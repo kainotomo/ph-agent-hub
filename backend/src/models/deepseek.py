@@ -38,23 +38,15 @@ class DeepSeekThinkingClient(OpenAIChatCompletionClient):
     ) -> dict[str, Any]:
         """Inject ``extra_body`` with explicit thinking mode.
 
-        When thinking is enabled but a tool call has just completed
-        (tool result present in messages), disable thinking for this
-        request to avoid the DeepSeek requirement that reasoning_content
-        must be passed back — which MAF doesn't fully support across
-        tool-call boundaries.
+        When thinking is enabled, keep it enabled across all turns —
+        including after tool calls.  The _prepare_message_for_openai
+        override correctly round-trips reasoning_content from either
+        additional_properties or the concatenated Content.text, so
+        the DeepSeek requirement is satisfied.
         """
         result = super()._prepare_options(messages, options)
 
-        thinking_type = "disabled"
-        if self._thinking_enabled:
-            # Check if there are tool results in the conversation
-            prepared_msgs = result.get("messages", [])
-            has_tool_result = any(
-                msg.get("role") == "tool" for msg in prepared_msgs
-            )
-            if not has_tool_result:
-                thinking_type = "enabled"
+        thinking_type = "enabled" if self._thinking_enabled else "disabled"
 
         # Inject reasoning_effort when thinking is enabled and a value is set
         if thinking_type == "enabled" and self._reasoning_effort:
@@ -165,13 +157,22 @@ class DeepSeekThinkingClient(OpenAIChatCompletionClient):
                         protected_data=json.dumps(rc),
                     )
                 )
+                # ALSO store the raw reasoning in additional_properties so
+                # _prepare_message_for_openai can read it back without
+                # relying on Content.protected_data (which MAF may corrupt).
+                msg.additional_properties["deepseek_reasoning"] = rc
         return chat_response
 
     def _parse_response_update_from_openai(
         self,
         chunk: ChatCompletionChunk,
     ) -> Any:  # ChatResponseUpdate
-        """Extract ``reasoning_content`` from streaming chunk."""
+        """Extract ``reasoning_content`` from streaming chunk.
+
+        Accumulates per-delta reasoning into a single Content item rather
+        than creating one Content per chunk, which would cause the base
+        class to only preserve the last delta.
+        """
         update = super()._parse_response_update_from_openai(chunk)
         for choice in chunk.choices:
             rc_delta = getattr(choice.delta, "reasoning_content", None)
@@ -188,12 +189,50 @@ class DeepSeekThinkingClient(OpenAIChatCompletionClient):
         self,
         message: Message,
     ) -> list[dict[str, Any]]:
-        """Convert ``reasoning_details`` back to ``reasoning_content``.
+        """Convert reasoning back to ``reasoning_content`` for DeepSeek.
 
-        The base class may already decode ``reasoning_details`` from JSON
-        (e.g. when it came from Content items).  We handle both cases.
+        Uses a priority chain to reconstruct the full reasoning text:
+
+        1. ``message.additional_properties["deepseek_reasoning"]`` — the
+           raw string stored by _parse_response_from_openai (avoids MAF
+           Content.protected_data corruption).  Only set in non-streaming.
+
+        2. Concatenate ``text`` from all ``text_reasoning`` Content items
+           in the message.  This works for streaming (multiple per-delta
+           Contents) where protected_data may be corrupted.
+
+        3. ``reasoning_details`` set by the base class from Content
+           ``protected_data`` (fallback — subject to corruption but kept
+           for compatibility).
         """
+        # ---- Reconstruct reasoning text from Content.text ----
+        # The .text field survives MAF processing correctly; .protected_data
+        # can be corrupted (especially for streaming per-delta Contents
+        # where only the last delta's protected_data is preserved).
+        raw_reasoning = message.additional_properties.get("deepseek_reasoning")
+        if not raw_reasoning:
+            reasoning_parts = [
+                ct.text
+                for ct in message.contents
+                if ct.type == "text_reasoning" and ct.text
+            ]
+            if reasoning_parts:
+                raw_reasoning = "".join(reasoning_parts)
+
+        # ---- Build the message dict via the base class ----
         prepared = super()._prepare_message_for_openai(message)
+
+        if raw_reasoning:
+            # Inject reasoning_content into the assistant message.
+            # Must remove any reasoning_details the base class may have
+            # set (could be corrupted).
+            for msg in prepared:
+                if msg.get("role") == "assistant":
+                    msg.pop("reasoning_details", None)
+                    msg["reasoning_content"] = raw_reasoning
+            return prepared
+
+        # ---- Fallback: convert base class reasoning_details ----
         for msg in prepared:
             if "reasoning_details" in msg:
                 value = msg.pop("reasoning_details")
@@ -201,7 +240,6 @@ class DeepSeekThinkingClient(OpenAIChatCompletionClient):
                     try:
                         msg["reasoning_content"] = json.loads(value)
                     except (json.JSONDecodeError, TypeError):
-                        # Already a plain string from the base class decode
                         msg["reasoning_content"] = value
                 else:
                     msg["reasoning_content"] = value

@@ -6,6 +6,8 @@
 # =============================================================================
 
 import asyncio
+import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -48,6 +50,20 @@ async def _cleanup_orphaned_temp_uploads() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup: scan MAF registry, load agent identity, start cleanup task."""
+    # Configure root logger so INFO/DEBUG logs from all modules
+    # appear alongside uvicorn's own logging output.
+    log_level = os.environ.get("LOG_LEVEL", settings.LOG_LEVEL).upper()
+    level = getattr(logging, log_level, logging.INFO)
+    logger = logging.getLogger()
+    logger.setLevel(level)
+    if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        ))
+        logger.addHandler(handler)
+
     from .agents.registry import startup_scan
     from .agents.runner import load_agent_identity
     from .db.base import AsyncSessionLocal
@@ -65,7 +81,7 @@ async def lifespan(app: FastAPI):
     task.cancel()
 
 
-app = FastAPI(title="PH Agent Hub", version="1.6.8", lifespan=lifespan)
+app = FastAPI(title="PH Agent Hub", version="1.6.9", lifespan=lifespan)
 
 # ---------------------------------------------------------------------------
 # Middleware

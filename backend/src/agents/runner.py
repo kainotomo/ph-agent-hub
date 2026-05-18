@@ -212,7 +212,9 @@ SUMMARY_CAP_RATIO = 0.005
 # Prevents a hung tool (e.g., stalled HTTP request, blocking I/O) from
 # freezing the entire agent loop indefinitely.  The agent receives an
 # error result and can retry or report the failure.
-TOOL_EXECUTION_TIMEOUT = 60
+# SEC filings tools (get_filing_section, get_filing_text) may need up
+# to 90s for large documents with section extraction.
+TOOL_EXECUTION_TIMEOUT = 90
 
 # Maximum seconds the MAF streaming loop will wait for the next update
 # from the model before giving up.  Prevents the agent from hanging

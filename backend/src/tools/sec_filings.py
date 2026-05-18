@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from datetime import datetime
 
 import httpx
@@ -105,10 +106,33 @@ async def _fetch_url_direct(
 ) -> tuple[str, str]:
     """Fallback: fetch and clean a filing via direct HTTP when edgartools
     cannot resolve the URL."""
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.get(url, headers=headers, follow_redirects=True)
-        resp.raise_for_status()
-    html = resp.text
+    t_start = time.monotonic()
+    logger.debug(
+        "_fetch_url_direct START url=%s timeout=%.1f user_agent=%s",
+        url, timeout, headers.get("User-Agent", ""),
+    )
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(url, headers=headers, follow_redirects=True)
+            resp.raise_for_status()
+        html = resp.text
+    except httpx.HTTPStatusError as exc:
+        elapsed = time.monotonic() - t_start
+        logger.warning(
+            "_fetch_url_direct HTTP %s for %s (elapsed=%.3fs) "
+            "response_headers=%s body_preview=%s",
+            exc.response.status_code,
+            url,
+            elapsed,
+            dict(exc.response.headers),
+            (exc.response.text or "")[:500],
+        )
+        raise
+    elapsed = time.monotonic() - t_start
+    logger.debug(
+        "_fetch_url_direct OK url=%s status=%s elapsed=%.3fs",
+        url, getattr(resp, 'status_code', '?'), elapsed,
+    )
 
     # Resolve indirect pages
 
@@ -251,12 +275,18 @@ def build_sec_filings_tools(tool_config: dict | None = None) -> list:
         Uses the edgartools library — full filing history since 1994,
         proper rate limiting, no API key required.
 
+        **limit is applied per form type** so that frequent filers
+        (8-K) don't crowd out annual/quarterly reports (10-K, 10-Q).
+        For example, ``limit=5`` returns up to 5 of each requested
+        form type.
+
         Args:
             ticker: Stock ticker symbol (e.g. "AAPL", "MSFT").
             form_types: Optional list of form types to filter by.
                 Common types: "10-K", "10-Q", "8-K", "S-1",
                 "DEF 14A".  Default searches 10-K, 10-Q, 8-K, S-1.
-            limit: Max filings to return (default 10, max 50).
+            limit: Max filings **per form type** (default 10, max 50).
+                Total results may be up to limit × number of form types.
             filing_date_from: Earliest filing date in YYYY-MM-DD format
                 (e.g. "2024-01-01").  Filters to filings on or after
                 this date.
@@ -279,15 +309,17 @@ def build_sec_filings_tools(tool_config: dict | None = None) -> list:
 
             forms = form_types if form_types else ["10-K", "10-Q", "8-K", "S-1"]
 
-            # Gather filings for each requested form type
+            # Gather filings — apply limit PER FORM TYPE so frequent
+            # filers (8-K) don't crowd out annual/quarterly reports.
             all_filings: list = []
             for form in forms:
                 try:
                     batch = await asyncio.to_thread(
                         company.get_filings, form=form
                     )
-                    # edgartools Filings objects are iterable
-                    all_filings.extend(list(batch))
+                    batch_list = list(batch)
+                    # Take up to lim of this specific form type
+                    all_filings.extend(batch_list[:lim])
                 except Exception as exc:
                     logger.debug("No %s filings for %s: %s", form, sym, exc)
 
@@ -310,12 +342,11 @@ def build_sec_filings_tools(tool_config: dict | None = None) -> list:
                     if getattr(f, "filing_date", None) and f.filing_date >= cutoff
                 ]
 
-            # Sort by date descending
+            # Sort by date descending (per-form-type limits already applied)
             all_filings.sort(
                 key=lambda f: getattr(f, "filing_date", datetime.min),
                 reverse=True,
             )
-            all_filings = all_filings[:lim]
 
             # Serialise to JSON-safe dicts
             results: list[dict] = []
@@ -432,8 +463,9 @@ def build_sec_filings_tools(tool_config: dict | None = None) -> list:
                 logger.warning("get_filing_text timed out for %s", url)
                 # Fall through to HTTP fallback
             except Exception as exc:
-                logger.debug(
-                    "edgartools lookup failed for %s: %s — falling back to HTTP",
+                logger.warning(
+                    "get_filing_text: edgartools lookup FAILED for %s: %s — "
+                    "falling back to HTTP",
                     url, exc,
                 )
 
@@ -453,6 +485,13 @@ def build_sec_filings_tools(tool_config: dict | None = None) -> list:
                 "source": "SEC EDGAR",
             }
         except httpx.HTTPStatusError as exc:
+            logger.warning(
+                "get_filing_text HTTP %s for %s headers=%s body_preview=%s",
+                exc.response.status_code,
+                url,
+                dict(exc.response.headers),
+                (exc.response.text or "")[:500],
+            )
             return {
                 "url": url,
                 "error": f"SEC EDGAR returned HTTP {exc.response.status_code}",
@@ -487,6 +526,7 @@ def build_sec_filings_tools(tool_config: dict | None = None) -> list:
             - ``source``: "SEC EDGAR"
         """
         logger.info("get_filing_section: %s [section=%s]", url, section)
+        t_start = time.monotonic()
 
         acc, cik = _parse_acc_num_and_cik(url)
 
@@ -550,7 +590,23 @@ def build_sec_filings_tools(tool_config: dict | None = None) -> list:
                     if direct:
                         matched = section.strip()
                         section_text = direct
-                except (Exception, asyncio.TimeoutError):
+                        logger.debug(
+                            "get_filing_section: direct lookup OK for %r "
+                            "(len=%d)",
+                            section, len(section_text),
+                        )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "get_filing_section: direct lookup TIMED OUT "
+                        "after %ds for section %r",
+                        EDGAR_TIMEOUT, section,
+                    )
+                    direct = None
+                except Exception as exc:
+                    logger.warning(
+                        "get_filing_section: direct lookup FAILED "
+                        "for section %r: %s", section, exc,
+                    )
                     direct = None
 
                 # If direct lookup failed, try case-insensitive match
@@ -577,6 +633,17 @@ def build_sec_filings_tools(tool_config: dict | None = None) -> list:
                             timeout=EDGAR_TIMEOUT,
                         )
                         section_text = extracted or ""
+                        if section_text:
+                            logger.debug(
+                                "get_filing_section: fallback lookup OK "
+                                "for %r (len=%d)",
+                                matched, len(section_text),
+                            )
+                        else:
+                            logger.warning(
+                                "get_filing_section: fallback lookup "
+                                "returned empty for %r", matched,
+                            )
             else:
                 # Fallback: regex-based splitter for unrecognised filing types
                 full_text = await asyncio.wait_for(
@@ -595,6 +662,12 @@ def build_sec_filings_tools(tool_config: dict | None = None) -> list:
                     section_text = sections.get(matched, "")
 
             if not section_text:
+                elapsed = time.monotonic() - t_start
+                logger.warning(
+                    "get_filing_section: section %r NOT FOUND "
+                    "(elapsed=%.1fs, available=%s)",
+                    section, elapsed, available,
+                )
                 return {
                     "url": url,
                     "section": section,
@@ -606,6 +679,11 @@ def build_sec_filings_tools(tool_config: dict | None = None) -> list:
                     "source": "SEC EDGAR",
                 }
 
+            elapsed = time.monotonic() - t_start
+            logger.info(
+                "get_filing_section: SUCCESS section=%r len=%d elapsed=%.1fs",
+                matched, len(section_text), elapsed,
+            )
             return {
                 "url": url,
                 "section": matched,
@@ -616,10 +694,27 @@ def build_sec_filings_tools(tool_config: dict | None = None) -> list:
             }
 
         except asyncio.TimeoutError:
-            logger.warning("get_filing_section timed out for %s [section=%s]", url, section)
+            elapsed = time.monotonic() - t_start
+            logger.warning(
+                "get_filing_section: inner operation TIMED OUT "
+                "after %.1fs for %s [section=%s]",
+                elapsed, url, section,
+            )
             return {"url": url, "error": f"Operation timed out after {EDGAR_TIMEOUT}s"}
+        except asyncio.CancelledError:
+            elapsed = time.monotonic() - t_start
+            logger.warning(
+                "get_filing_section: CANCELLED after %.1fs for %s "
+                "[section=%s] — likely framework tool timeout (60s)",
+                elapsed, url, section,
+            )
+            raise
         except Exception as exc:
-            logger.exception("get_filing_section failed for %s", url)
+            elapsed = time.monotonic() - t_start
+            logger.exception(
+                "get_filing_section failed after %.1fs for %s",
+                elapsed, url,
+            )
             return {"url": url, "error": str(exc)}
 
     return [list_sec_filings, get_filing_text, get_filing_section]

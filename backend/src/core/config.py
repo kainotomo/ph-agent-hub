@@ -58,6 +58,9 @@ class Settings(BaseSettings):
     LOGIN_RATE_LIMIT: str = "5/minute"
     SEED_ALLOW_WEAK_PASSWORD: bool = False
 
+    # --- Logging ---
+    LOG_LEVEL: str = "INFO"
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
     def __init__(self, **kwargs):

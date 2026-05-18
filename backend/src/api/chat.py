@@ -691,15 +691,30 @@ async def _stream_with_heartbeat(
     Emits ``{"event": "heartbeat", "data": "{}"}`` every *interval*
     seconds when no other event has been emitted, to keep proxy
     connections from closing due to idle timeout.
+
+    Uses ``asyncio.wait(..., timeout=interval)`` instead of
+    ``asyncio.wait_for`` so that the inner generator task is NOT
+    cancelled when the heartbeat fires.  Cancelling the inner task
+    would propagate ``CancelledError`` into any currently-running
+    tool (e.g. SEC filing extraction), silently aborting it.
     """
     while True:
         try:
-            event_dict = await asyncio.wait_for(
-                inner_gen.__anext__(), timeout=interval
+            # Wrap __anext__ in a task so we can wait on it without
+            # cancelling it when the heartbeat timeout fires.
+            anext_task = asyncio.ensure_future(inner_gen.__anext__())
+            done, _pending = await asyncio.wait(
+                [anext_task], timeout=interval
             )
-            yield event_dict
-        except asyncio.TimeoutError:
-            yield {"event": "heartbeat", "data": "{}"}
+            if done:
+                event_dict = await anext_task
+                yield event_dict
+            else:
+                # Heartbeat — inner task is still running, do NOT cancel it
+                yield {"event": "heartbeat", "data": "{}"}
+                # Wait for the inner task to complete, then yield its result
+                event_dict = await anext_task
+                yield event_dict
         except StopAsyncIteration:
             break
 

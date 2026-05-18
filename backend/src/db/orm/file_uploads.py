@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import String, Boolean, Integer, Text, DateTime, ForeignKey, func
+from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.dialects.mysql import CHAR
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -40,7 +41,7 @@ class FileUpload(Base):
     storage_key: Mapped[str] = mapped_column(String(512), nullable=False)
     bucket: Mapped[str] = mapped_column(String(255), nullable=False)
     is_temporary: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    extracted_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    extracted_text: Mapped[str | None] = mapped_column(LONGTEXT, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

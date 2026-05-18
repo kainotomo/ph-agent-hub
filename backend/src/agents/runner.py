@@ -188,6 +188,13 @@ KEEP_RECENT_PAIRS = 3
 # from consuming too much context).
 MAX_SUMMARY_CHARS = 2000
 
+# Maximum characters a single tool result can contribute to the agent context.
+# Results exceeding this are truncated (first half + last half preserved,
+# middle replaced with a truncation notice).  100K chars ≈ 25K tokens.
+# Universal across all tools — prevents any single oversized result from
+# silently overflowing the context (Issue #206).
+MAX_TOOL_OUTPUT_CHARS = 100_000
+
 # ---------------------------------------------------------------------------
 # Platform identity (Issue #83)
 # ---------------------------------------------------------------------------
@@ -1083,6 +1090,11 @@ async def _resolve_tool_callables(
                 "Failed to build memory tools for user=%s", user_id, exc_info=True
             )
 
+    # ---- Cap tool output size to prevent context overflow (Issue #206) ----
+    # Wrap every FunctionTool with a truncation wrapper that caps
+    # oversized results before they enter the MAF agent context.
+    callables = [_wrap_tool_with_output_cap(t) for t in callables]
+
     return callables, cleanup_clients
 
 
@@ -1266,6 +1278,37 @@ async def _build_erpnext_callables(
 # ---------------------------------------------------------------------------
 # Mid-run compaction (Issue #199 — prevents context overflow on tool-heavy runs)
 # ---------------------------------------------------------------------------
+
+
+def _wrap_tool_with_output_cap(tool_obj: Any) -> Any:
+    """Wrap a MAF FunctionTool to cap its output size before it enters the agent context.
+
+    Patches ``FunctionTool.func`` with an async wrapper that truncates
+    oversized results via ``_truncate_tool_output``.  Preserves original
+    function metadata so MAF tool detection, schema generation, and
+    logging continue to work correctly.
+
+    Returns the same ``FunctionTool`` object (mutated) so callers can
+    use it in a map expression.
+    """
+    if not hasattr(tool_obj, "func") or not callable(tool_obj.func):
+        return tool_obj  # Declaration-only or non-FunctionTool, skip
+
+    original_func = tool_obj.func
+
+    async def capped_func(*args: Any, **kwargs: Any) -> Any:
+        result = await original_func(*args, **kwargs)
+        return _truncate_tool_output(result)
+
+    # Preserve function identity so MAF introspection (name, schema, docs)
+    # still works after we replace ``func``.
+    capped_func.__name__ = getattr(original_func, "__name__", "unknown")
+    capped_func.__doc__ = getattr(original_func, "__doc__", None)
+    capped_func.__module__ = getattr(original_func, "__module__", "__main__")
+    capped_func.__qualname__ = getattr(original_func, "__qualname__", capped_func.__name__)
+
+    tool_obj.func = capped_func
+    return tool_obj
 
 
 def _build_compaction_strategy(
@@ -2371,9 +2414,12 @@ def _is_tool_error(output: Any) -> bool:
 
 
 def _summarise_tool_result(output: Any) -> str:
-    """Create a short human-readable summary of a tool result.
+    """Create a short human-readable summary of a tool result for SSE events.
 
-    Truncates long strings to avoid bloating SSE events.
+    This only affects the event sent to the frontend; it does NOT limit
+    what enters the agent context.  Context-level truncation for oversized
+    results is handled by ``_truncate_tool_output`` (applied earlier in
+    ``_resolve_tool_callables``).
     """
     if output is None:
         return "(no output)"
@@ -2381,6 +2427,53 @@ def _summarise_tool_result(output: Any) -> str:
     if len(text) > 200:
         return text[:197] + "..."
     return text
+
+
+def _truncate_tool_output(
+    output: Any,
+    max_chars: int = MAX_TOOL_OUTPUT_CHARS,
+) -> Any:
+    """Truncate oversized tool outputs before they enter the agent context.
+
+    For dict results (the common case), truncates each string value
+    exceeding ``max_chars``.  For plain strings, truncates directly.
+    Non-string values pass through unchanged.
+
+    Truncation keeps the first half + last half of the text, replacing
+    the middle with a notice showing how many characters were dropped.
+    This preserves important context from both the beginning (titles,
+    headers, summaries) and end (financial figures, conclusions).
+    """
+    if isinstance(output, dict):
+        result = {}
+        for key, value in output.items():
+            if isinstance(value, str) and len(value) > max_chars:
+                half = max_chars // 2
+                result[key] = (
+                    value[:half]
+                    + f"\n\n[... {len(value) - max_chars} characters truncated ...]\n\n"
+                    + value[-half:]
+                )
+                logger.warning(
+                    "Tool output key '%s' truncated from %d to %d chars",
+                    key, len(value), max_chars,
+                )
+            else:
+                result[key] = value
+        return result
+    if isinstance(output, str) and len(output) > max_chars:
+        half = max_chars // 2
+        truncated = (
+            output[:half]
+            + f"\n\n[... {len(output) - max_chars} characters truncated ...]\n\n"
+            + output[-half:]
+        )
+        logger.warning(
+            "Tool output truncated from %d to %d chars",
+            len(output), max_chars,
+        )
+        return truncated
+    return output
 
 
 def _exc_to_error_code(exc: Exception) -> str:

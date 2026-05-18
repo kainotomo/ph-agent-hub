@@ -122,6 +122,7 @@ def build_browser_tools(
     timeout_ms: int = int(config.get("timeout", DEFAULT_TIMEOUT))
     viewport_width: int = int(config.get("viewport_width", DEFAULT_VIEWPORT_WIDTH))
     viewport_height: int = int(config.get("viewport_height", DEFAULT_VIEWPORT_HEIGHT))
+    max_content_length: int = int(config.get("max_length", 100_000))
 
     async def _get_browser_page(url: str):
         """Get a Playwright browser page, navigated to the given URL.
@@ -313,11 +314,10 @@ def build_browser_tools(
         text = re.sub(r'\n{3,}', '\n\n', text)
 
         text_length = len(text)
-        max_length = 100_000
-        truncated = text_length > max_length
+        truncated = text_length > max_content_length
 
         if truncated:
-            text = text[:max_length] + f"\n\n... (truncated {text_length - max_length} more characters)"
+            text = text[:max_content_length] + f"\n\n... (truncated {text_length - max_content_length} more characters)"
 
         return {
             "url": url,

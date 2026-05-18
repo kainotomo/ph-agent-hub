@@ -19,7 +19,7 @@ def build_openai_client(model: Model) -> OpenAIChatClient:
     openai_client_args: dict = {
         "api_key": model.api_key,
         "max_retries": 2,
-        "timeout": 300.0,
+        "timeout": 900.0,
     }
     if model.base_url:
         openai_client_args["base_url"] = model.base_url

@@ -277,7 +277,7 @@ def build_deepseek_client(
         api_key=model.api_key,
         base_url=base_url,
         max_retries=2,
-        timeout=300.0,
+        timeout=900.0,
     )
 
     return DeepSeekThinkingClient(

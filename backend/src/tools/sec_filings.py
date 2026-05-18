@@ -400,16 +400,24 @@ def build_sec_filings_tools(tool_config: dict | None = None) -> list:
         acc, cik = _parse_acc_num_and_cik(url)
 
         if acc and cik:
+            EDGAR_TIMEOUT = 30  # seconds per individual edgartools operation
             try:
-                company = await asyncio.to_thread(Company, cik)
+                company = await asyncio.wait_for(
+                    asyncio.to_thread(Company, cik),
+                    timeout=EDGAR_TIMEOUT,
+                )
                 # Search filings for matching accession number
-                filings = await asyncio.to_thread(
-                    company.get_filings, accession_number=acc
+                filings = await asyncio.wait_for(
+                    asyncio.to_thread(company.get_filings, accession_number=acc),
+                    timeout=EDGAR_TIMEOUT,
                 )
                 filing_list = list(filings) if filings else []
                 if filing_list:
                     filing = filing_list[0]
-                    text = await asyncio.to_thread(filing.text)
+                    text = await asyncio.wait_for(
+                        asyncio.to_thread(filing.text),
+                        timeout=EDGAR_TIMEOUT,
+                    )
                     truncated = limit > 0 and len(text) > limit
                     if truncated:
                         text = text[:limit]
@@ -420,6 +428,9 @@ def build_sec_filings_tools(tool_config: dict | None = None) -> list:
                         "truncated": truncated,
                         "source": "SEC EDGAR (edgartools)",
                     }
+            except asyncio.TimeoutError:
+                logger.warning("get_filing_text timed out for %s", url)
+                # Fall through to HTTP fallback
             except Exception as exc:
                 logger.debug(
                     "edgartools lookup failed for %s: %s — falling back to HTTP",
@@ -488,10 +499,16 @@ def build_sec_filings_tools(tool_config: dict | None = None) -> list:
                 ),
             }
 
+        EDGAR_TIMEOUT = 30  # seconds per individual edgartools operation
+
         try:
-            company = await asyncio.to_thread(Company, cik)
-            filings = await asyncio.to_thread(
-                company.get_filings, accession_number=acc
+            company = await asyncio.wait_for(
+                asyncio.to_thread(Company, cik),
+                timeout=EDGAR_TIMEOUT,
+            )
+            filings = await asyncio.wait_for(
+                asyncio.to_thread(company.get_filings, accession_number=acc),
+                timeout=EDGAR_TIMEOUT,
             )
             filing_list = list(filings) if filings else []
             if not filing_list:
@@ -508,22 +525,32 @@ def build_sec_filings_tools(tool_config: dict | None = None) -> list:
             # lookup via __getitem__ first — edgartools resolves
             # Part-qualified names correctly (e.g. "Item 2" on a
             # 10-Q returns Part I MD&A, not Part II Item 2).
-            report = await asyncio.to_thread(filing.obj)
+            report = await asyncio.wait_for(
+                asyncio.to_thread(filing.obj),
+                timeout=EDGAR_TIMEOUT,
+            )
 
             section_text = ""
+            matched: str = ""
             available: list[str] = []
 
             if report is not None:
-                available = await asyncio.to_thread(lambda: report.items)
+                available = await asyncio.wait_for(
+                    asyncio.to_thread(lambda: report.items),
+                    timeout=EDGAR_TIMEOUT,
+                )
 
                 # Try edgartools' built-in lookup with the raw user
                 # section string — it handles Part qualification
                 try:
-                    direct = await asyncio.to_thread(report.__getitem__, section.strip())
+                    direct = await asyncio.wait_for(
+                        asyncio.to_thread(report.__getitem__, section.strip()),
+                        timeout=EDGAR_TIMEOUT,
+                    )
                     if direct:
                         matched = section.strip()
                         section_text = direct
-                except Exception:
+                except (Exception, asyncio.TimeoutError):
                     direct = None
 
                 # If direct lookup failed, try case-insensitive match
@@ -545,11 +572,17 @@ def build_sec_filings_tools(tool_config: dict | None = None) -> list:
                             break
 
                     if matched:
-                        extracted = await asyncio.to_thread(report.__getitem__, matched)
+                        extracted = await asyncio.wait_for(
+                            asyncio.to_thread(report.__getitem__, matched),
+                            timeout=EDGAR_TIMEOUT,
+                        )
                         section_text = extracted or ""
             else:
                 # Fallback: regex-based splitter for unrecognised filing types
-                full_text = await asyncio.to_thread(filing.text)
+                full_text = await asyncio.wait_for(
+                    asyncio.to_thread(filing.text),
+                    timeout=EDGAR_TIMEOUT,
+                )
                 sections = _split_filing_sections(full_text)
                 available = list(sections.keys())
                 target = section.strip().lower()
@@ -582,6 +615,9 @@ def build_sec_filings_tools(tool_config: dict | None = None) -> list:
                 "source": "SEC EDGAR (edgartools)",
             }
 
+        except asyncio.TimeoutError:
+            logger.warning("get_filing_section timed out for %s [section=%s]", url, section)
+            return {"url": url, "error": f"Operation timed out after {EDGAR_TIMEOUT}s"}
         except Exception as exc:
             logger.exception("get_filing_section failed for %s", url)
             return {"url": url, "error": str(exc)}

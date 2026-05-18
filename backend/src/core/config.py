@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     MINIO_PUBLIC_ENDPOINT: str = ""
 
     # --- File Upload Limits ---
-    UPLOAD_MAX_SIZE_BYTES: int = 20_971_520  # 20 MiB
+    UPLOAD_MAX_SIZE_BYTES: int = 104_857_600  # 100 MiB
     UPLOAD_ALLOWED_TYPES: str = (
         "text/plain,text/csv,text/markdown,application/pdf,"
         "application/json,image/png,image/jpeg,image/gif,image/webp,"

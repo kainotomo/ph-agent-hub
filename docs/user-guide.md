@@ -170,7 +170,7 @@ You can attach files to your chat sessions for the AI to reference.
 3. The file is uploaded and attached to the current session
 
 **Supported file types**: Plain text, CSV, Markdown, PDF, JSON, PNG, JPEG, GIF, WebP.
-**Maximum file size**: 20 MB.
+**Maximum file size**: 100 MB.
 
 ### 7.2 File Limitations
 

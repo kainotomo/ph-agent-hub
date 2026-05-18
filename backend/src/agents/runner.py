@@ -195,6 +195,19 @@ MAX_SUMMARY_CHARS = 2000
 # silently overflowing the context (Issue #206).
 MAX_TOOL_OUTPUT_CHARS = 100_000
 
+# Maximum seconds a single tool execution can run before being cancelled.
+# Prevents a hung tool (e.g., stalled HTTP request, blocking I/O) from
+# freezing the entire agent loop indefinitely.  The agent receives an
+# error result and can retry or report the failure.
+TOOL_EXECUTION_TIMEOUT = 60
+
+# Maximum seconds the MAF streaming loop will wait for the next update
+# from the model before giving up.  Prevents the agent from hanging
+# indefinitely when DeepSeek stops sending data mid-stream (e.g., while
+# generating a partial function call).  After this idle period the stream
+# is terminated and partial results are persisted.
+MAF_STREAM_IDLE_TIMEOUT = 120
+
 # ---------------------------------------------------------------------------
 # Platform identity (Issue #83)
 # ---------------------------------------------------------------------------
@@ -1297,8 +1310,16 @@ def _wrap_tool_with_output_cap(tool_obj: Any) -> Any:
     original_func = tool_obj.func
 
     async def capped_func(*args: Any, **kwargs: Any) -> Any:
-        result = await original_func(*args, **kwargs)
-        return _truncate_tool_output(result)
+        tool_name = getattr(original_func, '__name__', 'unknown')
+        try:
+            result = await asyncio.wait_for(
+                original_func(*args, **kwargs),
+                timeout=TOOL_EXECUTION_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            return {"error": f"Tool '{tool_name}' timed out after {TOOL_EXECUTION_TIMEOUT}s"}
+        truncated = _truncate_tool_output(result)
+        return truncated
 
     # Preserve function identity so MAF introspection (name, schema, docs)
     # still works after we replace ``func``.
@@ -1720,7 +1741,6 @@ async def run_agent_stream(
             message_id=user_msg_id,
             user_id=current_user.id,
         )
-
     try:
         # ---- 1-6. Resolve session config --------------------------------
         cfg = await _resolve_session_config(db, session_data, tenant_id, current_user, file_ids=file_ids)
@@ -1776,8 +1796,9 @@ async def run_agent_stream(
                 temperature=cfg.temperature,
                 reasoning_effort=cfg.reasoning_effort,
             )
-
+        event_count = 0
         async for event_dict in stream:
+            event_count += 1
             # Check for cancellation before each yield
             if await check_stream_cancel(session_id):
                 await clear_stream_cancel(session_id)
@@ -1810,7 +1831,6 @@ async def run_agent_stream(
             yield event_dict
 
     except Exception as exc:
-        logger.exception("Agent stream failed for session %s", session_id)
         # Persist whatever we accumulated before the error
         if accumulated_text or accumulated_reasoning or accumulated_tool_events:
             try:
@@ -1844,6 +1864,53 @@ async def run_agent_stream(
         return  # Don't proceed to message_complete on error
 
     finally:
+        # ---- Ensure partial results are ALWAYS persisted, even when the
+        #      client disconnects (GeneratorExit skips post-finally code).
+        #      We must NOT yield during GeneratorExit — it raises
+        #      RuntimeError and causes "ASGI callable returned without
+        #      completing response".  Persistence-only here. (Issue #206) --
+        try:
+            tokens_in = _stream_token_info.get("in", 0) or 0
+            tokens_out = _stream_token_info.get("out", 0) or 0
+            cache_hit_tokens_stream = _stream_token_info.get("cache_hit", 0) or 0
+
+            if accumulated_text or accumulated_reasoning or accumulated_tool_events:
+                await _persist_assistant_message(
+                    db=db,
+                    session_id=session_id,
+                    is_temporary=is_temporary,
+                    assistant_response=accumulated_text,
+                    model_id=cfg.model.id if cfg else "unknown",
+                    tool_events=accumulated_tool_events,
+                    tokens_in=tokens_in,
+                    tokens_out=tokens_out,
+                    reasoning=accumulated_reasoning,
+                )
+
+            if cfg is not None:
+                try:
+                    await write_usage_log(
+                        db,
+                        tenant_id=current_user.tenant_id,
+                        tenant_name=getattr(cfg, "tenant_name", "") or "",
+                        user_id=current_user.id,
+                        user_email=current_user.email,
+                        user_full_name=current_user.display_name,
+                        model_id=cfg.model.id,
+                        model_name=cfg.model.name,
+                        provider=cfg.model.provider,
+                        tokens_in=tokens_in,
+                        tokens_out=tokens_out,
+                        cache_hit_tokens=cache_hit_tokens_stream,
+                        input_price=getattr(cfg.model, "input_price_per_1m", None),
+                        output_price=getattr(cfg.model, "output_price_per_1m", None),
+                        cache_hit_price=getattr(cfg.model, "cache_hit_price_per_1m", None),
+                    )
+                except Exception:
+                    logger.exception("Failed to write usage log (streaming)")
+        except Exception:
+            logger.exception("Failed to persist partial message on stream close")
+
         # ---- Close ERPNext httpx clients to prevent connection leaks -----
         if cfg is not None and cfg.cleanup_clients:
             for client in cfg.cleanup_clients:
@@ -1852,75 +1919,31 @@ async def run_agent_stream(
                 except Exception:
                     logger.debug("Failed to close ERPNext httpx client", exc_info=True)
 
-    # ---- 8. Extract token counts from stream final response -------------
-    tokens_in = _stream_token_info.get("in", 0) or 0
-    tokens_out = _stream_token_info.get("out", 0) or 0
-    cache_hit_tokens_stream = _stream_token_info.get("cache_hit", 0) or 0
+    # ---- Only reached on normal completion (no GeneratorExit) ----------
+    if accumulated_text or accumulated_reasoning or accumulated_tool_events:
+        yield {
+            "event": "message_complete",
+            "data": json.dumps({
+                "session_id": session_id,
+                "message_id": message_id,
+                "total_tokens": total_tokens,
+                "tokens_in": _stream_token_info.get("in", 0) or 0,
+                "tokens_out": _stream_token_info.get("out", 0) or 0,
+                "model_id": cfg.model.id if cfg else "unknown",
+            }),
+        }
 
-    # ---- 9. Persist assistant message ------------------------------------
-    await _persist_assistant_message(
-        db=db,
-        session_id=session_id,
-        is_temporary=is_temporary,
-        assistant_response=accumulated_text,
-        model_id=cfg.model.id,
-        tool_events=accumulated_tool_events,
-        tokens_in=tokens_in,
-        tokens_out=tokens_out,
-        reasoning=accumulated_reasoning,
-    )
-
-    # ---- 10. Write usage log (streaming) ---------------------------------
-    try:
-        await write_usage_log(
-            db,
-            tenant_id=current_user.tenant_id,
-            tenant_name=getattr(cfg, "tenant_name", "") or "",
-            user_id=current_user.id,
-            user_email=current_user.email,
-            user_full_name=current_user.display_name,
-            model_id=cfg.model.id,
-            model_name=cfg.model.name,
-            provider=cfg.model.provider,
-            tokens_in=tokens_in,
-            tokens_out=tokens_out,
-            cache_hit_tokens=cache_hit_tokens_stream,
-            input_price=getattr(cfg.model, "input_price_per_1m", None),
-            output_price=getattr(cfg.model, "output_price_per_1m", None),
-            cache_hit_price=getattr(cfg.model, "cache_hit_price_per_1m", None),
+    if cfg is not None:
+        _schedule_post_response_tasks(
+            model=cfg.model,
+            system_prompt=cfg.system_prompt,
+            user_message=user_message,
+            assistant_response=accumulated_text,
+            session_id=session_id,
+            tenant_id=tenant_id,
+            is_temporary=is_temporary,
+            temperature=cfg.temperature,
         )
-    except Exception:
-        logger.exception("Failed to write usage log (streaming)")
-
-    # ---- 11. Emit message_complete ---------------------------------------
-    yield {
-        "event": "message_complete",
-        "data": json.dumps({
-            "session_id": session_id,
-            "message_id": message_id,
-            "total_tokens": total_tokens,
-            "tokens_in": tokens_in,
-            "tokens_out": tokens_out,
-            "model_id": cfg.model.id,
-        }),
-    }
-
-    # ---- 12. Launch post-response background tasks -----------------------
-    # Issue #126: Follow-up question generation and auto-tagging used to
-    # run synchronously inside the generator, keeping the SSE stream open
-    # and blocking the user from sending their next message.  Now they're
-    # launched as fire-and-forget background tasks so the stream closes
-    # immediately after message_complete.
-    _schedule_post_response_tasks(
-        model=cfg.model,
-        system_prompt=cfg.system_prompt,
-        user_message=user_message,
-        assistant_response=accumulated_text,
-        session_id=session_id,
-        tenant_id=tenant_id,
-        is_temporary=is_temporary,
-        temperature=cfg.temperature,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -2071,7 +2094,21 @@ async def _run_agent_stream(
     # Aggregate streaming tool calls: call_id -> {name, args_str}
     pending_calls: dict[str, dict] = {}
 
-    async for update in response_stream:
+    inner_event_count = 0
+    response_iter = response_stream.__aiter__()
+    while True:
+        try:
+            update = await asyncio.wait_for(
+                response_iter.__anext__(),
+                timeout=MAF_STREAM_IDLE_TIMEOUT,
+            )
+        except StopAsyncIteration:
+            break
+        except asyncio.TimeoutError:
+            break
+        inner_event_count += 1
+        if inner_event_count <= 5 or inner_event_count % 20 == 0:
+            content_types = [getattr(c, "type", "?") for c in (update.contents if hasattr(update, 'contents') else [])]
         # Check each content item in the update
         for content in update.contents:
             content_type = getattr(content, "type", None)
@@ -2128,7 +2165,6 @@ async def _run_agent_stream(
                     "step_index": step_index,
                     "total_steps_so_far": step_index,
                 }, session_id=session_id, message_id=message_id)
-
     # After stream is exhausted, get final response for token counts
     try:
         final = await response_stream.get_final_response()
@@ -2454,10 +2490,6 @@ def _truncate_tool_output(
                     + f"\n\n[... {len(value) - max_chars} characters truncated ...]\n\n"
                     + value[-half:]
                 )
-                logger.warning(
-                    "Tool output key '%s' truncated from %d to %d chars",
-                    key, len(value), max_chars,
-                )
             else:
                 result[key] = value
         return result
@@ -2467,10 +2499,6 @@ def _truncate_tool_output(
             output[:half]
             + f"\n\n[... {len(output) - max_chars} characters truncated ...]\n\n"
             + output[-half:]
-        )
-        logger.warning(
-            "Tool output truncated from %d to %d chars",
-            len(output), max_chars,
         )
         return truncated
     return output

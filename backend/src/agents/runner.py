@@ -1284,8 +1284,9 @@ def _build_compaction_strategy(
        overhead is reclaimed.
 
     2. **TokenBudgetComposedStrategy** — enforces a hard token budget at
-       70 % of the model's context length.  If the budget is exceeded after
-       step 1, the built-in fallback excludes the oldest message groups.
+       70 % of the model's configured context length, with a 32K floor.
+       If the budget is exceeded after step 1, the built-in fallback
+       excludes the oldest message groups.
 
     Returns:
         A tuple of ``(compaction_strategy, tokenizer)``, or ``(None, None)``
@@ -1297,9 +1298,9 @@ def _build_compaction_strategy(
     try:
         tokenizer = CharacterEstimatorTokenizer()
 
-        # Budget: 70 % of model context length, floor 32K, cap 128K
+        # Budget: 70 % of model context length, floor 32K
         context_length = getattr(model, "context_length", None) or 128_000
-        token_budget = max(32_000, min(int(context_length * 0.7), 128_000))
+        token_budget = max(32_000, int(context_length * 0.7))
 
         strategies = [
             # Step 1: collapse old tool results into compact summaries
@@ -1354,6 +1355,8 @@ async def _run_agent(
     default_options: dict = {"temperature": temperature}
     if reasoning_effort:
         default_options["reasoning_effort"] = reasoning_effort
+    if getattr(model, "max_tokens", 0) and model.max_tokens > 0:
+        default_options["max_tokens"] = model.max_tokens
 
     compaction_strategy, tokenizer = _build_compaction_strategy(
         model, model_client, tools,
@@ -2002,6 +2005,8 @@ async def _run_agent_stream(
     default_options: dict = {"temperature": temperature}
     if reasoning_effort:
         default_options["reasoning_effort"] = reasoning_effort
+    if getattr(model, "max_tokens", 0) and model.max_tokens > 0:
+        default_options["max_tokens"] = model.max_tokens
 
     compaction_strategy, tokenizer = _build_compaction_strategy(
         model, model_client, tools,

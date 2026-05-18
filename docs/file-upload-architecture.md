@@ -167,7 +167,7 @@ Enforced at the API layer before the object is written to MinIO:
 
 | Setting | Default | Config key |
 |---|---|---|
-| Max file size | 20 MB | `UPLOAD_MAX_SIZE_BYTES` |
+| Max file size | 100 MB | `UPLOAD_MAX_SIZE_BYTES` |
 | Allowed MIME types | see below | `UPLOAD_ALLOWED_TYPES` |
 
 **Default allowed MIME types:**
@@ -262,7 +262,7 @@ MINIO_ACCESS_KEY=minioadmin
 MINIO_SECRET_KEY=minioadmin
 MINIO_BUCKET_PREFIX=phhub-tenant
 
-UPLOAD_MAX_SIZE_BYTES=20971520
+UPLOAD_MAX_SIZE_BYTES=104857600
 UPLOAD_ALLOWED_TYPES=text/plain,text/csv,text/markdown,application/pdf,application/json,image/png,image/jpeg,image/gif,image/webp
 ```
 

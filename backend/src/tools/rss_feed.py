@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 DEFAULT_MAX_ENTRIES: int = 20
+DEFAULT_MAX_SUMMARY_CHARS: int = 1000
 DEFAULT_TIMEOUT: float = 15.0
 
 
@@ -123,9 +124,9 @@ def build_rss_feed_tools(tool_config: dict | None = None) -> list:
                 stripper = StripHTML()
                 try:
                     stripper.feed(entry.summary)
-                    summary = stripper.text.strip()[:1000]
+                    summary = stripper.text.strip()[:DEFAULT_MAX_SUMMARY_CHARS]
                 except Exception:
-                    summary = entry.summary[:1000]
+                    summary = entry.summary[:DEFAULT_MAX_SUMMARY_CHARS]
 
             entries.append({
                 "title": entry.get("title", ""),

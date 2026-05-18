@@ -99,8 +99,10 @@ async def _resolve_session_config(
     skill = await _resolve_skill(db, session_data)
 
     # 4. Resolve active tools
+    context_length = getattr(model, "context_length", None)
     active_tool_callables, cleanup_clients = await _resolve_tool_callables(
-        db, session_data, tenant_id, file_ids=file_ids
+        db, session_data, tenant_id, file_ids=file_ids,
+        context_length=context_length,
     )
 
     # 5. Determine execution type and name
@@ -186,14 +188,25 @@ KEEP_RECENT_PAIRS = 3
 
 # Maximum summary length in characters (to keep the summary itself
 # from consuming too much context).
-MAX_SUMMARY_CHARS = 2000
+# This is a fallback used when model context_length is unknown.
+SUMMARY_CAP_FALLBACK = 2000
 
-# Maximum characters a single tool result can contribute to the agent context.
-# Results exceeding this are truncated (first half + last half preserved,
-# middle replaced with a truncation notice).  100K chars ≈ 25K tokens.
-# Universal across all tools — prevents any single oversized result from
-# silently overflowing the context (Issue #206).
-MAX_TOOL_OUTPUT_CHARS = 100_000
+# Fallback for tool result truncation when model context_length is unknown.
+# Replaced by context-aware caps for models that have context_length set.
+TOOL_OUTPUT_CAP_FALLBACK = 100_000
+
+# Maximum fraction of context_length a single tool result may use.
+# Prevents any one result from dominating the context window.
+# Converted to chars via CHARS_PER_TOKEN_ESTIMATE.
+TOOL_OUTPUT_CAP_RATIO = 0.05
+
+# Absolute ceiling in chars for any single tool result (≈125K tokens).
+# Prevents even 1M-token models from accepting results that would
+# consume more than 12.5% of the window in one call.
+TOOL_OUTPUT_CAP_CEILING = 500_000
+
+# Maximum fraction of context_length for conversation summaries.
+SUMMARY_CAP_RATIO = 0.005
 
 # Maximum seconds a single tool execution can run before being cancelled.
 # Prevents a hung tool (e.g., stalled HTTP request, blocking I/O) from
@@ -207,6 +220,45 @@ TOOL_EXECUTION_TIMEOUT = 60
 # generating a partial function call).  After this idle period the stream
 # is terminated and partial results are persisted.
 MAF_STREAM_IDLE_TIMEOUT = 120
+
+# ---------------------------------------------------------------------------
+# Model-aware cap computation (Issue #207)
+# ---------------------------------------------------------------------------
+
+
+def _compute_tool_output_cap(context_length: int | None) -> int:
+    """Compute a model-aware character cap for tool output truncation.
+
+    Args:
+        context_length: The model's total context window in tokens,
+            or None if unknown.
+
+    Returns:
+        The maximum number of characters a single tool result may
+        contribute to the agent context, bounded by the ceiling.
+    """
+    if not context_length:
+        return TOOL_OUTPUT_CAP_FALLBACK
+    cap_tokens = max(int(context_length * TOOL_OUTPUT_CAP_RATIO), 25_000)
+    cap_chars = cap_tokens * CHARS_PER_TOKEN_ESTIMATE
+    return min(cap_chars, TOOL_OUTPUT_CAP_CEILING)
+
+
+def _compute_summary_cap(context_length: int | None) -> int:
+    """Compute a model-aware character cap for conversation summaries.
+
+    Args:
+        context_length: The model's total context window in tokens,
+            or None if unknown.
+
+    Returns:
+        The maximum number of characters a summary may contain.
+    """
+    if not context_length:
+        return SUMMARY_CAP_FALLBACK
+    cap = int(context_length * CHARS_PER_TOKEN_ESTIMATE * SUMMARY_CAP_RATIO)
+    return max(cap, SUMMARY_CAP_FALLBACK)
+
 
 # ---------------------------------------------------------------------------
 # Platform identity (Issue #83)
@@ -495,17 +547,21 @@ async def _generate_summary(
             return None
 
         model_name = getattr(fresh_client, "model", model.model_id)
+        model_max_tokens = getattr(model, "max_tokens", None) or 4096
+        summary_max_tokens = max(300, min(model_max_tokens, 2000))
         response = await raw_client.chat.completions.create(
             model=model_name,
             messages=messages_payload,
-            max_tokens=300,
+            max_tokens=summary_max_tokens,
             temperature=temperature,
         )
         summary = response.choices[0].message.content if response.choices else ""
         summary = (summary or "").strip()
 
-        if summary and len(summary) > MAX_SUMMARY_CHARS:
-            summary = summary[:MAX_SUMMARY_CHARS] + "..."
+        model_context_length = getattr(model, "context_length", None)
+        summary_cap = _compute_summary_cap(model_context_length)
+        if summary and len(summary) > summary_cap:
+            summary = summary[:summary_cap] + "..."
 
         return summary if summary else None
 
@@ -997,6 +1053,7 @@ async def _resolve_tool_callables(
     session_data: dict,
     tenant_id: str,
     file_ids: list[str] | None = None,
+    context_length: int | None = None,
 ) -> tuple[list, list]:
     """Resolve active tools into MAF tool callables.
 
@@ -1106,7 +1163,7 @@ async def _resolve_tool_callables(
     # ---- Cap tool output size to prevent context overflow (Issue #206) ----
     # Wrap every FunctionTool with a truncation wrapper that caps
     # oversized results before they enter the MAF agent context.
-    callables = [_wrap_tool_with_output_cap(t) for t in callables]
+    callables = [_wrap_tool_with_output_cap(t, context_length=context_length) for t in callables]
 
     return callables, cleanup_clients
 
@@ -1293,7 +1350,7 @@ async def _build_erpnext_callables(
 # ---------------------------------------------------------------------------
 
 
-def _wrap_tool_with_output_cap(tool_obj: Any) -> Any:
+def _wrap_tool_with_output_cap(tool_obj: Any, context_length: int | None = None) -> Any:
     """Wrap a MAF FunctionTool to cap its output size before it enters the agent context.
 
     Patches ``FunctionTool.func`` with an async wrapper that truncates
@@ -1301,13 +1358,21 @@ def _wrap_tool_with_output_cap(tool_obj: Any) -> Any:
     function metadata so MAF tool detection, schema generation, and
     logging continue to work correctly.
 
-    Returns the same ``FunctionTool`` object (mutated) so callers can
-    use it in a map expression.
+    The cap is derived from the model's ``context_length`` when available,
+    falling back to ``TOOL_OUTPUT_CAP_FALLBACK`` when unknown.
+
+    Args:
+        tool_obj: The MAF FunctionTool to wrap.
+        context_length: The model's context window in tokens, or None.
+
+    Returns:
+        The same ``FunctionTool`` object (mutated).
     """
     if not hasattr(tool_obj, "func") or not callable(tool_obj.func):
         return tool_obj  # Declaration-only or non-FunctionTool, skip
 
     original_func = tool_obj.func
+    max_chars = _compute_tool_output_cap(context_length)
 
     async def capped_func(*args: Any, **kwargs: Any) -> Any:
         tool_name = getattr(original_func, '__name__', 'unknown')
@@ -1318,7 +1383,7 @@ def _wrap_tool_with_output_cap(tool_obj: Any) -> Any:
             )
         except asyncio.TimeoutError:
             return {"error": f"Tool '{tool_name}' timed out after {TOOL_EXECUTION_TIMEOUT}s"}
-        truncated = _truncate_tool_output(result)
+        truncated = _truncate_tool_output(result, max_chars=max_chars)
         return truncated
 
     # Preserve function identity so MAF introspection (name, schema, docs)
@@ -2467,7 +2532,7 @@ def _summarise_tool_result(output: Any) -> str:
 
 def _truncate_tool_output(
     output: Any,
-    max_chars: int = MAX_TOOL_OUTPUT_CHARS,
+    max_chars: int = TOOL_OUTPUT_CAP_FALLBACK,
 ) -> Any:
     """Truncate oversized tool outputs before they enter the agent context.
 

@@ -54,6 +54,7 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_SERVER_URL: https://${FILES_DOMAIN}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 10s
@@ -63,6 +64,20 @@ services:
       - minio_data:/data
     networks:
       - phagent-network
+      - traefik-public
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: traefik-public
+      traefik.http.routers.phagent-files-http.entrypoints: http
+      traefik.http.routers.phagent-files-http.middlewares: https-redirect
+      traefik.http.routers.phagent-files-http.rule: Host(`${FILES_DOMAIN}`)
+      traefik.http.routers.phagent-files-http.service: phagent-files
+      traefik.http.routers.phagent-files-https.entrypoints: https
+      traefik.http.routers.phagent-files-https.rule: Host(`${FILES_DOMAIN}`)
+      traefik.http.routers.phagent-files-https.service: phagent-files
+      traefik.http.routers.phagent-files-https.tls: "true"
+      traefik.http.routers.phagent-files-https.tls.certresolver: le
+      traefik.http.services.phagent-files.loadbalancer.server.port: "9000"
 
   # ── Backend ──────────────────────────────────────────────────────────────
   backend:

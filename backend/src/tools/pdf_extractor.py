@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 DEFAULT_TIMEOUT: float = 60.0
-DEFAULT_MAX_CHARS: int = 100_000
+DEFAULT_MAX_CHARS: int = 500_000
 ALLOWED_SCHEMES: frozenset = frozenset({"http", "https"})
 
 # ---------------------------------------------------------------------------
@@ -60,7 +60,7 @@ def build_pdf_extractor_tools(tool_config: dict | None = None) -> list:
     Args:
         tool_config: Optional ``Tool.config`` JSON dict.  May include:
             - ``timeout`` (float): request timeout in seconds (default 60)
-            - ``max_chars`` (int): max characters to return (default 100k)
+            - ``max_chars`` (int): max characters to return (default 500k)
 
     Returns:
         A list with a single callable ready to pass to ``Agent(tools=...)``.
@@ -181,9 +181,13 @@ def build_pdf_extractor_tools(tool_config: dict | None = None) -> list:
             text_length = len(full_text)
             truncated = text_length > max_chars
             if truncated:
-                full_text = full_text[:max_chars] + (
-                    f"\n\n[... text truncated at {max_chars} characters "
-                    f"out of {text_length} total ...]"
+                half = max_chars // 2
+                full_text = (
+                    full_text[:half]
+                    + f"\n\n[... text truncated at {max_chars} characters "
+                      f"out of {text_length} total — showing beginning "
+                      f"and end ...]\n\n"
+                    + full_text[-half:]
                 )
 
             return {

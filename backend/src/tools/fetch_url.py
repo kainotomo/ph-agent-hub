@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 DEFAULT_TIMEOUT: float = 30.0
-DEFAULT_MAX_CONTENT_LENGTH: int = 100_000
+DEFAULT_MAX_CONTENT_LENGTH: int = 500_000
 DEFAULT_USER_AGENT: str = (
     "ph-agent-hub/1.0 (fetch-url tool; +https://github.com/phalouvas/ph-agent-hub)"
 )
@@ -65,7 +65,7 @@ def build_fetch_url_tools(tool_config: dict | None = None) -> list:
         tool_config: Optional ``Tool.config`` JSON dict.  May include:
             - ``user_agent`` (str): custom User-Agent header
             - ``timeout`` (float): request timeout in seconds (default 30)
-            - ``max_content_length`` (int): max chars to return (default 100k)
+            - ``max_content_length`` (int): max chars to return (default 500k)
 
     Returns:
         A list with a single callable ready to pass to ``Agent(tools=...)``.
@@ -119,8 +119,19 @@ def build_fetch_url_tools(tool_config: dict | None = None) -> list:
 
         # Only convert HTML content
         if "text/html" not in content_type and "application/xhtml" not in content_type:
-            text = response.text[:max_len]
-            truncated = len(response.text) > max_len
+            raw_text = response.text
+            truncated = len(raw_text) > max_len
+            if truncated:
+                half = max_len // 2
+                text = (
+                    raw_text[:half]
+                    + f"\n\n[... text truncated at {max_len} characters "
+                      f"out of {len(raw_text)} total — showing beginning "
+                      f"and end ...]\n\n"
+                    + raw_text[-half:]
+                )
+            else:
+                text = raw_text
             return {
                 "url": str(response.url),
                 "status_code": response.status_code,
@@ -176,7 +187,14 @@ def build_fetch_url_tools(tool_config: dict | None = None) -> list:
         text = markdown_text.strip()
         truncated = len(text) > max_len
         if truncated:
-            text = text[:max_len]
+            half = max_len // 2
+            text = (
+                text[:half]
+                + f"\n\n[... text truncated at {max_len} characters "
+                  f"out of {len(text)} total — showing beginning "
+                  f"and end ...]\n\n"
+                + text[-half:]
+            )
 
         logger.debug(
             "fetch_url %s → %d chars (truncated=%s)", url, len(text), truncated

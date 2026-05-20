@@ -227,7 +227,7 @@ export function SessionSidebar() {
           renderItem={(item) => (
             <List.Item
               onClick={() => {
-                navigate(`/chat/${item.id}`);
+                navigate(sessionId === item.id ? "/chat" : `/chat/${item.id}`);
                 if (isMobile) setMobileOpen(false);
               }}
               style={{

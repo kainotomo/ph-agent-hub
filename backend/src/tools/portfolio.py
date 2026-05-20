@@ -36,40 +36,60 @@ def _get_returns(
 ) -> tuple:
     """Download historical prices and compute daily returns.
 
+    Handles tickers from different exchanges (US, EU, etc.) by
+    forward-filling missing dates so that non-trading days yield
+    0% return rather than dropping the entire row.
+
     Returns:
-        (returns_df, ticker_names) where returns_df is a DataFrame of
-        daily returns (rows=dates, cols=tickers).
+        (returns_df, ticker_names, ticker_results) where:
+        - returns_df: DataFrame of daily returns (rows=dates, cols=tickers),
+          or None if no data at all.
+        - ticker_names: dict mapping symbol -> company name.
+        - ticker_results: list of dicts with ``symbol``, ``status``
+          ("success" | "failed"), and ``reason`` (None on success, or
+          "invalid_ticker", "no_data_for_period", "network_timeout").
     """
     import yfinance as yf
-    import numpy as np
 
     prices_data = {}
     names = {}
+    results = []
 
     def _fetch_one(sym: str):
+        """Fetch closing prices for one symbol. Returns (sym, series, name, reason)."""
         try:
             t = yf.Ticker(sym)
             df = t.history(period=period)
             if not df.empty and "Close" in df.columns:
-                return sym, df["Close"], t.info.get("shortName", sym)
+                return sym, df["Close"], t.info.get("shortName", sym), None
+            return sym, None, sym, "no_data_for_period"
         except Exception:
-            pass
-        return sym, None, sym
+            return sym, None, sym, "network_timeout"
 
     for sym in symbols:
-        _, closes, name = _fetch_one(sym)
+        _, closes, name, reason = _fetch_one(sym)
         if closes is not None and len(closes) > 1:
             prices_data[sym] = closes
             names[sym] = name
+            results.append({"symbol": sym, "status": "success", "reason": None})
+        else:
+            results.append({"symbol": sym, "status": "failed", "reason": reason or "no_data_for_period"})
 
     if not prices_data:
-        return None, {}
+        return None, {}, results
 
     import pandas as pd
     prices_df = pd.DataFrame(prices_data)
-    returns_df = prices_df.pct_change().dropna()
 
-    return returns_df, names
+    # Forward-fill for calendar alignment:
+    # When tickers trade on different exchanges (NYSE, Xetra, LSE, etc.),
+    # non-trading days get their last known price carried forward,
+    # yielding 0% daily return rather than dropping the entire row.
+    prices_df = prices_df.ffill()
+
+    returns_df = prices_df.pct_change().dropna(how="all")
+
+    return returns_df, names, results
 
 
 # ---------------------------------------------------------------------------
@@ -159,10 +179,16 @@ def build_portfolio_tools(tool_config: dict | None = None) -> list:
         w = [wi / w_sum for wi in w]
 
         # Get returns
-        returns_df, names = await asyncio.to_thread(_get_returns, syms, p)
+        returns_df, names, ticker_results = await asyncio.to_thread(_get_returns, syms, p)
 
         if returns_df is None or returns_df.empty:
-            return {"error": "Failed to fetch price data for the given symbols. Check that the tickers are valid."}
+            succeeded = [r["symbol"] for r in ticker_results if r["status"] == "success"]
+            failed = [{"symbol": r["symbol"], "reason": r["reason"]} for r in ticker_results if r["status"] == "failed"]
+            return {
+                "error": f"Failed to fetch price data for {len(failed)} of {len(syms)} symbols.",
+                "succeeded": succeeded,
+                "failed": failed,
+            }
 
         # Align columns - only use symbols that have data
         available_syms = [s for s in syms if s in returns_df.columns]
@@ -210,7 +236,7 @@ def build_portfolio_tools(tool_config: dict | None = None) -> list:
         alpha = None
         correlation = None
         try:
-            bench_ret_df, _ = await asyncio.to_thread(
+            bench_ret_df, _, _ = await asyncio.to_thread(
                 _get_returns, [benchmark_symbol], p
             )
             if bench_ret_df is not None and not bench_ret_df.empty:
@@ -262,6 +288,13 @@ def build_portfolio_tools(tool_config: dict | None = None) -> list:
         # Map names
         symbol_names = {s: names.get(s, s) for s in available_syms}
 
+        # Track any tickers that failed
+        failed_tickers = [
+            {"symbol": r["symbol"], "reason": r["reason"]}
+            for r in ticker_results
+            if r["status"] == "failed"
+        ]
+
         return {
             "symbols": available_syms,
             "symbol_names": symbol_names,
@@ -281,6 +314,7 @@ def build_portfolio_tools(tool_config: dict | None = None) -> list:
             "diversification_score": div_score,
             "daily_returns_sample": last_returns,
             "risk_free_rate": risk_free_rate,
+            "failed_tickers": failed_tickers or None,
             "source": "yfinance + numpy/scipy",
         }
 
@@ -328,10 +362,16 @@ def build_portfolio_tools(tool_config: dict | None = None) -> list:
             return {"error": "At least 2 symbols are required for optimization"}
 
         # Get returns
-        returns_df, names = await asyncio.to_thread(_get_returns, syms, p)
+        returns_df, names, ticker_results = await asyncio.to_thread(_get_returns, syms, p)
 
         if returns_df is None or returns_df.empty:
-            return {"error": "Failed to fetch price data. Check that the tickers are valid."}
+            succeeded = [r["symbol"] for r in ticker_results if r["status"] == "success"]
+            failed = [{"symbol": r["symbol"], "reason": r["reason"]} for r in ticker_results if r["status"] == "failed"]
+            return {
+                "error": f"Failed to fetch price data for {len(failed)} of {len(syms)} symbols.",
+                "succeeded": succeeded,
+                "failed": failed,
+            }
 
         available_syms = [s for s in syms if s in returns_df.columns]
         if len(available_syms) < 2:
@@ -464,10 +504,16 @@ def build_portfolio_tools(tool_config: dict | None = None) -> list:
         if len(syms) < 2:
             return {"error": "At least 2 symbols are required"}
 
-        returns_df, names = await asyncio.to_thread(_get_returns, syms, p)
+        returns_df, names, ticker_results = await asyncio.to_thread(_get_returns, syms, p)
 
         if returns_df is None or returns_df.empty:
-            return {"error": "Failed to fetch price data. Check that the tickers are valid."}
+            succeeded = [r["symbol"] for r in ticker_results if r["status"] == "success"]
+            failed = [{"symbol": r["symbol"], "reason": r["reason"]} for r in ticker_results if r["status"] == "failed"]
+            return {
+                "error": f"Failed to fetch price data for {len(failed)} of {len(syms)} symbols.",
+                "succeeded": succeeded,
+                "failed": failed,
+            }
 
         available_syms = [s for s in syms if s in returns_df.columns]
         if len(available_syms) < 2:

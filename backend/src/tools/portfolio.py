@@ -50,6 +50,7 @@ def _get_returns(
           "invalid_ticker", "no_data_for_period", "network_timeout").
     """
     import yfinance as yf
+    import pandas as pd
 
     prices_data = {}
     names = {}
@@ -69,6 +70,10 @@ def _get_returns(
     for sym in symbols:
         _, closes, name, reason = _fetch_one(sym)
         if closes is not None and len(closes) > 1:
+            # Normalise to timezone-naive date-only — yfinance returns
+            # exchange-local timezones (US/Eastern, Europe/Berlin, etc.)
+            # that produce different UTC timestamps for the same date.
+            closes.index = pd.DatetimeIndex(closes.index.date)
             prices_data[sym] = closes
             names[sym] = name
             results.append({"symbol": sym, "status": "success", "reason": None})
@@ -78,7 +83,6 @@ def _get_returns(
     if not prices_data:
         return None, {}, results
 
-    import pandas as pd
     prices_df = pd.DataFrame(prices_data)
 
     # Forward-fill for calendar alignment:

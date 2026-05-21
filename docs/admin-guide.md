@@ -162,7 +162,7 @@ Tools extend agent capabilities — they can call external APIs, query ERPNext i
 | **calculator** | Utility | Safe AST expression evaluator | None |
 | **calendar** | Productivity | Google Calendar — list/create events, find free slots | `provider`, `credentials`, `calendar_id`, `timezone` |
 | **code_interpreter** | Utility | Docker-sandboxed Python execution (pandas, numpy, matplotlib, plotly) | `timeout`, `allow_network` |
-| **currency_exchange** | Financial | Exchange rates via frankfurter.app (ECB data) | `base_currency`, `timeout` |
+| **currency_exchange** | Financial | Exchange rates via frankfurter.dev (ECB data) | `base_currency`, `timeout` |
 | **custom** | Extensibility | Admin-authored sandboxed Python tools | `code` (Python), `config` (JSON) |
 | **datetime** | Utility | Timezone-aware date/time queries | `timezone` |
 | **document_generation** | Utility | Markdown→PDF (weasyprint), list→Excel (openpyxl), list→CSV | `company_logo_url` |

@@ -1,8 +1,8 @@
 # =============================================================================
-# PH Agent Hub — Currency Exchange Tool Factory (frankfurter.app)
+# PH Agent Hub — Currency Exchange Tool Factory (frankfurter.dev)
 # =============================================================================
 # Builds MAF @tool-decorated async functions for currency conversion and
-# exchange rates using the free frankfurter.app API (ECB data).
+# exchange rates using the free frankfurter.dev API (ECB data).
 # No API key required.  Uses httpx for async HTTP requests.
 # =============================================================================
 
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-FRANKFURTER_BASE: str = "https://api.frankfurter.app"
+FRANKFURTER_BASE: str = "https://api.frankfurter.dev"
 DEFAULT_TIMEOUT: float = 15.0
 DEFAULT_BASE_CURRENCY: str = "EUR"
 
@@ -55,7 +55,7 @@ def build_currency_exchange_tools(tool_config: dict | None = None) -> list:
         """Convert an amount from one currency to another.
 
         Uses the European Central Bank's daily reference rates via
-        frankfurter.app — free, no API key required.
+        frankfurter.dev — free, no API key required.
 
         Args:
             amount: The amount to convert (e.g. 100).
@@ -74,13 +74,13 @@ def build_currency_exchange_tools(tool_config: dict | None = None) -> list:
         fc = from_currency.upper()
         tc = to_currency.upper()
         url = (
-            f"{FRANKFURTER_BASE}/latest"
+            f"{FRANKFURTER_BASE}/v1/latest"
             f"?amount={amount}&from={fc}&to={tc}"
         )
         logger.info("convert_currency: %.2f %s → %s", amount, fc, tc)
 
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
                 response = await client.get(
                     url,
                     headers={"User-Agent": "ph-agent-hub/1.0"},
@@ -140,7 +140,7 @@ def build_currency_exchange_tools(tool_config: dict | None = None) -> list:
         """Get the latest exchange rates for a base currency.
 
         Uses the European Central Bank's daily reference rates via
-        frankfurter.app — free, no API key required.
+        frankfurter.dev — free, no API key required.
 
         Args:
             base: Base currency code (e.g. "USD").
@@ -154,11 +154,11 @@ def build_currency_exchange_tools(tool_config: dict | None = None) -> list:
             - ``rate_count``: number of currencies available
         """
         b = (base or base_currency).upper()
-        url = f"{FRANKFURTER_BASE}/latest?from={b}"
+        url = f"{FRANKFURTER_BASE}/v1/latest?from={b}"
         logger.info("get_exchange_rates: base=%s", b)
 
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
                 response = await client.get(
                     url,
                     headers={"User-Agent": "ph-agent-hub/1.0"},

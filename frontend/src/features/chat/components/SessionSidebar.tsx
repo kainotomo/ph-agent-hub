@@ -34,6 +34,8 @@ import {
   DownOutlined,
   ThunderboltOutlined,
   MenuOutlined,
+  MenuFoldOutlined,
+  MenuUnfoldOutlined,
 } from "@ant-design/icons";
 import { Logo } from "../../../shared/components/Logo";
 import { useNavigate, useParams } from "react-router-dom";
@@ -173,49 +175,71 @@ export function SessionSidebar() {
             justifyContent: "space-between",
           }}
         >
-          <Logo size={28} showText textColor="#141414" />
-          <Space size={4}>
-            <Tooltip title="Search">
-              <Button
-                type="text"
-                icon={<SearchOutlined />}
-                size="small"
-                onClick={() => setSearchOpen(true)}
-              />
-            </Tooltip>
-            <Tooltip title="Memory">
-              <Button
-                type="text"
-                icon={<DatabaseOutlined />}
-                size="small"
-                onClick={() => setMemoryOpen(true)}
-              />
-            </Tooltip>
-          </Space>
+          <Logo size={28} showText={!collapsed} textColor="#141414" />
+          {!collapsed && (
+            <Space size={4}>
+              <Tooltip title="Search">
+                <Button
+                  type="text"
+                  icon={<SearchOutlined />}
+                  size="small"
+                  onClick={() => setSearchOpen(true)}
+                />
+              </Tooltip>
+              <Tooltip title="Memory">
+                <Button
+                  type="text"
+                  icon={<DatabaseOutlined />}
+                  size="small"
+                  onClick={() => setMemoryOpen(true)}
+                />
+              </Tooltip>
+              <Tooltip title="Collapse sidebar">
+                <Button
+                  type="text"
+                  icon={<MenuFoldOutlined />}
+                  size="small"
+                  onClick={() => setCollapsed(true)}
+                />
+              </Tooltip>
+            </Space>
+          )}
         </Space>
       </div>
 
       {/* New Chat Button */}
       <div style={{ padding: "8px 12px" }}>
-        <div style={{ display: "flex", gap: 0 }}>
-          <Button
-            type="dashed"
-            icon={<PlusOutlined />}
-            loading={createMutation.isPending}
-            style={{ flex: 1 }}
-            onClick={() => handleNewChat(false)}
-          >
-            New Chat
-          </Button>
-          <Dropdown menu={{ items: newChatMenuItems }} trigger={["click"]}>
+        {collapsed ? (
+          <Tooltip title="New Chat" placement="right">
             <Button
               type="dashed"
-              icon={<DownOutlined />}
+              icon={<PlusOutlined />}
               loading={createMutation.isPending}
-              style={{ width: 32 }}
+              block
+              onClick={() => handleNewChat(false)}
             />
-          </Dropdown>
-        </div>
+          </Tooltip>
+        ) : (
+          <div style={{ display: "flex", gap: 0 }}>
+            <Button
+              type="dashed"
+              icon={<PlusOutlined />}
+              loading={createMutation.isPending}
+              style={{ flex: 1 }}
+              onClick={() => handleNewChat(false)}
+            >
+              New Chat
+            </Button>
+            <Dropdown menu={{ items: newChatMenuItems }} trigger={["click"]}>
+              <Button
+                type="dashed"
+                icon={<DownOutlined />}
+                loading={createMutation.isPending}
+                style={{ width: 32 }}
+              />
+            </Dropdown>
+          </div>
+        )}
       </div>
 
       {/* Session List */}
@@ -460,7 +484,7 @@ export function SessionSidebar() {
           onClose={() => setMobileOpen(false)}
           placement="left"
           width={280}
-          bodyStyle={{ padding: 0 }}
+          styles={{ body: { padding: 0 } }}
         >
           {sidebarContent}
         </Drawer>
@@ -474,13 +498,42 @@ export function SessionSidebar() {
       width={280}
       collapsible
       collapsed={collapsed}
+      collapsedWidth={0}
+      trigger={null}
       onCollapse={setCollapsed}
       theme="light"
       style={{
-        borderRight: "1px solid #f0f0f0",
-        overflow: "auto",
+        borderRight: collapsed ? "none" : "1px solid #f0f0f0",
+        overflow: collapsed ? "visible" : "hidden",
+        position: "relative",
       }}
     >
+      {!isMobile && collapsed && (
+        <div
+          style={{
+            position: "absolute",
+            left: 0,
+            top: 8,
+            zIndex: 200,
+            width: 32,
+            display: "flex",
+            justifyContent: "center",
+          }}
+        >
+          <Tooltip title="Expand sidebar" placement="right">
+            <Button
+              type="text"
+              icon={<MenuUnfoldOutlined />}
+              onClick={() => setCollapsed(false)}
+              style={{
+                background: "#fff",
+                border: "1px solid #d9d9d9",
+                boxShadow: "0 2px 6px rgba(0,0,0,0.1)",
+              }}
+            />
+          </Tooltip>
+        </div>
+      )}
       {sidebarContent}
     </Sider>
   );

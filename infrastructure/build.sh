@@ -8,8 +8,8 @@
 #   ./build.sh                    # Build + push with tag from package.json
 #   ./build.sh -t v1.2.3          # Override the tag
 #   ./build.sh --no-push          # Build only, skip registry push
-#   ./build.sh --cache            # Use Docker layer cache (faster, less safe)
-#   ./build.sh --no-push --cache  # Combine overrides
+#   ./build.sh --no-cache         # Disable Docker layer cache (clean build)
+#   ./build.sh --no-push --no-cache  # Combine overrides
 #
 # Prerequisites:
 #   - Docker installed and running
@@ -33,7 +33,7 @@ echo "Detected app version: ${APP_VERSION}"
 # ── Defaults (production-first) ────────────────────────────────────────────
 TAG="${APP_VERSION:-latest}"   # Auto-tag from package.json, fallback: latest
 PUSH=true                       # Push by default; --no-push to skip
-NO_CACHE="--no-cache"           # No-cache by default; --cache to use cache
+NO_CACHE=""                     # Use cache by default; --no-cache to opt out
 
 # ── Help ───────────────────────────────────────────────────────────────────
 usage() {
@@ -43,7 +43,7 @@ Usage: $(basename "$0") [OPTIONS]
 Options:
   -t, --tag TAG       Override the image tag (default: auto-detected from package.json)
   --no-push           Build images but skip pushing to registry
-  --cache             Use Docker layer cache instead of --no-cache
+  --no-cache          Disable Docker layer cache (clean build)
   -h, --help          Show this help
 EOF
   exit 0
@@ -54,7 +54,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -t|--tag) TAG="$2"; shift 2 ;;
     --no-push) PUSH=false; shift ;;
-    --cache) NO_CACHE=""; shift ;;
+    --no-cache) NO_CACHE="--no-cache"; shift ;;
     -h|--help) usage ;;
     *) echo "Unknown option: $1"; usage ;;
   esac

@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     # --- Session ---
     TEMPORARY_SESSION_TTL_SECONDS: int = 86400  # 24 hours
 
+    # --- Cross-session memory (Issue #229) ---
+    CROSS_SESSION_EMBEDDING_MODEL: str = "text-embedding-3-small"
+
     # --- Security ---
     COOKIE_SECURE: bool = False
     CORS_ALLOWED_ORIGINS: str = "http://localhost:3000"

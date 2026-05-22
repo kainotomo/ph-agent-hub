@@ -1242,6 +1242,9 @@ class AdminSkillCreate(BaseModel):
     default_model_id: str | None = None
     enabled: bool = True
     tool_ids: list[str] | None = None
+    cross_session_retrieval_enabled: bool = False
+    cross_session_max_snippets: int = 3
+    cross_session_min_score: float = 0.30
 
 
 class AdminSkillUpdate(BaseModel):
@@ -1257,6 +1260,9 @@ class AdminSkillUpdate(BaseModel):
     default_model_id: str | None = None
     enabled: bool | None = None
     tool_ids: list[str] | None = None
+    cross_session_retrieval_enabled: bool | None = None
+    cross_session_max_snippets: int | None = None
+    cross_session_min_score: float | None = None
 
 
 class AdminSkillResponse(BaseModel):
@@ -1272,6 +1278,9 @@ class AdminSkillResponse(BaseModel):
     default_prompt_id: str | None
     default_model_id: str | None
     enabled: bool
+    cross_session_retrieval_enabled: bool
+    cross_session_max_snippets: int
+    cross_session_min_score: float
     created_at: datetime
     updated_at: datetime
     tool_ids: list[str] = []
@@ -1352,6 +1361,9 @@ async def admin_create_skill(
         default_model_id=body.default_model_id,
         enabled=body.enabled,
         tool_ids=body.tool_ids,
+        cross_session_retrieval_enabled=body.cross_session_retrieval_enabled,
+        cross_session_max_snippets=body.cross_session_max_snippets,
+        cross_session_min_score=body.cross_session_min_score,
     )
     tools = await _svc_list_skill_tools(db, skill.id)
     resp = AdminSkillResponse.model_validate(skill)
@@ -1388,6 +1400,8 @@ async def admin_update_skill(
         "title", "description", "execution_type", "maf_target_key",
         "visibility", "template_id", "default_prompt_id", "default_model_id",
         "enabled",
+        "cross_session_retrieval_enabled", "cross_session_max_snippets",
+        "cross_session_min_score",
     ):
         val = getattr(body, field, None)
         if val is not None:

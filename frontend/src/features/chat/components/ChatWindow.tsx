@@ -668,6 +668,15 @@ export function ChatWindow({
           >
             Summarize
           </Button>
+          <Switch
+            size="small"
+            checkedChildren="🧠 Memory"
+            unCheckedChildren="🧠 Memory"
+            title="Cross-session memory"
+            onChange={(v) => {
+              onSessionUpdate?.({ cross_session_retrieval_enabled: v });
+            }}
+          />
           {modelSupportsThinking && (
             <Switch
               size="small"

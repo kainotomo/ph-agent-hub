@@ -19,6 +19,7 @@ from .sessions import Session, SessionActiveTool
 from .tags import Tag, SessionTag
 from .messages import Message, MessageFeedback
 from .memory import Memory
+from .message_embeddings import MessageEmbedding
 from .file_uploads import FileUpload
 from .rag import RAGDocument
 from .usage_logs import UsageLog
@@ -44,6 +45,7 @@ __all__ = [
     "Message",
     "MessageFeedback",
     "Memory",
+    "MessageEmbedding",
     "FileUpload",
     "RAGDocument",
     "UsageLog",

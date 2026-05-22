@@ -116,6 +116,9 @@ async def create_skill(
     default_model_id: str | None = None,
     enabled: bool = True,
     tool_ids: list[str] | None = None,
+    cross_session_retrieval_enabled: bool = False,
+    cross_session_max_snippets: int = 3,
+    cross_session_min_score: float = 0.30,
 ) -> Skill:
     """Create a new skill with optional tool associations.
 
@@ -137,6 +140,9 @@ async def create_skill(
         default_prompt_id=default_prompt_id,
         default_model_id=default_model_id,
         enabled=enabled,
+        cross_session_retrieval_enabled=cross_session_retrieval_enabled,
+        cross_session_max_snippets=cross_session_max_snippets,
+        cross_session_min_score=cross_session_min_score,
     )
     db.add(skill)
     await db.flush()  # Get the skill ID before adding join rows

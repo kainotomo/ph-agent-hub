@@ -83,6 +83,7 @@ async def _resolve_session_config(
     tenant_id: str,
     user: User | None = None,
     file_ids: list[str] | None = None,
+    user_message: str | None = None,
 ) -> SessionConfig:
     """Resolve model, system prompt, skill, tools, execution type, and agent name.
 
@@ -92,8 +93,10 @@ async def _resolve_session_config(
     # 1. Resolve model
     model = await _resolve_model(db, session_data, user)
 
-    # 2. Build system prompt
-    system_prompt = await _build_system_prompt(db, session_data, user=user)
+    # 2. Build system prompt (includes cross-session memory retrieval if enabled)
+    system_prompt = await _build_system_prompt(
+        db, session_data, user=user, user_message=user_message,
+    )
 
     # 3. Resolve skill
     skill = await _resolve_skill(db, session_data)
@@ -791,7 +794,7 @@ async def run_agent(
     is_temporary = session_data.get("is_temporary", False)
 
     # ---- 1-6. Resolve session config ------------------------------------
-    cfg = await _resolve_session_config(db, session_data, tenant_id, current_user, file_ids=file_ids)
+    cfg = await _resolve_session_config(db, session_data, tenant_id, current_user, file_ids=file_ids, user_message=user_message)
 
     # ---- Build contextualized message (history + auto-summarization) ----
     contextualized_message, _ = await _maybe_summarize_and_build_context(
@@ -847,6 +850,21 @@ async def run_agent(
             tokens_in=tokens_in,
             tokens_out=tokens_out,
         )
+
+        # ---- Background: embed user message for cross-session retrieval -----
+        if not is_temporary:
+            try:
+                from ..services.embedding_service import embed_message as _embed_msg
+
+                asyncio.ensure_future(_embed_msg(
+                    db=await _fresh_db_session(),
+                    message_id=_user_msg_id,
+                    user_id=current_user.id,
+                    tenant_id=current_user.tenant_id,
+                    text=user_message,
+                ))
+            except Exception:
+                logger.warning("Failed to schedule embedding for message %s", _user_msg_id, exc_info=True)
 
         # ---- 9. Link file uploads to the user message ------------------------
         if file_ids and not is_temporary:
@@ -959,14 +977,21 @@ async def _resolve_model(
 
 
 async def _build_system_prompt(
-    db: AsyncSession, session_data: dict, user: User | None = None
+    db: AsyncSession,
+    session_data: dict,
+    user: User | None = None,
+    user_message: str | None = None,
 ) -> str:
-    """Build the system prompt from template + agent memory.
+    """Build the system prompt from template + agent memory + cross-session retrieval.
 
     Resolution chain:
     1. session.selected_template_id (manual override in chat)
     2. skill.template_id (from the selected skill's config)
     3. "You are a helpful assistant." (hardcoded fallback)
+
+    If ``user_message`` is provided and cross-session retrieval is enabled,
+    past conversations semantically similar to the user message are injected
+    as an additional context block (Issue #229).
     """
     template_id = session_data.get("selected_template_id")
 
@@ -1030,6 +1055,97 @@ async def _build_system_prompt(
         except Exception:
             logger.warning(
                 "Failed to load agent memory for user=%s", user.id, exc_info=True
+            )
+
+    # ---- Cross-session memory retrieval (Issue #229) -----------------------
+    # Inject relevant past conversation snippets via semantic search.
+    if user and user_message:
+        try:
+            from ..services.embedding_service import (
+                embed_query as _embed_query,
+                retrieve_similar as _retrieve_similar,
+            )
+
+            # Resolve whether retrieval is enabled:
+            #   session override (tri-state) → skill default → off
+            retrieval_enabled = session_data.get("cross_session_retrieval_enabled")
+            if retrieval_enabled is None:
+                # Fall back to skill config
+                skill_id = session_data.get("selected_skill_id")
+                if skill_id:
+                    result = await db.execute(
+                        select(Skill).where(Skill.id == skill_id)
+                    )
+                    skill_row = result.scalar_one_or_none()
+                    if skill_row:
+                        retrieval_enabled = skill_row.cross_session_retrieval_enabled
+                        max_snippets = skill_row.cross_session_max_snippets
+                        min_score = skill_row.cross_session_min_score
+                    else:
+                        retrieval_enabled = False
+                        max_snippets = 3
+                        min_score = 0.70
+                else:
+                    retrieval_enabled = False
+                    max_snippets = 3
+                    min_score = 0.30
+            else:
+                # Use session-level defaults when skill doesn't apply
+                max_snippets = 3
+                min_score = 0.30
+
+            if retrieval_enabled:
+                query_emb = await _embed_query(user_message)
+                if query_emb:
+                    similar = await _retrieve_similar(
+                        db=db,
+                        user_id=user.id,
+                        tenant_id=user.tenant_id,
+                        query_embedding=query_emb,
+                        session_id=session_data.get("id"),
+                        top_k=max_snippets,
+                        min_score=min_score,
+                    )
+
+                    if similar:
+                        snippet_lines: list[str] = [
+                            "## Relevant Past Conversations",
+                            "",
+                            "The following excerpts from your past conversations "
+                            "may be relevant to the current message. "
+                            "Use this context if helpful, but do NOT mention "
+                            "these entries unless they are directly relevant:",
+                            "",
+                        ]
+                        for s in similar:
+                            session_label = s.get("session_title") or "Unknown session"
+                            snippet_lines.append(
+                                f"- [Session: {session_label} | "
+                                f"Relevance: {s['score']:.2f}]"
+                            )
+                            # Truncate user message
+                            user_txt = s.get("user_text", "")
+                            if len(user_txt) > 300:
+                                user_txt = user_txt[:300] + "..."
+                            snippet_lines.append(f"  User: {user_txt}")
+
+                            asst_txt = s.get("assistant_text")
+                            if asst_txt:
+                                if len(asst_txt) > 500:
+                                    asst_txt = asst_txt[:500] + "..."
+                                snippet_lines.append(f"  Assistant: {asst_txt}")
+
+                            snippet_lines.append("")
+
+                        parts.append("\n".join(snippet_lines))
+                        logger.debug(
+                            "Injected %d cross-session snippets for user=%s",
+                            len(similar), user.id,
+                        )
+        except Exception:
+            logger.warning(
+                "Failed to retrieve cross-session memory for user=%s",
+                user.id, exc_info=True,
             )
 
     if parts:
@@ -1567,6 +1683,22 @@ async def _run_workflow(
 
 
 # ---------------------------------------------------------------------------
+# Fresh DB session helper (for background fire-and-forget tasks)
+# ---------------------------------------------------------------------------
+
+
+async def _fresh_db_session() -> AsyncSession:
+    """Create a new async DB session independent of the current request.
+
+    Used by ``asyncio.ensure_future`` background tasks (e.g. embedding)
+    that outlive the request-response cycle and therefore can't reuse
+    the request-scoped ``db`` session.
+    """
+    from ..db.base import AsyncSessionLocal
+    return AsyncSessionLocal()
+
+
+# ---------------------------------------------------------------------------
 # Message persistence
 # ---------------------------------------------------------------------------
 
@@ -1808,9 +1940,25 @@ async def run_agent_stream(
             message_id=user_msg_id,
             user_id=current_user.id,
         )
+
+    # ---- Background: embed user message for cross-session retrieval -----
+    if not is_temporary:
+        try:
+            from ..services.embedding_service import embed_message as _embed_msg
+
+            asyncio.ensure_future(_embed_msg(
+                db=await _fresh_db_session(),
+                message_id=user_msg_id,
+                user_id=current_user.id,
+                tenant_id=current_user.tenant_id,
+                text=user_message,
+            ))
+        except Exception:
+            logger.warning("Failed to schedule embedding for message %s", user_msg_id, exc_info=True)
+
     try:
         # ---- 1-6. Resolve session config --------------------------------
-        cfg = await _resolve_session_config(db, session_data, tenant_id, current_user, file_ids=file_ids)
+        cfg = await _resolve_session_config(db, session_data, tenant_id, current_user, file_ids=file_ids, user_message=user_message)
 
         # ---- Build contextualized message (history + auto-summarization) --
         contextualized_message, summary_info = await _maybe_summarize_and_build_context(

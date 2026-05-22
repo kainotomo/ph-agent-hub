@@ -115,6 +115,7 @@ export function ChatWindow({
   // Fetch models to determine if selected model supports thinking
   interface ModelInfo {
     id: string;
+    name: string;
     thinking_enabled: boolean;
     provider: string;
   }
@@ -548,6 +549,8 @@ export function ChatWindow({
         })),
       ],
       model_id: selectedModelId || null,
+      model_name: selectedModel?.name || null,
+      model_provider: selectedModel?.provider || null,
       tool_calls: null,
       tokens_in: streamingTokens?.tokens_in ?? null,
       tokens_out: streamingTokens?.tokens_out ?? null,

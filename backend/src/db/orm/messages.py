@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import String, Boolean, Integer, Text, DateTime, Enum, ForeignKey, JSON, func
 from sqlalchemy.dialects.mysql import CHAR
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..base import Base
 from .sessions import Session
@@ -30,6 +30,9 @@ class Message(Base):
     content: Mapped[list | None] = mapped_column(JSON, nullable=True)
     model_id: Mapped[str | None] = mapped_column(
         CHAR(36), ForeignKey("models.id"), nullable=True
+    )
+    model: Mapped["Model | None"] = relationship(
+        "Model", lazy="selectin", foreign_keys=[model_id]
     )
     tool_calls: Mapped[list | None] = mapped_column(JSON, nullable=True)
     tokens_in: Mapped[int | None] = mapped_column(Integer, nullable=True)

@@ -1997,6 +1997,8 @@ async def run_agent_stream(
                 "tokens_in": _stream_token_info.get("in", 0) or 0,
                 "tokens_out": _stream_token_info.get("out", 0) or 0,
                 "model_id": cfg.model.id if cfg else "unknown",
+                "model_name": cfg.model.name if cfg else None,
+                "model_provider": cfg.model.provider if cfg else None,
             }),
         }
 

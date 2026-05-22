@@ -40,6 +40,8 @@ export interface MessageData {
   sender: "user" | "assistant" | "system";
   content: unknown[] | null;
   model_id: string | null;
+  model_name?: string | null;
+  model_provider?: string | null;
   tool_calls: unknown[] | null;
   tokens_in: number | null;
   tokens_out: number | null;

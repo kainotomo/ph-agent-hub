@@ -69,6 +69,8 @@ export interface MessageCompleteEvent {
     message_id: string;
     content: string;
     model_id: string;
+    model_name?: string;
+    model_provider?: string;
     tokens_in?: number;
     tokens_out?: number;
   };

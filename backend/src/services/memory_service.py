@@ -141,19 +141,6 @@ async def update_memory(
     return memory
 
 
-async def list_all_memories(
-    db: AsyncSession,
-    tenant_id: str | None = None,
-) -> list[Memory]:
-    """List all memory entries, optionally scoped to a tenant.  Admin use only."""
-    stmt = select(Memory)
-    if tenant_id is not None:
-        stmt = stmt.where(Memory.tenant_id == tenant_id)
-    stmt = stmt.order_by(Memory.created_at.desc())
-    result = await db.execute(stmt)
-    return list(result.scalars().all())
-
-
 async def admin_delete_memory(
     db: AsyncSession,
     memory_id: str,

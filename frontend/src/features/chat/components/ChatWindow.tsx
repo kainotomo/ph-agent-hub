@@ -20,6 +20,7 @@ import {
   EditOutlined,
   CloseOutlined,
   ToolOutlined,
+  DatabaseOutlined,
 } from "@ant-design/icons";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { MessageBubble } from "./MessageBubble";
@@ -37,6 +38,7 @@ import {
   PromptLibrary,
   TemporaryChatBadge,
   SessionToolActivation,
+  MemoryManager,
 } from "./";
 
 const { TextArea } = Input;
@@ -88,6 +90,7 @@ export function ChatWindow({
   const screens = useBreakpoint();
   const isMobile = !screens.md;
   const [toolsOpen, setToolsOpen] = useState(false);
+  const [memoryOpen, setMemoryOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -115,6 +118,7 @@ export function ChatWindow({
   // Fetch models to determine if selected model supports thinking
   interface ModelInfo {
     id: string;
+    name: string;
     thinking_enabled: boolean;
     provider: string;
   }
@@ -548,6 +552,8 @@ export function ChatWindow({
         })),
       ],
       model_id: selectedModelId || null,
+      model_name: selectedModel?.name || null,
+      model_provider: selectedModel?.provider || null,
       tool_calls: null,
       tokens_in: streamingTokens?.tokens_in ?? null,
       tokens_out: streamingTokens?.tokens_out ?? null,
@@ -719,6 +725,15 @@ export function ChatWindow({
             onUse={(resolvedText) => setInputValue(resolvedText)}
           />
           <Button
+            icon={<DatabaseOutlined />}
+            onClick={() => {
+              setSettingsOpen(false);
+              setMemoryOpen(true);
+            }}
+          >
+            Memories
+          </Button>
+          <Button
             icon={<ToolOutlined />}
             onClick={() => {
               setSettingsOpen(false);
@@ -781,6 +796,12 @@ export function ChatWindow({
           </div>
         </div>
       </Drawer>
+
+      <MemoryManager
+        open={memoryOpen}
+        onClose={() => setMemoryOpen(false)}
+        sessionId={sessionId}
+      />
 
       {/* Messages area */}
       <div style={{ position: "relative", flex: 1 }}>

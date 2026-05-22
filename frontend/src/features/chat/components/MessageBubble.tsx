@@ -150,9 +150,9 @@ function MessageBubbleInner({
           <Text type="secondary" style={{ fontSize: 11 }}>
             {isUser ? "You" : isSystem ? "Summary" : "Assistant"}
           </Text>
-          {message.model_id && !isUser && (
+          {!isUser && (message.model_name || message.model_id) && (
             <Text type="secondary" style={{ fontSize: 10, color: "#bbb" }}>
-              · {message.model_id.slice(0, 8)}
+              · {message.model_name || message.model_id.slice(0, 8)}
             </Text>
           )}
         </Space>

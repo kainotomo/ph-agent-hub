@@ -21,6 +21,8 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
+from sqlalchemy.orm import selectinload
+
 from ..agents.runner import (
     _msg_get,
     run_agent,
@@ -118,6 +120,8 @@ class MessageResponse(BaseModel):
     sender: str
     content: list | None
     model_id: str | None
+    model_name: str | None = None
+    model_provider: str | None = None
     tool_calls: list | None
     tokens_in: int | None = None
     tokens_out: int | None = None
@@ -534,6 +538,8 @@ async def list_messages(
                 sender=m.get("sender", "user"),
                 content=m.get("content"),
                 model_id=m.get("model_id"),
+                model_name=m.get("model_name"),
+                model_provider=m.get("model_provider"),
                 tool_calls=m.get("tool_calls"),
                 tokens_in=m.get("tokens_in"),
                 tokens_out=m.get("tokens_out"),
@@ -547,6 +553,7 @@ async def list_messages(
     else:
         result = await db.execute(
             select(Message)
+            .options(selectinload(Message.model))
             .where(
                 Message.session_id == session_id,
                 Message.is_deleted == False,  # noqa: E712
@@ -554,7 +561,25 @@ async def list_messages(
             .order_by(Message.created_at)
         )
         messages = result.scalars().all()
-        return [MessageResponse.model_validate(m) for m in messages]
+        return [
+            MessageResponse(
+                id=m.id,
+                session_id=m.session_id,
+                sender=m.sender,
+                content=m.content,
+                model_id=m.model_id,
+                model_name=m.model.name if m.model else None,
+                model_provider=m.model.provider if m.model else None,
+                tool_calls=m.tool_calls,
+                tokens_in=m.tokens_in,
+                tokens_out=m.tokens_out,
+                is_deleted=m.is_deleted,
+                summarized=m.summarized,
+                created_at=m.created_at,
+                updated_at=m.updated_at,
+            )
+            for m in messages
+        ]
 
 
 @router.post(

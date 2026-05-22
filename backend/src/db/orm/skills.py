@@ -5,7 +5,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import String, Boolean, DateTime, Enum, ForeignKey, func
+from sqlalchemy import String, Boolean, Integer, Float, DateTime, Enum, ForeignKey, func
 from sqlalchemy.dialects.mysql import CHAR
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -49,6 +49,18 @@ class Skill(Base):
         Enum("tenant", "user", name="skill_visibility_enum"), nullable=False
     )
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    # ---- Cross-session memory (Issue #229) -----------------------------------
+    cross_session_retrieval_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    cross_session_max_snippets: Mapped[int] = mapped_column(
+        Integer, default=3, nullable=False
+    )
+    cross_session_min_score: Mapped[float] = mapped_column(
+        Float, default=0.30, nullable=False
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

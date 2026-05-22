@@ -44,6 +44,11 @@ class Session(Base):
     )
     thinking_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=None)
     temperature: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+
+    # ---- Cross-session memory (Issue #229) -- tri-state: None=inherit from skill
+    cross_session_retrieval_enabled: Mapped[bool | None] = mapped_column(
+        Boolean, nullable=True, default=None
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

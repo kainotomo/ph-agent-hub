@@ -90,6 +90,9 @@ export function SkillForm({ open, skill, duplicateFrom, onClose }: SkillFormProp
           default_model_id: duplicateFrom.default_model_id,
           enabled: duplicateFrom.enabled,
           tool_ids: duplicateFrom.tool_ids || [],
+          cross_session_retrieval_enabled: duplicateFrom.cross_session_retrieval_enabled ?? false,
+          cross_session_max_snippets: duplicateFrom.cross_session_max_snippets ?? 3,
+          cross_session_min_score: duplicateFrom.cross_session_min_score ?? 0.30,
         });
       } else if (skill) {
         form.setFieldsValue({
@@ -104,6 +107,9 @@ export function SkillForm({ open, skill, duplicateFrom, onClose }: SkillFormProp
           default_model_id: skill.default_model_id,
           enabled: skill.enabled,
           tool_ids: skill.tool_ids || [],
+          cross_session_retrieval_enabled: skill.cross_session_retrieval_enabled ?? false,
+          cross_session_max_snippets: skill.cross_session_max_snippets ?? 3,
+          cross_session_min_score: skill.cross_session_min_score ?? 0.30,
         });
       } else {
         form.resetFields();
@@ -114,6 +120,9 @@ export function SkillForm({ open, skill, duplicateFrom, onClose }: SkillFormProp
           visibility: "tenant",
           enabled: true,
           tool_ids: [],
+          cross_session_retrieval_enabled: false,
+          cross_session_max_snippets: 3,
+          cross_session_min_score: 0.30,
         });
       }
     }
@@ -279,6 +288,34 @@ export function SkillForm({ open, skill, duplicateFrom, onClose }: SkillFormProp
         </Form.Item>
         <Form.Item name="enabled" label="Enabled" valuePropName="checked">
           <Switch />
+        </Form.Item>
+
+        {/* ---- Cross-session memory (Issue #229) ---- */}
+        <Form.Item
+          label="Cross-Session Memory"
+          style={{ marginBottom: 0 }}
+        >
+          <Form.Item
+            name="cross_session_retrieval_enabled"
+            valuePropName="checked"
+            style={{ display: "inline-block", marginRight: 32 }}
+          >
+            <Switch checkedChildren="Enabled" unCheckedChildren="Disabled" />
+          </Form.Item>
+          <Form.Item
+            name="cross_session_max_snippets"
+            label="Max Snippets"
+            style={{ display: "inline-block", width: 120, marginRight: 32 }}
+          >
+            <Input type="number" min={1} max={10} />
+          </Form.Item>
+          <Form.Item
+            name="cross_session_min_score"
+            label="Min Score"
+            style={{ display: "inline-block", width: 120 }}
+          >
+            <Input type="number" min={0} max={1} step={0.05} />
+          </Form.Item>
         </Form.Item>
       </Form>
     </Modal>

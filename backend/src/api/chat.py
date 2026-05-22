@@ -79,6 +79,7 @@ class SessionUpdate(BaseModel):
     selected_model_id: str | None = None
     thinking_enabled: bool | None = None
     temperature: float | None = None
+    cross_session_retrieval_enabled: bool | None = None
 
 
 class TagResponse(BaseModel):
@@ -101,6 +102,7 @@ class SessionResponse(BaseModel):
     selected_model_id: str | None
     thinking_enabled: bool | None
     temperature: float | None
+    cross_session_retrieval_enabled: bool | None = None
     tags: list[TagResponse] = []
     created_at: datetime
     updated_at: datetime
@@ -198,6 +200,7 @@ def _session_to_dict(session: Session) -> dict[str, Any]:
         "selected_model_id": session.selected_model_id,
         "thinking_enabled": session.thinking_enabled,
         "temperature": session.temperature,
+        "cross_session_retrieval_enabled": session.cross_session_retrieval_enabled,
         "created_at": session.created_at.isoformat(),
         "updated_at": session.updated_at.isoformat(),
     }
@@ -436,6 +439,7 @@ async def get_session(
         "selected_model_id": data.get("selected_model_id"),
         "thinking_enabled": data.get("thinking_enabled"),
         "temperature": data.get("temperature"),
+        "cross_session_retrieval_enabled": data.get("cross_session_retrieval_enabled"),
         "tags": data.get("tags", []),
         "created_at": _parse_datetime(data.get("created_at")),
         "updated_at": _parse_datetime(data.get("updated_at")),
@@ -474,6 +478,7 @@ async def update_session(
             "selected_model_id": data.get("selected_model_id"),
             "thinking_enabled": data.get("thinking_enabled"),
             "temperature": data.get("temperature"),
+            "cross_session_retrieval_enabled": data.get("cross_session_retrieval_enabled"),
             "tags": [],
             "created_at": _parse_datetime(data.get("created_at")),
             "updated_at": datetime.now(timezone.utc),

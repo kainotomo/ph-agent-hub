@@ -29,6 +29,7 @@ export interface SessionData {
   selected_model_id: string | null;
   thinking_enabled?: boolean | null;
   temperature?: number | null;
+  cross_session_retrieval_enabled?: boolean | null;
   tags?: TagData[];
   created_at: string;
   updated_at: string;

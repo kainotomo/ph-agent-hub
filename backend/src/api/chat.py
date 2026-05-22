@@ -439,6 +439,7 @@ async def get_session(
         "selected_model_id": data.get("selected_model_id"),
         "thinking_enabled": data.get("thinking_enabled"),
         "temperature": data.get("temperature"),
+        "cross_session_retrieval_enabled": data.get("cross_session_retrieval_enabled"),
         "tags": data.get("tags", []),
         "created_at": _parse_datetime(data.get("created_at")),
         "updated_at": _parse_datetime(data.get("updated_at")),

@@ -61,6 +61,7 @@ interface ChatWindowProps {
   selectedTemplateId?: string;
   selectedSkillId?: string;
   temperature?: number | null;
+  crossSessionMemoryEnabled?: boolean | null;
   onSessionUpdate?: (data: Record<string, unknown>) => void;
 }
 
@@ -71,6 +72,7 @@ export function ChatWindow({
   selectedTemplateId,
   selectedSkillId,
   temperature,
+  crossSessionMemoryEnabled = null,
   onSessionUpdate,
 }: ChatWindowProps) {
   const [inputValue, setInputValue] = useState("");
@@ -80,6 +82,7 @@ export function ChatWindow({
   const [streamError, setStreamError] = useState<string | null>(null);
   const [streamingTokens, setStreamingTokens] = useState<{ tokens_in: number; tokens_out: number } | null>(null);
   const [thinkingEnabled, setThinkingEnabled] = useState<boolean | null>(null);
+  const [localCrossSessionMemory, setLocalCrossSessionMemory] = useState<boolean | null>(crossSessionMemoryEnabled);
   const [sessionTemperature, setSessionTemperature] = useState<number | null>(
     temperature ?? null,
   );
@@ -155,7 +158,8 @@ export function ChatWindow({
     setEditingMsgId(null);
     setRegeneratingMsgId(null);
     setSessionTemperature(temperature ?? null);
-  }, [sessionId, temperature]);
+    setLocalCrossSessionMemory(crossSessionMemoryEnabled ?? null);
+  }, [sessionId, temperature, crossSessionMemoryEnabled]);
 
   // Clear editing state once the edited message is confirmed gone from the list
   useEffect(() => {
@@ -670,10 +674,12 @@ export function ChatWindow({
           </Button>
           <Switch
             size="small"
+            checked={localCrossSessionMemory ?? false}
             checkedChildren="🧠 Memory"
             unCheckedChildren="🧠 Memory"
             title="Cross-session memory"
             onChange={(v) => {
+              setLocalCrossSessionMemory(v);
               onSessionUpdate?.({ cross_session_retrieval_enabled: v });
             }}
           />
@@ -784,6 +790,17 @@ export function ChatWindow({
               }}
             />
           )}
+          <Switch
+            size="small"
+            checked={localCrossSessionMemory ?? false}
+            checkedChildren="🧠 Memory"
+            unCheckedChildren="🧠 Memory"
+            title="Cross-session memory"
+            onChange={(v) => {
+              setLocalCrossSessionMemory(v);
+              onSessionUpdate?.({ cross_session_retrieval_enabled: v });
+            }}
+          />
           <div style={{ width: "100%" }}>
             <Space direction="vertical" style={{ width: "100%" }}>
               <Text type="secondary" style={{ fontSize: 12 }}>

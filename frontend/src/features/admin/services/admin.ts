@@ -138,6 +138,9 @@ export interface SkillData {
   created_at: string;
   updated_at: string;
   tool_ids: string[];
+  cross_session_retrieval_enabled?: boolean;
+  cross_session_max_snippets?: number;
+  cross_session_min_score?: number;
 }
 
 export interface UsageData {

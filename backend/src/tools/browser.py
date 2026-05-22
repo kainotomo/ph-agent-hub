@@ -91,7 +91,8 @@ async def _upload_and_get_url(
     expires_in: int = DEFAULT_PRESIGNED_TTL,
 ) -> str:
     """Upload data to MinIO/S3 and return a presigned download URL."""
-    from ..storage.s3 import generate_presigned_url, upload_object
+    from ..storage.s3 import generate_presigned_url, upload_object, ensure_bucket_exists
+    await ensure_bucket_exists(bucket)
     await upload_object(bucket, key, data, content_type)
     return await generate_presigned_url(bucket, key, expires_in=expires_in)
 

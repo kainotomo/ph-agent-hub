@@ -57,12 +57,14 @@ interface SessionToolActivationProps {
   sessionId: string;
   open: boolean;
   onClose: () => void;
+  selectedSkillId?: string;
 }
 
 export function SessionToolActivation({
   sessionId,
   open,
   onClose,
+  selectedSkillId,
 }: SessionToolActivationProps) {
   const queryClient = useQueryClient();
 
@@ -89,6 +91,15 @@ export function SessionToolActivation({
 
   const alwaysOnSet = new Set(alwaysOnIds || []);
   const activeIds = new Set((activeTools || []).map((t) => t.id));
+
+  // Fetch the selected skill's tool IDs (for "from skill" badge)
+  const { data: allSkills } = useQuery({
+    queryKey: ["skills"],
+    queryFn: () => api<{ id: string; tool_ids: string[] }[]>("/skills"),
+    enabled: open && !!selectedSkillId,
+  });
+  const selectedSkill = allSkills?.find((s) => s.id === selectedSkillId);
+  const skillToolIds = new Set(selectedSkill?.tool_ids ?? []);
 
   // Group tools by category, excluding hidden categories
   const groupedTools = useMemo(() => {
@@ -192,7 +203,16 @@ export function SessionToolActivation({
                   ]}
                 >
                   <List.Item.Meta
-                    title={tool.name}
+                    title={
+                      <Space size={4}>
+                        {tool.name}
+                        {skillToolIds.has(tool.id) && (
+                          <Text type="secondary" style={{ fontSize: 11, fontStyle: "italic" }}>
+                            from skill
+                          </Text>
+                        )}
+                      </Space>
+                    }
                     description={
                       <Space direction="vertical" size={0}>
                         <Text type="secondary">

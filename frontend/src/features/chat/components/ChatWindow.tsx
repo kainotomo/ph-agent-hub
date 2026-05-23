@@ -92,6 +92,17 @@ export function ChatWindow({
   const queryClient = useQueryClient();
   const screens = useBreakpoint();
   const isMobile = !screens.md;
+
+  // Invalidate session tools when the selected skill changes (backend syncs
+  // active tools on skill change, but the sidebar needs to know to refetch).
+  const prevSkillRef = useRef(selectedSkillId);
+  useEffect(() => {
+    if (prevSkillRef.current !== selectedSkillId) {
+      prevSkillRef.current = selectedSkillId;
+      queryClient.invalidateQueries({ queryKey: ["session-tools", sessionId] });
+      queryClient.invalidateQueries({ queryKey: ["skills"] });
+    }
+  }, [selectedSkillId, sessionId, queryClient]);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -1130,6 +1141,7 @@ export function ChatWindow({
         sessionId={sessionId}
         open={toolsOpen}
         onClose={() => setToolsOpen(false)}
+        selectedSkillId={selectedSkillId}
       />
     </div>
   );

@@ -9,6 +9,7 @@ from ..core.exceptions import NotFoundError, ValidationError
 from ..db.orm.sessions import Session, SessionActiveTool
 from ..db.orm.tools import Tool
 from ..db.orm.users import User
+from ..db.orm.skills import Skill, SkillAllowedTool
 from ..services.model_service import list_models as _svc_list_models
 
 
@@ -344,6 +345,80 @@ async def remove_session_tool(
     if result.rowcount == 0:
         raise NotFoundError("Tool not active for this session")
     await db.commit()
+
+
+async def sync_session_tools_for_skill(
+    db: AsyncSession,
+    session_id: str,
+    old_skill_id: str | None,
+    new_skill_id: str | None,
+    tenant_id: str,
+    always_on_ids: list[str] | None = None,
+) -> None:
+    """Sync the session's active tools when the selected skill changes.
+
+    When a skill is selected, its tools are auto-activated. When the skill
+    is changed or cleared, the previous skill's tools are removed.
+    Always-on tools are never removed.
+
+    Resolution:
+        to_remove = old_skill_tool_ids − new_skill_tool_ids − always_on_ids
+        to_add    = new_skill_tool_ids − current_active_ids
+    """
+    always_on_set = set(always_on_ids or [])
+
+    # Fetch tool IDs for old skill
+    old_skill_tool_ids: set[str] = set()
+    if old_skill_id:
+        result = await db.execute(
+            select(SkillAllowedTool.tool_id).where(
+                SkillAllowedTool.skill_id == old_skill_id
+            )
+        )
+        old_skill_tool_ids = {row[0] for row in result.all()}
+
+    # Fetch tool IDs for new skill
+    new_skill_tool_ids: set[str] = set()
+    if new_skill_id:
+        result = await db.execute(
+            select(SkillAllowedTool.tool_id).where(
+                SkillAllowedTool.skill_id == new_skill_id
+            )
+        )
+        new_skill_tool_ids = {row[0] for row in result.all()}
+
+    # Get current session active tool IDs
+    current_ids = set(await _get_session_tool_ids(db, session_id))
+
+    # Compute diff
+    to_remove = old_skill_tool_ids - new_skill_tool_ids - always_on_set
+    to_add = new_skill_tool_ids - current_ids
+
+    # Apply changes
+    for tool_id in to_remove:
+        await db.execute(
+            delete(SessionActiveTool).where(
+                SessionActiveTool.session_id == session_id,
+                SessionActiveTool.tool_id == tool_id,
+            )
+        )
+
+    for tool_id in to_add:
+        # Validate tool exists, is enabled, and belongs to tenant
+        result = await db.execute(
+            select(Tool).where(
+                Tool.id == tool_id,
+                Tool.enabled == True,  # noqa: E712
+                Tool.tenant_id == tenant_id,
+            )
+        )
+        tool = result.scalar_one_or_none()
+        if tool is None:
+            continue  # Skip invalid tools silently
+        db.add(SessionActiveTool(session_id=session_id, tool_id=tool_id))
+
+    if to_remove or to_add:
+        await db.commit()
 
 
 # ---------------------------------------------------------------------------

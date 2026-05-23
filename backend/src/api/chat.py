@@ -318,7 +318,7 @@ async def create_session(
     If ``active_tool_ids`` is not provided, auto-activates tools that the
     user has marked as "always on" in their preferences.
     """
-    # Resolve active tool IDs: explicit list > always-on preferences > empty
+    # Resolve active tool IDs: explicit list > always-on + skill tools > empty
     active_tool_ids = body.active_tool_ids
     if active_tool_ids is None:
         pref_result = await db.execute(
@@ -327,8 +327,21 @@ async def create_session(
                 UserToolPreference.always_on == True,  # noqa: E712
             )
         )
-        always_on_ids = [row[0] for row in pref_result.all()]
-        active_tool_ids = always_on_ids
+        always_on_ids = {row[0] for row in pref_result.all()}
+
+        # Include skill's tools if a skill is selected
+        skill_tool_ids: set[str] = set()
+        if body.selected_skill_id:
+            from ..db.orm.skills import SkillAllowedTool
+
+            result = await db.execute(
+                select(SkillAllowedTool.tool_id).where(
+                    SkillAllowedTool.skill_id == body.selected_skill_id
+                )
+            )
+            skill_tool_ids = {row[0] for row in result.all()}
+
+        active_tool_ids = list(always_on_ids | skill_tool_ids)
 
     if body.is_temporary:
         # Create in Redis
@@ -458,12 +471,55 @@ async def update_session(
     await _require_session_owner(data, current_user)
 
     is_temp = data.get("is_temporary", False)
+    update_fields = body.model_dump(exclude_unset=True)
+
+    # Detect skill change
+    old_skill_id = data.get("selected_skill_id")
+    skill_changed = "selected_skill_id" in update_fields
+    new_skill_id = update_fields.get("selected_skill_id") if skill_changed else None
 
     if is_temp:
         # Update Redis blob
-        update_fields = body.model_dump(exclude_unset=True)
         data.update(update_fields)
         data["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+        # Sync skill tools in Redis blob
+        if skill_changed:
+            pref_result = await db.execute(
+                select(UserToolPreference.tool_id).where(
+                    UserToolPreference.user_id == current_user.id,
+                    UserToolPreference.always_on == True,  # noqa: E712
+                )
+            )
+            always_on_ids = {row[0] for row in pref_result.all()}
+
+            # Fetch old skill tool IDs
+            from ..db.orm.skills import SkillAllowedTool
+
+            old_tool_ids: set[str] = set()
+            if old_skill_id:
+                result = await db.execute(
+                    select(SkillAllowedTool.tool_id).where(
+                        SkillAllowedTool.skill_id == old_skill_id
+                    )
+                )
+                old_tool_ids = {row[0] for row in result.all()}
+
+            # Fetch new skill tool IDs
+            new_tool_ids: set[str] = set()
+            if new_skill_id:
+                result = await db.execute(
+                    select(SkillAllowedTool.tool_id).where(
+                        SkillAllowedTool.skill_id == new_skill_id
+                    )
+                )
+                new_tool_ids = {row[0] for row in result.all()}
+
+            current_active = set(data.get("active_tool_ids", []))
+            to_remove = old_tool_ids - new_tool_ids - always_on_ids
+            to_add = new_tool_ids - current_active
+            data["active_tool_ids"] = list((current_active - to_remove) | to_add)
+
         await store_temp_session(session_id, data)
 
         return {
@@ -487,8 +543,26 @@ async def update_session(
         session = await session_service.update_session(
             db=db,
             session_id=session_id,
-            **body.model_dump(exclude_unset=True),
+            **update_fields,
         )
+
+        if skill_changed:
+            pref_result = await db.execute(
+                select(UserToolPreference.tool_id).where(
+                    UserToolPreference.user_id == current_user.id,
+                    UserToolPreference.always_on == True,  # noqa: E712
+                )
+            )
+            always_on_ids = [row[0] for row in pref_result.all()]
+            await session_service.sync_session_tools_for_skill(
+                db=db,
+                session_id=session_id,
+                old_skill_id=old_skill_id,
+                new_skill_id=new_skill_id,
+                tenant_id=current_user.tenant_id,
+                always_on_ids=always_on_ids,
+            )
+
         return SessionResponse.model_validate(session)
 
 

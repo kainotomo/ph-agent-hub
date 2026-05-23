@@ -1130,6 +1130,7 @@ export function ChatWindow({
         sessionId={sessionId}
         open={toolsOpen}
         onClose={() => setToolsOpen(false)}
+        selectedSkillId={selectedSkillId}
       />
     </div>
   );

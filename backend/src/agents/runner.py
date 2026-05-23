@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from sqlalchemy import select
+from sqlalchemy.exc import DatabaseError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_framework import (
@@ -1052,9 +1053,24 @@ async def _build_system_prompt(
                     memory_lines.append(f"- {source_tag} **{m.key}**: {m.value}")
 
                 parts.append("\n".join(memory_lines))
+        except DatabaseError as e:
+            logger.error(
+                "Database error loading agent memory for user=%s, "
+                "tenant=%s: %s",
+                user.id, user.tenant_id, e,
+            )
+            parts.append(
+                "Note: Your saved memories could not be loaded due to a "
+                "temporary database error."
+            )
         except Exception:
-            logger.warning(
-                "Failed to load agent memory for user=%s", user.id, exc_info=True
+            logger.error(
+                "Failed to load agent memory for user=%s, tenant=%s",
+                user.id, user.tenant_id, exc_info=True,
+            )
+            parts.append(
+                "Note: Your saved memories could not be loaded due to an "
+                "unexpected error."
             )
 
     # ---- Cross-session memory retrieval (Issue #229) -----------------------

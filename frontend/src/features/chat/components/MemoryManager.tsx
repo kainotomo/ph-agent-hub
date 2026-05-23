@@ -7,6 +7,7 @@
 
 import { useState, useMemo } from "react";
 import {
+  Alert,
   Drawer,
   List,
   Button,
@@ -57,10 +58,10 @@ export function MemoryManager({
   const [form] = Form.useForm();
   const queryClient = useQueryClient();
 
-  const { data: entries, isLoading } = useQuery({
+  const { data: entries, isLoading, isError, error, refetch } = useQuery({
     queryKey: ["memory", sessionId],
     queryFn: () => listMemory(sessionId),
-    enabled: open,
+    enabled: open || !!sessionId,
   });
 
   const createMutation = useMutation({
@@ -72,6 +73,7 @@ export function MemoryManager({
       setAdding(false);
       form.resetFields();
     },
+    onError: (err) => message.error(`Failed to add memory: ${(err as Error).message}`),
   });
 
   const updateMutation = useMutation({
@@ -82,6 +84,7 @@ export function MemoryManager({
       message.success("Memory entry updated");
       setEditing(null);
     },
+    onError: (err) => message.error(`Failed to update memory: ${(err as Error).message}`),
   });
 
   const deleteMutation = useMutation({
@@ -90,6 +93,7 @@ export function MemoryManager({
       queryClient.invalidateQueries({ queryKey: ["memory", sessionId] });
       message.success("Memory entry deleted");
     },
+    onError: (err) => message.error(`Failed to delete memory: ${(err as Error).message}`),
   });
 
   // Filter entries by search text (case-insensitive match on key or value)
@@ -151,10 +155,20 @@ export function MemoryManager({
         style={{ marginBottom: 16 }}
       />
 
-      <List
-        loading={isLoading}
-        dataSource={filteredEntries}
-        locale={{ emptyText: <Empty description="No memory entries" /> }}
+      {isError ? (
+        <Alert
+          type="error"
+          message="Failed to load memories"
+          description={error?.message || "An error occurred"}
+          action={<Button size="small" onClick={() => refetch()}>Retry</Button>}
+          showIcon
+          style={{ marginBottom: 16 }}
+        />
+      ) : (
+        <List
+          loading={isLoading}
+          dataSource={filteredEntries}
+          locale={{ emptyText: <Empty description="No memory entries" /> }}
         renderItem={(item) => {
           const isExpanded = expandedId === item.id;
           return (
@@ -232,6 +246,7 @@ export function MemoryManager({
           );
         }}
       />
+      )}
 
       {/* Add Modal */}
       <Modal

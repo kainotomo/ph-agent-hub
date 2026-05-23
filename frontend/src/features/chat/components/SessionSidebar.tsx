@@ -8,6 +8,7 @@
 
 import React, { useState } from "react";
 import {
+  Alert,
   Layout,
   List,
   Button,
@@ -75,7 +76,7 @@ export function SessionSidebar() {
     return () => window.removeEventListener("resize", handleResize);
   }, []);
 
-  const { data: sessions, isLoading } = useQuery({
+  const { data: sessions, isLoading, isError, error, refetch } = useQuery({
     queryKey: ["sessions"],
     queryFn: listSessions,
   });
@@ -87,10 +88,12 @@ export function SessionSidebar() {
         is_temporary: is_temporary ?? false,
       }),
     onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      queryClient.setQueryData(["sessions"], (old: SessionData[] | undefined) =>
+        [data, ...(old || []).filter(s => s.id !== data.id)]
+      );
       navigate(`/chat/${data.id}`);
     },
-    onError: () => message.error("Failed to create session"),
+    onError: (err) => message.error(`Failed to create session: ${err.message}`),
   });
 
   const updateMutation = useMutation({
@@ -244,118 +247,130 @@ export function SessionSidebar() {
 
       {/* Session List */}
       <div style={{ flex: 1, overflow: "auto" }}>
-        <List
-          loading={isLoading}
-          dataSource={sortedSessions}
-          locale={{ emptyText: "No sessions" }}
-          renderItem={(item) => (
-            <List.Item
-              onClick={() => {
-                navigate(sessionId === item.id ? "/chat" : `/chat/${item.id}`);
-                if (isMobile) setMobileOpen(false);
-              }}
-              style={{
-                cursor: "pointer",
-                padding: "8px 12px",
-                background:
-                  sessionId === item.id ? "#e6f4ff" : "transparent",
-                borderLeft:
-                  sessionId === item.id
-                    ? "3px solid #1677ff"
-                    : "3px solid transparent",
-              }}
-              actions={[
-                <Tooltip title="Edit" key="edit">
-                  <Button
-                    type="text"
-                    size="small"
-                    icon={<EditOutlined />}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setEditingSession(item);
-                      setEditTitle(item.title);
-                    }}
-                  />
-                </Tooltip>,
-                <Tooltip
-                  title={item.is_pinned ? "Unpin" : "Pin"}
-                  key="pin"
-                >
-                  <Button
-                    type="text"
-                    size="small"
-                    icon={
-                      item.is_pinned ? (
-                        <PushpinFilled />
-                      ) : (
-                        <PushpinOutlined />
-                      )
-                    }
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      pinMutation.mutate({
-                        id: item.id,
-                        is_pinned: !item.is_pinned,
-                      });
-                    }}
-                  />
-                </Tooltip>,
-                <Tooltip title="Delete" key="delete">
-                  <Button
-                    type="text"
-                    size="small"
-                    danger
-                    icon={<DeleteOutlined />}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      deleteMutation.mutate(item.id);
-                    }}
-                  />
-                </Tooltip>,
-              ]}
-            >
-              <List.Item.Meta
-                title={
-                  <Text
-                    ellipsis
-                    style={{
-                      maxWidth: collapsed ? 0 : 160,
-                      display: "inline-block",
-                    }}
+        {isError ? (
+          <div style={{ padding: 16 }}>
+            <Alert
+              type="error"
+              message="Failed to load sessions"
+              description={error?.message || "An error occurred"}
+              action={<Button size="small" onClick={() => refetch()}>Retry</Button>}
+              showIcon
+            />
+          </div>
+        ) : (
+          <List
+            loading={isLoading}
+            dataSource={sortedSessions}
+            locale={{ emptyText: "No sessions" }}
+            renderItem={(item) => (
+              <List.Item
+                onClick={() => {
+                  navigate(sessionId === item.id ? "/chat" : `/chat/${item.id}`);
+                  if (isMobile) setMobileOpen(false);
+                }}
+                style={{
+                  cursor: "pointer",
+                  padding: "8px 12px",
+                  background:
+                    sessionId === item.id ? "#e6f4ff" : "transparent",
+                  borderLeft:
+                    sessionId === item.id
+                      ? "3px solid #1677ff"
+                      : "3px solid transparent",
+                }}
+                actions={[
+                  <Tooltip title="Edit" key="edit">
+                    <Button
+                      type="text"
+                      size="small"
+                      icon={<EditOutlined />}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setEditingSession(item);
+                        setEditTitle(item.title);
+                      }}
+                    />
+                  </Tooltip>,
+                  <Tooltip
+                    title={item.is_pinned ? "Unpin" : "Pin"}
+                    key="pin"
                   >
-                    {item.is_temporary && "⚡ "}
-                    {item.title}
-                  </Text>
-                }
-                description={
-                  !collapsed ? (
-                    <div>
-                      <Text
-                        type="secondary"
-                        style={{ fontSize: 11 }}
-                      >
-                        {new Date(item.updated_at).toLocaleDateString()}
-                      </Text>
-                      {(item.tags || []).length > 0 && (
-                        <div style={{ marginTop: 2 }}>
-                          {(item.tags || []).slice(0, 3).map((t) => (
-                            <Tag
-                              key={t.id}
-                              style={{ fontSize: 10, lineHeight: "14px", marginBottom: 2 }}
-                              color={t.color || "default"}
-                            >
-                              {t.name}
-                            </Tag>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  ) : null
-                }
-              />
-            </List.Item>
-          )}
-        />
+                    <Button
+                      type="text"
+                      size="small"
+                      icon={
+                        item.is_pinned ? (
+                          <PushpinFilled />
+                        ) : (
+                          <PushpinOutlined />
+                        )
+                      }
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        pinMutation.mutate({
+                          id: item.id,
+                          is_pinned: !item.is_pinned,
+                        });
+                      }}
+                    />
+                  </Tooltip>,
+                  <Tooltip title="Delete" key="delete">
+                    <Button
+                      type="text"
+                      size="small"
+                      danger
+                      icon={<DeleteOutlined />}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        deleteMutation.mutate(item.id);
+                      }}
+                    />
+                  </Tooltip>,
+                ]}
+              >
+                <List.Item.Meta
+                  title={
+                    <Text
+                      ellipsis
+                      style={{
+                        maxWidth: collapsed ? 0 : 160,
+                        display: "inline-block",
+                      }}
+                    >
+                      {item.is_temporary && "⚡ "}
+                      {item.title}
+                    </Text>
+                  }
+                  description={
+                    !collapsed ? (
+                      <div>
+                        <Text
+                          type="secondary"
+                          style={{ fontSize: 11 }}
+                        >
+                          {new Date(item.updated_at).toLocaleDateString()}
+                        </Text>
+                        {(item.tags || []).length > 0 && (
+                          <div style={{ marginTop: 2 }}>
+                            {(item.tags || []).slice(0, 3).map((t) => (
+                              <Tag
+                                key={t.id}
+                                style={{ fontSize: 10, lineHeight: "14px", marginBottom: 2 }}
+                                color={t.color || "default"}
+                              >
+                                {t.name}
+                              </Tag>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ) : null
+                  }
+                />
+              </List.Item>
+            )}
+          />
+        )}
       </div>
 
       {/* Footer */}

@@ -16,18 +16,28 @@ async def list_memory(
     user_id: str,
     tenant_id: str,
     session_id: str | None = None,
-) -> list[Memory]:
-    """List memory entries for a user, optionally scoped to a session."""
+    page: int | None = None,
+    page_size: int = 50,
+) -> tuple[list[Memory], int]:
+    """List memory entries for a user, optionally scoped to a session.
+
+    When ``page`` is None, returns all matching rows (no pagination).
+    When ``page`` is an integer, returns a paginated slice with total count.
+    Global memories (session_id IS NULL) are always included alongside
+    session-scoped ones when ``session_id`` is provided.
+    """
     stmt = select(Memory).where(
         Memory.user_id == user_id,
         Memory.tenant_id == tenant_id,
     )
     if session_id is not None:
-        stmt = stmt.where(Memory.session_id == session_id)
+        stmt = stmt.where(
+            (Memory.session_id == session_id) | (Memory.session_id.is_(None))
+        )
     stmt = stmt.order_by(Memory.created_at.desc())
 
-    result = await db.execute(stmt)
-    return list(result.scalars().all())
+    from ..core.pagination import paginate
+    return await paginate(db, stmt, page=page, page_size=page_size)
 
 
 async def list_all_memories(
@@ -178,7 +188,7 @@ async def upsert_memory(
             Memory.session_id.is_(None)
             if session_id is None
             else Memory.session_id == session_id,
-        )
+        ).with_for_update()
     )
     existing = result.scalar_one_or_none()
 

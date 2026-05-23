@@ -55,6 +55,8 @@ class MemoryResponse(BaseModel):
 @router.get("", response_model=list[MemoryResponse])
 async def list_memory(
     session_id: str | None = Query(None),
+    page: int = Query(1, ge=1, description="Page number (1-indexed)"),
+    page_size: int = Query(50, ge=1, le=200, description="Items per page"),
     db: AsyncSession = Depends(get_db),
     current_user: UserORM = Depends(get_current_user),
 ):
@@ -62,11 +64,13 @@ async def list_memory(
 
     Optionally filter by ``?session_id=``.
     """
-    entries = await memory_service.list_memory(
+    entries, total = await memory_service.list_memory(
         db=db,
         user_id=current_user.id,
         tenant_id=current_user.tenant_id,
         session_id=session_id,
+        page=page,
+        page_size=page_size,
     )
     return [MemoryResponse.model_validate(e) for e in entries]
 

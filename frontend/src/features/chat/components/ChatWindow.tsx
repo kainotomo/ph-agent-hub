@@ -170,7 +170,8 @@ export function ChatWindow({
     setRegeneratingMsgId(null);
     setSessionTemperature(temperature ?? null);
     setLocalCrossSessionMemory(crossSessionMemoryEnabled ?? null);
-  }, [sessionId, temperature, crossSessionMemoryEnabled]);
+    queryClient.invalidateQueries({ queryKey: ["memory"] });
+  }, [sessionId, temperature, crossSessionMemoryEnabled, queryClient]);
 
   // Clear editing state once the edited message is confirmed gone from the list
   useEffect(() => {

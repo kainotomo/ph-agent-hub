@@ -29,14 +29,12 @@ async function refreshToken(): Promise<string | null> {
       credentials: "include",
     });
     if (!res.ok) {
-      _token = null;
       return null;
     }
     const data = await res.json();
     _token = data.access_token;
     return _token;
   } catch {
-    _token = null;
     return null;
   }
 }

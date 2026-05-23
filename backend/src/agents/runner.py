@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from sqlalchemy import select
+from sqlalchemy.exc import DatabaseError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_framework import (
@@ -546,21 +547,21 @@ async def _generate_summary(
         from ..models.base import get_chat_client
 
         fresh_client = get_chat_client(model, thinking_enabled=False)
-        raw_client = getattr(fresh_client, "client", None)
-        if raw_client is None:
-            logger.warning("No client attribute on fresh model_client, skipping summarization")
-            return None
 
-        model_name = getattr(fresh_client, "model", model.model_id)
         model_max_tokens = getattr(model, "max_tokens", None) or 4096
         summary_max_tokens = max(300, min(model_max_tokens, 2000))
-        response = await raw_client.chat.completions.create(
-            model=model_name,
-            messages=messages_payload,
-            max_tokens=summary_max_tokens,
-            temperature=temperature,
+
+        # Use MAF's standard get_response() instead of accessing .client
+        from agent_framework import Message as MafMessage
+
+        maf_messages = [
+            MafMessage("user", [summary_prompt]),
+        ]
+        maf_response = await fresh_client.get_response(
+            messages=maf_messages,
+            options={"temperature": temperature, "max_tokens": summary_max_tokens},
         )
-        summary = response.choices[0].message.content if response.choices else ""
+        summary = maf_response.messages[-1].text if maf_response.messages else ""
         summary = (summary or "").strip()
 
         model_context_length = getattr(model, "context_length", None)
@@ -1052,9 +1053,24 @@ async def _build_system_prompt(
                     memory_lines.append(f"- {source_tag} **{m.key}**: {m.value}")
 
                 parts.append("\n".join(memory_lines))
+        except DatabaseError as e:
+            logger.error(
+                "Database error loading agent memory for user=%s, "
+                "tenant=%s: %s",
+                user.id, user.tenant_id, e,
+            )
+            parts.append(
+                "Note: Your saved memories could not be loaded due to a "
+                "temporary database error."
+            )
         except Exception:
-            logger.warning(
-                "Failed to load agent memory for user=%s", user.id, exc_info=True
+            logger.error(
+                "Failed to load agent memory for user=%s, tenant=%s",
+                user.id, user.tenant_id, exc_info=True,
+            )
+            parts.append(
+                "Note: Your saved memories could not be loaded due to an "
+                "unexpected error."
             )
 
     # ---- Cross-session memory retrieval (Issue #229) -----------------------
@@ -2188,6 +2204,11 @@ def _schedule_post_response_tasks(
     async def _run() -> None:
         # -- Follow-up questions -------------------------------------------
         if getattr(model, "follow_up_questions_enabled", False):
+            logger.info(
+                "Scheduling follow-up question generation for session %s (model=%s)",
+                session_id,
+                model.name,
+            )
             try:
                 questions = await _generate_follow_up_questions(
                     model=model,
@@ -2767,33 +2788,34 @@ async def _generate_follow_up_questions(
         '- Example format: ["Question one?", "Question two?", "Question three?"]'
     )
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_message},
-        {"role": "assistant", "content": assistant_response},
-        {"role": "user", "content": prompt},
-    ]
-
+    text = ""
     try:
         # Create a fresh client (non-thinking mode for simpler output)
         from ..models.base import get_chat_client
 
         fresh_client = get_chat_client(model, thinking_enabled=False)
 
-        # Access the underlying OpenAI client via .client property
-        raw_client = getattr(fresh_client, "client", None)
-        if raw_client is None:
-            logger.warning("No client attribute on fresh model_client, skipping follow-up questions")
-            return []
+        logger.info("Follow-up: created %s client", type(fresh_client).__name__)
 
-        model_name = getattr(fresh_client, "model", model.model_id)
-        response = await raw_client.chat.completions.create(
-            model=model_name,
-            messages=messages,
-            max_tokens=200,
-            temperature=temperature,
+        # Use MAF's standard get_response() instead of accessing .client
+        from agent_framework import Message as MafMessage
+
+        maf_messages = [
+            MafMessage("system", [system_prompt]),
+            MafMessage("user", [user_message]),
+            MafMessage("assistant", [assistant_response]),
+            MafMessage("user", [prompt]),
+        ]
+        response = await fresh_client.get_response(
+            messages=maf_messages,
+            options={"temperature": temperature, "max_tokens": 200},
         )
-        text = response.choices[0].message.content if response.choices else ""
+        text = response.messages[-1].text if response.messages else ""
+
+        logger.info(
+            "Follow-up raw response (first 200 chars): %s",
+            (text or "")[:200],
+        )
 
         # Parse the JSON array from the response
         text = (text or "").strip()
@@ -2807,10 +2829,18 @@ async def _generate_follow_up_questions(
 
         questions = json.loads(text)
         if isinstance(questions, list) and all(isinstance(q, str) for q in questions):
+            logger.info(
+                "Generated %d follow-up questions for session",
+                len(questions[:3]),
+            )
             return questions[:3]
 
     except (json.JSONDecodeError, Exception) as exc:
-        logger.warning("Failed to parse follow-up questions: %s", exc)
+        logger.exception(
+            "Failed to generate follow-up questions (type=%s): %s",
+            type(exc).__name__,
+            exc,
+        )
 
     return []
 

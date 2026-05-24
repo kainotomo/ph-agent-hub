@@ -29,6 +29,7 @@ from ..core.pagination import PaginatedResponse
 from ..db.orm.users import User as UserORM
 from ..services.audit_service import list_audit_logs, write_audit_log
 from ..services.tenant_service import (
+    count_tenants,
     create_tenant as _svc_create_tenant,
     delete_tenant as _svc_delete_tenant,
     force_delete_tenant as _svc_force_delete_tenant,
@@ -420,7 +421,21 @@ async def create_tenant(
     db: AsyncSession = Depends(get_db),
     _admin: UserORM = Depends(require_admin),
 ):
-    """Create a new tenant (admin only)."""
+    """Create a new tenant (admin only).
+
+    Gated by licensing (Issue #243): free tier allows up to MAX_FREE_TENANTS
+    (default 3). A valid Pro license key removes this limit.
+    """
+    from ..services.license_service import can_create_tenant
+
+    current_count = await count_tenants(db)
+    allowed, reason = await can_create_tenant(db, current_count)
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail=reason,
+        )
+
     tenant = await _svc_create_tenant(db, body.name)
     await write_audit_log(
         db,
@@ -2132,8 +2147,16 @@ async def get_settings(
     db: AsyncSession = Depends(get_db),
     _admin: UserORM = Depends(require_admin),
 ):
-    """Get all application settings (admin only)."""
+    """Get all application settings (admin only).
+
+    The response includes a 'license_status' key (VALID, INVALID, EXPIRED,
+    or NOT_SET) that reflects the current state of the stored license key.
+    """
+    from ..services.license_service import get_license_status
+
     settings = await get_all_settings(db)
+    license_status, _ = await get_license_status(db)
+    settings["license_status"] = license_status.value
     return SettingsResponse(settings=settings)
 
 
@@ -2143,6 +2166,116 @@ async def update_settings(
     db: AsyncSession = Depends(get_db),
     _admin: UserORM = Depends(require_admin),
 ):
-    """Bulk update application settings (admin only)."""
+    """Bulk update application settings (admin only).
+
+    If a 'license_key' is provided, it is validated before saving.
+    Invalid or expired license keys are rejected with a clear error.
+    """
+    from ..services.license_service import verify_license_key, _is_expired
+
+    license_key = body.get("license_key")
+    if license_key is not None and license_key.strip():
+        info = verify_license_key(license_key)
+        if info is None:
+            if _is_expired(license_key):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="License key has expired. Please obtain a new license.",
+                )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "Invalid license key. The key could not be verified. "
+                    "Please check that you entered it correctly."
+                ),
+            )
+
     settings = await set_settings(db, body)
     return SettingsResponse(settings=settings)
+
+
+# =============================================================================
+# License & Tenant Status Endpoints (Issue #243)
+# =============================================================================
+
+
+class LicenseStatusResponse(BaseModel):
+    status: str  # valid | invalid | expired | not_set
+    licensee: str | None = None
+    max_tenants: int | None = None
+    expires_at: str | None = None
+    tenant_count: int = 0
+    tenant_limit: int = 3
+
+
+class TenantStatusResponse(BaseModel):
+    total_tenants: int
+    effective_limit: int
+    license_status: str
+    can_create: bool
+    message: str | None = None
+
+
+@router.get("/license/status", response_model=LicenseStatusResponse)
+async def get_license_status_endpoint(
+    db: AsyncSession = Depends(get_db),
+    _admin: UserORM = Depends(require_admin),
+):
+    """Get detailed license status (admin only).
+
+    Returns the current license state, tenant count, and effective limit.
+    Used by the frontend for real-time license validation feedback.
+    """
+    from ..services.license_service import (
+        get_license_status,
+        get_effective_tenant_limit,
+    )
+
+    status, info = await get_license_status(db)
+    limit = await get_effective_tenant_limit(db)
+    from ..services.tenant_service import count_tenants
+    total = await count_tenants(db)
+
+    # Format limit for display: -1 / large sentinel → "Unlimited"
+    display_limit = limit
+    if limit >= 1_000_000:
+        display_limit = -1  # signal unlimited to frontend
+
+    return LicenseStatusResponse(
+        status=status.value,
+        licensee=info.licensee if info else None,
+        max_tenants=info.max_tenants if info else None,
+        expires_at=info.expires_at.isoformat() if info else None,
+        tenant_count=total,
+        tenant_limit=display_limit,
+    )
+
+
+@router.get("/tenant-status", response_model=TenantStatusResponse)
+async def get_tenant_status(
+    db: AsyncSession = Depends(get_db),
+    _admin: UserORM = Depends(require_admin),
+):
+    """Get tenant capacity status for UI banners (admin only).
+
+    Returns whether new tenants can be created and an appropriate message.
+    """
+    from ..services.license_service import (
+        can_create_tenant,
+        get_license_status,
+        get_effective_tenant_limit,
+    )
+    from ..services.tenant_service import count_tenants
+
+    total = await count_tenants(db)
+    limit = await get_effective_tenant_limit(db)
+    status, _ = await get_license_status(db)
+    allowed, message = await can_create_tenant(db, total)
+
+    return TenantStatusResponse(
+        total_tenants=total,
+        effective_limit=limit if limit < 1_000_000 else -1,
+        license_status=status.value,
+        can_create=allowed,
+        message=message if not allowed else None,
+    )

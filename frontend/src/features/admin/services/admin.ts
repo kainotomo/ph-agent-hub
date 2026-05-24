@@ -164,6 +164,23 @@ export interface SettingsData {
   settings: Record<string, string>;
 }
 
+export interface LicenseStatusData {
+  status: 'valid' | 'invalid' | 'expired' | 'not_set';
+  licensee: string | null;
+  max_tenants: number | null;
+  expires_at: string | null;
+  tenant_count: number;
+  tenant_limit: number;  // -1 = unlimited
+}
+
+export interface TenantStatusData {
+  total_tenants: number;
+  effective_limit: number;  // -1 = unlimited
+  license_status: string;
+  can_create: boolean;
+  message: string | null;
+}
+
 export interface AuditData {
   id: string;
   tenant_id: string | null;
@@ -425,6 +442,14 @@ export function getSettings(): Promise<SettingsData> {
 
 export function updateSettings(settings: Record<string, string>): Promise<SettingsData> {
   return api<SettingsData>("/admin/settings", { method: "PUT", body: settings });
+}
+
+export function getLicenseStatus(): Promise<LicenseStatusData> {
+  return api<LicenseStatusData>("/admin/license/status");
+}
+
+export function getTenantStatus(): Promise<TenantStatusData> {
+  return api<TenantStatusData>("/admin/tenant-status");
 }
 
 export function listAuditLogs(

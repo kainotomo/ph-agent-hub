@@ -41,6 +41,25 @@ async def get_tenant_by_id(db: AsyncSession, tenant_id: str) -> Tenant | None:
     return result.scalar_one_or_none()
 
 
+async def count_tenants(db: AsyncSession) -> int:
+    """Return the total number of tenants in the system."""
+    result = await db.execute(select(func.count()).select_from(Tenant))
+    return result.scalar() or 0
+
+
+async def get_tenant_ordinal(db: AsyncSession, tenant_id: str) -> int | None:
+    """Return the 1-based ordinal position of a tenant ordered by creation date.
+    Returns None if the tenant is not found."""
+    result = await db.execute(
+        select(Tenant).order_by(Tenant.created_at.asc())
+    )
+    tenants = result.scalars().all()
+    for idx, t in enumerate(tenants, start=1):
+        if t.id == tenant_id:
+            return idx
+    return None
+
+
 async def create_tenant(db: AsyncSession, name: str) -> Tenant:
     """Create a new tenant. Raises ConflictError if the name already exists."""
     existing = await db.execute(select(Tenant).where(Tenant.name == name))

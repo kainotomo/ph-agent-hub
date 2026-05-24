@@ -34,6 +34,7 @@ export function TenantForm({ open, tenant, onClose }: TenantFormProps) {
     mutationFn: (data: { name: string }) => createTenant(data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["admin-tenants"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-tenant-status"] });
       message.success("Tenant created");
       onClose();
     },
@@ -47,6 +48,7 @@ export function TenantForm({ open, tenant, onClose }: TenantFormProps) {
       updateTenant(id, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["admin-tenants"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-tenant-status"] });
       message.success("Tenant updated");
       onClose();
     },

@@ -64,6 +64,10 @@ class Settings(BaseSettings):
     # --- Logging ---
     LOG_LEVEL: str = "INFO"
 
+    # --- Licensing (Issue #243) ---
+    MAX_FREE_TENANTS: int = 3
+    LICENSE_PUBLIC_KEY: str = ""
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
     def __init__(self, **kwargs):

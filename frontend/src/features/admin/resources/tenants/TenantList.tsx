@@ -17,14 +17,24 @@ import {
   Card,
   Typography,
   Input,
+  Alert,
+  Tooltip,
 } from "antd";
-import { EditOutlined, DeleteOutlined, SearchOutlined } from "@ant-design/icons";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+  EditOutlined,
+  DeleteOutlined,
+  SearchOutlined,
+  WarningOutlined,
+  KeyOutlined,
+} from "@ant-design/icons";
+import { useMutation, useQueryClient, useQuery } from "@tanstack/react-query";
 import {
   listTenants,
   deleteTenant,
+  getTenantStatus,
   TenantData,
 } from "../../services/admin";
+import type { TenantStatusData } from "../../services/admin";
 import { useAdminTable } from "../../hooks/useAdminTable";
 import { useDebounce } from "../../hooks/useDebounce";
 import { TenantForm } from "./TenantForm";
@@ -42,6 +52,13 @@ export function TenantList() {
   const isMobile = !screens.md;
   const queryClient = useQueryClient();
 
+  // Tenant capacity status (Issue #243)
+  const { data: tenantStatus, isLoading: statusLoading } = useQuery<TenantStatusData>({
+    queryKey: ["admin-tenant-status"],
+    queryFn: getTenantStatus,
+    refetchOnWindowFocus: false,
+  });
+
   const debouncedSearch = useDebounce(searchText, 300);
 
   const { data, isLoading, updateParams, handleTableChange, setSearch } = useAdminTable(
@@ -57,6 +74,7 @@ export function TenantList() {
     mutationFn: (id: string) => deleteTenant(id, { force: forceDelete }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["admin-tenants"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-tenant-status"] });
       message.success("Tenant deleted");
       setForceDelete(false);
     },
@@ -108,13 +126,66 @@ export function TenantList() {
 
   const tenantsData = data?.items || [];
   const totalTenants = data?.total || 0;
+  const atLimit = tenantStatus && !tenantStatus.can_create;
+  const nearLimit = !atLimit && tenantStatus && tenantStatus.license_status !== "valid"
+    && tenantStatus.total_tenants >= tenantStatus.effective_limit - 1;
 
   return (
     <div>
+      {/* Tenant capacity banner (Issue #243) */}
+      {!statusLoading && tenantStatus && (
+        <div style={{ marginBottom: 16 }}>
+          {atLimit ? (
+            <Alert
+              type={tenantStatus.license_status === "valid" ? "warning" : "info"}
+              icon={<WarningOutlined />}
+              message={
+                tenantStatus.license_status === "valid"
+                  ? "Tenant limit reached"
+                  : "Free tier limit reached"
+              }
+              description={
+                <span>
+                  {tenantStatus.message || ""}
+                  {tenantStatus.license_status !== "valid" && (
+                    <>
+                      {" "}
+                      — <a href="/admin/settings"><KeyOutlined /> Upgrade to Pro</a>
+                    </>
+                  )}
+                </span>
+              }
+              showIcon
+              style={{ marginBottom: 12 }}
+            />
+          ) : nearLimit && (
+            <Alert
+              type="info"
+              message={`${tenantStatus.total_tenants} of ${tenantStatus.effective_limit} tenants used`}
+              description={
+                <span>
+                  You are approaching the free tier limit.{" "}
+                  <a href="/admin/settings"><KeyOutlined /> Upgrade to Pro</a> for unlimited tenants.
+                </span>
+              }
+              showIcon
+              closable
+              style={{ marginBottom: 12 }}
+            />
+          )}
+        </div>
+      )}
+
       <Space style={{ marginBottom: 16 }} wrap>
-        <Button type="primary" onClick={() => setCreating(true)}>
-          Create Tenant
-        </Button>
+        <Tooltip title={atLimit ? (tenantStatus?.message || "Tenant limit reached") : undefined}>
+          <Button
+            type="primary"
+            onClick={() => setCreating(true)}
+            disabled={atLimit}
+          >
+            Create Tenant
+          </Button>
+        </Tooltip>
         <Checkbox
           checked={forceDelete}
           onChange={(e) => setForceDelete(e.target.checked)}

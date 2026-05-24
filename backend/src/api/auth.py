@@ -20,6 +20,8 @@ from ..core.limiter import limiter
 from ..core.redis import add_to_denylist, is_denylisted
 from ..core.security import verify_password
 from ..db.orm.users import User
+from ..services.license_service import is_tenant_accessible
+from ..services.tenant_service import count_tenants, get_tenant_ordinal
 from ..services.user_service import get_user_by_email, get_user_by_id
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -65,6 +67,22 @@ async def login(
         raise UnauthorizedError("Invalid email or password")
     if not user.is_active:
         raise UnauthorizedError("User account is inactive")
+
+    # --- License gating (Issue #243) ---
+    # Check that this tenant is within the effective limit.
+    # Admin users always bypass (they need access to manage licenses).
+    if user.role != "admin":
+        tenant_ordinal = await get_tenant_ordinal(db, user.tenant_id)
+        if tenant_ordinal is not None:
+            accessible = await is_tenant_accessible(db, tenant_ordinal)
+            if not accessible:
+                total = await count_tenants(db)
+                raise UnauthorizedError(
+                    "License expired or tenant limit reached. "
+                    f"This instance has {total} tenants but only "
+                    "the first 3 are accessible on the free tier. "
+                    "Contact your administrator to upgrade to Pro."
+                )
 
     jti = str(uuid.uuid4())
 

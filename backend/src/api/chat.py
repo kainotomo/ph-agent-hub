@@ -588,6 +588,39 @@ async def delete_session(
         await session_service.delete_session(db, session_id)
 
 
+@router.post("/session/{session_id}/finalize", response_model=SessionResponse)
+async def finalize_temp_session(
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(get_current_user),
+):
+    """Convert a temporary (Redis) session into a permanent (MariaDB) session.
+
+    Migrates messages, tool activations, and file uploads from Redis to
+    MariaDB. Returns the new permanent session.
+    """
+    data = await _load_session(db, session_id)
+    await _require_session_owner(data, current_user)
+
+    if not data.get("is_temporary", False):
+        raise ValidationError("Session is already permanent")
+
+    temp_messages = await get_temp_messages(session_id)
+    session = await session_service.finalize_session(db, data, temp_messages)
+
+    # Clean up Redis keys
+    await delete_temp_session(session_id)
+
+    logger.info(
+        "Finalized temporary session %s — migrated %d messages, %d tools",
+        session_id,
+        len(temp_messages),
+        len(data.get("active_tool_ids", [])),
+    )
+
+    return SessionResponse.model_validate(session)
+
+
 # =============================================================================
 # Messages
 # =============================================================================

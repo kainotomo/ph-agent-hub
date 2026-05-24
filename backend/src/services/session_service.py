@@ -422,6 +422,109 @@ async def sync_session_tools_for_skill(
 
 
 # ---------------------------------------------------------------------------
+# Finalize (convert temporary → permanent)
+# ---------------------------------------------------------------------------
+
+
+async def finalize_session(
+    db: AsyncSession,
+    temp_data: dict,
+    temp_messages: list[dict],
+) -> Session:
+    """Convert a temporary (Redis) session into a permanent (MariaDB) session.
+
+    Creates a permanent Session record with the same ID, migrates all
+    messages, activates tools, and re-points file uploads.
+    Returns the created Session ORM object.
+    """
+    import uuid as _uuid
+    from datetime import datetime, timezone
+    from ..db.orm.messages import Message
+    from sqlalchemy import update
+    from ..db.orm.file_uploads import FileUpload
+
+    session_id = temp_data["id"]
+
+    # Auto-assign model if none was set (mirrors create_session logic)
+    selected_model_id = temp_data.get("selected_model_id")
+    if selected_model_id is None:
+        user_result = await db.execute(
+            select(User).where(User.id == temp_data["user_id"])
+        )
+        user = user_result.scalar_one_or_none()
+        if user and user.default_model_id:
+            selected_model_id = user.default_model_id
+        else:
+            models, _ = await _svc_list_models(
+                db,
+                tenant_id=temp_data["tenant_id"],
+                user_id=temp_data["user_id"],
+            )
+            enabled = [m for m in models if m.enabled]
+            if enabled:
+                selected_model_id = enabled[0].id
+
+    # 1. Create permanent session with the existing temp session ID
+    session = Session(
+        id=session_id,
+        tenant_id=temp_data["tenant_id"],
+        user_id=temp_data["user_id"],
+        title=temp_data.get("title", "New Chat"),
+        is_temporary=False,
+        is_pinned=temp_data.get("is_pinned", False),
+        selected_template_id=temp_data.get("selected_template_id"),
+        selected_skill_id=temp_data.get("selected_skill_id"),
+        selected_model_id=selected_model_id,
+        thinking_enabled=temp_data.get("thinking_enabled"),
+        temperature=temp_data.get("temperature"),
+        cross_session_retrieval_enabled=temp_data.get(
+            "cross_session_retrieval_enabled"
+        ),
+    )
+    db.add(session)
+    await db.flush()
+
+    # 2. Migrate messages from Redis to MariaDB
+    for msg in temp_messages:
+        created_at = msg.get("created_at")
+        if created_at:
+            if isinstance(created_at, str):
+                created_at = datetime.fromisoformat(created_at)
+        else:
+            created_at = datetime.now(timezone.utc)
+
+        message = Message(
+            id=msg.get("id", str(_uuid.uuid4())),
+            session_id=session_id,
+            sender=msg.get("sender", "user"),
+            content=msg.get("content"),
+            model_id=msg.get("model_id"),
+            tool_calls=msg.get("tool_calls"),
+            tokens_in=msg.get("tokens_in"),
+            tokens_out=msg.get("tokens_out"),
+            created_at=created_at,
+        )
+        db.add(message)
+    await db.flush()
+
+    # 3. Migrate active tool associations
+    active_tool_ids: list[str] = temp_data.get("active_tool_ids", [])
+    for tool_id in active_tool_ids:
+        sat = SessionActiveTool(session_id=session_id, tool_id=tool_id)
+        db.add(sat)
+    await db.flush()
+
+    # 4. Re-point file uploads to the permanent session
+    #    (uploaded_file_ids is stored in the temp blob, but the actual
+    #    FileUpload rows in MariaDB already reference session_id — no
+    #    update needed since we used the same ID.)
+
+    await db.commit()
+    await db.refresh(session)
+    return session
+
+
+# ---------------------------------------------------------------------------
 # Session tag management
 # ---------------------------------------------------------------------------
 

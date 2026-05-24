@@ -29,6 +29,7 @@ import {
   listMessages,
   deleteMessage,
   summarizeSession,
+  finalizeSession,
 } from "../services/chat";
 import api, { getToken } from "../../../services/api";
 import {
@@ -88,10 +89,28 @@ export function ChatWindow({
   );
   const [toolEvents, setToolEvents] = useState<Array<{type: string; data: Record<string, unknown>}>>([]);
   const [followUpQuestions, setFollowUpQuestions] = useState<string[]>([]);
+  const [finalizing, setFinalizing] = useState(false);
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const queryClient = useQueryClient();
   const screens = useBreakpoint();
   const isMobile = !screens.md;
+
+  // Handle finalizing a temporary session to permanent
+  const handleFinalize = useCallback(async () => {
+    if (!sessionId) return;
+    setFinalizing(true);
+    try {
+      const permanent = await finalizeSession(sessionId);
+      queryClient.setQueryData(["session", sessionId], permanent);
+      queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      message.success("Chat saved permanently");
+    } catch (err) {
+      message.error("Failed to save chat permanently");
+    } finally {
+      setFinalizing(false);
+    }
+  }, [sessionId, queryClient]);
 
   // Invalidate session tools when the selected skill changes (backend syncs
   // active tools on skill change, but the sidebar needs to know to refetch).
@@ -618,7 +637,11 @@ export function ChatWindow({
           }}
         >
           {isTemporary !== undefined && (
-            <TemporaryChatBadge isTemporary={isTemporary} />
+            <TemporaryChatBadge
+              isTemporary={isTemporary}
+              onFinalize={handleFinalize}
+              loading={finalizing}
+            />
           )}
           <Button
             size="small"
@@ -640,7 +663,11 @@ export function ChatWindow({
           }}
         >
           {isTemporary !== undefined && (
-            <TemporaryChatBadge isTemporary={isTemporary} />
+            <TemporaryChatBadge
+              isTemporary={isTemporary}
+              onFinalize={handleFinalize}
+              loading={finalizing}
+            />
           )}
           <ModelSelector
             value={selectedModelId}

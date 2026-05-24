@@ -139,6 +139,12 @@ export function deleteSession(id: string): Promise<void> {
   return api<void>(`/chat/session/${id}`, { method: "DELETE" });
 }
 
+export function finalizeSession(id: string): Promise<SessionData> {
+  return api<SessionData>(`/chat/session/${id}/finalize`, {
+    method: "POST",
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Summarization (Issue #29)
 // ---------------------------------------------------------------------------

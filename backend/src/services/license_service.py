@@ -129,6 +129,9 @@ def verify_license_key(raw_key: str) -> LicenseInfo | None:
         return None
 
     raw_key = raw_key.strip()
+    # Strip all internal whitespace/newlines in case the key was copied from
+    # a multi-line terminal output (Issue #243 — Issue #243).
+    raw_key = "".join(raw_key.split())
 
     # Split signature and payload
     parts = raw_key.split(".", 1)

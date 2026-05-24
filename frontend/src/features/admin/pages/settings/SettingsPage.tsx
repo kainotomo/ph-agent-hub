@@ -241,7 +241,15 @@ export function SettingsPage() {
                   </Descriptions.Item>
                   {licenseData.expires_at && (
                     <Descriptions.Item label="Expires">
-                      {new Date(licenseData.expires_at).toLocaleDateString()}
+                      {(() => {
+                        const d = new Date(licenseData.expires_at);
+                        const day = d.getDate().toString().padStart(2, "0");
+                        const months = [
+                          "Jan","Feb","Mar","Apr","May","Jun",
+                          "Jul","Aug","Sep","Oct","Nov","Dec",
+                        ];
+                        return `${day}-${months[d.getMonth()]}-${d.getFullYear()}`;
+                      })()}
                     </Descriptions.Item>
                   )}
                   {licenseData.max_tenants !== null && (

@@ -21,6 +21,7 @@ import {
   Dropdown,
   message,
   Tag,
+  Popconfirm,
 } from "antd";
 import type { MenuProps } from "antd";
 import {
@@ -314,18 +315,25 @@ export function SessionSidebar() {
                       }}
                     />
                   </Tooltip>,
-                  <Tooltip title="Delete" key="delete">
-                    <Button
-                      type="text"
-                      size="small"
-                      danger
-                      icon={<DeleteOutlined />}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        deleteMutation.mutate(item.id);
-                      }}
-                    />
-                  </Tooltip>,
+                  <Popconfirm
+                    key="delete"
+                    title="Delete this session?"
+                    description="This will permanently delete the session and all its messages."
+                    onConfirm={() => deleteMutation.mutate(item.id)}
+                    okText="Delete"
+                    cancelText="Cancel"
+                    okButtonProps={{ danger: true }}
+                  >
+                    <Tooltip title="Delete">
+                      <Button
+                        type="text"
+                        size="small"
+                        danger
+                        icon={<DeleteOutlined />}
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                    </Tooltip>
+                  </Popconfirm>,
                 ]}
               >
                 <List.Item.Meta

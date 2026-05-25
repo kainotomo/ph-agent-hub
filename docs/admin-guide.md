@@ -241,7 +241,82 @@ Tools extend agent capabilities — they can call external APIs, query ERPNext i
 
 ---
 
-## 7. Managing Templates & Skills
+## 7. Managing MCP Servers
+
+MCP (Model Context Protocol) servers let you connect external tools without writing code. Instead of building each integration manually, you configure a connection to any MCP-compliant server and sync its tools into the platform. Synced MCP tools appear in the **Tools** list with type `mcp` and category `MCP`, and work identically to built-in tools in the chat area.
+
+### 7.1 Supported Transports
+
+| Transport | Use Case |
+|---|---|
+| **Streamable HTTP** | Remote MCP servers over HTTP/SSE. Best for Docker deployments — the server runs as a separate service (sidecar, SaaS, or serverless). |
+| **Stdio** | Local MCP servers spawned as a subprocess (e.g., `npx @modelcontextprotocol/server-github`). Requires the server runtime (Node.js, Python, etc.) to be available in the backend container, or route through an HTTP proxy sidecar (`supergateway`). |
+| **WebSocket** | Persistent bidirectional connections for streaming use cases. |
+
+### 7.2 Add an MCP Server
+
+1. Go to **Admin Area → MCP Servers**
+2. Click **Add MCP Server**
+3. Fill in the fields:
+   - **Server Name** — a label to identify this connection
+   - **Transport** — select `Streamable HTTP`, `Stdio`, or `WebSocket`
+   - **Server URL** (HTTP/WS) — the MCP server endpoint, e.g., `https://learn.microsoft.com/api/mcp`
+   - **Command** (stdio) — the program to run, e.g., `npx`
+   - **Arguments** (stdio) — one per line, e.g., `-y`, `@modelcontextprotocol/server-github`
+   - **Environment Variables** — `KEY=VALUE` per line; encrypted at rest via Fernet
+   - **HTTP Headers** — `KEY=VALUE` per line for Authorization or API keys; encrypted at rest
+   - **Allowed Tools** — leave empty to allow all tools from this server, or type specific tool names to filter
+
+4. Click **Test Connection** to verify the server is reachable and see what tools it exposes
+5. Click **OK** to save the configuration
+6. Click **Sync Tools** to discover the server's tools and register them as Tool records
+
+### 7.3 Syncing Tools
+
+When you click **Sync Tools**, the platform:
+1. Connects to the MCP server and calls its `tools/list` endpoint
+2. For each discovered tool, creates or updates a record in the **Tools** table with:
+   - `type`: `mcp`
+   - `name`: `{Server Name}: {tool_name}`
+   - `config.mcp_server_id`: reference to the MCP server config
+   - `config.tool_name`: the tool's original name on the server
+3. Tools that were previously synced but no longer appear on the server are soft-deprecated (`enabled = false`)
+
+Synced tools immediately become available for:
+- Group assignment (via **Groups**)
+- Skill assignment (via **Skills**)
+- Session activation (via the chat area's tool selector)
+
+### 7.4 Synced Tools vs Built-in Tools
+
+Synced MCP tools function identically to built-in tools:
+- They appear in the **Tools** list as type `mcp`
+- They can be enabled/disabled, made public, assigned to groups, and added to skills
+- They appear in the chat area's **Session Tools** drawer under the **MCP** category
+- The agent calls them the same way as any other tool
+
+The only operational difference is that synced MCP tools trigger an outbound connection to the configured MCP server when invoked, which adds network latency.
+
+### 7.5 Managing MCP Servers
+
+From the **MCP Servers** list you can:
+- **Edit** — change the server name, transport, URL, auth headers, or allowed tools filter
+- **Toggle enabled** — disable a server without deleting its configuration or synced tools
+- **Test Connection** — re-verify connectivity at any time
+- **Sync Tools** — refresh the synced tool list (e.g., after an MCP server adds new tools)
+- **Delete** — removes the server configuration AND all its synced tools from the Tools table
+
+> **Note:** Deleting an MCP server also deletes all associated Tool records. To preserve the tools but stop the server, disable it instead.
+
+### 7.6 Security Considerations
+
+- **Secrets at rest**: Environment variables and HTTP headers are encrypted using the Fernet key (`ENCRYPTION_KEY`). The admin API returns masked values (`ghp_****`).
+- **Network access**: The backend container must be able to reach the MCP server URL. For local servers, use the Docker host address (`host.docker.internal` on Docker Desktop, `172.17.0.1` on Linux).
+- **Stdio in Docker**: Running stdio-based MCP servers (`npx`, `uvx`) requires the server runtime to be installed in the backend container. Consider using an HTTP proxy sidecar (`supergateway`) instead.
+
+---
+
+## 8. Managing Templates & Skills
 
 ### 7.1 Templates
 

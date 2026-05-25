@@ -130,6 +130,7 @@ Tools let the AI interact with external systems — query databases, call APIs, 
 | **Utility** | Calculator, Code Interpreter, Datetime, Document Generation, Weather | Do math, run Python code, check dates/times, generate PDFs/Excel/CSV, check weather |
 | **Communication** | Slack, Email | Send messages to Slack channels, send emails |
 | **Creative** | Image Generation | Generate images from text descriptions (DALL·E 3, Stable Diffusion) |
+| **MCP** | (dynamically synced) | External tools connected by your administrator via MCP servers — GitHub, databases, file systems, or any MCP-compatible service |
 | **Productivity** | Calendar | Check your calendar, schedule meetings, find free time slots |
 | **DevOps** | GitHub | Search code, list issues/PRs, read files from GitHub/GitLab repos |
 

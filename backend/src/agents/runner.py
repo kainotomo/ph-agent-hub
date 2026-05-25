@@ -903,13 +903,16 @@ async def run_agent(
         return raw_response, assistant_msg_id
 
     finally:
-        # ---- Close ERPNext httpx clients to prevent connection leaks -----
+        # ---- Close ERPNext httpx clients & MCPTool connections -----------
         if cfg is not None and cfg.cleanup_clients:
             for client in cfg.cleanup_clients:
                 try:
-                    await client.aclose()
+                    if hasattr(client, "aclose"):
+                        await client.aclose()
+                    else:
+                        await client.close()
                 except Exception:
-                    logger.debug("Failed to close ERPNext httpx client", exc_info=True)
+                    logger.debug("Failed to close client %s", type(client).__name__, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1299,6 +1302,28 @@ async def _resolve_tool_callables(
     # oversized results before they enter the MAF agent context.
     callables = [_wrap_tool_with_output_cap(t, context_length=context_length) for t in callables]
 
+    # ---- Connect MCPTool instances -----------------------------------------
+    # MCP tools (from MCP servers) need an active connection before the
+    # agent can invoke them.  Connect now and register them for cleanup
+    # so they are disconnected after the agent run completes.
+    from agent_framework import MCPStreamableHTTPTool, MCPStdioTool, MCPWebsocketTool
+
+    _MCP_TYPES = (MCPStreamableHTTPTool, MCPStdioTool, MCPWebsocketTool)
+
+    for item in callables[:]:  # iterate over a copy so we can remove items
+        if isinstance(item, _MCP_TYPES):
+            try:
+                await item.connect()
+                cleanup_clients.append(item)
+                logger.info("Connected MCP tool '%s'", getattr(item, "name", "unknown"))
+            except Exception:
+                logger.warning(
+                    "Failed to connect MCP tool '%s'; removing from agent tools",
+                    getattr(item, "name", "unknown"),
+                    exc_info=True,
+                )
+                callables.remove(item)
+
     return callables, cleanup_clients
 
 
@@ -1399,6 +1424,13 @@ async def _build_tool_callables(
     elif tool.type == "email":
         from ..tools.email import build_email_tools
         return build_email_tools(tool.config or {})
+    elif tool.type == "mcp":
+        from ..tools.mcp import build_mcp_tool_callables
+        return await build_mcp_tool_callables(
+            db, tool, tenant_id,
+            session_id=session_id,
+            cleanup_clients=cleanup_clients,
+        )
     else:
         logger.warning("Unknown tool type '%s' for tool %s", tool.type, tool.id)
         return []
@@ -2142,13 +2174,16 @@ async def run_agent_stream(
         except Exception:
             logger.exception("Failed to persist partial message on stream close")
 
-        # ---- Close ERPNext httpx clients to prevent connection leaks -----
+        # ---- Close ERPNext httpx clients & MCPTool connections -----------
         if cfg is not None and cfg.cleanup_clients:
             for client in cfg.cleanup_clients:
                 try:
-                    await client.aclose()
+                    if hasattr(client, "aclose"):
+                        await client.aclose()
+                    else:
+                        await client.close()
                 except Exception:
-                    logger.debug("Failed to close ERPNext httpx client", exc_info=True)
+                    logger.debug("Failed to close client %s", type(client).__name__, exc_info=True)
 
     # ---- Only reached on normal completion (no GeneratorExit) ----------
     if accumulated_text or accumulated_reasoning or accumulated_tool_events:

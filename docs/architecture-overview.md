@@ -24,6 +24,7 @@ The backend is the core of the platform. It provides:
 - Agent execution using the [Microsoft Agent Framework (MAF)](agent-framework-integration.md) — Python, `pip install agent-framework`
 - Multi-model orchestration (DeepSeek, OpenAI, Anthropic, etc.)
 - Tool calling and workflow coordination
+- MCP (Model Context Protocol) client support — connect any MCP-compliant server for dynamically discovered tools
 - DeepSeek-compatible stabilization layer (JSON repair, retry logic, output filtering)
 - Multi-tenant routing
 - User authentication and authorization (JWT)

@@ -36,8 +36,9 @@ const CATEGORY_ORDER: Record<string, number> = {
   enterprise: 3,
   utility: 4,
   custom: 5,
-  system: 6,
-  general: 7,
+  mcp: 6,
+  system: 7,
+  general: 8,
 };
 
 const CATEGORY_LABELS: Record<string, string> = {
@@ -46,6 +47,7 @@ const CATEGORY_LABELS: Record<string, string> = {
   enterprise: "Enterprise",
   utility: "Utility",
   custom: "Custom",
+  mcp: "MCP",
   system: "System",
   general: "General",
 };

@@ -19,7 +19,7 @@ VALID_TOOL_TYPES = {
     "portfolio", "sec_filings", "pdf_extractor",
     "code_interpreter", "sql_query", "document_generation", "browser",
     "rag_search", "github", "calendar", "image_generation",
-    "slack", "email",
+    "slack", "email", "mcp",
 }
 
 TOOL_TYPE_TO_CATEGORY = {
@@ -50,6 +50,7 @@ TOOL_TYPE_TO_CATEGORY = {
     "image_generation": "creative",
     "slack": "communication",
     "email": "communication",
+    "mcp": "mcp",
     "file_list": "system",
     "memory": "system",
 }

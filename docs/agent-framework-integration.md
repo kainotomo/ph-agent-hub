@@ -18,6 +18,7 @@ MAF is a production-grade Python framework for building AI agents and multi-agen
 | `Agent` with tool calling | Core conversational agents in the chat area |
 | Agent Skills | Registering named, reusable execution profiles (mapped to PH Agent Hub Skills) |
 | Workflows (graph-based) | Multi-step, multi-agent orchestration |
+| MCP client (`MCPStreamableHTTPTool`, `MCPStdioTool`, `MCPWebsocketTool`) | Dynamically discovering and invoking tools from external MCP servers |
 | Middleware | DeepSeek stabilization patches, request/response processing |
 | Streaming | Token and event streaming to the frontend |
 | OpenTelemetry integration | Observability (tracing and monitoring) |

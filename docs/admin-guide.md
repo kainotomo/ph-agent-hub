@@ -358,11 +358,45 @@ For Prompt Based skills, the key is auto-generated from the title if left empty 
 
 ---
 
-## 8. Groups (Access Control)
+## 8. Licensing & Tenant Gating *(v1.10)*
+
+PH Agent Hub supports a free/pro licensing model that controls how many tenants can be created.
+
+### 8.1 Free Tier
+
+- By default, a fresh deployment allows up to **3 tenants** (configurable via `MAX_FREE_TENANTS`)
+- When the limit is reached, attempting to create a new tenant returns `402 Payment Required`
+- No license key is required — the free tier works out of the box
+
+### 8.2 Pro License
+
+To remove the tenant limit, install a Pro license:
+
+1. Obtain a license key from the PH Agent Hub team (Ed25519-signed token)
+2. Set the `LICENSE_PUBLIC_KEY` environment variable (base64-encoded Ed25519 public key)
+3. Enter the license key in **Admin Area → Settings → Licensing**
+4. The license is verified using Ed25519 signature verification. If valid, the tenant creation limit is removed.
+
+**Security notes:**
+- The `LICENSE_PUBLIC_KEY` must match the key used to sign the license
+- License verification is performed server-side on every `POST /admin/tenants` request
+- If the license key is invalid, expired, or tampered with, the system falls back to the free tier limit
+- Leaving `LICENSE_PUBLIC_KEY` empty disables license verification entirely (free tier only)
+
+### 8.3 License Key Input
+
+When entering a license key:
+- Internal whitespace is automatically stripped
+- Expiration dates are formatted for readability
+- The key is stored encrypted at rest
+
+---
+
+## 9. Groups (Access Control)
 
 Groups let you control which users can access specific models and tools. Instead of making every model and tool available to an entire tenant, you can restrict access to subsets of users.
 
-### 8.1 How Groups Work
+### 9.1 How Groups Work
 
 - **Create a group** — a named container (e.g., "Finance Team", "Developers")
 - **Add members** — assign users to the group
@@ -373,20 +407,20 @@ A user can belong to multiple groups. When group-based access is active, users s
 - **Models** that are assigned to at least one of their groups (or marked `is_public`)
 - **Tools** that are assigned to at least one of their groups (or marked `is_public`)
 
-### 8.2 Create a Group
+### 9.2 Create a Group
 
 1. Go to **Admin Area → Groups**
 2. Click **Create**
 3. Enter a group name
 4. Save
 
-### 8.3 Manage Group Members
+### 9.3 Manage Group Members
 
 1. Open a group
 2. Go to the **Members** tab
 3. Add or remove users
 
-### 8.4 Assign Models and Tools
+### 9.4 Assign Models and Tools
 
 1. Open a group
 2. Go to the **Models** or **Tools** tab
@@ -394,9 +428,9 @@ A user can belong to multiple groups. When group-based access is active, users s
 
 ---
 
-## 9. Admin Memory & Session Management
+## 10. Admin Memory & Session Management
 
-### 9.1 Memory Management
+### 10.1 Memory Management
 
 **Admin Area → Memories** shows all memory entries across the platform:
 - **Admins**: See all memory entries, optionally filtered by tenant or user
@@ -404,7 +438,7 @@ A user can belong to multiple groups. When group-based access is active, users s
 
 You can view and delete any memory entry. Deleting a memory entry removes it permanently — the user will no longer see it in their Memory Manager.
 
-### 9.2 Session Management
+### 10.2 Session Management
 
 **Admin Area → Sessions** provides a read-only view of all permanent chat sessions:
 - **Admins**: See all sessions across all tenants
@@ -414,9 +448,9 @@ You can view session metadata (title, user, tags, pin status) and delete session
 
 ---
 
-## 10. Analytics & Monitoring
+## 11. Analytics & Monitoring
 
-### 10.1 Usage Analytics
+### 11.1 Usage Analytics
 
 **Admin Area → Analytics** shows token usage:
 - **Admins**: See all tenants
@@ -424,7 +458,7 @@ You can view session metadata (title, user, tags, pin status) and delete session
 
 Usage logs are written automatically on every completed agent run (both streaming and non-streaming).
 
-### 10.2 Audit Logs
+### 11.2 Audit Logs
 
 **Admin Area → Audit** shows a read-only log of all administrative mutations:
 - Who performed the action
@@ -433,13 +467,13 @@ Usage logs are written automatically on every completed agent run (both streamin
 
 Audit logs are **immutable** — they cannot be deleted or modified. Only admins can view them.
 
-### 10.3 System Logs
+### 11.3 System Logs
 
 **Admin Area → Logs** provides a view of agent activity and error logs. (Currently a stub — detailed log strategy is planned for a future release.)
 
 ---
 
-## 11. Security Best Practices
+## 12. Security Best Practices
 
 1. **Change the default admin password** immediately after first deployment
 2. **Use strong, unique values** for `JWT_SECRET` and `ENCRYPTION_KEY`
@@ -452,7 +486,7 @@ Audit logs are **immutable** — they cannot be deleted or modified. Only admins
 
 ---
 
-## 10. Troubleshooting
+## 13. Troubleshooting
 
 ### Backend won't start
 

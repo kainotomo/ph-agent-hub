@@ -173,6 +173,8 @@ Key variables:
 | `API_DOMAIN` | Production backend domain (Traefik) |
 | `APP_DOMAIN` | Production frontend domain (Traefik) |
 | `PMA_DOMAIN` | Production phpMyAdmin domain (Traefik) |
+| `MAX_FREE_TENANTS` | Max tenants allowed on free tier (default: `3`) |
+| `LICENSE_PUBLIC_KEY` | Ed25519 public key for Pro license verification (base64, 32 bytes). Leave empty to disable. |
 
 **Important:** `infrastructure/env` is in `.gitignore` — keep secrets out of version control.
 

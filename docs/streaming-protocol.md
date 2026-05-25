@@ -157,6 +157,7 @@ Emitted when the agent finishes and the full message has been persisted to the d
 }
 ```
 
+- `model_id` — the UUID of the model that generated this response. The frontend uses this to display "Model: XYZ" on the message bubble (see Issue #233).
 - The frontend uses this to finalize the message bubble, enable feedback controls, and update branch navigation.
 - After this event the SSE connection is closed by the server.
 

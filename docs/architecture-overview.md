@@ -26,10 +26,12 @@ The backend is the core of the platform. It provides:
 - Tool calling and workflow coordination
 - MCP (Model Context Protocol) client support — connect any MCP-compliant server for dynamically discovered tools
 - DeepSeek-compatible stabilization layer (JSON repair, retry logic, output filtering)
-- Multi-tenant routing
+- Multi-tenant routing with tenant-gated licensing (free tier up to 3 tenants; Pro license removes limit)
 - User authentication and authorization (JWT)
-- Session and message storage
+- Session and message storage (permanent in MariaDB, temporary in Redis)
+- Cross-session memory — semantic retrieval of past conversations via embedding-based search
 - Memory and RAG
+- Temporary session finalization — convert disposable Redis sessions to permanent MariaDB sessions
 - ERPNext and external system integrations (via tools)
 - REST and streaming APIs consumed by the frontend
 
@@ -53,18 +55,22 @@ The frontend does **not** run agents directly. It acts as a thin client over the
 The chat area is the end-user experience inside the frontend web app. It provides:
 
 - chat sessions and history (permanent or temporary mode)
+- conversion of temporary sessions to permanent sessions
 - session pinning and title editing
-- model selection
+- model selection (with model name shown in each response)
 - template, prompt, and skill selection
 - personal skill creation and management
 - file uploads
-- memory management (view, delete, manually add entries)
+- memory management (view, delete, manually add entries, cross-session retrieval)
 - session-level tool activation from tenant-approved tools
+- auto-sync of session tools when skill changes
 - message editing, deletion, and regeneration via non-destructive branching
-- message feedback (thumbs up / down)
+- message feedback (thumbs up / down) with confirmation before deletion
 - full-text search across sessions and messages
 - authentication via backend-issued JWT
 - real-time streaming responses and agent events
+- auto-scroll to bottom when revisiting a session
+- follow-up question suggestions after each response
 
 The chat area contains no administrative logic.
 

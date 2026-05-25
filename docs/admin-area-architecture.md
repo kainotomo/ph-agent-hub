@@ -14,13 +14,16 @@ The admin area serves two roles:
 - manage all tenants and platform-level settings
 - manage users across any tenant
 - configure models, tools, templates, and skills globally
+- manage MCP server connections and sync their tools
+- manage platform-wide memory entries
+- configure system-level settings (including licensing)
 - view platform-wide analytics and logs
-- configure system-level settings
 - monitor agent activity and operational errors
 
 **Tenant managers (role: manager)** can:
 - manage users within their own tenant only
 - create, edit, and delete tools within their tenant
+- manage MCP server connections within their tenant
 - enable and disable models for their tenant
 - manage templates and skills within their tenant
 - view analytics scoped to their tenant
@@ -92,11 +95,13 @@ Refine should be used where it accelerates resource management. It should not be
 | Manage users across all tenants | ✓ | ✗ |
 | Manage users within own tenant | ✓ | ✓ |
 | Create / edit / delete tools (own tenant) | ✓ | ✓ |
+| Manage MCP servers (own tenant) | ✓ | ✓ |
 | Enable / disable models (own tenant) | ✓ | ✓ |
 | Manage templates and skills (own tenant) | ✓ | ✓ |
+| Manage platform-wide memory entries | ✓ | ✗ |
 | View analytics (own tenant) | ✓ | ✓ |
 | View platform-wide analytics | ✓ | ✗ |
-| System settings | ✓ | ✗ |
+| System settings (including licensing) | ✓ | ✗ |
 
 ### **4.3 User Management**
 - Create and delete users
@@ -124,6 +129,17 @@ Refine should be used where it accelerates resource management. It should not be
 - Configure Membrane tools
 - Upload custom tool definitions
 - Enable and disable tools per tenant
+- View MCP-synced tools (created automatically when MCP server tools are synced)
+
+### **4.7 MCP Server Management** *(v1.10)*
+- Create, edit, and delete MCP server configurations
+- Support for three transports: Streamable HTTP, Stdio, WebSocket
+- Test connection to MCP servers and preview discovered tools
+- Sync tools from MCP servers (creates/updates Tool records with `type=mcp`)
+- Environment variables and HTTP headers stored encrypted at rest (Fernet)
+- Allowed tools filtering — restrict which server tools are synced
+- **Security**: Secrets are encrypted using the Fernet key and masked in API responses (`ghp_****`). Synced tools are available for group assignment, skill assignment, and session activation just like built-in tools.
+- Deleting an MCP server also removes all its synced tools. To preserve tools but stop the server, disable it instead.
 
 ### **4.7 Template Management**
 - Create, edit, and delete curated templates
@@ -145,10 +161,21 @@ Refine should be used where it accelerates resource management. It should not be
 - Error logs
 - Managers see only their own tenant's data
 
-### **4.10 System Settings** *(admin only)*
+### **4.10 Memory Management** *(v1.10)*
+The admin area provides a read-only (with delete capability) view of all memory entries across the platform:
+- **Admins**: See all memory entries, optionally filtered by tenant or user
+- **Managers**: See entries in their own tenant only
+
+Entries can be viewed and deleted. Deleting a memory entry removes it permanently.
+
+### **4.11 System Settings** *(admin only)*
 - Global configuration
 - Logging level
 - Vector DB settings (optional)
+- **Licensing configuration**:
+  - `MAX_FREE_TENANTS` — max tenants allowed on the free tier (default: 3)
+  - `LICENSE_PUBLIC_KEY` — Ed25519 public key for license verification; leave empty to disable verification (free tier only)
+  - Tenant creation is gated: `POST /admin/tenants` returns `402 Payment Required` when the free tier limit is exceeded and no Pro license is installed
 - Maintenance mode
 
 ---
@@ -188,8 +215,10 @@ Refine resources should be defined inside the admin feature module, while shared
 - Tenants *(admin only)*
 - Models
 - Tools
+- MCP Servers *(v1.10)*
 - Templates
 - Skills
+- Memories *(v1.10)*
 - Analytics
 - Settings *(admin only)*
 - Logout
@@ -244,6 +273,16 @@ PUT    /admin/tools/:id
 DELETE /admin/tools/:id
 ```
 
+### **MCP Servers** *(v1.10)*
+```
+GET    /admin/mcp-servers
+POST   /admin/mcp-servers
+PUT    /admin/mcp-servers/:id
+DELETE /admin/mcp-servers/:id
+POST   /admin/mcp-servers/:id/test-connection
+POST   /admin/mcp-servers/:id/sync-tools
+```
+
 ### **Templates**
 ```
 GET    /admin/templates
@@ -260,10 +299,17 @@ PUT    /admin/skills/:id
 DELETE /admin/skills/:id
 ```
 
+### **Memories** *(v1.10)*
+```
+GET    /admin/memories
+DELETE /admin/memories/:id
+```
+
 ### **Analytics**
 ```
 GET /admin/usage
 GET /admin/logs
+GET /admin/audit
 ```
 
 ---

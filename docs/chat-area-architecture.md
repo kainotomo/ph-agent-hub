@@ -12,17 +12,19 @@ The chat area is designed for end users who interact with AI agents. It focuses 
 
 - fast, responsive chat experience
 - real-time streaming responses and agent events
-- model selection based on tenant permissions
+- model selection based on tenant permissions (model name displayed on each response)
 - template, prompt, and skill selection
 - personal skill creation and management
 - file uploads
-- memory management (view, delete, manually add entries)
-- session-level tool activation from tenant-approved tools
-- temporary and permanent chat sessions
-- message editing, deletion, branching, and regeneration
+- memory management (view, delete, manually add entries, paginated, cross-session retrieval)
+- session-level tool activation from tenant-approved tools (auto-synced when skill changes)
+- temporary and permanent chat sessions (with temp→permanent conversion)
+- message editing, deletion (with confirmation dialog), branching, and regeneration
 - message feedback
+- follow-up question suggestions after each response
 - full-text search across sessions and messages
 - multi-session chat history
+- auto-scroll to bottom when revisiting a session
 - authentication via backend-issued JWT
 
 It does **not** include any admin functionality.
@@ -88,11 +90,12 @@ The chat area is a thin client. It renders state returned by the backend but doe
 - Code block highlighting
 - Streaming token display
 - Support for images and file attachments
-- Smooth auto-scrolling
+- Smooth auto-scrolling (including auto-scroll to bottom when navigating to an existing session)
 - Retry last message
 - Stop generation button
 - Rendering of tool activity and other agent-side progress states when exposed by the backend
 - Branch navigation controls when multiple branches exist at a message node (e.g. "2 / 3 ▶")
+- Model name shown on each assistant message bubble
 
 ### **4.3 Model Selection**
 - Dropdown listing models available to the tenant
@@ -108,6 +111,7 @@ The chat area is a thin client. It renders state returned by the backend but doe
 - Dropdown or launcher for skills available to the user
 - A skill can map to a predefined Microsoft Agent Framework agent or workflow
 - A selected skill can set defaults such as model, template, prompt, and allowed tools
+- When a skill is changed, session tools are automatically synced — the old skill's tools are removed and the new skill's tools are added (always-on tools are preserved)
 - Users can create, edit, and delete their own personal (private) skills
 - Personal skills are scoped to the user and not visible to other users
 - Personal skills follow the same structure as tenant skills: execution type, model, template, prompt, allowed tools
@@ -119,11 +123,13 @@ The chat area is a thin client. It renders state returned by the backend but doe
 ### **4.7 Session Management**
 - Create new session (permanent or temporary mode)
 - Rename / edit session title
-- Delete session
+- Delete session (with confirmation dialog to prevent accidental deletion)
 - Pin / unpin a session (pinned sessions appear at top of list)
+- Convert a temporary session to permanent (finalize — migrates messages from Redis to MariaDB)
 - View session history
 - Load previous messages
 - Clear visual indicator when a session is in temporary mode
+- Collapsible session list (desktop minimize)
 
 ### **4.8 Temporary Sessions**
 - Users can start a session in temporary mode at creation time
@@ -151,10 +157,11 @@ The chat area is a thin client. It renders state returned by the backend but doe
 - Search UI accessible from the session sidebar
 
 ### **4.11 Memory Management**
-- View all memory items associated with the current user
-- Filter memory by session or view all
+- View all memory items associated with the current user (paginated listing)
+- Filter memory by session or view all (global memories always included alongside session-scoped ones)
 - Delete individual memory entries
 - Manually add a memory entry (pin a fact or context note)
+- **Cross-session memory retrieval**: When enabled on a session, the agent semantically searches all of the user's memory entries from past conversations and injects relevant matches into context
 - Entries created by the agent are marked as automatic; user-added entries are marked as manual
 - All memory actions are proxied through the backend; no direct DB access from the frontend
 
@@ -237,6 +244,7 @@ POST   /chat/session
 GET    /chat/session/:id
 PUT    /chat/session/:id
 DELETE /chat/session/:id
+POST   /chat/session/:id/finalize   # Convert temp → permanent
 GET    /chat/sessions/search
 ```
 

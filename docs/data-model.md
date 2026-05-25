@@ -95,7 +95,7 @@ Tools represent external integrations (ERPNext, Membrane, custom tools).
 - id (UUID, PK)
 - tenant_id (UUID, FK → tenants.id)
 - name (string)
-- type (enum: erpnext, membrane, custom, datetime, web_search, fetch_url, weather, calculator, wikipedia, rss_feed, currency_exchange, market_overview, etf_data, stock_data, portfolio, sec_filings, code_interpreter, sql_query, document_generation, browser, rag_search, github, calendar, image_generation, slack, email)
+- type (enum: erpnext, membrane, custom, datetime, web_search, fetch_url, weather, calculator, wikipedia, rss_feed, currency_exchange, market_overview, etf_data, stock_data, portfolio, sec_filings, code_interpreter, sql_query, document_generation, browser, rag_search, github, calendar, image_generation, slack, email, mcp)
 - config (JSON)
 - enabled (boolean)
 - is_public (boolean, default false) — when true, tool is available to all users regardless of group membership
@@ -133,7 +133,38 @@ Users can mark tools as "always on" so they're automatically activated in new se
 
 ---
 
-## 1.7 Groups (Access Control)
+## 1.7 MCP Servers (Model Context Protocol)
+
+MCP servers allow connecting external tool sources without writing custom integration code. Each server exposes tools discovered via the MCP protocol that are registered as individual Tool records with `type="mcp"`.
+
+**Table: mcp_servers**
+- id (UUID, PK)
+- tenant_id (UUID, FK → tenants.id)
+- name (string, 255)
+- transport (enum: stdio, streamable_http, websocket)
+- url (string, 2048, nullable) — for HTTP/WebSocket transports
+- command (string, 1024, nullable) — for stdio transport
+- args (JSON, nullable)
+- env_vars (Text, nullable) — Fernet-encrypted JSON dict of environment variables
+- headers (Text, nullable) — Fernet-encrypted JSON dict of HTTP headers
+- allowed_tools (JSON, nullable) — null = all tools allowed; list = subset of tool names
+- enabled (boolean, default true)
+- created_at (timestamp)
+- updated_at (timestamp)
+
+**Table: mcp_synced_tools** (virtual — synced tools are Tool records with `type='mcp'` and `config.mcp_server_id` referencing the MCP server)
+
+When synced, each discovered tool creates or updates a Tool record with:
+- `type`: `mcp`
+- `name`: `{Server Name}: {tool_name}`
+- `config.mcp_server_id`: reference to the MCP server record
+- `config.tool_name`: the tool's original name on the server
+
+Tools that were previously synced but no longer appear on the server are soft-deprecated (`enabled = false`).
+
+---
+
+## 1.8 Groups (Access Control)
 
 Groups restrict which models and tools specific users can access. Models and tools marked `is_public` are available to all users regardless of group membership.
 
@@ -256,6 +287,8 @@ A session belongs to a user and a tenant.
 - selected_skill_id (UUID, FK → skills.id, nullable)
 - selected_model_id (UUID, FK → models.id, nullable)
 - thinking_enabled (bool, nullable) — session-level override for reasoning mode; null means use model default
+- cross_session_retrieval_enabled (boolean, default false) — when enabled, the agent can semantically retrieve memory entries from other sessions during the conversation
+- temperature (float, nullable) — session-level temperature override
 - created_at (timestamp)
 - updated_at (timestamp)
 
@@ -327,6 +360,10 @@ Full-text search across a user's sessions and messages is supported via MariaDB 
 ## 4.1 Memory Items
 
 Memory is stored per user and optionally scoped to a session. Users can view, delete, and manually add memory entries via the chat area.
+
+**Cross-session memory retrieval** (v1.10): When a session has `cross_session_retrieval_enabled = true`, the agent performs semantic embedding-based search across all of the user's memory entries (from all sessions) and injects relevant matches into the context window. This allows the AI to remember information learned in past conversations.
+
+Memory listing supports pagination via `?page=&page_size=` query parameters. When a `session_id` filter is provided, global memory entries (`session_id IS NULL`) are also included alongside session-scoped ones.
 
 **Table: memory**
 - id (UUID, PK)
@@ -491,8 +528,11 @@ Fields marked as encrypted in this schema use **application-level Fernet symmetr
 - Support flexible model and tool configuration
 - Support curated templates, personal prompts, and reusable skills (tenant-shared and user-owned)
 - Enable session-level tool activation by end users within tenant-approved boundaries
-- Enable user-managed memory (view, delete, manually add)
+- Enable user-managed memory (view, delete, manually add, paginate)
+- Support cross-session memory retrieval — semantic search across all user memories
 - Support temporary sessions via Redis with TTL alongside permanent MariaDB sessions
+- Allow temporary session finalization (conversion to permanent)
+- Support MCP server configurations with encrypted secrets (env vars, headers)
 - Support session pinning and title editing
 - Support message branching for edits and regeneration without data loss
 - Support multi-modal message content via structured JSON parts

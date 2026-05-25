@@ -34,6 +34,8 @@ Sessions can be:
 - **Permanent**: Saved to the database. Appears in your session list. Supports all features.
 - **Temporary**: Lives only in Redis. Disappears after inactivity. Does not support branching or editing.
 
+Temporary sessions can be **converted to permanent** — click the **Finalize** button to migrate the session and all its messages from Redis to the database.
+
 ### 2.2 Pin a Session
 
 Click the pin icon on any session to keep it at the top of your session list.
@@ -41,6 +43,18 @@ Click the pin icon on any session to keep it at the top of your session list.
 ### 2.3 Rename a Session
 
 Click the session title to edit it directly. Good titles help you find conversations later.
+
+### 2.4 Convert a Temporary Session to Permanent
+
+If you started a temporary session and later decide you want to keep it, click the **Finalize** button. This converts the session to permanent — all messages are migrated from Redis to the database, and the session appears permanently in your session list.
+
+### 2.5 Search Sessions
+
+Click the delete icon on a session. A confirmation dialog will appear to prevent accidental deletion. Once confirmed, the session and all its messages are permanently removed.
+
+### 2.5 Collapse the Session List
+
+On desktop, click the minimize button on the session sidebar to collapse it and give the chat area more space.
 
 ### 2.4 Search Sessions
 
@@ -60,6 +74,7 @@ Responses stream live via Server-Sent Events (SSE). You'll see:
 - **Tokens** appearing word by word as the AI generates them
 - **Tool calls** — when the agent uses an activated tool, you'll see what it's doing
 - **Step completion** — when a tool call finishes
+- **Model name** — each assistant response shows which model generated it (e.g., "DeepSeek R1")
 
 ### 3.3 Stop Generation
 
@@ -146,6 +161,15 @@ You can only activate tools that your administrator has approved for your tenant
 
 You can mark a tool as **always-on** — it will be automatically activated for every new session you create. In the tool selector, toggle the always-on switch next to a tool. Your preference is saved and applied to all future sessions.
 
+### 6.4 Tool Activation on Skill Change
+
+When you change the selected skill during a session, the active tools are automatically updated:
+- Tools associated with the old skill are removed
+- Tools associated with the new skill are added
+- Tools you've marked as always-on are preserved
+
+This ensures the agent always has the right tools for the selected skill without manual reconfiguration.
+
 ### 6.4 Deactivate Tools
 
 Toggle a tool off to prevent the AI from using it. The change takes effect immediately.
@@ -186,6 +210,18 @@ Hover over an uploaded file in the session and click the delete icon. The file i
 ## 8. Memory
 
 Memory lets the AI remember information across sessions. Think of it as a persistent notepad the AI can reference.
+
+### 8.0 Cross-Session Memory Retrieval
+
+When enabled on a session, the AI can automatically search across all your stored memories from past conversations. This means:
+- If you told the AI about a project in a previous session, it can recall that information in a new session
+- The AI uses semantic search to find the most relevant memories
+- You control which sessions have this feature — enable it per-session in the session settings
+
+This is particularly useful for:
+- Continuing long-running projects across multiple sessions
+- Personal assistants that remember your preferences
+- Research where context builds over time
 
 ### 8.1 View Memory
 
@@ -230,6 +266,10 @@ Click the **Delete** (trash) icon on any message to permanently remove it from t
 ### 9.4 Message Feedback
 
 Click **thumbs up** or **thumbs down** on any assistant message to provide feedback. This helps administrators understand model performance.
+
+### 9.5 Delete a Session
+
+Click the **Delete** icon on a session in the sidebar. A confirmation dialog will ask you to confirm — this prevents accidental deletion of entire conversations. Once confirmed, the session and all its messages are permanently removed.
 
 ---
 

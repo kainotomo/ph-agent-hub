@@ -114,8 +114,10 @@ Suggested route domains:
 /admin/tenants
 /admin/models
 /admin/tools
+/admin/mcp-servers
 /admin/templates
 /admin/skills
+/admin/memories
 /admin/analytics
 /admin/settings
 ```
@@ -173,7 +175,7 @@ This keeps the frontend simple while preserving a strong security model.
 ## 8. Data Access and Streaming
 
 ### **8.1 Standard Resource Access**
-- REST API for users, tenants, models, tools, templates, prompts, skills, logs, and settings
+- REST API for users, tenants, models, tools, MCP servers, templates, prompts, skills, memories, logs, and settings
 - Shared data layer for query caching, loading states, and mutation flows
 
 ### **8.2 Agent Interaction**

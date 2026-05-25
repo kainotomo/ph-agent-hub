@@ -42,16 +42,18 @@ The backend provides the following core capabilities:
 - Role claims in JWT used for endpoint-level permission enforcement
 
 ### **1.5 Data Storage**
-- Users, roles, tenants
+- Users, roles, tenants (with tenant count gated by license on free tier)
 - Models and tool configurations
+- MCP server configurations (encrypted env vars and headers stored at rest)
 - Templates, user prompts, and skills (tenant-shared and user-owned)
 - Permanent chat sessions and messages (MariaDB)
-- Temporary chat sessions (Redis with TTL; purged on logout or expiry)
+- Temporary chat sessions (Redis with TTL; purged on logout or expiry, convertible to permanent)
 - Message branches, soft-deleted messages, and message feedback
-- Session-level active tool associations
-- Memory items (per user, optionally per session; supports manual user entries)
+- Session-level active tool associations (auto-synced on skill change)
+- Memory items (per user, optionally per session; supports manual user entries, pagination, and cross-session retrieval)
 - RAG documents
 - ERPNext instance configurations
+- License verification (Ed25519 signature-based; optional for Pro tier)
 - Schema defined as SQLAlchemy ORM models; migrations versioned and applied with Alembic
 
 ### **1.6 Multi‑Tenant Routing**
@@ -136,8 +138,11 @@ POST   /chat/session/:id/message/:msgId/regenerate
 POST   /chat/session/:id/message/:msgId/feedback
 GET    /chat/session/:id/stream
 DELETE /chat/session/:id
+POST   /chat/session/:id/finalize       # Convert temp → permanent (v1.10)
 GET    /chat/sessions/search
 ```
+
+> **`POST /chat/session/:id/finalize`** — Converts a temporary (Redis) session into a permanent (MariaDB) session. Migrates messages, tool activations, and file uploads. Returns the new permanent session. Requires the session to be in temporary mode.
 
 ### **3.3 File Uploads**
 ```
@@ -167,6 +172,8 @@ GET    /memory
 POST   /memory
 DELETE /memory/:id
 ```
+
+Memory supports pagination via `?page=&page_size=` query parameters. When a `session_id` filter is applied, global memories (`session_id IS NULL`) are also included alongside session-scoped entries.
 
 ### **3.6 Session Tools**
 ```
@@ -201,7 +208,24 @@ PUT    /admin/models/:id
 DELETE /admin/models/:id
 ```
 
-### **3.10 Admin / Manager Tools**
+### **3.10 Admin / Manager MCP Servers** *(added in v1.10)*
+```
+GET    /admin/mcp-servers
+POST   /admin/mcp-servers
+PUT    /admin/mcp-servers/:id
+DELETE /admin/mcp-servers/:id
+POST   /admin/mcp-servers/:id/test-connection
+POST   /admin/mcp-servers/:id/sync-tools
+```
+
+MCP (Model Context Protocol) servers let administrators connect external tool sources. Supported transports:
+- **streamable_http** — remote HTTP/SSE endpoint
+- **stdio** — local subprocess (`npx`, `uvx`, etc.)
+- **websocket** — persistent bidirectional connection
+
+Secret env vars and HTTP headers are encrypted at rest using the Fernet key and masked in API responses.
+
+### **3.11 Admin / Manager Tools**
 ```
 GET    /admin/tools
 POST   /admin/tools
@@ -209,7 +233,9 @@ PUT    /admin/tools/:id
 DELETE /admin/tools/:id
 ```
 
-### **3.11 Admin / Manager ERPNext Instances**
+Tools now support a `mcp` type (alongside the existing `erpnext`, `membrane`, `custom`, `datetime`, etc.). MCP tools are synced automatically from MCP server configurations via the `POST /admin/mcp-servers/:id/sync-tools` endpoint.
+
+### **3.12 Admin / Manager ERPNext Instances**
 ```
 GET    /admin/tools/erpnext
 POST   /admin/tools/erpnext
@@ -219,7 +245,7 @@ DELETE /admin/tools/erpnext/:instance_id
 
 > Sensitive fields (`api_key`, `api_secret`) are never returned in response bodies. Values are transparently encrypted at rest via the `EncryptedString` ORM type.
 
-### **3.12 Admin / Manager Templates**
+### **3.13 Admin / Manager Templates**
 ```
 GET    /admin/templates
 POST   /admin/templates
@@ -227,7 +253,7 @@ PUT    /admin/templates/:id
 DELETE /admin/templates/:id
 ```
 
-### **3.13 Admin / Manager Skills**
+### **3.14 Admin / Manager Skills**
 ```
 GET    /admin/skills
 POST   /admin/skills
@@ -235,7 +261,7 @@ PUT    /admin/skills/:id
 DELETE /admin/skills/:id
 ```
 
-### **3.14 Analytics and Audit**
+### **3.15 Analytics and Audit**
 ```
 GET /admin/usage
 GET /admin/logs
@@ -268,6 +294,7 @@ GET /admin/audit
       openai.py
       anthropic.py
     /tools
+      mcp.py                — MCP tool runner (dynamically invokes MCP server tools)
       erpnext.py
       membrane.py
       custom/
@@ -278,10 +305,19 @@ GET /admin/audit
       tenant_service.py
       model_service.py
       tool_service.py
+      mcp_service.py          — MCP server CRUD, encryption, tool sync
       erpnext_service.py
       template_service.py
       prompt_service.py
       skill_service.py
+      session_service.py      — finalize_session (temp→permanent), sync_session_tools_for_skill
+      memory_service.py       — pagination, cross-session retrieval support
+      license_service.py      — Ed25519 license verification, tenant gating
+      audit_service.py
+      embedding_service.py
+      group_service.py
+      upload_service.py
+      usage_service.py
     /db
       base.py              — SQLAlchemy declarative base and async session factory
       /orm                 — SQLAlchemy ORM model definitions

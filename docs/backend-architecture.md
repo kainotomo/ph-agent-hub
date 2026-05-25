@@ -110,7 +110,7 @@ The backend is designed to be fully patchable:
 │  - MariaDB (primary DB)                      │
 │  - Redis (cache, queues, memory)             │
 │  - MinIO (object storage for file uploads)   │
-│  - Optional vector DB                        │
+│  - MariaDB embedded vectors (RAG)            │
 └──────────────────────────────────────────────┘
 ```
 
@@ -315,6 +315,7 @@ GET /admin/audit
       license_service.py      — Ed25519 license verification, tenant gating
       audit_service.py
       embedding_service.py
+      rag_service.py          — RAG ingestion, semantic search, document mgmt (Issue #250)
       group_service.py
       upload_service.py
       usage_service.py
@@ -460,10 +461,8 @@ The key and the encrypted data live on the same server — this is acceptable fo
 
 The backend runs as a Docker container and depends on:
 
-- MariaDB
-- Redis
+- MariaDB (embedding vectors stored as JSON for RAG)
 - MinIO
-- Optional vector DB
 - Nginx reverse proxy
 
 It is designed for both single‑server and multi‑server deployments.

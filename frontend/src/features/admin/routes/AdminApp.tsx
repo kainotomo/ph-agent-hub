@@ -16,6 +16,7 @@ import TemplateList from "../resources/templates/TemplateList";
 import SkillList from "../resources/skills/SkillList";
 import GroupList from "../resources/groups/GroupList";
 import MemoryList from "../resources/memories/MemoryList";
+import RagDocumentList from "../resources/rag/RagDocumentList";
 import SessionList from "../resources/sessions/SessionList";
 import AuditList from "../resources/audit/AuditList";
 import AnalyticsPage from "../pages/analytics/AnalyticsPage";
@@ -35,6 +36,7 @@ export function AdminApp() {
         <Route path="skills" element={<SkillList />} />
         <Route path="groups" element={<GroupList />} />
         <Route path="memories" element={<MemoryList />} />
+        <Route path="rag-documents" element={<RagDocumentList />} />
         <Route path="sessions" element={<SessionList />} />
         <Route path="audit" element={<AuditList />} />
         <Route path="analytics" element={<AnalyticsPage />} />

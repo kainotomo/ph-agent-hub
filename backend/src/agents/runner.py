@@ -1167,6 +1167,74 @@ async def _build_system_prompt(
                 user.id, exc_info=True,
             )
 
+    # ---- RAG document context injection (Issue #250) -----------------------
+    # When the session has uploaded files that have been RAG-indexed,
+    # retrieve relevant chunks and inject them as context.
+    if user and user_message:
+        try:
+            from ..services.rag_service import search_documents as _rag_search
+
+            # Determine which file IDs are relevant to this session
+            rag_file_ids = None
+
+            # Check if there are uploaded files in this session
+            session_id = session_data.get("id")
+            if session_id:
+                from ..db.orm.file_uploads import FileUpload as FileUploadORM
+
+                result = await db.execute(
+                    select(FileUploadORM).where(
+                        FileUploadORM.session_id == session_id,
+                        FileUploadORM.tenant_id == user.tenant_id,
+                    )
+                )
+                session_uploads = list(result.scalars().all())
+                if session_uploads:
+                    rag_file_ids = [u.id for u in session_uploads]
+
+            if rag_file_ids:
+                rag_results = await _rag_search(
+                    db=db,
+                    query=user_message,
+                    tenant_id=user.tenant_id,
+                    top_k=5,
+                    file_ids=rag_file_ids,
+                )
+
+                if rag_results:
+                    rag_lines: list[str] = [
+                        "## Referenced Documents",
+                        "",
+                        "The following excerpts from your uploaded documents "
+                        "are relevant to the current message. "
+                        "Use this information to answer the user's question "
+                        "when applicable:",
+                        "",
+                    ]
+                    seen_files: set[str] = set()
+                    for r in rag_results:
+                        fname = r.get("filename", "Unknown")
+                        if fname not in seen_files:
+                            seen_files.add(fname)
+                            rag_lines.append(f"**File: {fname}**")
+                        rag_lines.append(
+                            f"- (relevance: {r['score']:.2f}) {r['text'][:600]}"
+                        )
+                        if len(r['text']) > 600:
+                            rag_lines[-1] += "..."
+                        rag_lines.append("")
+
+                    parts.append("\n".join(rag_lines))
+                    logger.debug(
+                        "Injected %d RAG chunks for user=%s, tenant=%s",
+                        len(rag_results), user.id, user.tenant_id,
+                    )
+        except Exception:
+            logger.warning(
+                "Failed to retrieve RAG context for user=%s",
+                user.id, exc_info=True,
+            )
+
     if parts:
         return "\n\n---\n\n".join(parts)
 
@@ -1406,7 +1474,9 @@ async def _build_tool_callables(
         return build_pdf_extractor_tools(tool.config or {})
     elif tool.type == "rag_search":
         from ..tools.rag_search import build_rag_search_tools
-        return build_rag_search_tools(tool.config or {})
+        return build_rag_search_tools(
+            tool.config or {}, db=db, tenant_id=tenant_id
+        )
     elif tool.type == "github":
         from ..tools.github import build_github_tools
         return build_github_tools(tool.config or {})

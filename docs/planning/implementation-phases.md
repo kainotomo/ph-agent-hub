@@ -314,19 +314,30 @@ Phases are sequential. Do not start a phase until its entry condition is met.
 
 ---
 
-## Phase 11 — RAG (Optional)
+## ✅ Phase 11 — RAG (Completed)
 
-**What gets built:**
-- Vector DB service added to both `docker-compose.yml` (dev) and `docker-compose.prod.yml` (production with Traefik labels) — Qdrant recommended
-- Document ingestion pipeline: upload → extract text → embed → store in vector DB + `rag_documents` table
-- Retrieval integrated into agent context assembly (top-k similarity search before agent run)
-- Admin UI for RAG document management
+**What was built:**
+- `backend/src/services/rag_service.py` — Document ingestion pipeline: chunk → embed → store in `rag_documents` (MariaDB JSON, no Qdrant)
+- Auto-index on upload: `upload_service.py` triggers `rag_service.index_document()` in a background task after file upload
+- Cascade cleanup: deleting a file upload also removes its RAG chunks
+- DB-backed `rag_search.py` tools: `index_document`, `search_documents`, `clear_index` now persist to/query from `rag_documents` table (with in-memory fallback)
+- Agent context injection: `_build_system_prompt()` retrieves relevant chunks and injects a "## Referenced Documents" block
+- Admin API: `GET/DELETE /admin/rag/documents`, `POST /admin/rag/documents/{file_id}/reindex`
+- Admin UI: `RagDocumentList.tsx` with search, pagination, delete, reindex
+- New columns on `rag_documents`: `chunk_index`, `embedding_json`, `file_id`, `model`
+- Text extraction via `markitdown` (PDF, DOCX, XLSX, PPTX, TXT, CSV, MD, JSON)
 
-**Entry condition:** Phase 10 complete. Vector DB provider decided.
+**Key decision (D-XX):** MariaDB JSON embeddings instead of Qdrant for v1. Embedding vectors stored as JSON arrays in `rag_documents.embedding_json`; cosine similarity computed in Python. Zero new infrastructure. Swappable to a dedicated vector DB later by replacing the search backend in `rag_service.py`.
+
+**Entry condition:** Phase 10 complete.
 
 **Exit condition (done when):**
-- Uploaded document is embedded and retrievable
-- Agent includes relevant document chunks in context when answering a related question
-- Retrieval is scoped to tenant (no cross-tenant document access)
+- ✅ Uploaded document is automatically chunked, embedded, and stored in `rag_documents`
+- ✅ Search returns relevant chunks when queried about uploaded content
+- ✅ Agent includes relevant document chunks in context when answering a related question
+- ✅ Retrieval is scoped to tenant (cross-tenant isolation via `tenant_id` filter)
+- ✅ Admin can list, delete, and re-index documents via API and UI
+- ✅ Deleting a file upload cascade-removes its RAG chunks
+- ✅ Backend builds and starts without import errors; migration `b2c3d4e5f6a7` runs cleanly
 
-**References:** [data-model.md](../data-model.md) §4.2, [architecture-overview.md](../architecture-overview.md)
+**References:** [data-model.md](../data-model.md) §4.2, [backend-architecture.md](../backend-architecture.md), [planning/decisions.md](../planning/decisions.md)

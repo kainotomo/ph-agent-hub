@@ -641,3 +641,39 @@ export function syncMcpServerTools(id: string): Promise<McpServerSyncResult> {
     method: "POST",
   });
 }
+
+
+// =============================================================================
+// RAG Documents
+// =============================================================================
+
+export interface RagDocumentData {
+  file_id: string;
+  title: string;
+  original_filename: string | null;
+  content_type: string | null;
+  chunk_count: number;
+  created_at: string | null;
+}
+
+export function listRagDocuments(
+  params?: ListParams & { tenant_id?: string },
+): Promise<PaginatedResponse<RagDocumentData>> {
+  const qs = buildQueryString({ ...params });
+  return api<PaginatedResponse<RagDocumentData>>(`/admin/rag/documents${qs}`);
+}
+
+export function deleteRagDocument(file_id: string): Promise<void> {
+  return api<void>(`/admin/rag/documents/${file_id}`, { method: "DELETE" });
+}
+
+export interface ReindexResponse {
+  file_id: string;
+  chunks_indexed: number;
+}
+
+export function reindexRagDocument(file_id: string): Promise<ReindexResponse> {
+  return api<ReindexResponse>(`/admin/rag/documents/${file_id}/reindex`, {
+    method: "POST",
+  });
+}

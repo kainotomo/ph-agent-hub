@@ -213,6 +213,32 @@ Hover over an uploaded file in the session and click the delete icon. The file i
 
 Memory lets the AI remember information across sessions. Think of it as a persistent notepad the AI can reference.
 
+### 7.0 Chat with Your Documents (RAG)
+
+Upload a PDF, Word document, Excel file, or text file and ask questions about it. The AI automatically indexes your document and uses its content to answer your questions.
+
+**How it works:**
+1. Upload a document using the paperclip icon or drag-and-drop into the chat
+2. The system automatically extracts the text, chunks it, and creates a searchable index
+3. Ask questions related to the document — the AI searches the relevant chunks and answers based on the content
+4. Each uploaded file in the session is included in the search scope
+
+**Supported formats:**
+- PDF (`.pdf`)
+- Word (`.doc`, `.docx`)
+- Excel (`.xls`, `.xlsx`)
+- PowerPoint (`.ppt`, `.pptx`)
+- Text (`.txt`), Markdown (`.md`), CSV (`.csv`)
+- JSON (`.json`)
+
+**Tips:**
+- For best results, upload files before asking questions about them
+- The AI works with the text content of your files (images and charts within documents are not processed)
+- Documents are not shared across tenants — your documents are private to your organization
+- Deleting a file upload also removes its indexed chunks
+
+---
+
 ### 8.0 Cross-Session Memory Retrieval
 
 When enabled on a session, the AI can automatically search across all your stored memories from past conversations. This means:

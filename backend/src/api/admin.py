@@ -2559,3 +2559,119 @@ async def get_tenant_status(
         can_create=allowed,
         message=message if not allowed else None,
     )
+
+
+# =============================================================================
+# RAG Document Management (admin only)
+# =============================================================================
+
+RAG_DOCUMENTS_TAG = "RAG Documents"
+
+
+class RAGDocumentResponse(BaseModel):
+    file_id: str
+    title: str
+    original_filename: str | None = None
+    content_type: str | None = None
+    chunk_count: int = 0
+    created_at: str | None = None
+
+    model_config = {"from_attributes": True}
+
+
+@router.get(
+    "/rag/documents",
+    response_model=PaginatedResponse[RAGDocumentResponse],
+    tags=[RAG_DOCUMENTS_TAG],
+)
+async def admin_list_rag_documents(
+    page: int = 1,
+    page_size: int = 25,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin),
+):
+    """List indexed RAG documents, grouped by source file.
+
+    Admin sees all tenants. Shows filename, chunk count, and creation date.
+    """
+    from ..services.rag_service import list_documents as _rag_list
+
+    tenant_id = current_user.tenant_id
+    items, total = await _rag_list(
+        db, tenant_id=tenant_id, page=page, page_size=page_size,
+    )
+
+    resp_list = [RAGDocumentResponse(**item) for item in items]
+    total_pages = max(1, -(-total // page_size))
+    return PaginatedResponse(
+        items=resp_list, total=total, page=page,
+        page_size=page_size, total_pages=total_pages,
+    )
+
+
+@router.delete(
+    "/rag/documents/{file_id}",
+    status_code=204,
+    tags=[RAG_DOCUMENTS_TAG],
+)
+async def admin_delete_rag_document(
+    file_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin),
+):
+    """Delete all RAG document chunks for a given file upload."""
+    from ..services.rag_service import delete_document as _rag_delete
+
+    deleted = await _rag_delete(db, file_id)
+    await write_audit_log(
+        db,
+        actor=current_user,
+        action="rag.document.deleted",
+        target_type="rag_document",
+        target_id=file_id,
+        tenant_id=current_user.tenant_id,
+        ip_address=_get_client_ip(request),
+        payload={"chunks_deleted": deleted},
+    )
+
+
+@router.post(
+    "/rag/documents/{file_id}/reindex",
+    status_code=200,
+    tags=[RAG_DOCUMENTS_TAG],
+)
+async def admin_reindex_rag_document(
+    file_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin),
+):
+    """Re-index a file upload's text in the RAG system.
+
+    Deletes existing chunks and re-creates them from the stored
+    extracted text.
+    """
+    from ..db.orm.file_uploads import FileUpload
+    from ..services.rag_service import index_document as _rag_index
+
+    result = await db.execute(
+        select(FileUpload).where(FileUpload.id == file_id)
+    )
+    upload = result.scalar_one_or_none()
+    if upload is None:
+        raise NotFoundError("File upload not found")
+
+    chunk_count = await _rag_index(db, upload)
+    await write_audit_log(
+        db,
+        actor=current_user,
+        action="rag.document.reindexed",
+        target_type="rag_document",
+        target_id=file_id,
+        tenant_id=current_user.tenant_id,
+        ip_address=_get_client_ip(request),
+        payload={"chunks_indexed": chunk_count},
+    )
+
+    return {"file_id": file_id, "chunks_indexed": chunk_count}

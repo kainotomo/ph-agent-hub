@@ -96,6 +96,11 @@ export function AdminLayout() {
       label: "Memories",
     },
     {
+      key: "/admin/rag-documents",
+      icon: <FileTextOutlined />,
+      label: "RAG Documents",
+    },
+    {
       key: "/admin/sessions",
       icon: <CommentOutlined />,
       label: "Sessions",

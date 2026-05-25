@@ -110,3 +110,13 @@ A log of key design decisions made during the design phase, with rationale. Orde
 **Rationale:** Search is scoped to a single user's own data within their tenant — the result set is small. MariaDB full-text search is sufficient for this scope and avoids adding another service to the stack. A dedicated search engine can be introduced later if requirements grow.
 **Alternatives considered:** Meilisearch, Elasticsearch (deferred — not justified by scope).
 **Reference:** [data-model.md](../data-model.md) §3.3
+
+---
+
+## D-12 — MariaDB JSON embeddings for RAG (no dedicated vector DB)
+
+**Date:** 2026-05-25
+**Decision:** RAG embedding vectors are stored as JSON arrays in the `rag_documents.embedding_json` column. Cosine similarity is computed in Python. No dedicated vector database (Qdrant, pgvector, Milvus) is introduced for v1.
+**Rationale:** For a self-hosted platform where users upload dozens to hundreds of documents (not millions), MariaDB JSON with in-application cosine similarity is fast enough. Loading all embeddings for a tenant (even 10,000 chunks × 256-dim = ~20 MB) and computing similarity in Python completes in milliseconds. This avoids adding Qdrant or another Docker service, saving RAM, disk, and operational complexity. The `embedding_json` column is a drop-in replacement — swapping to a vector DB in the future requires only changing the search backend in `rag_service.py`, with zero changes to the ingestion pipeline or data model.
+**Alternatives considered:** Qdrant (deferred — infrastructure cost not justified by current scale), pgvector (not applicable — MariaDB, not PostgreSQL).
+**Reference:** [data-model.md](../data-model.md) §4.2, [implementation-phases.md](../implementation-phases.md) Phase 11

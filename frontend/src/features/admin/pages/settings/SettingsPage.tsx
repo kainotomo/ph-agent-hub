@@ -141,7 +141,7 @@ export function SettingsPage() {
 
   // Debounced license validation on input change
   const debouncedValidate = useCallback(
-    (value: string) => {
+    (_value: string) => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
       debounceRef.current = setTimeout(() => {
         refetchLicense();

@@ -5,7 +5,7 @@
 // Clicking triggers a Popconfirm to convert the session to permanent.
 // =============================================================================
 
-import { Tag, Popconfirm, message } from "antd";
+import { Tag, Popconfirm } from "antd";
 import { ClockCircleOutlined, LoadingOutlined } from "@ant-design/icons";
 
 interface TemporaryChatBadgeProps {

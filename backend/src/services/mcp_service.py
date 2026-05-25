@@ -267,14 +267,21 @@ async def sync_mcp_tools(
       - Tools no longer present on the server are soft-deprecated (enabled=False).
 
     Returns a dict with counts: created, updated, deprecated.
+    Raises ValidationError if the MCP server is unreachable.
     """
     server = await get_mcp_server(db, server_id)
     if server is None:
         raise NotFoundError("MCP server not found")
 
-    mcp_tool = _build_mcp_tool_instance(server)
-    async with mcp_tool:
-        functions = mcp_tool.functions
+    try:
+        mcp_tool = _build_mcp_tool_instance(server)
+        async with mcp_tool:
+            functions = mcp_tool.functions
+    except Exception as exc:
+        logger.warning("MCP sync failed for server %s: %s", server_id, exc)
+        raise ValidationError(
+            f"Failed to connect to MCP server '{server.name}': {exc}"
+        ) from exc
 
     discovered_names = {fn.name for fn in functions}
 

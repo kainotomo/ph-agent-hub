@@ -98,7 +98,7 @@ export function McpServerList() {
     mutationFn: (id: string) => deleteMcpServer(id),
     onSuccess: () => {
       message.success("MCP server deleted");
-      queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-mcp-servers"] });
     },
     onError: () => message.error("Failed to delete MCP server"),
   });
@@ -108,7 +108,7 @@ export function McpServerList() {
       updateMcpServer(id, { enabled }),
     onSuccess: () => {
       message.success("MCP server updated");
-      queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-mcp-servers"] });
     },
     onError: () => message.error("Failed to update MCP server"),
   });
@@ -131,8 +131,8 @@ export function McpServerList() {
       message.success(
         `Synced: ${result.created} created, ${result.updated} updated, ${result.deprecated} deprecated`
       );
-      queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
-      queryClient.invalidateQueries({ queryKey: ["tools"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-mcp-servers"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-tools"] });
     },
     onError: () => message.error("Failed to sync tools"),
   });

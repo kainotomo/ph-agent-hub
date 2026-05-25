@@ -66,7 +66,7 @@ export function McpServerForm({ open, server, onClose }: McpServerFormProps) {
     mutationFn: (data: Record<string, unknown>) => createMcpServer(data as any),
     onSuccess: () => {
       message.success("MCP server created");
-      queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-mcp-servers"] });
       onClose();
     },
     onError: () => message.error("Failed to create MCP server"),
@@ -77,7 +77,7 @@ export function McpServerForm({ open, server, onClose }: McpServerFormProps) {
       updateMcpServer(id, data as any),
     onSuccess: () => {
       message.success("MCP server updated");
-      queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-mcp-servers"] });
       onClose();
     },
     onError: () => message.error("Failed to update MCP server"),

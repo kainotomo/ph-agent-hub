@@ -22,7 +22,7 @@ MAF is a production-grade Python framework for building AI agents and multi-agen
 | Middleware | DeepSeek stabilization patches, request/response processing |
 | Streaming | Token and event streaming to the frontend |
 | OpenTelemetry integration | Observability (tracing and monitoring) |
-| Multiple provider support | DeepSeek, OpenAI, Anthropic, local models |
+| Multiple provider support | DeepSeek, OpenAI, Anthropic, Ollama, local models |
 
 ---
 
@@ -84,6 +84,7 @@ MAF supports multiple model providers. PH Agent Hub uses MAF provider clients co
 | DeepSeek | `OpenAIChatClient` with custom `base_url` (DeepSeek exposes an OpenAI-compatible API) |
 | OpenAI | `OpenAIChatClient` |
 | Anthropic | `AnthropicChatClient` |
+| Ollama | `OpenAIChatClient` (Ollama exposes an OpenAI-compatible `/v1/chat/completions` endpoint) |
 | Local / custom | Custom provider implementing the MAF `ChatClient` interface |
 
 The backend resolves the correct client at request time from the `models` table, using the tenant- and session-selected model.

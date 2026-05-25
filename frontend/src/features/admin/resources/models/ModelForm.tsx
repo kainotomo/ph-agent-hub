@@ -248,15 +248,28 @@ export function ModelForm({ open, model, duplicateFrom, onClose }: ModelFormProp
               { label: "OpenAI", value: "openai" },
               { label: "Anthropic", value: "anthropic" },
               { label: "DeepSeek", value: "deepseek" },
+              { label: "Ollama", value: "ollama" },
             ]}
           />
         </Form.Item>
-        <Form.Item name="api_key" label="API Key">
-          <Input.Password
-            placeholder={
-              isEdit ? "Leave blank to keep current" : "Enter API key"
-            }
-          />
+        <Form.Item shouldUpdate noStyle>
+          {() => {
+            const provider = form.getFieldValue("provider");
+            const isOllama = provider === "ollama";
+            return (
+              <Form.Item name="api_key" label={isOllama ? "API Key (optional)" : "API Key"}>
+                <Input.Password
+                  placeholder={
+                    isOllama
+                      ? "Not required for local models"
+                      : isEdit
+                        ? "Leave blank to keep current"
+                        : "Enter API key"
+                  }
+                />
+              </Form.Item>
+            );
+          }}
         </Form.Item>
         <Form.Item name="base_url" label="Base URL">
           <Input placeholder="e.g., https://api.openai.com/v1" />
@@ -297,8 +310,11 @@ export function ModelForm({ open, model, duplicateFrom, onClose }: ModelFormProp
         </Form.Item>
 
         <Form.Item shouldUpdate noStyle>
-          {() =>
-            form.getFieldValue("provider") === "deepseek" ? (
+          {() => {
+            const provider = form.getFieldValue("provider");
+            // Only DeepSeek supports thinking/reasoning mode
+            if (provider !== "deepseek") return null;
+            return (
               <>
                 <Form.Item
                   name="thinking_enabled"
@@ -323,8 +339,8 @@ export function ModelForm({ open, model, duplicateFrom, onClose }: ModelFormProp
                   </Form.Item>
                 )}
               </>
-            ) : null
-          }
+            );
+          }}
         </Form.Item>
         <Form.Item
           name="follow_up_questions_enabled"

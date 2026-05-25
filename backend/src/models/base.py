@@ -10,6 +10,7 @@ from agent_framework import BaseChatClient
 from ..db.orm.models import Model
 from .anthropic import build_anthropic_client
 from .deepseek import build_deepseek_client
+from .ollama import build_ollama_client
 from .openai import build_openai_client
 
 
@@ -24,6 +25,7 @@ def get_chat_client(
       - "openai"    → OpenAIChatClient
       - "deepseek"  → DeepSeekThinkingClient with custom base_url
       - "anthropic" → AnthropicChatClient
+      - "ollama"    → OpenAIChatClient (OpenAI-compatible local API)
 
     Raises NotImplementedError for unsupported providers.
     """
@@ -39,6 +41,8 @@ def get_chat_client(
         )
     elif provider == "anthropic":
         return build_anthropic_client(model)
+    elif provider == "ollama":
+        return build_ollama_client(model)
     else:
         raise NotImplementedError(
             f"Provider '{model.provider}' is not supported"

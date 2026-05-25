@@ -88,6 +88,8 @@ Use the model selector in the top bar to choose which AI model to use. You can o
 - Your administrator has enabled for your tenant
 - Are currently active
 
+Models from various providers may be available, including cloud providers (OpenAI, Anthropic, DeepSeek) and **local models** running via Ollama. Local models appear in the selector with an `(ollama)` label.
+
 Different models have different strengths — try a few to find what works best for your use case.
 
 ---

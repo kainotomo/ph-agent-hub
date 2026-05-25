@@ -677,3 +677,87 @@ export function reindexRagDocument(file_id: string): Promise<ReindexResponse> {
     method: "POST",
   });
 }
+
+
+// =============================================================================
+// Embed Configurations
+// =============================================================================
+
+export interface EmbedConfigData {
+  id: string;
+  tenant_id: string;
+  name: string;
+  allowed_origins: string | null;
+  is_active: boolean;
+  theme: Record<string, unknown> | null;
+  feature_flags: Record<string, unknown> | null;
+  default_model_id: string | null;
+  default_skill_id: string | null;
+  default_template_id: string | null;
+  guest_token: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface EmbedConfigCreate {
+  name: string;
+  allowed_origins?: string | null;
+  theme?: Record<string, unknown> | null;
+  feature_flags?: Record<string, unknown> | null;
+  default_model_id?: string | null;
+  default_skill_id?: string | null;
+  default_template_id?: string | null;
+}
+
+export interface EmbedConfigUpdate {
+  name?: string;
+  allowed_origins?: string | null;
+  is_active?: boolean;
+  theme?: Record<string, unknown> | null;
+  feature_flags?: Record<string, unknown> | null;
+  default_model_id?: string | null;
+  default_skill_id?: string | null;
+  default_template_id?: string | null;
+}
+
+export function listEmbedConfigs(
+  params?: ListParams & { tenant_id?: string },
+): Promise<PaginatedResponse<EmbedConfigData>> {
+  const qs = buildQueryString({ ...params });
+  return api<PaginatedResponse<EmbedConfigData>>(`/admin/embed-configs${qs}`);
+}
+
+export function getEmbedConfig(id: string): Promise<EmbedConfigData> {
+  return api<EmbedConfigData>(`/admin/embed-configs/${id}`);
+}
+
+export function createEmbedConfig(
+  data: EmbedConfigCreate,
+): Promise<EmbedConfigData> {
+  return api<EmbedConfigData>("/admin/embed-configs", {
+    method: "POST",
+    body: data,
+  });
+}
+
+export function updateEmbedConfig(
+  id: string,
+  data: EmbedConfigUpdate,
+): Promise<EmbedConfigData> {
+  return api<EmbedConfigData>(`/admin/embed-configs/${id}`, {
+    method: "PUT",
+    body: data,
+  });
+}
+
+export function deleteEmbedConfig(id: string): Promise<void> {
+  return api<void>(`/admin/embed-configs/${id}`, { method: "DELETE" });
+}
+
+export function regenerateEmbedToken(
+  id: string,
+): Promise<EmbedConfigData> {
+  return api<EmbedConfigData>(`/admin/embed-configs/${id}/regenerate-token`, {
+    method: "POST",
+  });
+}

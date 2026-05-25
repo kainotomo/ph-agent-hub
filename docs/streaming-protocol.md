@@ -7,6 +7,8 @@ This document defines the streaming transport, event schema, and error handling 
 ## 1. Transport: Server-Sent Events (SSE)
 
 PH Agent Hub uses **Server-Sent Events (SSE)** over HTTP as the streaming transport.
+The same protocol is used for both authenticated users (main chat UI) and anonymous
+guests (embeddable widget — see [`embed-widget.md`](embed-widget.md)).
 
 ### Rationale
 
@@ -42,18 +44,37 @@ The native browser `EventSource` API only supports GET requests. Because the mes
 
 ## 3. Streaming Endpoint
 
+### 3.1 Authenticated Users
+
 ```
 POST /chat/session/:id/message
 Content-Type: application/json
 Accept: text/event-stream
+Authorization: Bearer <jwt>
+```
+
+### 3.2 Widget (Anonymous Guests)
+
+```
+POST /widget/session/message
+Content-Type: application/json
+Accept: text/event-stream
+Authorization: Bearer <guest_jwt>
 ```
 
 The message is sent and the stream opens in a single request. The response is a `text/event-stream` content type and the connection stays open until the agent finishes or the client aborts.
 
 ### Stop Generation
 
+Authenticated:
 ```
 DELETE /chat/session/:id/stream
+```
+
+Widget:
+```
+DELETE /widget/session/stream
+Authorization: Bearer <guest_jwt>
 ```
 
 Aborts the active stream for the session. The backend cancels the MAF agent run and closes the SSE connection. The partially generated message is saved as-is.

@@ -63,6 +63,7 @@ interface ChatWindowProps {
   selectedSkillId?: string;
   temperature?: number | null;
   crossSessionMemoryEnabled?: boolean | null;
+  embedded?: boolean;
   onSessionUpdate?: (data: Record<string, unknown>) => void;
 }
 
@@ -74,6 +75,7 @@ export function ChatWindow({
   selectedSkillId,
   temperature,
   crossSessionMemoryEnabled = null,
+  embedded = false,
   onSessionUpdate,
 }: ChatWindowProps) {
   const [inputValue, setInputValue] = useState("");
@@ -638,7 +640,22 @@ export function ChatWindow({
         }
       `}</style>
       {/* Top bar */}
-      {isMobile ? (
+      {embedded ? (
+        <div
+          style={{
+            padding: "4px 12px",
+            borderBottom: "1px solid #f0f0f0",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexShrink: 0,
+          }}
+        >
+          <Text strong style={{ fontSize: 14 }}>
+            Chat
+          </Text>
+        </div>
+      ) : isMobile ? (
         <div
           style={{
             padding: "8px 16px 8px 56px",
@@ -766,14 +783,15 @@ export function ChatWindow({
           </div>
         </div>
       )}
-      <Drawer
-        placement="bottom"
-        title="Chat Options"
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        height="auto"
-        styles={{ body: { paddingBottom: 32 } }}
-      >
+      {!embedded && (
+        <Drawer
+          placement="bottom"
+          title="Chat Options"
+          open={settingsOpen}
+          onClose={() => setSettingsOpen(false)}
+          height="auto"
+          styles={{ body: { paddingBottom: 32 } }}
+        >
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <ModelSelector
             value={selectedModelId}
@@ -873,12 +891,15 @@ export function ChatWindow({
           </div>
         </div>
       </Drawer>
+      )}
 
-      <MemoryManager
-        open={memoryOpen}
-        onClose={() => setMemoryOpen(false)}
-        sessionId={sessionId}
-      />
+      {!embedded && (
+        <MemoryManager
+          open={memoryOpen}
+          onClose={() => setMemoryOpen(false)}
+          sessionId={sessionId}
+        />
+      )}
 
       {/* Messages area */}
       <div style={{ position: "relative", flex: 1 }}>
@@ -1177,12 +1198,14 @@ export function ChatWindow({
       </div>
 
       {/* Tools drawer */}
-      <SessionToolActivation
-        sessionId={sessionId}
-        open={toolsOpen}
-        onClose={() => setToolsOpen(false)}
-        selectedSkillId={selectedSkillId}
-      />
+      {!embedded && (
+        <SessionToolActivation
+          sessionId={sessionId}
+          open={toolsOpen}
+          onClose={() => setToolsOpen(false)}
+          selectedSkillId={selectedSkillId}
+        />
+      )}
     </div>
   );
 }

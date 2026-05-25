@@ -26,6 +26,7 @@ from .rag import RAGDocument
 from .usage_logs import UsageLog
 from .audit_logs import AuditLog
 from .app_settings import AppSetting
+from .embed_configs import EmbedConfig
 
 __all__ = [
     "Tenant",
@@ -53,4 +54,5 @@ __all__ = [
     "UsageLog",
     "AuditLog",
     "AppSetting",
+    "EmbedConfig",
 ]

@@ -22,6 +22,7 @@ from .api.prompts import router as prompts_router
 from .api.skills import router as skills_router
 from .api.templates import router as templates_router
 from .api.users import router as users_router
+from .api.widget import router as widget_router
 from .core.config import settings
 from .core.exceptions import AppException, app_exception_handler
 from .core.limiter import limiter, RateLimitExceeded
@@ -120,6 +121,7 @@ app.include_router(admin_router, prefix="/api")
 app.include_router(templates_router, prefix="/api")
 app.include_router(prompts_router, prefix="/api")
 app.include_router(skills_router, prefix="/api")
+app.include_router(widget_router, prefix="/api")
 
 
 @app.get("/health")

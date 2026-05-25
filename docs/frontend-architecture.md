@@ -109,6 +109,7 @@ Suggested route domains:
 /login
 /chat
 /chat/:sessionId
+/widget (embed iframe page — no auth required, uses guest token)
 /admin
 /admin/users
 /admin/tenants
@@ -167,6 +168,27 @@ The chat and admin areas should share foundations, but not implementation detail
   - `manager` role → chat area + admin area (tenant-scoped)
   - `admin` role → full access to chat and admin areas
 - Backend enforces all authorization rules on every protected endpoint
+
+---
+
+## 8. Embed Widget
+
+The embeddable chat widget uses a separate architecture from the main SPA:
+
+- **`WidgetPage`** (`src/features/chat/routes/WidgetPage.tsx`) — a lightweight React
+  page loaded inside an iframe on the host website. Reads `?token=` from URL, fetches
+  the embed config, stores the guest JWT via `api.ts`'s `setToken()`, and renders
+  `ChatWindow` with `embedded={true}`.
+- **`ChatWindow` embedded mode** — the `embedded` prop hides the sidebar, model/template/
+  skill selectors, settings drawers, and other chrome. Only the message list, input
+  area, and minimal header are shown.
+- **`embed.js`** (`public/embed.js`) — a ~3 KB vanilla JS loader script injected by
+  the host website's `<script>` tag. Creates a floating bubble + drawer (or inline
+  iframe) and communicates with the iframe via `window.postMessage`.
+- **No auth provider required** — the widget uses guest JWT tokens instead of the
+  `AuthProvider`'s user login flow. The `WidgetPage` is a public route (no `RouteGuard`).
+
+See [`embed-widget.md`](embed-widget.md) for the full widget documentation.
 
 This keeps the frontend simple while preserving a strong security model.
 

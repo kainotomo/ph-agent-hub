@@ -192,6 +192,32 @@ Groups restrict which models and tools specific users can access. Models and too
 
 ---
 
+## 1.8 Embed Configurations
+
+**Table: embed_configs**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID (PK) | Primary key |
+| `tenant_id` | UUID (FK → tenants) | Owning tenant |
+| `name` | VARCHAR(255) | Display name |
+| `guest_token_hash` | VARCHAR(255) | SHA-256 hash of the guest token (raw token never stored) |
+| `allowed_origins` | TEXT | Comma-separated domain whitelist |
+| `is_active` | BOOLEAN | Whether the config is active |
+| `theme` | JSON | Widget theme: `primary_color`, `logo_url`, `greeting_text`, `position` |
+| `feature_flags` | JSON | Feature toggles: `file_upload`, `model_selection`, `feedback`, `follow_up_questions`, `memory` |
+| `default_model_id` | UUID (FK → models) | Optional default AI model |
+| `default_skill_id` | UUID (FK → skills) | Optional default skill |
+| `default_template_id` | UUID (FK → templates) | Optional default template |
+| `created_at` | TIMESTAMP | |
+| `updated_at` | TIMESTAMP | |
+
+**Relationships:**
+- Belongs to a `Tenant`
+- Optionally refers to a default `Model`, `Skill`, and `Template`
+
+---
+
 # 2. Templates, Prompts & Skills
 
 ## 2.1 Templates

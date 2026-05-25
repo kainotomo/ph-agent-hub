@@ -98,6 +98,49 @@ async def get_guest_context(
 
 
 # ---------------------------------------------------------------------------
+# Demo (anonymous) auth — no user account required, separate from widget
+# ---------------------------------------------------------------------------
+
+
+class DemoContext:
+    """Minimal context representing an anonymous demo visitor.
+
+    Used for the public demo experience (``/demo`` endpoints).
+    Similar to ``GuestContext`` but without an embed config ID.
+    """
+
+    def __init__(self, tenant_id: str, session_id: str = ""):
+        self.tenant_id = tenant_id
+        self.session_id = session_id
+        self.id = f"demo:{tenant_id}"
+        self.is_guest = True
+
+
+async def get_demo_context(
+    token: str = Depends(oauth2_scheme),
+) -> DemoContext:
+    """Validate a demo token and return the demo context.
+
+    Used by demo endpoints where visitors chat without any user account.
+    """
+    try:
+        payload = decode_guest_token(token)
+    except JWTError:
+        raise UnauthorizedError("Invalid or expired demo token")
+
+    if payload.get("type") != "demo":
+        raise UnauthorizedError("Token is not a demo token")
+
+    tenant_id = payload.get("sub")
+    session_id = payload.get("session_id", "")
+
+    if not tenant_id:
+        raise UnauthorizedError("Demo token missing required claims")
+
+    return DemoContext(tenant_id=tenant_id, session_id=session_id)
+
+
+# ---------------------------------------------------------------------------
 # Unified auth — accepts either user JWT or guest token
 # ---------------------------------------------------------------------------
 

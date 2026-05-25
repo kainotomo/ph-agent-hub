@@ -1,0 +1,369 @@
+# =============================================================================
+# PH Agent Hub — Demo (Anonymous) API Router
+# =============================================================================
+# Public endpoints for the "Try It Now" demo experience.
+# No authentication required — uses anonymous guest JWTs scoped to the
+# configured demo tenant.
+# =============================================================================
+
+import asyncio
+import logging
+import uuid
+from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
+from sse_starlette.sse import EventSourceResponse
+
+from ..agents.runner import run_agent_stream
+from ..core.config import settings
+from ..core.dependencies import get_db, get_demo_context, DemoContext
+from ..core.exceptions import NotFoundError, ServiceUnavailableError
+from ..core.jwt import create_demo_token
+from ..core.limiter import limiter
+from ..core.redis import (
+    get_temp_messages,
+    get_temp_session,
+    set_stream_cancel,
+    store_temp_session,
+)
+from ..services.settings_service import get_setting
+from ..services.tenant_service import get_demo_tenant
+
+router = APIRouter(prefix="/demo", tags=["demo"])
+
+
+# =============================================================================
+# Pydantic Schemas
+# =============================================================================
+
+
+class DemoStatusResponse(BaseModel):
+    """Public status — tells the frontend whether demo mode is enabled."""
+
+    enabled: bool
+
+
+class DemoConfigResponse(BaseModel):
+    """Response from creating a new demo session."""
+
+    guest_token: str
+    session_id: str
+    theme: dict = {}
+    feature_flags: dict = {}
+    default_model_id: str | None = None
+    default_skill_id: str | None = None
+    default_template_id: str | None = None
+
+
+class DemoSessionResponse(BaseModel):
+    id: str
+    tenant_id: str
+    title: str
+    is_temporary: bool = True
+
+    model_config = {"from_attributes": True}
+
+
+class DemoMessageCreate(BaseModel):
+    content: str
+    file_ids: list[str] = []
+
+
+class DemoMessageResponse(BaseModel):
+    id: str
+    session_id: str
+    role: str
+    content: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ---------------------------------------------------------------------------
+# Helper: check if demo mode is enabled via app setting
+# ---------------------------------------------------------------------------
+
+
+async def _is_demo_enabled(db: AsyncSession) -> bool:
+    """Check the ``demo_enabled`` app setting."""
+    val = await get_setting(db, "demo_enabled", "false")
+    return val == "true" or val == "1"
+
+
+async def _assert_demo_enabled(db: AsyncSession) -> None:
+    """Raise if demo mode is disabled."""
+    if not await _is_demo_enabled(db):
+        raise ServiceUnavailableError("Demo mode is not enabled")
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting keys
+# ---------------------------------------------------------------------------
+
+DEMO_SESSION_LIMIT = "10/hour"
+DEMO_MESSAGE_LIMIT = "30/minute"
+
+
+# =============================================================================
+# GET /demo/status — public status check
+# =============================================================================
+
+
+@router.get("/status", response_model=DemoStatusResponse)
+async def get_demo_status(
+    db: AsyncSession = Depends(get_db),
+):
+    """Return whether the demo mode is enabled.
+
+    Used by the frontend to decide whether to show the "Try It Now"
+    button on the login page.  No authentication required.
+    """
+    enabled = await _is_demo_enabled(db)
+    return DemoStatusResponse(enabled=enabled)
+
+
+# =============================================================================
+# POST /demo/session — create a new demo session
+# =============================================================================
+
+
+@router.post("/session", response_model=DemoConfigResponse)
+@limiter.limit(DEMO_SESSION_LIMIT)
+async def create_demo_session(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Create an anonymous demo session under the demo tenant.
+
+    This is the first endpoint the demo page calls.  It:
+    1. Checks that demo mode is enabled
+    2. Looks up the demo tenant
+    3. Creates a temporary Redis session with 1-hour TTL
+    4. Returns a short-lived demo guest JWT for subsequent calls
+
+    Rate limited to 10 requests per hour per IP.
+    """
+    await _assert_demo_enabled(db)
+
+    tenant = await get_demo_tenant(db)
+    if tenant is None:
+        raise ServiceUnavailableError(
+            "Demo mode is enabled but no demo tenant is configured. "
+            "An admin must mark a tenant as the demo tenant first."
+        )
+
+    session_id = str(uuid.uuid4())
+    guest_user_id = f"demo:{tenant.id}"
+    now = datetime.now(timezone.utc)
+
+    data = {
+        "id": session_id,
+        "tenant_id": tenant.id,
+        "user_id": guest_user_id,
+        "title": "Demo Chat",
+        "is_temporary": True,
+        "is_pinned": False,
+        "selected_template_id": None,
+        "selected_skill_id": None,
+        "selected_model_id": None,
+        "thinking_enabled": False,
+        "temperature": None,
+        "active_tool_ids": [],
+        "created_at": now.isoformat(),
+        "updated_at": now.isoformat(),
+    }
+    await store_temp_session(session_id, data, ttl=settings.DEMO_SESSION_TTL_SECONDS)
+
+    guest_jwt = create_demo_token({
+        "sub": tenant.id,
+        "session_id": session_id,
+    })
+
+    logger.info(
+        "Demo session created: %s under tenant %s (TTL=%ds)",
+        session_id,
+        tenant.id,
+        settings.DEMO_SESSION_TTL_SECONDS,
+    )
+
+    return DemoConfigResponse(
+        guest_token=guest_jwt,
+        session_id=session_id,
+        default_model_id=None,
+        default_skill_id=None,
+        default_template_id=None,
+    )
+
+
+# =============================================================================
+# GET /demo/session — get current demo session info
+# =============================================================================
+
+
+@router.get("/session", response_model=DemoSessionResponse)
+async def get_demo_session(
+    ctx: DemoContext = Depends(get_demo_context),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the current demo session info.
+
+    The session ID is extracted from the demo guest JWT.
+    """
+    await _assert_demo_enabled(db)
+
+    session = await get_temp_session(ctx.session_id)
+    if session is None:
+        raise NotFoundError("Session not found or expired")
+
+    return DemoSessionResponse(
+        id=session["id"],
+        tenant_id=session["tenant_id"],
+        title=session["title"],
+        is_temporary=True,
+    )
+
+
+# =============================================================================
+# GET /demo/session/messages — list session messages
+# =============================================================================
+
+
+@router.get("/session/messages", response_model=list[DemoMessageResponse])
+async def list_demo_messages(
+    ctx: DemoContext = Depends(get_demo_context),
+    db: AsyncSession = Depends(get_db),
+):
+    """List messages in the current demo session."""
+    await _assert_demo_enabled(db)
+
+    messages = await get_temp_messages(ctx.session_id)
+
+    def _extract_text(msg: dict) -> str:
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+            return "\n".join(parts)
+        return str(content)
+
+    return [
+        DemoMessageResponse(
+            id=m.get("id", ""),
+            session_id=m.get("session_id", ctx.session_id),
+            role=m.get("sender", "user"),
+            content=_extract_text(m),
+            created_at=datetime.fromisoformat(
+                m.get("created_at", datetime.now(timezone.utc).isoformat())
+            ),
+        )
+        for m in messages
+    ]
+
+
+# =============================================================================
+# POST /demo/session/message — send a message (SSE streaming)
+# =============================================================================
+
+
+@router.post("/session/message")
+@limiter.limit(DEMO_MESSAGE_LIMIT)
+async def send_demo_message(
+    body: DemoMessageCreate,
+    request: Request,
+    ctx: DemoContext = Depends(get_demo_context),
+    db: AsyncSession = Depends(get_db),
+):
+    """Send a user message in the demo session and run the agent.
+
+    Supports SSE streaming when ``Accept: text/event-stream`` is sent.
+    Rate limited to 30 requests per minute per session.
+    """
+    await _assert_demo_enabled(db)
+
+    session = await get_temp_session(ctx.session_id)
+    if session is None:
+        raise NotFoundError("Session not found or expired")
+
+    accept = request.headers.get("accept", "")
+    if "text/event-stream" in accept:
+        return EventSourceResponse(
+            _stream_demo_response(
+                db=db,
+                session_data=session,
+                message_content=body.content,
+                file_ids=body.file_ids,
+                session_id=ctx.session_id,
+            )
+        )
+
+    # Fallback: run agent synchronously
+    from ..agents.runner import run_agent
+
+    from ..core.dependencies import get_db as _get_db
+
+    async with _get_db() as sync_db:
+        response = await run_agent(
+            db=sync_db,
+            session_data=session,
+            message_content=body.content,
+            file_ids=body.file_ids,
+            current_user=None,
+        )
+    return response
+
+
+async def _stream_demo_response(
+    db: AsyncSession,
+    session_data: dict,
+    message_content: str,
+    file_ids: list[str],
+    session_id: str,
+):
+    """Stream an agent response for a demo session.
+
+    Wraps ``run_agent_stream``, yielding SSE events to the client.
+    """
+    async for event in run_agent_stream(
+        db=db,
+        session_data=session_data,
+        message_content=message_content,
+        file_ids=file_ids,
+        current_user=None,
+    ):
+        yield event
+
+        # If the stream was cancelled, stop early
+        cancelled = await _is_stream_cancelled(session_id)
+        if cancelled:
+            break
+
+
+async def _is_stream_cancelled(session_id: str) -> bool:
+    """Check if the stream was cancelled via DELETE."""
+    from ..core.redis import get_redis
+
+    r = await get_redis()
+    key = f"stream_cancel:{session_id}"
+    result = await r.get(key)
+    return result is not None
+
+
+# =============================================================================
+# DELETE /demo/session/stream — cancel an active stream
+# =============================================================================
+
+
+@router.delete("/session/stream", status_code=204)
+async def cancel_demo_stream(
+    ctx: DemoContext = Depends(get_demo_context),
+    db: AsyncSession = Depends(get_db),
+):
+    """Cancel an active stream for the demo session."""
+    await _assert_demo_enabled(db)
+    await set_stream_cancel(ctx.session_id)

@@ -3,14 +3,16 @@
 // =============================================================================
 // Ant Design Form with username+password; calls auth.ts login();
 // on success redirects to /chat; no localStorage usage.
+// Shows "Try It Now" button when demo mode is enabled.
 // =============================================================================
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
-import { Form, Input, Button, Typography, Alert, Card, Space } from "antd";
-import { UserOutlined, LockOutlined } from "@ant-design/icons";
+import { Button, Divider, Form, Input, Typography, Alert, Card, Space } from "antd";
+import { UserOutlined, LockOutlined, RocketOutlined } from "@ant-design/icons";
 import { useAuth } from "../../providers/AuthProvider";
 import { Logo } from "../../shared/components/Logo";
+import { getDemoStatus } from "../../features/chat/services/demo";
 
 const { Title } = Typography;
 
@@ -25,6 +27,14 @@ export function LoginPage() {
   const location = useLocation();
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [demoEnabled, setDemoEnabled] = useState(false);
+
+  // Check if demo mode is available
+  useEffect(() => {
+    getDemoStatus().then((status) => {
+      setDemoEnabled(status.enabled);
+    });
+  }, []);
 
   // If already authenticated, redirect
   React.useEffect(() => {
@@ -126,6 +136,27 @@ export function LoginPage() {
               </Button>
             </Form.Item>
           </Form>
+
+          {demoEnabled && (
+            <>
+              <Divider plain>or</Divider>
+              <Button
+                type="default"
+                block
+                icon={<RocketOutlined />}
+                onClick={() => navigate("/demo")}
+                size="large"
+              >
+                Try It Now
+              </Button>
+              <Typography.Text
+                type="secondary"
+                style={{ display: "block", textAlign: "center", fontSize: 12 }}
+              >
+                No account needed. Demo sessions expire after 1 hour.
+              </Typography.Text>
+            </>
+          )}
         </Space>
       </Card>
     </div>

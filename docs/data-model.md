@@ -57,6 +57,7 @@ Tenants isolate:
 **Table: tenants**
 - id (UUID, PK)
 - name (string, unique)
+- is_demo (boolean, default false) — marks this tenant as the demo tenant (only one can be true at a time)
 - created_at (timestamp)
 - updated_at (timestamp)
 

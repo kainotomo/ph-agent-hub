@@ -75,6 +75,30 @@ def create_guest_token(payload: dict) -> str:
     return jose_jwt.encode(to_encode, settings.EMBED_GUEST_TOKEN_SECRET, algorithm="HS256")
 
 
+def create_demo_token(payload: dict) -> str:
+    """Create a short-lived JWT for demo (anonymous) sessions.
+
+    Payload should contain:
+        sub: tenant_id (the demo tenant)
+        session_id: the temporary session ID
+        type: "demo"
+
+    Uses the same guest token secret for isolation from user JWTs,
+    but carries a different ``type`` claim so endpoints can distinguish
+    demo tokens from widget guest tokens.
+    """
+    now = datetime.now(timezone.utc)
+    to_encode = payload.copy()
+    to_encode.update(
+        {
+            "iat": now,
+            "exp": now + timedelta(seconds=300),  # 5 minutes
+            "type": "demo",
+        }
+    )
+    return jose_jwt.encode(to_encode, settings.EMBED_GUEST_TOKEN_SECRET, algorithm="HS256")
+
+
 def decode_guest_token(token: str) -> dict:
     """Decode and validate a guest JWT. Returns the claims dict."""
     return jose_jwt.decode(token, settings.EMBED_GUEST_TOKEN_SECRET, algorithms=["HS256"])

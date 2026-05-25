@@ -24,7 +24,7 @@ from ..core.dependencies import (
     require_admin,
     require_admin_or_manager,
 )
-from ..core.exceptions import ForbiddenError, NotFoundError, ValidationError
+from ..core.exceptions import ConflictError, ForbiddenError, NotFoundError, ValidationError
 from ..core.pagination import PaginatedResponse
 from ..db.orm.users import User as UserORM
 from ..services.audit_service import list_audit_logs, write_audit_log
@@ -33,8 +33,10 @@ from ..services.tenant_service import (
     create_tenant as _svc_create_tenant,
     delete_tenant as _svc_delete_tenant,
     force_delete_tenant as _svc_force_delete_tenant,
+    get_demo_tenant as _svc_get_demo_tenant,
     get_tenant_by_id as _svc_get_tenant_by_id,
     list_tenants as _svc_list_tenants,
+    set_demo_tenant as _svc_set_demo_tenant,
     update_tenant as _svc_update_tenant,
 )
 from ..services.usage_service import list_usage_logs, get_tenant_aggregates, get_user_aggregates
@@ -171,11 +173,13 @@ class TenantCreate(BaseModel):
 
 class TenantUpdate(BaseModel):
     name: str
+    is_demo: bool | None = None
 
 
 class TenantResponse(BaseModel):
     id: str
     name: str
+    is_demo: bool
     created_at: datetime
     updated_at: datetime
     total_tokens_in: int = 0
@@ -477,8 +481,12 @@ async def update_tenant(
     db: AsyncSession = Depends(get_db),
     _admin: UserORM = Depends(require_admin),
 ):
-    """Update a tenant's name (admin only)."""
-    tenant = await _svc_update_tenant(db, tenant_id, body.name)
+    """Update a tenant's name or mark it as the demo tenant (admin only)."""
+    if body.is_demo is True:
+        tenant = await _svc_set_demo_tenant(db, tenant_id)
+    else:
+        tenant = await _svc_update_tenant(db, tenant_id, body.name)
+
     await write_audit_log(
         db,
         actor=_admin,

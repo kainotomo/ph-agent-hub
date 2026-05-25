@@ -51,6 +51,7 @@ class Settings(BaseSettings):
 
     # --- Session ---
     TEMPORARY_SESSION_TTL_SECONDS: int = 86400  # 24 hours
+    DEMO_SESSION_TTL_SECONDS: int = 3600  # 1 hour
 
     # --- Cross-session memory (Issue #229) ---
     CROSS_SESSION_EMBEDDING_MODEL: str = "text-embedding-3-small"

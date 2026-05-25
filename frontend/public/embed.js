@@ -19,11 +19,12 @@
   if (!script) return;
 
   var token = script.getAttribute("data-ph-token");
+  var isDemo = script.getAttribute("data-ph-demo") === "true";
   var position = script.getAttribute("data-ph-position") || "bubble";
   var apiUrl = script.getAttribute("data-ph-api-url") || "/api";
   var baseUrl = apiUrl.replace(/\/api\/?$/, ""); // derive app base URL
 
-  if (!token) {
+  if (!token && !isDemo) {
     console.error("[PH Widget] Missing data-ph-token attribute");
     return;
   }
@@ -34,7 +35,9 @@
   function createIframe() {
     var iframe = document.createElement("iframe");
     iframe.id = iframeId;
-    iframe.src = baseUrl + "/widget?token=" + encodeURIComponent(token);
+    iframe.src = isDemo
+      ? baseUrl + "/widget?demo=true"
+      : baseUrl + "/widget?token=" + encodeURIComponent(token);
     iframe.style.border = "none";
     iframe.style.width = "100%";
     iframe.style.height = "0";

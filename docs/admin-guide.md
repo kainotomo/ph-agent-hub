@@ -86,6 +86,41 @@ A tenant can only be deleted if it has no users. Remove or reassign all users fi
 - Managers are scoped to their own tenant — they cannot create tenants or see cross-tenant data
 - Admins have full visibility across all tenants
 
+### 3.4 Demo Tenant
+
+PH Agent Hub supports a **demo tenant** for the "Try It Now" experience and embedded widget demo mode. Anonymous visitors are auto-provisioned a temporary session under this tenant.
+
+#### Setup Steps
+
+1. **Create or choose a tenant** that will serve as the demo tenant
+2. **Mark it as the demo tenant**: Edit the tenant → set **Is Demo** to `true`
+   - Only one tenant can be the demo tenant at a time
+   - Marking a new tenant as demo automatically clears the flag on the previous one
+3. **Configure models**: Add at least one model with valid credentials under the demo tenant
+4. **Configure skills and templates**: Set up the chat experience visitors will see
+   - Optionally set default model, skill, and template — these are auto-selected when a demo session starts
+5. **Enable demo mode**: Go to **Admin → Settings** → add `demo_enabled: true`
+   - When disabled, the "Try It Now" button is hidden and demo API endpoints return 503
+6. **Rate limits**: Demo sessions are rate-limited (10 sessions/hour per IP, 30 messages/minute per session) to prevent abuse
+
+#### What Visitors See
+
+- A simplified chat interface (no sidebar, no settings, no model selector)
+- A banner: *"You're trying the demo — sign up to save your conversations"*
+- Sessions expire after **1 hour** of inactivity
+- No persistence — closing the page loses the session
+
+#### Usage
+
+- **Platform demo**: Visitors click **Try It Now** on the login page → redirected to `/demo`
+- **Embedded demo**: Add `<script src="/embed.js" data-ph-demo="true"></script>` on any website
+
+#### Limitations
+
+- Only one demo tenant can exist at a time
+- The demo tenant's model usage costs are borne by the platform owner
+- Demo sessions are anonymous — there is no way to recover a session after expiry
+
 ---
 
 ## 4. Managing Users

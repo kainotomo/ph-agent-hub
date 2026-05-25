@@ -73,6 +73,34 @@ async def create_tenant(db: AsyncSession, name: str) -> Tenant:
     return tenant
 
 
+async def get_demo_tenant(db: AsyncSession) -> Tenant | None:
+    """Return the tenant marked as the demo tenant, or None."""
+    result = await db.execute(select(Tenant).where(Tenant.is_demo == True))
+    return result.scalar_one_or_none()
+
+
+async def set_demo_tenant(db: AsyncSession, tenant_id: str) -> Tenant:
+    """Mark a tenant as the demo tenant. Clears the flag on all other tenants.
+
+    Raises NotFoundError if the tenant does not exist.
+    """
+    tenant = await get_tenant_by_id(db, tenant_id)
+    if tenant is None:
+        raise NotFoundError("Tenant not found")
+
+    # Clear demo flag on all tenants using ORM-level operations
+    result = await db.execute(select(Tenant))
+    all_tenants = result.scalars().all()
+    for t in all_tenants:
+        t.is_demo = False
+
+    # Set demo flag on the target tenant
+    tenant.is_demo = True
+    await db.commit()
+    await db.refresh(tenant)
+    return tenant
+
+
 async def update_tenant(db: AsyncSession, tenant_id: str, name: str) -> Tenant:
     """Update a tenant's name. Raises NotFoundError or ConflictError."""
     tenant = await get_tenant_by_id(db, tenant_id)

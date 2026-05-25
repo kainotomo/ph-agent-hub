@@ -60,6 +60,19 @@ guest token (embedded in the `<script>` tag) rather than a user account. Session
 are stored in Redis only (temporary, 24h TTL).  See [`embed-widget.md`](embed-widget.md)
 for detailed documentation.
 
+### **1.4 Demo Experience (Public)**
+The platform includes a public **"Try It Now"** demo experience at the `/demo` route.
+No authentication is required — visitors are auto-provisioned an anonymous session
+under a configured demo tenant with a 1-hour expiry.
+
+Two access paths exist:
+- **Platform demo**: The login page shows a **Try It Now** button when demo mode is enabled,
+  linking to `/demo`
+- **Embedded demo**: The embed script supports `data-ph-demo="true"` to load the demo
+  session instead of a configured widget
+
+See [`admin-guide.md`](admin-guide.md#3-demo-tenant) for configuration instructions.
+
 ---
 
 ## 2. Chat Area

@@ -73,6 +73,7 @@ export function ToolList() {
     enterprise: "Enterprise",
     utility: "Utility",
     custom: "Custom",
+    mcp: "MCP",
     system: "System",
     general: "General",
   };
@@ -83,6 +84,7 @@ export function ToolList() {
     enterprise: "orange",
     utility: "cyan",
     custom: "purple",
+    mcp: "teal",
     system: "default",
     general: "default",
   };

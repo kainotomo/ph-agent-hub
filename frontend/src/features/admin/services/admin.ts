@@ -563,3 +563,81 @@ export function listAdminSessions(
 export function deleteAdminSession(id: string): Promise<void> {
   return api<void>(`/admin/sessions/${id}`, { method: "DELETE" });
 }
+
+// =============================================================================
+// MCP Servers
+// =============================================================================
+
+export interface McpServerData {
+  id: string;
+  tenant_id: string;
+  name: string;
+  transport: "stdio" | "streamable_http" | "websocket";
+  url: string | null;
+  command: string | null;
+  args: string[] | null;
+  env_vars: Record<string, string> | null;
+  headers: Record<string, string> | null;
+  allowed_tools: string[] | null;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface McpServerTestResult {
+  connected: boolean;
+  tools: { name: string; description: string }[];
+  error: string | null;
+}
+
+export interface McpServerSyncResult {
+  created: number;
+  updated: number;
+  deprecated: number;
+}
+
+export function listMcpServers(
+  params?: ListParams & { transport?: string; enabled?: boolean },
+): Promise<PaginatedResponse<McpServerData>> {
+  const qs = buildQueryString({ ...params });
+  return api<PaginatedResponse<McpServerData>>(`/admin/mcp-servers${qs}`);
+}
+
+export function getMcpServer(id: string): Promise<McpServerData> {
+  return api<McpServerData>(`/admin/mcp-servers/${id}`);
+}
+
+export function createMcpServer(
+  data: Partial<McpServerData>,
+): Promise<McpServerData> {
+  return api<McpServerData>("/admin/mcp-servers", {
+    method: "POST",
+    body: data,
+  });
+}
+
+export function updateMcpServer(
+  id: string,
+  data: Partial<McpServerData>,
+): Promise<McpServerData> {
+  return api<McpServerData>(`/admin/mcp-servers/${id}`, {
+    method: "PUT",
+    body: data,
+  });
+}
+
+export function deleteMcpServer(id: string): Promise<void> {
+  return api<void>(`/admin/mcp-servers/${id}`, { method: "DELETE" });
+}
+
+export function testMcpServer(id: string): Promise<McpServerTestResult> {
+  return api<McpServerTestResult>(`/admin/mcp-servers/${id}/test`, {
+    method: "POST",
+  });
+}
+
+export function syncMcpServerTools(id: string): Promise<McpServerSyncResult> {
+  return api<McpServerSyncResult>(`/admin/mcp-servers/${id}/sync-tools`, {
+    method: "POST",
+  });
+}

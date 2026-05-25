@@ -24,6 +24,7 @@ import {
   CommentOutlined,
   MessageOutlined,
   AuditOutlined,
+  CloudServerOutlined,
 } from "@ant-design/icons";
 import { useNavigate, useLocation, Outlet, useSearchParams } from "react-router-dom";
 import { useAuth } from "../../../providers/AuthProvider";
@@ -73,6 +74,7 @@ export function AdminLayout() {
       : []),
     { key: "/admin/models", icon: <ApiOutlined />, label: "Models" },
     { key: "/admin/tools", icon: <ToolOutlined />, label: "Tools" },
+    { key: "/admin/mcp-servers", icon: <CloudServerOutlined />, label: "MCP Servers" },
     {
       key: "/admin/templates",
       icon: <FileTextOutlined />,

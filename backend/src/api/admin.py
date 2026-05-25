@@ -60,6 +60,18 @@ from ..services.tool_service import (
     list_tools as _svc_list_tools,
     update_tool as _svc_update_tool,
 )
+from ..services.mcp_service import (
+    create_mcp_server as _svc_create_mcp_server,
+    delete_mcp_server as _svc_delete_mcp_server,
+    get_mcp_server as _svc_get_mcp_server,
+    list_mcp_servers as _svc_list_mcp_servers,
+    update_mcp_server as _svc_update_mcp_server,
+    test_mcp_connection as _svc_test_mcp_connection,
+    sync_mcp_tools as _svc_sync_mcp_tools,
+    decrypt_env_vars,
+    decrypt_headers,
+    mask_dict,
+)
 from ..services.template_service import (
     create_template as _svc_create_template,
     delete_template as _svc_delete_template,
@@ -1057,6 +1069,274 @@ async def delete_tool(
         tenant_id=current_user.tenant_id,
         ip_address=_get_client_ip(request),
     )
+
+
+# =============================================================================
+# MCP Server Endpoints (admin or manager)
+# =============================================================================
+
+
+class McpServerCreate(BaseModel):
+    tenant_id: str | None = None  # admin only
+    name: str
+    transport: str  # "stdio", "streamable_http", "websocket"
+    url: str | None = None
+    command: str | None = None
+    args: list[str] | None = None
+    env_vars: dict | None = None
+    headers: dict | None = None
+    allowed_tools: list[str] | None = None
+    enabled: bool = True
+
+
+class McpServerUpdate(BaseModel):
+    name: str | None = None
+    transport: str | None = None
+    url: str | None = None
+    command: str | None = None
+    args: list[str] | None = None
+    env_vars: dict | None = None
+    headers: dict | None = None
+    allowed_tools: list[str] | None = None
+    enabled: bool | None = None
+
+
+class McpServerResponse(BaseModel):
+    id: str
+    tenant_id: str
+    name: str
+    transport: str
+    url: str | None = None
+    command: str | None = None
+    args: list | None = None
+    env_vars: dict | None = None  # masked values
+    headers: dict | None = None  # masked values
+    allowed_tools: list | None = None
+    enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class McpServerTestResponse(BaseModel):
+    connected: bool
+    tools: list[dict] = []
+    error: str | None = None
+
+
+class McpServerSyncResponse(BaseModel):
+    created: int
+    updated: int
+    deprecated: int
+
+
+@router.get("/mcp-servers", response_model=PaginatedResponse[McpServerResponse])
+async def list_mcp_servers(
+    tenant_id: str | None = None,
+    search: str | None = None,
+    transport: str | None = None,
+    enabled: bool | None = None,
+    page: int = 1,
+    page_size: int = 25,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """List MCP servers. Admin sees all; manager scoped to own tenant."""
+    if current_user.role == "manager":
+        servers, total = await _svc_list_mcp_servers(
+            db, tenant_id=current_user.tenant_id,
+            search=search, transport=transport, enabled=enabled,
+            page=page, page_size=page_size,
+        )
+    else:
+        servers, total = await _svc_list_mcp_servers(
+            db, tenant_id=tenant_id,
+            search=search, transport=transport, enabled=enabled,
+            page=page, page_size=page_size,
+        )
+
+    total_pages = max(1, -(-total // page_size))
+    items = []
+    for s in servers:
+        data = McpServerResponse.model_validate(s)
+        # Mask secrets
+        data.env_vars = mask_dict(decrypt_env_vars(s))
+        data.headers = mask_dict(decrypt_headers(s))
+        items.append(data)
+
+    return PaginatedResponse(
+        items=items, total=total, page=page, page_size=page_size,
+        total_pages=total_pages,
+    )
+
+
+@router.post("/mcp-servers", response_model=McpServerResponse, status_code=201)
+async def create_mcp_server(
+    body: McpServerCreate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Create an MCP server config. Admin can specify tenant_id."""
+    if current_user.role == "manager" and body.tenant_id and body.tenant_id != current_user.tenant_id:
+        raise ForbiddenError("Managers can only create MCP servers in their own tenant")
+    tenant_id = body.tenant_id if current_user.role == "admin" and body.tenant_id else current_user.tenant_id
+
+    server = await _svc_create_mcp_server(
+        db,
+        tenant_id=tenant_id,
+        name=body.name,
+        transport=body.transport,
+        url=body.url,
+        command=body.command,
+        args=body.args,
+        env_vars=body.env_vars,
+        headers=body.headers,
+        allowed_tools=body.allowed_tools,
+        enabled=body.enabled,
+    )
+    await write_audit_log(
+        db,
+        actor=current_user,
+        action="mcp_server.created",
+        target_type="mcp_server",
+        target_id=server.id,
+        tenant_id=current_user.tenant_id,
+        ip_address=_get_client_ip(request),
+    )
+    data = McpServerResponse.model_validate(server)
+    data.env_vars = mask_dict(decrypt_env_vars(server))
+    data.headers = mask_dict(decrypt_headers(server))
+    return data
+
+
+@router.get("/mcp-servers/{server_id}", response_model=McpServerResponse)
+async def get_mcp_server(
+    server_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Get a single MCP server config. Manager scoped to own tenant."""
+    server = await _svc_get_mcp_server(db, server_id)
+    if server is None:
+        raise NotFoundError("MCP server not found")
+    if current_user.role == "manager" and server.tenant_id != current_user.tenant_id:
+        raise ForbiddenError("Managers can only view MCP servers in their own tenant")
+
+    data = McpServerResponse.model_validate(server)
+    data.env_vars = mask_dict(decrypt_env_vars(server))
+    data.headers = mask_dict(decrypt_headers(server))
+    return data
+
+
+@router.put("/mcp-servers/{server_id}", response_model=McpServerResponse)
+async def update_mcp_server(
+    server_id: str,
+    body: McpServerUpdate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Update an MCP server config. Manager scoped to own tenant."""
+    target = await _svc_get_mcp_server(db, server_id)
+    if target is None:
+        raise NotFoundError("MCP server not found")
+    if current_user.role == "manager" and target.tenant_id != current_user.tenant_id:
+        raise ForbiddenError("Managers can only modify MCP servers in their own tenant")
+
+    update_kwargs = {}
+    for field in ("name", "transport", "url", "command", "args", "env_vars",
+                  "headers", "allowed_tools", "enabled"):
+        val = getattr(body, field, None)
+        if val is not None:
+            update_kwargs[field] = val
+
+    server = await _svc_update_mcp_server(db, server_id, **update_kwargs)
+
+    action = "mcp_server.disabled" if body.enabled is False else "mcp_server.updated"
+    await write_audit_log(
+        db,
+        actor=current_user,
+        action=action,
+        target_type="mcp_server",
+        target_id=server_id,
+        tenant_id=current_user.tenant_id,
+        ip_address=_get_client_ip(request),
+    )
+    data = McpServerResponse.model_validate(server)
+    data.env_vars = mask_dict(decrypt_env_vars(server))
+    data.headers = mask_dict(decrypt_headers(server))
+    return data
+
+
+@router.delete("/mcp-servers/{server_id}", status_code=204)
+async def delete_mcp_server(
+    server_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Delete an MCP server and its synced tools. Manager scoped to own tenant."""
+    target = await _svc_get_mcp_server(db, server_id)
+    if target is None:
+        raise NotFoundError("MCP server not found")
+    if current_user.role == "manager" and target.tenant_id != current_user.tenant_id:
+        raise ForbiddenError("Managers can only delete MCP servers in their own tenant")
+
+    await _svc_delete_mcp_server(db, server_id)
+    await write_audit_log(
+        db,
+        actor=current_user,
+        action="mcp_server.deleted",
+        target_type="mcp_server",
+        target_id=server_id,
+        tenant_id=current_user.tenant_id,
+        ip_address=_get_client_ip(request),
+    )
+
+
+@router.post("/mcp-servers/{server_id}/test", response_model=McpServerTestResponse)
+async def test_mcp_server(
+    server_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Test connection to an MCP server and return discovered tools."""
+    target = await _svc_get_mcp_server(db, server_id)
+    if target is None:
+        raise NotFoundError("MCP server not found")
+    if current_user.role == "manager" and target.tenant_id != current_user.tenant_id:
+        raise ForbiddenError("Managers can only test MCP servers in their own tenant")
+
+    return await _svc_test_mcp_connection(db, server_id)
+
+
+@router.post("/mcp-servers/{server_id}/sync-tools", response_model=McpServerSyncResponse)
+async def sync_mcp_server_tools(
+    server_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Sync tools from an MCP server into the tools table."""
+    target = await _svc_get_mcp_server(db, server_id)
+    if target is None:
+        raise NotFoundError("MCP server not found")
+    if current_user.role == "manager" and target.tenant_id != current_user.tenant_id:
+        raise ForbiddenError("Managers can only sync MCP servers in their own tenant")
+
+    result = await _svc_sync_mcp_tools(db, server_id)
+    await write_audit_log(
+        db,
+        actor=current_user,
+        action="mcp_server.tools_synced",
+        target_type="mcp_server",
+        target_id=server_id,
+        tenant_id=current_user.tenant_id,
+        ip_address=_get_client_ip(request),
+    )
+    return result
 
 
 # =============================================================================

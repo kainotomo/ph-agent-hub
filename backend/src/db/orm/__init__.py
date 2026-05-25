@@ -11,6 +11,7 @@ from .tenants import Tenant
 from .users import User
 from .models import Model
 from .groups import UserGroup, UserGroupMember, ModelGroup
+from .mcp_servers import McpServer
 from .tools import Tool
 from .templates import Template
 from .prompts import Prompt
@@ -33,6 +34,7 @@ __all__ = [
     "UserGroup",
     "UserGroupMember",
     "ModelGroup",
+    "McpServer",
     "Tool",
     "Template",
     "Prompt",

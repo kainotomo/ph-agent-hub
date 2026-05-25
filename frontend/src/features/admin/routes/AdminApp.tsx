@@ -11,6 +11,7 @@ import UserList from "../resources/users/UserList";
 import TenantList from "../resources/tenants/TenantList";
 import ModelList from "../resources/models/ModelList";
 import ToolList from "../resources/tools/ToolList";
+import McpServerList from "../resources/mcp/McpServerList";
 import TemplateList from "../resources/templates/TemplateList";
 import SkillList from "../resources/skills/SkillList";
 import GroupList from "../resources/groups/GroupList";
@@ -29,6 +30,7 @@ export function AdminApp() {
         <Route path="tenants" element={<TenantList />} />
         <Route path="models" element={<ModelList />} />
         <Route path="tools" element={<ToolList />} />
+        <Route path="mcp-servers" element={<McpServerList />} />
         <Route path="templates" element={<TemplateList />} />
         <Route path="skills" element={<SkillList />} />
         <Route path="groups" element={<GroupList />} />

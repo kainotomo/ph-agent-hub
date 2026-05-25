@@ -18,7 +18,7 @@ The backend provides the following core capabilities:
 - Supports streaming responses and agent events to the chat area via SSE
 
 ### **1.2 Model Orchestration**
-- Supports multiple model providers (DeepSeek, OpenAI, Anthropic, local models, etc.)
+- Supports multiple model providers (DeepSeek, OpenAI, Anthropic, Ollama, local models, etc.)
 - Allows per‑tenant model configuration
 - Allows administrators to enable/disable models
 - Provides routing logic for selecting the correct model per request

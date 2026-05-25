@@ -200,6 +200,65 @@ Production uses Traefik (external stack) with Let's Encrypt auto-SSL. Each servi
 
 ---
 
+# 7. Ollama Setup (Local Models)
+
+PH Agent Hub supports local LLMs via [Ollama](https://ollama.com). Ollama provides an OpenAI-compatible API, so it integrates as a first-class model provider alongside cloud providers.
+
+## 7.1 Install Ollama
+
+```bash
+# Linux (curl method)
+curl -fsSL https://ollama.com/install.sh | sh
+
+# macOS — download from https://ollama.com
+# Docker — see https://hub.docker.com/r/ollama/ollama
+```
+
+## 7.2 Pull a Model
+
+```bash
+ollama pull llama3.2
+# or
+ollama pull mistral
+# or
+ollama pull qwen2.5
+```
+
+## 7.3 Verify Ollama is Running
+
+```bash
+# Ollama serves its API on port 11434 by default
+curl http://localhost:11434/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"llama3.2","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+## 7.4 Configure in PH Agent Hub
+
+1. Go to **Admin → Models → Create Model**
+2. Set **Provider** to `Ollama`
+3. Set **Model ID** to the model name you pulled (e.g., `llama3.2`)
+4. Set **Base URL** to your Ollama server URL (e.g., `http://localhost:11434/v1` or `http://host.docker.internal:11434/v1` when running PH Agent Hub in Docker and Ollama on the host)
+5. **API Key** is not required for Ollama — it's auto-filled with a placeholder
+6. Set **Max Tokens**, **Temperature**, and **Context Window** as desired (these are for PH Agent Hub's internal context management, not passed to Ollama)
+7. Click **OK**
+
+## 7.5 Docker Considerations
+
+When running PH Agent Hub in Docker:
+
+- If Ollama is on the **host machine**, use `http://host.docker.internal:11434/v1` as Base URL (Docker Desktop) or the host's LAN IP
+- If Ollama runs in its **own container**, add it to the `phagent-network` and use `http://ollama:11434/v1`
+- Local models run on CPU by default. For GPU acceleration, install the NVIDIA Container Toolkit and add GPU reservations to the Ollama container
+
+## 7.6 Limitations
+
+- **Thinking/reasoning mode** is not supported (most local models don't emit reasoning tokens)
+- **Tool calling** depends on the model — only recent models (e.g., `llama3.2`, `qwen2.5`) support native function calling
+- **Performance** varies by hardware — Ollama runs on CPU by default; GPU acceleration significantly improves throughput
+
+---
+
 # 7. Deployment Modes
 
 ## **7.1 Local Development**

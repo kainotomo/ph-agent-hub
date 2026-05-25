@@ -105,7 +105,15 @@ async def create_model(
     output_price_per_1m: float | None = None,
     cache_hit_price_per_1m: float | None = None,
 ) -> Model:
-    """Create a new model. api_key is transparently encrypted by the ORM."""
+    """Create a new model. api_key is transparently encrypted by the ORM.
+
+    For Ollama models, api_key is auto-filled with "ollama" when empty
+    (Ollama does not require authentication but the column is non-nullable).
+    """
+    # Auto-fill api_key for Ollama (no auth required)
+    if provider.lower() == "ollama" and not api_key:
+        api_key = "ollama"
+
     model = Model(
         tenant_id=tenant_id,
         name=name,
@@ -132,10 +140,20 @@ async def create_model(
 
 
 async def update_model(db: AsyncSession, model_id: str, **fields) -> Model:
-    """Update a model's fields. Raises NotFoundError if missing."""
+    """Update a model's fields. Raises NotFoundError if missing.
+
+    For Ollama models, api_key is auto-filled with "ollama" when empty
+    (Ollama does not require authentication but the column is non-nullable).
+    """
     model = await get_model_by_id(db, model_id)
     if model is None:
         raise NotFoundError("Model not found")
+
+    # Determine effective provider: use the incoming value if provided,
+    # otherwise fall back to the current provider from DB.
+    provider = fields.get("provider", model.provider)
+    if "api_key" in fields and not fields["api_key"] and provider.lower() == "ollama":
+        fields["api_key"] = "ollama"
 
     for key, value in fields.items():
         if hasattr(model, key):

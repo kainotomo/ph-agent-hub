@@ -91,6 +91,7 @@ export function ChatWindow({
   const [followUpQuestions, setFollowUpQuestions] = useState<string[]>([]);
   const [finalizing, setFinalizing] = useState(false);
   const virtuosoRef = useRef<VirtuosoHandle>(null);
+  const prevLoadingRef = useRef(true);
   const queryClient = useQueryClient();
   const screens = useBreakpoint();
   const isMobile = !screens.md;
@@ -191,6 +192,17 @@ export function ChatWindow({
     setLocalCrossSessionMemory(crossSessionMemoryEnabled ?? null);
     queryClient.invalidateQueries({ queryKey: ["memory"] });
   }, [sessionId, temperature, crossSessionMemoryEnabled, queryClient]);
+
+  // Auto-scroll to bottom when messages finish loading (existing session)
+  useEffect(() => {
+    if (prevLoadingRef.current && !loadingMessages && messages?.length) {
+      // Small delay to let Virtuoso layout settle
+      setTimeout(() => {
+        virtuosoRef.current?.scrollToIndex({ index: "LAST", behavior: "auto" });
+      }, 50);
+    }
+    prevLoadingRef.current = loadingMessages;
+  }, [loadingMessages, messages]);
 
   // Clear editing state once the edited message is confirmed gone from the list
   useEffect(() => {

@@ -5,6 +5,8 @@
 # Only ``storage/s3.py`` calls ``boto3`` (single-module rule).
 # =============================================================================
 
+import asyncio
+import logging
 import mimetypes
 import tempfile
 import os
@@ -12,6 +14,8 @@ import uuid
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger(__name__)
 
 from ..core.config import settings
 from ..core.exceptions import NotFoundError, ValidationError
@@ -203,6 +207,19 @@ async def create_upload(
             redis_data["uploaded_file_ids"] = uploaded_ids
             await store_temp_session(session_data["id"], redis_data)
 
+    # 8. Auto-index in RAG (background, best-effort)
+    if extracted_text and not is_temp:
+        try:
+            from ..services.rag_service import index_document as _rag_index
+
+            asyncio.ensure_future(_rag_index(
+                db=await _fresh_db_session(),
+                file_upload=upload,
+            ))
+            logger.info("Scheduled RAG indexing for file %s", file_id)
+        except Exception:
+            logger.warning("Failed to schedule RAG indexing for file %s", file_id, exc_info=True)
+
     return upload
 
 
@@ -282,8 +299,15 @@ async def delete_upload(
     file_id: str,
     user_id: str,
 ) -> None:
-    """Delete a file upload (MinIO object + DB row)."""
+    """Delete a file upload (MinIO object + DB row + RAG chunks)."""
     upload = await get_upload_by_id(db, file_id, user_id)
+
+    # Clean up RAG document chunks first
+    try:
+        from ..services.rag_service import delete_document as _rag_delete
+        await _rag_delete(db, file_id)
+    except Exception:
+        logger.warning("Failed to delete RAG chunks for file %s", file_id, exc_info=True)
 
     await s3.delete_object(bucket=upload.bucket, key=upload.storage_key)
     await db.execute(delete(FileUpload).where(FileUpload.id == file_id))
@@ -436,6 +460,22 @@ async def _delete_temp_upload_by_id(db: AsyncSession, file_id: str) -> None:
         pass
     await db.execute(delete(FileUpload).where(FileUpload.id == file_id))
     await db.flush()
+
+
+# ---------------------------------------------------------------------------
+# Fresh DB session for background tasks
+# ---------------------------------------------------------------------------
+
+
+async def _fresh_db_session() -> AsyncSession:
+    """Create a new async DB session independent of the current request.
+
+    Used by ``asyncio.ensure_future`` background tasks (e.g. RAG indexing)
+    that outlive the request-response cycle and therefore can't reuse
+    the request-scoped ``db`` session.
+    """
+    from ..db.base import AsyncSessionLocal
+    return AsyncSessionLocal()
 
 
 # ---------------------------------------------------------------------------

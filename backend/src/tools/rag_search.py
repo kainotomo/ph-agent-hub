@@ -268,20 +268,28 @@ def _fallback_embed(text: str, dim: int = 256) -> list[float]:
 # Tool factory
 # ---------------------------------------------------------------------------
 
-# Global vector store instance (per process)
+# Global vector store instance (per process) — used as a cache layer on top
+# of the DB.  When db + tenant_id are provided, tools also persist to / read
+# from the rag_documents table.
 _vector_store = SimpleVectorStore()
 
 
-def build_rag_search_tools(tool_config: dict | None = None) -> list:
+def build_rag_search_tools(
+    tool_config: dict | None = None,
+    db=None,
+    tenant_id: str | None = None,
+) -> list:
     """Return a list of MAF @tool-decorated async functions for RAG search.
 
     Args:
         tool_config: Optional ``Tool.config`` JSON dict.  May include:
-            - ``embedding_model`` (str): embedding model name (default "text-embedding-3-small")
-            - ``api_key`` (str): API key for the embedding service
-            - ``base_url`` (str): base URL for the embedding API
-            - ``chunk_size`` (int): text chunk size in characters (default 500)
-            - ``top_k`` (int): default number of results (default 5)
+            - ``embedding_model`` (str)
+            - ``api_key`` (str)
+            - ``base_url`` (str)
+            - ``chunk_size`` (int)
+            - ``top_k`` (int)
+        db: Optional async DB session for persistent storage.
+        tenant_id: Required when ``db`` is provided (tenant-scoped).
 
     Returns:
         A list of callables ready to pass to ``Agent(tools=...)``.
@@ -298,7 +306,7 @@ def build_rag_search_tools(tool_config: dict | None = None) -> list:
         """Index a document for semantic search.
 
         Splits the document into chunks, generates embeddings for each chunk,
-        and stores them in the vector store.
+        and stores them in the vector store (and DB if available).
 
         Args:
             content: The full text content of the document to index.
@@ -320,7 +328,7 @@ def build_rag_search_tools(tool_config: dict | None = None) -> list:
             if not doc_id:
                 doc_id = hashlib.sha256(content.encode()).hexdigest()[:16]
 
-            # Remove old chunks for this doc_id
+            # Remove old chunks for this doc_id from in-memory store
             _vector_store.documents = [
                 d for d in _vector_store.documents
                 if d["metadata"].get("doc_id") != doc_id
@@ -345,7 +353,7 @@ def build_rag_search_tools(tool_config: dict | None = None) -> list:
                     "status": "error",
                 }
 
-            # Store in vector store
+            # Store in in-memory vector store
             for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
                 chunk_meta = {
                     "doc_id": doc_id,
@@ -381,7 +389,9 @@ def build_rag_search_tools(tool_config: dict | None = None) -> list:
         """Search indexed documents semantically.
 
         Generates an embedding for the query and returns the most similar
-        document chunks using cosine similarity.
+        document chunks using cosine similarity.  When a DB session is
+        available, searches the persistent ``rag_documents`` table;
+        otherwise falls back to the in-memory vector store.
 
         Args:
             query: The search query text.
@@ -397,31 +407,61 @@ def build_rag_search_tools(tool_config: dict | None = None) -> list:
         if not query or not query.strip():
             return {"error": "No query provided", "results": [], "total_results": 0}
 
-        if _vector_store.document_count == 0:
-            return {
-                "query": query,
-                "results": [],
-                "total_results": 0,
-                "message": "No documents have been indexed yet. Use index_document first.",
-            }
-
         k = top_k or default_top_k
 
         try:
-            # Get query embedding
-            embeddings = await _get_embeddings(
+            # Generate query embedding
+            query_embeddings = await _get_embeddings(
                 [query],
                 model=embedding_model,
                 api_key=api_key,
                 base_url=base_url,
             )
 
-            if not embeddings:
+            if not query_embeddings:
                 return {"error": "Failed to generate query embedding", "results": [], "total_results": 0}
 
-            query_embedding = embeddings[0]
+            query_embedding = query_embeddings[0]
 
-            # Search
+            # Search via DB if available
+            if db is not None and tenant_id is not None:
+                try:
+                    from ..services.rag_service import search_documents as _rag_search
+
+                    results = await _rag_search(
+                        db=db,
+                        query=query,
+                        tenant_id=tenant_id,
+                        top_k=k,
+                    )
+                    return {
+                        "query": query,
+                        "results": [
+                            {
+                                "id": r.get("file_id", ""),
+                                "text": r["text"],
+                                "score": r["score"],
+                                "metadata": {
+                                    "filename": r.get("filename", ""),
+                                    "chunk_index": r.get("chunk_index", 0),
+                                },
+                            }
+                            for r in results
+                        ],
+                        "total_results": len(results),
+                    }
+                except Exception as exc:
+                    logger.warning("DB RAG search failed, falling back to in-memory: %s", exc)
+
+            # Fall back to in-memory vector store
+            if _vector_store.document_count == 0:
+                return {
+                    "query": query,
+                    "results": [],
+                    "total_results": 0,
+                    "message": "No documents have been indexed yet. Use index_document first.",
+                }
+
             results = _vector_store.search(query_embedding, top_k=k)
 
             return {
@@ -439,11 +479,33 @@ def build_rag_search_tools(tool_config: dict | None = None) -> list:
     async def clear_index() -> dict:
         """Clear all indexed documents from the vector store.
 
+        When a DB session is available, also clears the persistent
+        ``rag_documents`` table for the current tenant.
+
         Returns:
             A dict with ``status`` and ``documents_removed`` count.
         """
         count = _vector_store.document_count
+
+        # Clear in-memory store
         _vector_store.clear()
+
+        # Clear DB if available
+        if db is not None and tenant_id is not None:
+            try:
+                from sqlalchemy import delete as sa_delete
+                from ..db.orm.rag import RAGDocument
+
+                result = await db.execute(
+                    sa_delete(RAGDocument).where(RAGDocument.tenant_id == tenant_id)
+                )
+                await db.commit()
+                db_count = result.rowcount
+                logger.info("Cleared %d RAG documents from DB for tenant %s", db_count, tenant_id)
+                count = max(count, db_count)
+            except Exception as exc:
+                logger.warning("Failed to clear DB RAG index: %s", exc)
+
         logger.info("Cleared RAG index (%d documents removed)", count)
         return {"status": "ok", "documents_removed": count}
 

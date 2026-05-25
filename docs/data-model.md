@@ -379,16 +379,21 @@ Memory listing supports pagination via `?page=&page_size=` query parameters. Whe
 
 ## 4.2 RAG Documents
 
-Optional vector DB integration (Qdrant, Milvus, etc.).
+Implemented in v1.11 (Issue #250). Document chunk-level storage with MariaDB JSON embeddings. No external vector DB required — cosine similarity computed in Python. Swappable to Qdrant or pgvector later by replacing the `rag_service` backend.
 
 **Table: rag_documents**
-- id (UUID, PK)
+- id (UUID, PK) — formatted as `{file_id}_{chunk_index}`
 - tenant_id (UUID, FK → tenants.id)
-- title (string)
-- content (text)
-- metadata (JSON)
-- vector_id (string) — reference to vector DB
+- file_id (UUID, FK → file_uploads.id, nullable) — source file upload
+- title (string) — document name (original filename)
+- content (text) — chunk text (not full document)
+- chunk_index (int) — position of this chunk within the source document
+- metadata (JSON) — includes original_filename, content_type, size_bytes, chunk_count
+- embedding_json (JSON, nullable) — embedding vector stored as JSON array of floats
+- model (string, nullable) — embedding model used (e.g. "text-embedding-3-small")
 - created_at (timestamp)
+
+**Ingestion flow:** File upload → `markitdown` text extraction → chunking (500 char, 50 overlap) → embedding via OpenAI-compatible API → store in `rag_documents` → cosine similarity search on query.
 
 ---
 

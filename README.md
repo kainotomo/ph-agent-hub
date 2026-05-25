@@ -17,6 +17,7 @@ PH Agent Hub is a modular, multi-tenant AI platform that provides a chat interfa
 - **Message feedback** — rate responses with thumbs up / down
 - **Full-text search** across sessions and messages
 - **Temporary sessions** — ephemeral chats that leave no database trace
+- **Embeddable chat widget** — `<script>` tag embeddable on any website; anonymous guest sessions
 
 ### For Administrators & Managers
 - **Tenant management** — create and manage isolated tenant environments

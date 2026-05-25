@@ -87,6 +87,14 @@ from ..services.skill_service import (
     list_skills as _svc_list_skills,
     update_skill as _svc_update_skill,
 )
+from ..services.embed_service import (
+    create_embed_config as _svc_create_embed_config,
+    delete_embed_config as _svc_delete_embed_config,
+    get_embed_config_by_id as _svc_get_embed_config_by_id,
+    list_embed_configs as _svc_list_embed_configs,
+    update_embed_config as _svc_update_embed_config,
+    regenerate_token as _svc_regenerate_embed_token,
+)
 from ..services.group_service import (
     add_member as _svc_add_member,
     assign_model_to_group as _svc_assign_model_to_group,
@@ -2675,3 +2683,216 @@ async def admin_reindex_rag_document(
     )
 
     return {"file_id": file_id, "chunks_indexed": chunk_count}
+
+
+# =============================================================================
+# Embed Configurations
+# =============================================================================
+
+EMBED_TAG = "Embed Configs"
+
+
+class EmbedConfigAdminResponse(BaseModel):
+    id: str
+    tenant_id: str
+    name: str
+    allowed_origins: str | None = None
+    is_active: bool
+    theme: dict | None = None
+    feature_flags: dict | None = None
+    default_model_id: str | None = None
+    default_skill_id: str | None = None
+    default_template_id: str | None = None
+    guest_token: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class EmbedConfigAdminCreate(BaseModel):
+    name: str
+    allowed_origins: str | None = None
+    theme: dict | None = None
+    feature_flags: dict | None = None
+    default_model_id: str | None = None
+    default_skill_id: str | None = None
+    default_template_id: str | None = None
+
+
+class EmbedConfigAdminUpdate(BaseModel):
+    name: str | None = None
+    allowed_origins: str | None = None
+    is_active: bool | None = None
+    theme: dict | None = None
+    feature_flags: dict | None = None
+    default_model_id: str | None = None
+    default_skill_id: str | None = None
+    default_template_id: str | None = None
+
+
+@router.get("/embed-configs", response_model=PaginatedResponse[EmbedConfigAdminResponse], tags=[EMBED_TAG])
+async def admin_list_embed_configs(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+    page: int | None = None,
+    page_size: int = 25,
+    search: str | None = None,
+    sort_by: str | None = None,
+    sort_dir: str | None = None,
+):
+    """List embed configs for the current tenant (admin sees all)."""
+    tenant_id = None if current_user.role == "admin" else current_user.tenant_id
+    items, total = await _svc_list_embed_configs(
+        db, tenant_id=tenant_id,
+        search=search, sort_by=sort_by, sort_dir=sort_dir,
+        page=page, page_size=page_size,
+    )
+    return PaginatedResponse(
+        items=[EmbedConfigAdminResponse.model_validate(i) for i in items],
+        total=total, page=page or 1, page_size=page_size,
+        total_pages=(total + page_size - 1) // page_size if page else 1,
+    )
+
+
+@router.post("/embed-configs", response_model=EmbedConfigAdminResponse, status_code=201, tags=[EMBED_TAG])
+async def admin_create_embed_config(
+    body: EmbedConfigAdminCreate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Create a new embed config. Returns the config with the raw guest token."""
+    config, raw_token = await _svc_create_embed_config(
+        db,
+        tenant_id=current_user.tenant_id,
+        name=body.name,
+        allowed_origins=body.allowed_origins,
+        theme=body.theme,
+        feature_flags=body.feature_flags,
+        default_model_id=body.default_model_id,
+        default_skill_id=body.default_skill_id,
+        default_template_id=body.default_template_id,
+    )
+    await write_audit_log(
+        db,
+        actor=current_user,
+        action="embed_config.created",
+        target_type="embed_config",
+        target_id=config.id,
+        tenant_id=current_user.tenant_id,
+        ip_address=_get_client_ip(request),
+    )
+    response = EmbedConfigAdminResponse.model_validate(config)
+    response.guest_token = raw_token
+    return response
+
+
+@router.get("/embed-configs/{config_id}", response_model=EmbedConfigAdminResponse, tags=[EMBED_TAG])
+async def admin_get_embed_config(
+    config_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Get a single embed config."""
+    config = await _svc_get_embed_config_by_id(db, config_id)
+    if config is None:
+        raise NotFoundError("Embed config not found")
+    if current_user.role == "manager" and config.tenant_id != current_user.tenant_id:
+        raise ForbiddenError("Access denied")
+    return EmbedConfigAdminResponse.model_validate(config)
+
+
+@router.put("/embed-configs/{config_id}", response_model=EmbedConfigAdminResponse, tags=[EMBED_TAG])
+async def admin_update_embed_config(
+    config_id: str,
+    body: EmbedConfigAdminUpdate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Update an embed config."""
+    config = await _svc_get_embed_config_by_id(db, config_id)
+    if config is None:
+        raise NotFoundError("Embed config not found")
+    if current_user.role == "manager" and config.tenant_id != current_user.tenant_id:
+        raise ForbiddenError("Access denied")
+
+    updated = await _svc_update_embed_config(
+        db, config_id,
+        name=body.name,
+        allowed_origins=body.allowed_origins,
+        is_active=body.is_active,
+        theme=body.theme,
+        feature_flags=body.feature_flags,
+        default_model_id=body.default_model_id,
+        default_skill_id=body.default_skill_id,
+        default_template_id=body.default_template_id,
+    )
+    await write_audit_log(
+        db,
+        actor=current_user,
+        action="embed_config.updated",
+        target_type="embed_config",
+        target_id=config_id,
+        tenant_id=current_user.tenant_id,
+        ip_address=_get_client_ip(request),
+    )
+    return EmbedConfigAdminResponse.model_validate(updated)
+
+
+@router.delete("/embed-configs/{config_id}", status_code=204, tags=[EMBED_TAG])
+async def admin_delete_embed_config(
+    config_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Delete an embed config."""
+    config = await _svc_get_embed_config_by_id(db, config_id)
+    if config is None:
+        raise NotFoundError("Embed config not found")
+    if current_user.role == "manager" and config.tenant_id != current_user.tenant_id:
+        raise ForbiddenError("Access denied")
+
+    await _svc_delete_embed_config(db, config_id)
+    await write_audit_log(
+        db,
+        actor=current_user,
+        action="embed_config.deleted",
+        target_type="embed_config",
+        target_id=config_id,
+        tenant_id=current_user.tenant_id,
+        ip_address=_get_client_ip(request),
+    )
+
+
+@router.post("/embed-configs/{config_id}/regenerate-token", response_model=EmbedConfigAdminResponse, tags=[EMBED_TAG])
+async def admin_regenerate_embed_token(
+    config_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Regenerate the guest token. Old token is immediately invalidated."""
+    config = await _svc_get_embed_config_by_id(db, config_id)
+    if config is None:
+        raise NotFoundError("Embed config not found")
+    if current_user.role == "manager" and config.tenant_id != current_user.tenant_id:
+        raise ForbiddenError("Access denied")
+
+    config, raw_token = await _svc_regenerate_embed_token(db, config_id)
+    await write_audit_log(
+        db,
+        actor=current_user,
+        action="embed_config.token_regenerated",
+        target_type="embed_config",
+        target_id=config_id,
+        tenant_id=current_user.tenant_id,
+        ip_address=_get_client_ip(request),
+    )
+    response = EmbedConfigAdminResponse.model_validate(config)
+    response.guest_token = raw_token
+    return response

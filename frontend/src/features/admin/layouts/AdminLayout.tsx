@@ -25,6 +25,7 @@ import {
   MessageOutlined,
   AuditOutlined,
   CloudServerOutlined,
+  CodeOutlined,
 } from "@ant-design/icons";
 import { useNavigate, useLocation, Outlet, useSearchParams } from "react-router-dom";
 import { useAuth } from "../../../providers/AuthProvider";
@@ -99,6 +100,11 @@ export function AdminLayout() {
       key: "/admin/rag-documents",
       icon: <FileTextOutlined />,
       label: "RAG Documents",
+    },
+    {
+      key: "/admin/embed",
+      icon: <CodeOutlined />,
+      label: "Embed Widget",
     },
     {
       key: "/admin/sessions",

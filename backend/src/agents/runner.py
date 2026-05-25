@@ -775,7 +775,7 @@ async def run_agent(
     session_data: dict,
     user_message: str,
     db: AsyncSession,
-    current_user: User,
+    current_user: User | None = None,
     file_ids: list[str] | None = None,
 ) -> tuple[str, str]:
     """Assemble and run a MAF agent for a single user message.
@@ -784,13 +784,13 @@ async def run_agent(
         session_data: Unified session dict (from DB or Redis).
         user_message: The text the user sent.
         db: Active async DB session.
-        current_user: The authenticated user.
+        current_user: The authenticated user (or None for guest sessions).
         file_ids: Optional list of FileUpload IDs to link to the user message.
 
     Returns:
         A tuple of (assistant response text, assistant message ID).
     """
-    tenant_id = current_user.tenant_id
+    tenant_id = current_user.tenant_id if current_user else session_data.get("tenant_id", "")
     session_id = session_data["id"]
     is_temporary = session_data.get("is_temporary", False)
 
@@ -2004,8 +2004,8 @@ async def run_agent_stream(
     session_data: dict,
     user_message: str,
     db: AsyncSession,
-    current_user: User,
-    message_id: str,
+    current_user: User | None = None,
+    message_id: str = "",
     file_ids: list[str] | None = None,
 ) -> AsyncIterator[dict]:
     """Assemble and run a MAF agent, yielding typed SSE event dicts.
@@ -2018,7 +2018,7 @@ async def run_agent_stream(
         session_data: Unified session dict (from DB or Redis).
         user_message: The text the user sent.
         db: Active async DB session.
-        current_user: The authenticated user.
+        current_user: The authenticated user (or None for guest sessions).
         message_id: Pre-generated UUID for the assistant message (used
             for client-side correlation across all events).
         file_ids: Optional list of FileUpload IDs to link to the user message.
@@ -2027,7 +2027,7 @@ async def run_agent_stream(
         Dicts with ``event`` and ``data`` keys suitable for
         ``EventSourceResponse``.
     """
-    tenant_id = current_user.tenant_id
+    tenant_id = current_user.tenant_id if current_user else session_data.get("tenant_id", "")
     session_id = session_data["id"]
     is_temporary = session_data.get("is_temporary", False)
 
@@ -2049,7 +2049,7 @@ async def run_agent_stream(
     )
 
     # Link file uploads to the user message
-    if file_ids and not is_temporary:
+    if file_ids and not is_temporary and current_user is not None:
         from ..services import upload_service as _upload_svc
 
         await _upload_svc.link_uploads_to_message(
@@ -2060,7 +2060,7 @@ async def run_agent_stream(
         )
 
     # ---- Background: embed user message for cross-session retrieval -----
-    if not is_temporary:
+    if not is_temporary and current_user is not None:
         try:
             from ..services.embedding_service import embed_message as _embed_msg
 
@@ -2220,7 +2220,7 @@ async def run_agent_stream(
                     reasoning=accumulated_reasoning,
                 )
 
-            if cfg is not None:
+            if cfg is not None and current_user is not None:
                 try:
                     await write_usage_log(
                         db,

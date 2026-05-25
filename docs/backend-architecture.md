@@ -152,7 +152,31 @@ GET    /chat/session/:id/upload/:fileId/url
 DELETE /chat/session/:id/upload/:fileId
 ```
 
-### **3.4 User-Facing Configuration**
+### **3.4 Embed Widget**
+
+Widget endpoints are public (no user auth) — they use a guest token or short-lived
+guest JWT instead:
+```
+GET    /api/widget/config/:token         # Bootstrap: returns theme + guest JWT + session
+GET    /api/widget/session                # Get session info (guest JWT)
+GET    /api/widget/session/messages       # List messages (guest JWT)
+POST   /api/widget/session/message        # Send message + SSE stream (guest JWT)
+DELETE /api/widget/session/stream         # Stop streaming (guest JWT)
+```
+
+Admin embed config management (requires auth):
+```
+GET    /api/admin/embed-configs           # List configs
+POST   /api/admin/embed-configs           # Create config
+GET    /api/admin/embed-configs/:id       # Get config
+PUT    /api/admin/embed-configs/:id       # Update config
+DELETE /api/admin/embed-configs/:id       # Delete config
+POST   /api/admin/embed-configs/:id/regenerate-token  # Regenerate guest token
+```
+
+See [`embed-widget.md`](embed-widget.md) for full documentation.
+
+### **3.5 User-Facing Configuration**
 ```
 GET  /models
 GET  /templates

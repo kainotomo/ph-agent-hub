@@ -45,3 +45,36 @@ def create_refresh_token(payload: dict) -> str:
 def decode_token(token: str) -> dict:
     """Decode and validate a JWT token. Returns the claims dict."""
     return jose_jwt.decode(token, settings.JWT_SECRET, algorithms=["HS256"])
+
+
+# ---------------------------------------------------------------------------
+# Guest (widget) tokens — short-lived, separate secret
+# ---------------------------------------------------------------------------
+
+
+def create_guest_token(payload: dict) -> str:
+    """Create a short-lived JWT for embedded widget guests.
+
+    Payload should contain:
+        sub: embed_config_id
+        tenant_id: tenant to scope the session to
+        type: "guest"
+
+    The token has a **short** TTL (5 minutes) and uses a separate secret
+    from user access tokens for isolation.
+    """
+    now = datetime.now(timezone.utc)
+    to_encode = payload.copy()
+    to_encode.update(
+        {
+            "iat": now,
+            "exp": now + timedelta(seconds=300),  # 5 minutes
+            "type": "guest",
+        }
+    )
+    return jose_jwt.encode(to_encode, settings.EMBED_GUEST_TOKEN_SECRET, algorithm="HS256")
+
+
+def decode_guest_token(token: str) -> dict:
+    """Decode and validate a guest JWT. Returns the claims dict."""
+    return jose_jwt.decode(token, settings.EMBED_GUEST_TOKEN_SECRET, algorithms=["HS256"])

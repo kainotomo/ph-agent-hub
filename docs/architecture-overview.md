@@ -48,6 +48,18 @@ The frontend is a single deployable React application that shares:
 
 The frontend does **not** run agents directly. It acts as a thin client over the backend and the MAF runtime.
 
+### **1.3 Embeddable Chat Widget**
+The embeddable widget lets tenants offer AI chat on external websites. It uses an
+**iframe-based architecture**: a vanilla JS loader script (`embed.js`) injects a
+chat bubble or inline iframe on the host page, which loads a stripped-down React
+chat page (`WidgetPage`) from the PH Agent Hub domain.  The iframe communicates
+with the parent via `postMessage` for resize and close events.
+
+Widget visitors are **anonymous guests** — they authenticate via a tenant-scoped
+guest token (embedded in the `<script>` tag) rather than a user account. Sessions
+are stored in Redis only (temporary, 24h TTL).  See [`embed-widget.md`](embed-widget.md)
+for detailed documentation.
+
 ---
 
 ## 2. Chat Area
@@ -71,6 +83,7 @@ The chat area is the end-user experience inside the frontend web app. It provide
 - real-time streaming responses and agent events
 - auto-scroll to bottom when revisiting a session
 - follow-up question suggestions after each response
+- embedded chat widget — temporary sessions for anonymous website visitors (see [embed-widget.md](embed-widget.md))
 
 The chat area contains no administrative logic.
 

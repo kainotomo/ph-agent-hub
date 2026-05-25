@@ -61,6 +61,10 @@ class Settings(BaseSettings):
     LOGIN_RATE_LIMIT: str = "5/minute"
     SEED_ALLOW_WEAK_PASSWORD: bool = False
 
+    # --- Embeddable Widget ---
+    EMBED_GUEST_TOKEN_SECRET: str = ""
+    WIDGET_ALLOWED_ORIGINS: str = "*"
+
     # --- Logging ---
     LOG_LEVEL: str = "INFO"
 

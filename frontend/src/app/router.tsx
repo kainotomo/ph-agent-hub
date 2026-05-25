@@ -2,19 +2,24 @@
 // PH Agent Hub — Router
 // =============================================================================
 // React Router createBrowserRouter; routes: /login, /chat, /chat/:sessionId,
-// /admin/*, all protected via RouteGuard.
+// /admin/*, /widget (embed), all protected via RouteGuard.
 // =============================================================================
 
 import { createBrowserRouter } from "react-router-dom";
 import { RouteGuard } from "../shared/components/RouteGuard";
 import LoginPage from "../features/auth/LoginPage";
 import ChatPage from "../features/chat/routes/ChatPage";
+import { WidgetPage } from "../features/chat/routes/WidgetPage";
 import AdminApp from "../features/admin/routes/AdminApp";
 
 export const router = createBrowserRouter([
   {
     path: "/login",
     element: <LoginPage />,
+  },
+  {
+    path: "/widget",
+    element: <WidgetPage />,
   },
   {
     element: <RouteGuard />,

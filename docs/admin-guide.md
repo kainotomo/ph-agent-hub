@@ -358,7 +358,38 @@ For Prompt Based skills, the key is auto-generated from the title if left empty 
 
 ---
 
-## 8. Licensing & Tenant Gating *(v1.10)*
+## 8. Embed Widget Configurations
+
+Embed configurations let you offer the AI chat assistant on external websites via
+a `<script>` tag. See the dedicated [`embed-widget.md`](embed-widget.md) guide for
+full details.
+
+### 8.1 Creating an Embed Config
+
+1. Go to **Admin → Embed Widget**
+2. Click **New Embed Config** and fill in the form
+3. Copy the generated embed snippet **immediately** — the token is shown only once
+4. Paste the `<script>` tag on your website
+
+### 8.2 Configuration Options
+
+- **Name** — descriptive label for admin reference
+- **Allowed Origins** — optional domain whitelist (comma-separated)
+- **Theme** — primary color, logo URL, greeting text, position (bubble/inline)
+- **Default Model / Skill / Template** — optional overrides (falls back to tenant defaults)
+- **Feature Toggles** — enable/disable file upload, model selection, feedback,
+  follow-up questions, and cross-session memory per embed
+
+### 8.3 Managing Tokens
+
+- **Regenerate** invalidates the old token immediately — update your website's snippet
+- **Copy Snippet** copies the current `<script>` tag to your clipboard
+- **Delete** permanently removes the embed config (existing sessions continue until
+  their 24h TTL expires)
+
+---
+
+## 9. Licensing & Tenant Gating *(v1.10)*
 
 PH Agent Hub supports a free/pro licensing model that controls how many tenants can be created.
 

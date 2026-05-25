@@ -175,6 +175,8 @@ Key variables:
 | `PMA_DOMAIN` | Production phpMyAdmin domain (Traefik) |
 | `MAX_FREE_TENANTS` | Max tenants allowed on free tier (default: `3`) |
 | `LICENSE_PUBLIC_KEY` | Ed25519 public key for Pro license verification (base64, 32 bytes). Leave empty to disable. |
+| `EMBED_GUEST_TOKEN_SECRET` | Separate JWT secret for guest (widget) tokens. Generate with `python -c "import secrets; print(secrets.token_hex(32))"`. Required for the embeddable chat widget. |
+| `WIDGET_ALLOWED_ORIGINS` | CORS origins for the widget API. Default `*` (use embed config origin whitelist for security). |
 
 **Important:** `infrastructure/env` is in `.gitignore` — keep secrets out of version control.
 

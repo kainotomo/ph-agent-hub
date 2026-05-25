@@ -14,6 +14,7 @@
 
 import logging
 import math
+import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import select, delete, func as sa_func
@@ -167,7 +168,7 @@ async def index_document(
     for i, (chunk_text, emb) in enumerate(zip(chunks, embeddings)):
         if not emb:
             continue
-        doc_id = f"{file_upload.id}_{i}"
+        doc_id = str(uuid.uuid4())
         row = RAGDocument(
             id=doc_id,
             tenant_id=file_upload.tenant_id,

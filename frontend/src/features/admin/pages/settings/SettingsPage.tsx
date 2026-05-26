@@ -19,6 +19,7 @@ import {
   Space,
   Alert,
   Descriptions,
+  Switch,
 } from "antd";
 import {
   SettingOutlined,
@@ -29,6 +30,7 @@ import {
   InfoCircleOutlined,
   EyeInvisibleOutlined,
   EyeOutlined,
+  RocketOutlined,
 } from "@ant-design/icons";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -163,6 +165,7 @@ export function SettingsPage() {
       form.setFieldsValue({
         currency: settingsData.settings.currency || "EUR",
         license_key: storedLicense,
+        demo_enabled: settingsData.settings.demo_enabled === "true",
       });
       setLicenseInput(storedLicense);
     }
@@ -176,12 +179,14 @@ export function SettingsPage() {
     );
   }
 
-  const handleSave = (values: Record<string, string>) => {
+  const handleSave = (values: Record<string, string | boolean>) => {
     // Only include license_key if it was changed
-    const payload: Record<string, string> = { currency: values.currency };
+    const payload: Record<string, string> = { currency: values.currency as string };
     if (values.license_key !== undefined) {
-      payload.license_key = values.license_key || "";
+      payload.license_key = (values.license_key as string) || "";
     }
+    // demo_enabled is a boolean from Switch, store as "true"/"false" string
+    payload.demo_enabled = values.demo_enabled ? "true" : "false";
     mutation.mutate(payload);
   };
 
@@ -277,6 +282,21 @@ export function SettingsPage() {
               tooltip="Used to format cost values across the app"
             >
               <Select options={CURRENCY_OPTIONS} />
+            </Form.Item>
+
+            {/* Demo Mode */}
+            <Form.Item
+              name="demo_enabled"
+              label={
+                <Space>
+                  <RocketOutlined />
+                  <span>Demo Mode</span>
+                </Space>
+              }
+              valuePropName="checked"
+              tooltip="When enabled, the login page shows a 'Try It Now' button and anonymous visitors can chat via /demo"
+            >
+              <Switch />
             </Form.Item>
 
             {/* License Key */}

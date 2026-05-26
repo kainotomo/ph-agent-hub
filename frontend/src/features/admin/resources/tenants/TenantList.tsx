@@ -19,6 +19,7 @@ import {
   Input,
   Alert,
   Tooltip,
+  Tag,
 } from "antd";
 import {
   EditOutlined,
@@ -26,6 +27,7 @@ import {
   SearchOutlined,
   WarningOutlined,
   KeyOutlined,
+  StarOutlined,
 } from "@ant-design/icons";
 import { useMutation, useQueryClient, useQuery } from "@tanstack/react-query";
 import {
@@ -84,7 +86,22 @@ export function TenantList() {
   });
 
   const columns = [
-    { title: "Name", dataIndex: "name", key: "name", sorter: true },
+    {
+      title: "Name",
+      dataIndex: "name",
+      key: "name",
+      sorter: true,
+      render: (name: string, record: TenantData) => (
+        <Space>
+          {name}
+          {record.is_demo && (
+            <Tag icon={<StarOutlined />} color="gold">
+              Demo
+            </Tag>
+          )}
+        </Space>
+      ),
+    },
     {
       title: "Cost",
       dataIndex: "total_cost",

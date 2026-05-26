@@ -151,7 +151,7 @@ async def get_sales_order(order_id: str) -> dict:
 
 MAF supports token-level streaming. PH Agent Hub uses **Server-Sent Events (SSE)** delivered via [`sse-starlette`](https://github.com/sysid/sse-starlette) on the backend and consumed by [`@microsoft/fetch-event-source`](https://github.com/Azure/fetch-event-source) on the frontend.
 
-MAF stream events are mapped to typed SSE events in `runner.py` before being sent to the client. The full event schema, error codes, nginx configuration, and client-side handling pattern are defined in [streaming-protocol.md](streaming-protocol.md).
+MAF stream events are mapped to typed SSE events in `runner.py` before being sent to the client. The full event schema, error codes, nginx configuration, and client-side handling pattern are defined in [backend-architecture.md](backend-architecture.md) §11.
 
 MAF streaming integration points:
 - Token chunks are forwarded to the SSE response stream as they arrive from the model
@@ -209,4 +209,4 @@ MAF has built-in OpenTelemetry integration. PH Agent Hub configures:
 - [MAF Docs — Providers](https://learn.microsoft.com/en-us/agent-framework/agents/providers/index)
 - [MAF Docs — Tools](https://learn.microsoft.com/en-us/agent-framework/agents/tools/index)
 - [DeepSeek Stabilizer](deepseek-stabilizer.md)
-- [Streaming Protocol](streaming-protocol.md)
+- [Streaming Protocol](backend-architecture.md#11-streaming-protocol)

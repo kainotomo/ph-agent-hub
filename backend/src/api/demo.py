@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
@@ -26,7 +26,7 @@ class FollowUpQuestionsResponse(BaseModel):
 from ..agents.runner import run_agent
 from ..core.config import settings
 from ..core.dependencies import get_db, get_demo_context, DemoContext
-from ..core.exceptions import NotFoundError, ServiceUnavailableError
+from ..core.exceptions import NotFoundError, ServiceUnavailableError, ValidationError
 from ..core.jwt import create_demo_token
 from ..core.limiter import limiter
 from ..core.redis import (
@@ -37,6 +37,7 @@ from ..core.redis import (
 )
 from ..services.settings_service import get_setting, get_all_settings
 from ..services.tenant_service import get_demo_tenant
+from ..services.upload_service import create_upload
 
 import logging
 
@@ -90,6 +91,14 @@ class DemoMessageResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class FileUploadResponse(BaseModel):
+    file_id: str
+    original_filename: str
+    content_type: str
+    size_bytes: int
+    created_at: datetime
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +377,56 @@ async def _is_stream_cancelled(session_id: str) -> bool:
     key = f"stream_cancel:{session_id}"
     result = await r.get(key)
     return result is not None
+
+
+# =============================================================================
+# POST /demo/session/upload — upload a file
+# =============================================================================
+
+
+@router.post(
+    "/session/upload",
+    response_model=FileUploadResponse,
+    status_code=201,
+)
+async def upload_demo_file(
+    file: UploadFile = File(...),
+    ctx: DemoContext = Depends(get_demo_context),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upload a file to the demo session (stored in MinIO).
+
+    Files are stored as temporary uploads and cleaned up when the
+    session expires or the periodic cleanup task runs.
+    """
+    await _assert_demo_enabled(db)
+
+    session = await get_temp_session(ctx.session_id)
+    if session is None:
+        raise NotFoundError("Session not found or expired")
+
+    if not file.filename:
+        raise ValidationError("File must have a filename")
+
+    file_bytes = await file.read()
+    content_type = file.content_type or "application/octet-stream"
+
+    upload = await create_upload(
+        db=db,
+        session_data=session,
+        current_user=None,
+        file_bytes=file_bytes,
+        original_filename=file.filename,
+        content_type=content_type,
+    )
+
+    return FileUploadResponse(
+        file_id=upload.id,
+        original_filename=upload.original_filename,
+        content_type=upload.content_type,
+        size_bytes=upload.size_bytes,
+        created_at=upload.created_at,
+    )
 
 
 # =============================================================================

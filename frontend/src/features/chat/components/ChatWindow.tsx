@@ -543,10 +543,13 @@ export function ChatWindow({
       try {
         const formData = new FormData();
         formData.append("file", file);
+        const endpoint = demo
+          ? `/demo/session/upload`
+          : `/chat/session/${sessionId}/upload`;
         const res = await api<{
           file_id: string;
           original_filename: string;
-        }>(`/chat/session/${sessionId}/upload`, {
+        }>(endpoint, {
           method: "POST",
           body: formData,
         });
@@ -565,7 +568,7 @@ export function ChatWindow({
       }
       return false; // Prevent default Upload behavior
     },
-    [sessionId],
+    [sessionId, demo],
   );
 
   const handleRemoveFile = useCallback((fileId: string) => {

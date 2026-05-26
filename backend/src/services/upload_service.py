@@ -118,7 +118,7 @@ def _resolve_content_type(content_type: str, filename: str) -> str:
 async def create_upload(
     db: AsyncSession,
     session_data: dict,
-    current_user: User,
+    current_user: User | None,
     file_bytes: bytes,
     original_filename: str,
     content_type: str,
@@ -153,11 +153,37 @@ async def create_upload(
     # 3. Determine if this is a temporary session
     is_temp = session_data.get("is_temporary", False)
 
-    # 4. Build storage path
+    # 4. Build storage path (resolve user/tenant from session_data for guests)
     file_id = str(uuid.uuid4())
-    bucket = f"{settings.MINIO_BUCKET_PREFIX}-{current_user.tenant_id}"
+    if current_user:
+        uploader_id = current_user.id
+        uploader_tenant_id = current_user.tenant_id
+    else:
+        # For guest/demo uploads, use any user from the tenant as owner
+        from ..db.orm.users import User as UserORM
+        from sqlalchemy import select
+        result = await db.execute(
+            select(UserORM).where(
+                UserORM.tenant_id == session_data.get("tenant_id", "")
+            ).limit(1)
+        )
+        first_user = result.scalar_one_or_none()
+        if first_user:
+            uploader_id = first_user.id
+            uploader_tenant_id = first_user.tenant_id
+        else:
+            # Fallback: use any admin user across all tenants
+            result = await db.execute(
+                select(UserORM).where(UserORM.role == "admin").limit(1)
+            )
+            admin_user = result.scalar_one_or_none()
+            if not admin_user:
+                raise ValidationError("No user available for file upload")
+            uploader_id = admin_user.id
+            uploader_tenant_id = session_data.get("tenant_id", "unknown")
+    bucket = f"{settings.MINIO_BUCKET_PREFIX}-{uploader_tenant_id}"
     key = (
-        f"uploads/{current_user.id}/{session_data['id']}/"
+        f"uploads/{uploader_id}/{session_data['id']}/"
         f"{file_id}-{original_filename}"
     )
 
@@ -181,8 +207,8 @@ async def create_upload(
     # 6. Persist DB row
     upload = FileUpload(
         id=file_id,
-        tenant_id=current_user.tenant_id,
-        user_id=current_user.id,
+        tenant_id=uploader_tenant_id,
+        user_id=uploader_id,
         session_id=None if is_temp else session_data["id"],
         original_filename=original_filename,
         content_type=resolved_type,

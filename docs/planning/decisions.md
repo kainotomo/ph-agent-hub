@@ -20,7 +20,7 @@ A log of key design decisions made during the design phase, with rationale. Orde
 **Decision:** Use Server-Sent Events (SSE) for streaming agent responses to the frontend. WebSocket is not used.
 **Rationale:** Chat streaming is unidirectional (server → client). SSE is designed for this. Works through nginx without special proxy configuration. Easier to debug and test than WebSocket. Stop-generation is handled by a separate `DELETE` HTTP request.
 **Alternatives considered:** WebSocket (bidirectional, adds proxy complexity with no benefit for this workload).
-**Reference:** [streaming-protocol.md](../streaming-protocol.md)
+**Reference:** [backend-architecture.md](../backend-architecture.md) §11
 
 ---
 
@@ -30,7 +30,7 @@ A log of key design decisions made during the design phase, with rationale. Orde
 **Decision:** Use `sse-starlette` for SSE responses in FastAPI and `@microsoft/fetch-event-source` for SSE consumption in React.
 **Rationale:** `sse-starlette` is the standard SSE library for Starlette/FastAPI with minimal boilerplate. `@microsoft/fetch-event-source` is required (over native `EventSource`) because it supports SSE over POST requests — necessary since the message is sent in the request body. The native `EventSource` API only supports GET.
 **Alternatives considered:** Native browser `EventSource` (does not support POST).
-**Reference:** [streaming-protocol.md](../streaming-protocol.md)
+**Reference:** [backend-architecture.md](../backend-architecture.md) §11
 
 ---
 
@@ -50,7 +50,7 @@ A log of key design decisions made during the design phase, with rationale. Orde
 **Decision:** Use MinIO (self-hosted, S3-compatible) as the object storage backend for file uploads.
 **Rationale:** S3-compatible API from day one means migrating to AWS S3 or Cloudflare R2 in the future requires only changing env vars, not code. Works for single-server and multi-server deployments. Supports presigned URLs. Runs as a Docker container inside the existing stack. Local disk was rejected because it breaks multi-container deployments and has no presigned URL support.
 **Alternatives considered:** Local disk (rejected — not multi-container safe, no migration path to cloud without code rewrite), AWS S3/Cloudflare R2 (premature for a self-hosted system), Ceph (too heavy).
-**Reference:** [file-upload-architecture.md](../file-upload-architecture.md)
+**Reference:** [backend-architecture.md](../backend-architecture.md) §10
 
 ---
 
@@ -60,7 +60,7 @@ A log of key design decisions made during the design phase, with rationale. Orde
 **Decision:** All MinIO/boto3 interactions are contained in `/backend/src/storage/s3.py`. No service, agent, or API handler calls `boto3` directly.
 **Rationale:** Ensures future migration to AWS S3, Cloudflare R2, or Azure Blob Storage requires changes in exactly one file. Azure Blob Storage is not S3-compatible, so a storage abstraction layer may be needed in the future — keeping calls in one module makes that refactor straightforward.
 **Alternatives considered:** Full storage abstraction interface now (deferred — not needed until a second backend is required).
-**Reference:** [file-upload-architecture.md](../file-upload-architecture.md) §10
+**Reference:** [backend-architecture.md](../backend-architecture.md) §10.1
 
 ---
 

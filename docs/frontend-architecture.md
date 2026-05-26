@@ -65,7 +65,7 @@ Recommended stack:
 - **TypeScript**
 - **React Router**
 - **TanStack Query** for data fetching and mutations
-- **SSE** ([`@microsoft/fetch-event-source`](https://github.com/Azure/fetch-event-source)) for streaming responses and agent events — see [streaming-protocol.md](streaming-protocol.md)
+- **SSE** ([`@microsoft/fetch-event-source`](https://github.com/Azure/fetch-event-source)) for streaming responses and agent events — see [backend-architecture.md](backend-architecture.md) §11
 - **Ant Design 5** — the design system for both chat and admin areas
 
 The frontend should remain framework-light and avoid duplicating backend behavior.
@@ -264,4 +264,185 @@ The PWA install targets the **Chat Area** as the primary experience. The admin a
 - share authentication, routing, and UI foundations
 - preserve strong separation between chat and admin experiences
 - support future prompt, skill, and agent UX without re-architecting the app
+- deliver a mobile-friendly, installable experience through PWA support
+
+---
+
+## 12. Chat Area
+
+The chat area is the end-user experience inside the single React frontend. It provides a clean interface for interacting with AI agents while keeping all administrative logic out of the user's view.
+
+### 12.1 Purpose
+
+The chat area focuses on:
+- Real-time streaming chat with AI agents
+- Model selection based on tenant permissions
+- Template, prompt, and skill selection
+- Personal skill creation and management
+- File uploads
+- Memory management (view, delete, add entries, cross-session retrieval)
+- Session-level tool activation
+- Temporary and permanent chat sessions
+- Message editing, branching, and regeneration
+- Message feedback
+- Full-text search across sessions and messages
+- Follow-up question suggestions
+
+It does **not** include any admin functionality.
+
+### 12.2 Core Features
+
+| Feature | Description |
+|---|---|
+| **Authentication** | Login shared with admin area; JWT in memory; automatic token refresh |
+| **Chat Interface** | Markdown rendering, code highlighting, streaming tokens, file attachments, auto-scroll, stop generation, tool activity display, branch navigation, model name on each response |
+| **Model Selection** | Dropdown of tenant-enabled models; default pre-selected; disabled models hidden |
+| **Templates & Prompts** | Dropdown for tenant templates; personal prompt library for reusable user-authored prompts |
+| **Skills** | Dropdown for tenant and personal skills; maps to MAF agents/workflows; auto-syncs session tools on skill change; users can create/edit/delete personal skills |
+| **Session Management** | Create (permanent or temporary), rename, delete (with confirmation), pin/unpin, convert temp→permanent, collapsible session list |
+| **Message Management** | Edit (creates branch + auto-regenerates), delete (soft-delete), regenerate (creates branch), branch navigation, thumbs up/down feedback |
+| **Search** | Full-text search across user's own sessions and messages |
+| **Memory** | Paginated view, filter by session, delete, manually add entries, cross-session retrieval, automatic vs. manual entry markers |
+| **Tool Activation** | View tenant-enabled tools; activate/deactivate per session; state stored server-side |
+| **File Uploads** | Upload to backend; backend handles extraction and embedding |
+| **Temporary Sessions** | Redis-backed with TTL; auto-deleted on logout/expiry; memory disabled; visually marked in UI |
+
+### 12.3 UI Layout Structure
+
+```
+/frontend/src/features/chat/
+  /routes
+  /components
+    ChatWindow.tsx
+    MessageBubble.tsx
+    MessageBranchNav.tsx
+    MessageFeedback.tsx
+    ModelSelector.tsx
+    TemplateSelector.tsx
+    PromptLibrary.tsx
+    SkillSelector.tsx
+    PersonalSkillEditor.tsx
+    FileUpload.tsx
+    SessionSidebar.tsx
+    SessionSearch.tsx
+    MemoryManager.tsx
+    SessionToolActivation.tsx
+    TemporaryChatBadge.tsx
+  /hooks
+  /services
+    chat.ts
+  /state
+```
+
+### 12.4 Navigation Structure
+
+**Sidebar:** New Chat (with temp/permanent toggle), sessions list (pinned first), search, memory manager, user settings, logout
+
+**Main Area:** Chat window, input box, model/template/prompt/skill selectors, tool activation panel, file upload button
+
+### 12.5 API Integration
+
+The chat area consumes these backend endpoints:
+
+| Category | Endpoints |
+|---|---|
+| **Auth** | `POST /auth/login`, `GET /auth/me` |
+| **Sessions** | `POST/GET/PUT/DELETE /chat/session`, `POST /chat/session/:id/finalize`, `GET /chat/sessions/search` |
+| **Messages** | `POST/GET /chat/session/:id/message`, `PUT/DELETE /chat/session/:id/message/:msgId`, `POST .../regenerate`, `POST .../feedback` |
+| **Streaming** | `POST /chat/session/:id/message` (with `Accept: text/event-stream`), `DELETE /chat/session/:id/stream` |
+| **Config** | `GET /models`, `GET /templates` |
+| **Prompts** | `GET/POST/PUT/DELETE /prompts` |
+| **Skills** | `GET/POST/PUT/DELETE /skills` |
+| **Session Tools** | `GET/POST/DELETE /chat/session/:id/tools` |
+| **Memory** | `GET/POST/DELETE /memory` |
+| **Files** | `POST/GET /chat/session/:id/upload`, `GET .../upload/:fileId/url`, `DELETE .../upload/:fileId` |
+
+### 12.6 Security Considerations
+
+- JWT stored in memory only (not localStorage)
+- No admin endpoints exposed in the chat area
+- Tenant context enforced by backend
+- File uploads validated server-side
+- No sensitive data stored in browser
+- Frontend feature visibility does not replace backend authorization
+
+---
+
+## 13. Admin Area
+
+The admin area is the operational control surface for administrators and tenant managers. It provides visibility and control over tenants, users, models, tools, templates, skills, and system configuration.
+
+### 13.1 Purpose
+
+**Platform administrators (role: `admin`)** can:
+- Manage all tenants and platform-level settings
+- Manage users across any tenant
+- Configure models, tools, templates, and skills globally
+- Manage MCP server connections and sync their tools
+- Manage platform-wide memory entries
+- Configure system-level settings (including licensing)
+- View platform-wide analytics and logs
+
+**Tenant managers (role: `manager`)** can:
+- Manage users within their own tenant only
+- Create, edit, and delete tools within their tenant
+- Manage MCP server connections within their tenant
+- Enable/disable models for their tenant
+- Manage templates and skills within their tenant
+- View analytics scoped to their tenant
+
+Managers cannot create/delete tenants, access other tenants, or modify platform-level configuration.
+
+### 13.2 Role Capabilities Summary
+
+| Capability | admin | manager |
+|---|---|---|
+| Create/delete tenants | ✓ | ✗ |
+| Manage users (all tenants) | ✓ | ✗ |
+| Manage users (own tenant) | ✓ | ✓ |
+| Create/edit/delete tools | ✓ | ✓ |
+| Manage MCP servers | ✓ | ✓ |
+| Enable/disable models | ✓ | ✓ |
+| Manage templates and skills | ✓ | ✓ |
+| Platform-wide memory entries | ✓ | ✗ |
+| View analytics (own tenant) | ✓ | ✓ |
+| View platform-wide analytics | ✓ | ✗ |
+| System settings (licensing) | ✓ | ✗ |
+
+### 13.3 Core Features
+
+| Feature | Description |
+|---|---|
+| **User Management** | Create, delete, assign roles, reset passwords, activate/deactivate accounts |
+| **Tenant Management** | Create/delete tenants, configure defaults, assign models and tools (admin only) |
+| **Model Management** | Add/remove models, configure API keys (encrypted), enable/disable per tenant, set routing priority and defaults |
+| **Tool Management** | Create/edit/delete tools, configure ERPNext/Membrane/custom tools, upload definitions, enable/disable per tenant, view MCP-synced tools |
+| **MCP Server Management** | Create/edit/delete MCP server configs (Streamable HTTP, Stdio, WebSocket), test connections, preview tools, sync tools, env vars encrypted at rest |
+| **Template Management** | Create/edit/delete curated templates, assign to tenants/roles/users, set defaults |
+| **Skill Management** | Create/edit/delete skills, map to MAF agents/workflows, configure defaults |
+| **Usage Analytics** | Token usage per user/tenant, model breakdown, tool usage statistics, error logs; managers see own tenant only |
+| **Audit Logging** | Immutable record of all admin actions; admin only; no delete endpoint |
+| **Memory Management** | Read-only (with delete) view of all memory entries; admins see all, managers see own tenant |
+| **System Settings** | Global config, logging level, licensing (MAX_FREE_TENANTS, Ed25519 license key) |
+
+### 13.4 UI Layout Structure
+
+```
+/frontend/src/features/admin/
+  /resources
+    /users
+    /tenants
+    /models
+    /tools
+    /templates
+    /skills
+  /pages
+    /analytics
+    /settings
+    /mcp-servers
+    /memories
+  /components
+```
+
+The admin area uses [Refine](https://refine.dev/) for CRUD-heavy screens (resource lists, forms, tables, filters) and custom components as needed for analytics and operational views. Ant Design 5 with `@refinedev/antd` provides the UI component layer.
 - deliver a mobile-friendly, installable experience through PWA support

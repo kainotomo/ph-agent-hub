@@ -504,3 +504,206 @@ It is designed for both single‑server and multi‑server deployments.
 - Support dual-mode session persistence (permanent via MariaDB, temporary via Redis)
 - Support non-destructive message branching for edits and regeneration
 - Expose message feedback for model quality analytics
+
+---
+
+## 10. File Uploads
+
+PH Agent Hub uses **MinIO** as the object storage backend for all file uploads. The S3-compatible API enables future migration to AWS S3 or Cloudflare R2 with only environment variable changes.
+
+### 10.1 Storage Architecture
+
+- All `boto3` calls are contained in `/backend/src/storage/s3.py` — the only module that interacts with MinIO directly
+- One bucket per tenant, created automatically on tenant provisioning: `phhub-tenant-{tenant_id}`
+- Object key format: `uploads/{user_id}/{session_id}/{file_id}-{original_filename}`
+- All objects are private; access is always via presigned URLs (15-minute validity)
+- Migration to Azure Blob Storage would require adding an adapter to `s3.py` only
+
+### 10.2 Data Model
+
+**Table: `file_uploads`**
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | UUID, PK | |
+| `tenant_id` | UUID, FK | |
+| `user_id` | UUID, FK | |
+| `session_id` | UUID, FK, nullable | Null if uploaded outside a session |
+| `message_id` | UUID, FK, nullable | Linked when attached to a message |
+| `original_filename` | string | |
+| `content_type` | string | MIME type |
+| `size_bytes` | int | |
+| `storage_key` | string | Full object key within the tenant bucket |
+| `bucket` | string | MinIO bucket name |
+| `is_temporary` | boolean | True if parent session is temporary |
+| `created_at` | timestamp | |
+
+### 10.3 API Endpoints
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `POST` | `/chat/session/:id/upload` | Upload a file (multipart/form-data) |
+| `GET` | `/chat/session/:id/uploads` | List files for a session |
+| `GET` | `/chat/session/:id/upload/:fileId/url` | Get presigned download URL |
+| `DELETE` | `/chat/session/:id/upload/:fileId` | Delete a file |
+
+### 10.4 Upload Flow
+
+```
+User selects file → Frontend POSTs multipart/form-data → Backend validates
+(JWT, file type, file size, session ownership) → Stores object in MinIO →
+Inserts file_uploads row → Returns file_id → Frontend attaches file_id(s)
+to next message → Backend links message_id after message is persisted
+```
+
+### 10.5 Limits
+
+| Setting | Default | Env var |
+|---|---|---|
+| Max file size | 100 MB | `UPLOAD_MAX_SIZE_BYTES` |
+| Allowed MIME types | `text/plain`, `text/csv`, `text/markdown`, `application/pdf`, `application/json`, `image/png`, `image/jpeg`, `image/gif`, `image/webp` | `UPLOAD_ALLOWED_TYPES` |
+
+### 10.6 Temporary Session Rules
+
+- File uploads are **disabled** for temporary sessions (`403`)
+- The frontend hides the upload button when the session is in temporary mode
+- No file cleanup needed on temp session expiry — uploads were never permitted
+
+### 10.7 File Lifecycle
+
+| Event | Action |
+|---|---|
+| Session deleted (permanent) | All `file_uploads` rows deleted; objects removed from MinIO |
+| User account deleted | All files owned by user deleted from MinIO and DB |
+| Tenant deleted | All tenant bucket objects deleted; all rows deleted |
+| Temporary session expires | No cleanup needed — uploads blocked |
+
+### 10.8 Agent Tool Integration
+
+When a message includes attached files, the backend extracts content before the agent loop runs:
+- **Text-based files** (PDF, CSV, Markdown, JSON, plain text): extracted and injected into the agent's context window
+- **Images**: passed as multi-modal message content if the selected model supports vision
+
+### 10.9 Environment Variables
+
+```
+MINIO_ENDPOINT=http://minio:9000
+MINIO_ACCESS_KEY=minioadmin
+MINIO_SECRET_KEY=minioadmin
+MINIO_BUCKET_PREFIX=phhub-tenant
+UPLOAD_MAX_SIZE_BYTES=104857600
+UPLOAD_ALLOWED_TYPES=text/plain,text/csv,text/markdown,application/pdf,application/json,image/png,image/jpeg,image/gif,image/webp
+```
+
+---
+
+## 11. Streaming Protocol
+
+PH Agent Hub uses **Server-Sent Events (SSE)** over HTTP for streaming agent responses to the frontend. WebSocket is not used — chat streaming is unidirectional (server → client), and SSE works transparently through nginx without special proxy configuration.
+
+### 11.1 Libraries
+
+| Layer | Library | Reason |
+|---|---|---|
+| Backend | [`sse-starlette`](https://github.com/sysid/sse-starlette) | SSE support for FastAPI/Starlette |
+| Frontend | [`@microsoft/fetch-event-source`](https://github.com/Azure/fetch-event-source) | SSE over POST requests (native `EventSource` only supports GET) |
+
+### 11.2 Streaming Endpoints
+
+**Authenticated users:**
+```
+POST /chat/session/:id/message
+Content-Type: application/json
+Accept: text/event-stream
+Authorization: Bearer <jwt>
+```
+
+**Widget (anonymous guests):**
+```
+POST /widget/session/message
+Content-Type: application/json
+Accept: text/event-stream
+Authorization: Bearer <guest_jwt>
+```
+
+**Stop generation (both modes):**
+```
+DELETE /chat/session/:id/stream
+DELETE /widget/session/stream
+```
+
+The response is `text/event-stream`. The connection stays open until the agent finishes or the client aborts. Stop generation cancels the MAF agent run and saves the partially generated message as-is.
+
+### 11.3 SSE Event Types
+
+| Event | Payload | When |
+|---|---|---|
+| `token` | `{ delta: "token text" }` | Each streamed token from the model. `<think>` tokens are stripped before emission. |
+| `tool_start` | `{ tool_call_id, tool_name, arguments }` | Agent begins executing a tool call |
+| `tool_result` | `{ tool_call_id, tool_name, success, result_summary }` | Tool call completes |
+| `step_complete` | `{ step_index, total_steps_so_far }` | End of each MAF agent step |
+| `message_complete` | `{ branch_index, total_tokens, model_id }` | Agent finishes; message persisted |
+| `follow_up_questions` | `{ questions: [...] }` | After `message_complete` if follow-up questions are enabled |
+| `summarized` | `{ summary, summarized_message_count, tokens_saved }` | Conversation history was auto-summarized |
+| `error` | `{ code, message }` | Non-recoverable error; connection closes after |
+| `heartbeat` | `{}` | Every 15s on idle to keep connection alive |
+
+**Error codes:** `model_timeout`, `model_error`, `tool_error`, `max_steps_exceeded`, `invalid_output`, `auth_error`, `internal_error`
+
+### 11.4 Backend Implementation (FastAPI)
+
+```python
+from sse_starlette.sse import EventSourceResponse
+
+async def stream_agent_response(session_id, message_id, agent_stream):
+    async def event_generator():
+        async for maf_event in agent_stream:
+            if isinstance(maf_event, TokenEvent):
+                yield {"event": "token", "data": json.dumps({...})}
+            # ... other event types
+        yield {"event": "message_complete", "data": json.dumps({...})}
+    return EventSourceResponse(event_generator())
+```
+
+### 11.5 Frontend Implementation
+
+```typescript
+import { fetchEventSource } from '@microsoft/fetch-event-source';
+
+await fetchEventSource(`/api/chat/session/${sessionId}/message`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${jwt}` },
+  body: JSON.stringify({ content: userMessage }),
+  signal: abortController.signal,
+  onmessage(event) {
+    const payload = JSON.parse(event.data);
+    switch (event.event) {
+      case 'token': appendToken(payload.delta); break;
+      case 'tool_start': showToolProgress(payload); break;
+      case 'tool_result': updateToolProgress(payload); break;
+      case 'step_complete': updateStepCount(payload); break;
+      case 'message_complete': finalizeMessage(payload); break;
+      case 'error': showError(payload); break;
+      case 'heartbeat': break;
+    }
+  },
+});
+```
+
+### 11.6 Nginx Configuration
+
+SSE requires disabling response buffering in nginx:
+
+```nginx
+location /api/ {
+  proxy_pass http://backend:8000/;
+  proxy_http_version 1.1;
+  proxy_buffering off;
+  proxy_cache off;
+  proxy_read_timeout 300s;
+  proxy_set_header Connection '';
+  chunked_transfer_encoding on;
+}
+```
+
+Without `proxy_buffering off`, nginx buffers the entire response before sending it, defeating streaming entirely.

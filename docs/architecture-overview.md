@@ -207,13 +207,9 @@ Additional documentation is provided in:
 
 - [backend-architecture.md](backend-architecture.md)
 - [frontend-architecture.md](frontend-architecture.md)
-- [chat-area-architecture.md](chat-area-architecture.md)
-- [admin-area-architecture.md](admin-area-architecture.md)
 - [data-model.md](data-model.md)
 - [deployment.md](deployment.md)
 - [deepseek-stabilizer.md](deepseek-stabilizer.md)
 - [agent-framework-integration.md](agent-framework-integration.md)
-- [streaming-protocol.md](streaming-protocol.md)
-- [file-upload-architecture.md](file-upload-architecture.md)
 
 These documents define the detailed implementation plan for PH Agent Hub.

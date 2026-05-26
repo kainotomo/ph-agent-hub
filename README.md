@@ -98,7 +98,6 @@ The platform starts at:
 | [Frontend Architecture](docs/frontend-architecture.md) | Frontend developers |
 | [Data Model](docs/data-model.md) | Developers |
 | [Deployment Guide](docs/deployment.md) | DevOps |
-| [Streaming Protocol](docs/streaming-protocol.md) | Developers |
 | [Agent Framework Integration](docs/agent-framework-integration.md) | Backend developers |
 | [DeepSeek Stabilizer](docs/deepseek-stabilizer.md) | Backend developers |
 

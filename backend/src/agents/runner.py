@@ -53,6 +53,7 @@ from ..db.orm.tools import Tool
 from ..db.orm.users import User
 from ..models.base import get_chat_client
 from ..services.usage_service import write_usage_log
+from ..services.balance_service import check_balance_or_raise, deduct_usage
 
 logger = logging.getLogger(__name__)
 
@@ -805,6 +806,13 @@ async def run_agent(
         user_message=user_message,
     )
 
+    # ---- Pre-flight balance check -----------------------------------------
+    if current_user is not None:
+        try:
+            await check_balance_or_raise(db, tenant_id)
+        except Exception:
+            raise
+
     # ---- 7. Run agent or workflow ----------------------------------------
     raw_response: str
 
@@ -880,8 +888,9 @@ async def run_agent(
 
         # ---- 10. Write usage log (non-streaming) -----------------------------
         if current_user is not None:
+            usage_log = None
             try:
-                await write_usage_log(
+                usage_log = await write_usage_log(
                     db,
                     tenant_id=current_user.tenant_id,
                     tenant_name=getattr(cfg, "tenant_name", "") or "",
@@ -900,6 +909,19 @@ async def run_agent(
                 )
             except Exception:
                 logger.exception("Failed to write usage log (non-streaming)")
+
+            # ---- Deduct usage cost from tenant balance -------------------------
+            if usage_log is not None and usage_log.cost is not None:
+                try:
+                    await deduct_usage(
+                        db,
+                        tenant_id=current_user.tenant_id,
+                        cost_eur=usage_log.cost,
+                        reference_type="usage_log",
+                        reference_id=usage_log.id,
+                    )
+                except Exception:
+                    logger.exception("Failed to deduct usage from tenant balance")
 
         # ---- 11. Post-response tasks (follow-up questions, auto-tagging) -----
         _schedule_post_response_tasks(
@@ -2099,6 +2121,13 @@ async def run_agent_stream(
             user_message=user_message,
         )
 
+        # ---- Pre-flight balance check -----------------------------------------
+        if current_user is not None:
+            try:
+                await check_balance_or_raise(db, tenant_id)
+            except Exception:
+                raise
+
         # Emit summarized event if auto-summarization happened
         if summary_info:
             yield {
@@ -2234,8 +2263,9 @@ async def run_agent_stream(
                 )
 
             if cfg is not None and current_user is not None:
+                usage_log = None
                 try:
-                    await write_usage_log(
+                    usage_log = await write_usage_log(
                         db,
                         tenant_id=current_user.tenant_id,
                         tenant_name=getattr(cfg, "tenant_name", "") or "",
@@ -2254,6 +2284,19 @@ async def run_agent_stream(
                     )
                 except Exception:
                     logger.exception("Failed to write usage log (streaming)")
+
+                # ---- Deduct usage cost from tenant balance -------------------------
+                if usage_log is not None and usage_log.cost is not None:
+                    try:
+                        await deduct_usage(
+                            db,
+                            tenant_id=current_user.tenant_id,
+                            cost_eur=usage_log.cost,
+                            reference_type="usage_log",
+                            reference_id=usage_log.id,
+                        )
+                    except Exception:
+                        logger.exception("Failed to deduct usage from tenant balance (streaming)")
         except Exception:
             logger.exception("Failed to persist partial message on stream close")
 

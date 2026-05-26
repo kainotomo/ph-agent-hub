@@ -67,11 +67,26 @@ export interface TenantData {
   id: string;
   name: string;
   is_demo: boolean;
+  balance_euros: number | null;
+  warning_threshold_eur: number | null;
+  balance_warning: boolean;
   created_at: string;
   updated_at: string;
   total_tokens_in: number;
   total_tokens_out: number;
   total_cost: number;
+}
+
+export interface BalanceTransactionData {
+  id: string;
+  tenant_id: string;
+  admin_user_id: string | null;
+  amount_eur: number;
+  balance_after: number;
+  reason: string;
+  reference_type: string | null;
+  reference_id: string | null;
+  created_at: string;
 }
 
 export interface ModelData {
@@ -316,6 +331,44 @@ export function updateTenant(id: string, data: { name: string; is_demo?: boolean
 export function deleteTenant(id: string, params?: { force?: boolean }): Promise<void> {
   const qs = params?.force ? "?force=true" : "";
   return api<void>(`/admin/tenants/${id}${qs}`, { method: "DELETE" });
+}
+
+// =============================================================================
+// Tenant Balance
+// =============================================================================
+
+export function updateTenantBalance(
+  id: string,
+  data: { amount_eur: number; reason: string },
+): Promise<TenantData> {
+  return api<TenantData>(`/admin/tenants/${id}/balance`, {
+    method: "PUT",
+    body: data,
+  });
+}
+
+export function disableTenantBalanceLimit(id: string): Promise<void> {
+  return api<void>(`/admin/tenants/${id}/balance`, { method: "DELETE" });
+}
+
+export function getTenantBalanceTransactions(
+  id: string,
+  params?: ListParams,
+): Promise<PaginatedResponse<BalanceTransactionData>> {
+  const qs = buildQueryString({ ...params });
+  return api<PaginatedResponse<BalanceTransactionData>>(
+    `/admin/tenants/${id}/balance/transactions${qs}`,
+  );
+}
+
+export function updateTenantBalanceConfig(
+  id: string,
+  data: { warning_threshold_eur: number | null },
+): Promise<TenantData> {
+  return api<TenantData>(`/admin/tenants/${id}/balance/config`, {
+    method: "PUT",
+    body: data,
+  });
 }
 
 // =============================================================================

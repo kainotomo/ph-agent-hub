@@ -24,6 +24,7 @@ from .message_embeddings import MessageEmbedding
 from .file_uploads import FileUpload
 from .rag import RAGDocument
 from .usage_logs import UsageLog
+from .balance_transactions import BalanceTransaction
 from .audit_logs import AuditLog
 from .app_settings import AppSetting
 from .embed_configs import EmbedConfig
@@ -52,6 +53,7 @@ __all__ = [
     "FileUpload",
     "RAGDocument",
     "UsageLog",
+    "BalanceTransaction",
     "AuditLog",
     "AppSetting",
     "EmbedConfig",

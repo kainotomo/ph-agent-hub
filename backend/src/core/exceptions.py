@@ -47,6 +47,11 @@ class ServiceUnavailableError(AppException):
         super().__init__(message, status_code=503)
 
 
+class InsufficientBalanceError(AppException):
+    def __init__(self, message: str = "Insufficient balance. Please contact your administrator to top up."):
+        super().__init__(message, status_code=402)
+
+
 # ---------------------------------------------------------------------------
 # FastAPI exception handlers
 # ---------------------------------------------------------------------------

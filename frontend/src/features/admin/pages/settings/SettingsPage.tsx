@@ -20,6 +20,8 @@ import {
   Alert,
   Descriptions,
   Switch,
+  Checkbox,
+  Collapse,
 } from "antd";
 import {
   SettingOutlined,
@@ -162,10 +164,23 @@ export function SettingsPage() {
   useEffect(() => {
     if (settingsData?.settings) {
       const storedLicense = settingsData.settings.license_key || "";
+      let demoFlags: Record<string, boolean> = {};
+      try {
+        const raw = settingsData.settings.demo_feature_flags || "{}";
+        demoFlags = JSON.parse(raw);
+      } catch {
+        demoFlags = {};
+      }
+
       form.setFieldsValue({
         currency: settingsData.settings.currency || "EUR",
         license_key: storedLicense,
         demo_enabled: settingsData.settings.demo_enabled === "true",
+        demo_file_upload: demoFlags.file_upload ?? false,
+        demo_model_selection: demoFlags.model_selection ?? false,
+        demo_feedback: demoFlags.feedback ?? false,
+        demo_follow_up_questions: demoFlags.follow_up_questions ?? true,
+        demo_memory: demoFlags.memory ?? false,
       });
       setLicenseInput(storedLicense);
     }
@@ -187,6 +202,15 @@ export function SettingsPage() {
     }
     // demo_enabled is a boolean from Switch, store as "true"/"false" string
     payload.demo_enabled = values.demo_enabled ? "true" : "false";
+    // Demo feature flags stored as JSON
+    const featureFlags = {
+      file_upload: !!values.demo_file_upload,
+      model_selection: !!values.demo_model_selection,
+      feedback: !!values.demo_feedback,
+      follow_up_questions: !!values.demo_follow_up_questions,
+      memory: !!values.demo_memory,
+    };
+    payload.demo_feature_flags = JSON.stringify(featureFlags);
     mutation.mutate(payload);
   };
 
@@ -297,6 +321,33 @@ export function SettingsPage() {
               tooltip="When enabled, the login page shows a 'Try It Now' button and anonymous visitors can chat via /demo"
             >
               <Switch />
+            </Form.Item>
+
+            {/* Demo Features */}
+            <Form.Item label="Demo Features" style={{ marginBottom: 0 }}>
+              <Collapse ghost size="small" items={[{
+                key: "demo-features",
+                label: "Configure which features are available in the demo",
+                children: (
+                  <Space direction="vertical" style={{ width: "100%" }}>
+                    <Form.Item name="demo_file_upload" valuePropName="checked" style={{ marginBottom: 8 }}>
+                      <Checkbox>File Upload</Checkbox>
+                    </Form.Item>
+                    <Form.Item name="demo_model_selection" valuePropName="checked" style={{ marginBottom: 8 }}>
+                      <Checkbox>Model Selection</Checkbox>
+                    </Form.Item>
+                    <Form.Item name="demo_feedback" valuePropName="checked" style={{ marginBottom: 8 }}>
+                      <Checkbox>Feedback (like/dislike)</Checkbox>
+                    </Form.Item>
+                    <Form.Item name="demo_follow_up_questions" valuePropName="checked" style={{ marginBottom: 8 }}>
+                      <Checkbox>Follow-up Questions</Checkbox>
+                    </Form.Item>
+                    <Form.Item name="demo_memory" valuePropName="checked" style={{ marginBottom: 8 }}>
+                      <Checkbox>Memory</Checkbox>
+                    </Form.Item>
+                  </Space>
+                ),
+              }]} />
             </Form.Item>
 
             {/* License Key */}

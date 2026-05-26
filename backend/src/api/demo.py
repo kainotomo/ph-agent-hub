@@ -31,7 +31,7 @@ from ..core.redis import (
     set_stream_cancel,
     store_temp_session,
 )
-from ..services.settings_service import get_setting
+from ..services.settings_service import get_setting, get_all_settings
 from ..services.tenant_service import get_demo_tenant
 
 import logging
@@ -165,6 +165,15 @@ async def create_demo_session(
     guest_user_id = f"demo:{tenant.id}"
     now = datetime.now(timezone.utc)
 
+    # Read demo feature flags from app settings
+    feature_flags_raw = await get_setting(db, "demo_feature_flags", "{}")
+    try:
+        feature_flags = json.loads(feature_flags_raw)
+    except (json.JSONDecodeError, TypeError):
+        feature_flags = {}
+    if not isinstance(feature_flags, dict):
+        feature_flags = {}
+
     data = {
         "id": session_id,
         "tenant_id": tenant.id,
@@ -198,9 +207,7 @@ async def create_demo_session(
     return DemoConfigResponse(
         guest_token=guest_jwt,
         session_id=session_id,
-        default_model_id=None,
-        default_skill_id=None,
-        default_template_id=None,
+        feature_flags=feature_flags,
     )
 
 

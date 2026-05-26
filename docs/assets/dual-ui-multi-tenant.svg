@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+  <title id="title">PH Agent Hub dual UI and multi-tenant architecture</title>
+  <desc id="desc">Diagram showing chat and admin frontends, backend services, and tenant isolation boundaries.</desc>
+
+  <rect width="1200" height="760" fill="#f8fafc"/>
+
+  <rect x="50" y="30" width="1100" height="150" rx="14" fill="#e2e8f0" stroke="#94a3b8"/>
+  <text x="80" y="68" font-family="Segoe UI, Arial, sans-serif" font-size="26" fill="#0f172a" font-weight="700">React Frontend</text>
+
+  <rect x="90" y="86" width="260" height="74" rx="10" fill="#0ea5e9"/>
+  <text x="140" y="131" font-family="Segoe UI, Arial, sans-serif" font-size="22" fill="#ffffff" font-weight="700">Chat Area</text>
+
+  <rect x="390" y="86" width="290" height="74" rx="10" fill="#22c55e"/>
+  <text x="452" y="131" font-family="Segoe UI, Arial, sans-serif" font-size="22" fill="#ffffff" font-weight="700">Admin Area</text>
+
+  <text x="730" y="120" font-family="Segoe UI, Arial, sans-serif" font-size="18" fill="#334155">Shared auth, API client, and role routing</text>
+
+  <line x1="220" y1="180" x2="220" y2="250" stroke="#334155" stroke-width="3"/>
+  <line x1="535" y1="180" x2="535" y2="250" stroke="#334155" stroke-width="3"/>
+
+  <rect x="50" y="250" width="1100" height="220" rx="14" fill="#dbeafe" stroke="#93c5fd"/>
+  <text x="80" y="292" font-family="Segoe UI, Arial, sans-serif" font-size="26" fill="#1e3a8a" font-weight="700">FastAPI Backend + Agent Runtime</text>
+
+  <rect x="90" y="320" width="220" height="56" rx="10" fill="#1d4ed8"/>
+  <text x="145" y="356" font-family="Segoe UI, Arial, sans-serif" font-size="20" fill="#ffffff" font-weight="700">API Layer</text>
+
+  <rect x="330" y="320" width="220" height="56" rx="10" fill="#1d4ed8"/>
+  <text x="386" y="356" font-family="Segoe UI, Arial, sans-serif" font-size="20" fill="#ffffff" font-weight="700">Auth + RBAC</text>
+
+  <rect x="570" y="320" width="250" height="56" rx="10" fill="#1d4ed8"/>
+  <text x="620" y="356" font-family="Segoe UI, Arial, sans-serif" font-size="20" fill="#ffffff" font-weight="700">MAF Execution</text>
+
+  <rect x="840" y="320" width="270" height="56" rx="10" fill="#1d4ed8"/>
+  <text x="885" y="356" font-family="Segoe UI, Arial, sans-serif" font-size="20" fill="#ffffff" font-weight="700">Services Layer</text>
+
+  <text x="90" y="418" font-family="Segoe UI, Arial, sans-serif" font-size="17" fill="#1e3a8a">Models, tools, sessions, memory, template and skill orchestration</text>
+
+  <line x1="400" y1="470" x2="400" y2="550" stroke="#334155" stroke-width="3"/>
+  <line x1="600" y1="470" x2="600" y2="550" stroke="#334155" stroke-width="3"/>
+  <line x1="800" y1="470" x2="800" y2="550" stroke="#334155" stroke-width="3"/>
+
+  <rect x="240" y="550" width="320" height="80" rx="12" fill="#fff7ed" stroke="#fdba74"/>
+  <text x="358" y="598" font-family="Segoe UI, Arial, sans-serif" font-size="24" fill="#9a3412" font-weight="700">MariaDB</text>
+
+  <rect x="440" y="550" width="320" height="80" rx="12" fill="#f0fdf4" stroke="#86efac"/>
+  <text x="567" y="598" font-family="Segoe UI, Arial, sans-serif" font-size="24" fill="#166534" font-weight="700">Redis</text>
+
+  <rect x="640" y="550" width="320" height="80" rx="12" fill="#eff6ff" stroke="#93c5fd"/>
+  <text x="748" y="598" font-family="Segoe UI, Arial, sans-serif" font-size="24" fill="#1e3a8a" font-weight="700">MinIO</text>
+
+  <rect x="50" y="650" width="1100" height="80" rx="14" fill="#111827"/>
+  <text x="80" y="695" font-family="Segoe UI, Arial, sans-serif" font-size="26" fill="#f8fafc" font-weight="700">Tenant Isolation Boundary</text>
+  <text x="470" y="695" font-family="Segoe UI, Arial, sans-serif" font-size="20" fill="#d1d5db">Tenant A | Tenant B | Tenant N</text>
+</svg>

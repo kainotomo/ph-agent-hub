@@ -2,6 +2,12 @@
 
 This guide is for end users (`user` role) who use PH Agent Hub to chat with AI agents. It covers everything you can do in the chat area — from starting your first conversation to using advanced features like branching, memory, and file uploads.
 
+Quick links:
+- Documentation index: [README.md](README.md)
+- Public demo: [agent.kainotomo.com/demo](https://agent.kainotomo.com/demo)
+
+![Dual UI and multi-tenant architecture](assets/dual-ui-multi-tenant.svg)
+
 ---
 
 ## 1. Getting Started

@@ -1,107 +1,197 @@
 # PH Agent Hub
 
-PH Agent Hub is a modular, multi-tenant AI platform that provides a chat interface for end users and an admin area for managing models, tools, tenants, and users — all in a single React web app. It is powered by the [Microsoft Agent Framework](https://github.com/microsoft/agent-framework) (MAF) and runs fully containerized with Docker.
+![PH Agent Hub Banner](docs/assets/ph-agent-hub-banner.svg)
 
----
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/phalouvas/ph-agent-hub?style=social)](https://github.com/phalouvas/ph-agent-hub)
+[![Last Commit](https://img.shields.io/github/last-commit/phalouvas/ph-agent-hub)](https://github.com/phalouvas/ph-agent-hub)
+[![Issues](https://img.shields.io/github/issues/phalouvas/ph-agent-hub)](https://github.com/phalouvas/ph-agent-hub/issues)
+[![Docker Pulls](https://img.shields.io/badge/Docker%20Pulls-not%20published-lightgrey)](https://github.com/phalouvas/ph-agent-hub)
+[![Build](https://img.shields.io/badge/Build-no%20workflow%20configured-lightgrey)](https://github.com/phalouvas/ph-agent-hub/actions)
 
-## Features
+PH Agent Hub is a multi-tenant AI application platform for teams that need both:
+- a production chat experience for end users
+- an operational admin control plane for models, tools, tenancy, and governance
 
-### For End Users
-- **AI Chat** with real-time streaming responses (Server-Sent Events)
-- **Model selection** — choose from tenant-enabled AI models (DeepSeek, OpenAI, Anthropic, and more)
-- **Templates, prompts, and skills** — curated by admins or created personally
-- **File uploads** — attach files to chat sessions; stored securely in MinIO
-- **Memory management** — view, add, and delete persistent memory entries
-- **Session-level tools** — activate tenant-approved tools per session
-- **Message branching** — edit or regenerate messages without losing history
-- **Message feedback** — rate responses with thumbs up / down
-- **Full-text search** across sessions and messages
-- **Temporary sessions** — ephemeral chats that leave no database trace
-- **Embeddable chat widget** — `<script>` tag embeddable on any website; anonymous guest sessions
+It is built on FastAPI + React and uses the [Microsoft Agent Framework](https://github.com/microsoft/agent-framework) for agent runtime orchestration.
 
-### For Administrators & Managers
-- **Tenant management** — create and manage isolated tenant environments
-- **User management** — invite, deactivate, and reset passwords for users
-- **Model configuration** — add AI providers with encrypted API keys
-- **Tool configuration** — register ERPNext, membrane, or custom tools
-- **Template & skill management** — curate reusable agent configurations
-- **Usage analytics** — token usage reports scoped by tenant
-- **Audit logging** — immutable record of all administrative actions
-- **Role-based access** — admin (platform-wide) and manager (tenant-scoped) roles
+Live demo: [agent.kainotomo.com/demo](https://agent.kainotomo.com/demo)
 
-### Platform
-- **Multi-tenant** — complete data isolation between tenants
-- **DeepSeek stabilizer** — automatic reasoning-strip, JSON repair, and retry for DeepSeek models
-- **Docker deployment** — one command start with `docker compose up`
-- **Production-ready** — Traefik with Let's Encrypt SSL, health checks, and external volumes
+## Why This Exists
 
----
+Most open-source AI chat projects are strong at single-tenant chat UX or developer experimentation. PH Agent Hub is optimized for teams shipping tenant-isolated AI products where operations matter as much as chat quality.
 
-## Quick Start
+What you get in one system:
+- dual UI model: Chat Area + Admin Area in one web app
+- tenant isolation at the backend authorization and data layer
+- model and tool governance per tenant
+- embedded website widget for anonymous or guided external usage
+- deployment that stays simple: Docker Compose dev and prod paths
+
+## Run In 3 Commands
 
 ```bash
-git clone <repo-url> ph-agent-hub
+git clone https://github.com/phalouvas/ph-agent-hub.git
 cd ph-agent-hub/infrastructure
 cp env.example env
-# Edit `env` — set JWT_SECRET, ENCRYPTION_KEY, and at least one AI provider key
+```
+
+Then set required env values in env and start:
+
+```bash
 docker compose up --build
 ```
 
-The platform starts at:
-- **App**: http://localhost (frontend with chat + admin areas)
-- **phpMyAdmin**: http://localhost:8080 (database admin, dev only)
-- **MinIO Console**: http://localhost:9001 (object storage, dev only)
+Required env values:
 
-**Default admin login**: `admin@phagent.local` / `admin` (change immediately in production).
-
----
-
-## Architecture
-
-```
-┌──────────────────────────────────────────────┐
-│              React Frontend (Vite)           │
-│  ┌──────────────┐   ┌──────────────────────┐ │
-│  │  Chat Area   │   │     Admin Area       │ │
-│  │  (end users) │   │  (admins/managers)   │ │
-│  └──────┬───────┘   └──────────┬───────────┘ │
-└─────────┼──────────────────────┼─────────────┘
-          │   REST + SSE         │  REST
-          ▼                      ▼
-┌──────────────────────────────────────────────┐
-│         FastAPI Backend + MAF Runtime        │
-│  Auth · Models · Tools · Sessions · Memory   │
-└──────────┬──────────┬──────────┬─────────────┘
-           │          │          │
-           ▼          ▼          ▼
-┌──────────┐  ┌──────┐  ┌──────────────────────┐
-│ MariaDB  │  │ Redis│  │  MinIO (S3-compat)   │
-└──────────┘  └──────┘  └──────────────────────┘
-```
-
-- **Backend**: Python/FastAPI + SQLAlchemy 2.0 + Microsoft Agent Framework
-- **Frontend**: React + TypeScript + Ant Design 5 + TanStack Query
-- **Database**: MariaDB 11 (relational), Redis 7 (caching/sessions)
-- **Storage**: MinIO (S3-compatible object storage)
-- **Proxy**: nginx (dev) / Traefik (production)
-
----
-
-## Documentation
-
-| Document | Audience |
+| Variable | Why it is required |
 |---|---|
-| [Administrator Guide](docs/admin-guide.md) | Platform admins & tenant managers |
-| [End User Guide](docs/user-guide.md) | Chat users |
-| [Architecture Overview](docs/architecture-overview.md) | Developers |
-| [Backend Architecture](docs/backend-architecture.md) | Backend developers |
-| [Frontend Architecture](docs/frontend-architecture.md) | Frontend developers |
-| [Data Model](docs/data-model.md) | Developers |
-| [Deployment Guide](docs/deployment.md) | DevOps |
-| [Agent Framework Integration](docs/agent-framework-integration.md) | Backend developers |
-| [DeepSeek Stabilizer](docs/deepseek-stabilizer.md) | Backend developers |
+| JWT_SECRET | Signs access and refresh tokens |
+| ENCRYPTION_KEY | Encrypts provider API keys at rest |
+| ADMIN_EMAIL | Bootstraps initial admin user |
+| ADMIN_PASSWORD | Bootstraps initial admin password |
+| At least one provider key | Enables model inference (DeepSeek/OpenAI/Anthropic/etc.) |
 
----
+Endpoints after startup:
+- App: [http://localhost](http://localhost)
+- phpMyAdmin (dev): [http://localhost:8080](http://localhost:8080)
+- MinIO Console (dev): [http://localhost:9001](http://localhost:9001)
+
+Default login on first run: admin@phagent.local / admin (change immediately).
+
+## Who It Is For
+
+- Teams building tenant-aware AI SaaS or internal multi-business-unit copilots
+- Developers who need configurable tools, models, and skills without hard-coding per customer
+- Operators who need auditability, usage visibility, and role-based controls
+
+## Differentiators
+
+- Multi-tenant from the core domain model, not bolted on later
+- Built-in admin control plane for real operations, not only prompt experimentation
+- DeepSeek stabilizer layer (reasoning strip, JSON repair, retry orchestration)
+- Embeddable chat widget with anonymous guest flow and demo-mode support
+- Microsoft Agent Framework runtime integration for workflow-friendly agent execution
+
+## How It Compares
+
+Technical comparison for first-pass evaluation.
+
+| Capability | PH Agent Hub | Dify | Onyx | Open WebUI | LibreChat |
+|---|---|---|---|---|---|
+| First-class multi-tenant isolation | Yes | Partial (varies by setup) | Team-oriented, not full tenant governance | Primarily single-instance | Primarily single-instance |
+| Unified Chat + Admin product surfaces | Yes | Yes | More knowledge assistant focus | Chat-first | Chat-first |
+| Tenant-scoped model + tool governance | Yes | Partial | Partial | Limited by deployment pattern | Limited by deployment pattern |
+| Embeddable widget for external websites | Yes | Yes | Not primary focus | Limited | Limited |
+| DeepSeek hardening layer (JSON repair/retry) | Yes | No native equivalent | No native equivalent | No native equivalent | No native equivalent |
+| Self-host with one Compose stack | Yes | Yes | Yes | Yes | Yes |
+| Built on Microsoft Agent Framework runtime | Yes | No | No | No | No |
+
+Notes:
+- "Partial" means achievable but usually depends on custom deployment conventions or enterprise configuration.
+- Validate against your own requirements and current upstream versions before final adoption decisions.
+
+## Visual Architecture
+
+```mermaid
+flowchart TB
+    subgraph Frontend[React Frontend]
+        Chat[Chat Area<br/>end users]
+        Admin[Admin Area<br/>admins and managers]
+    end
+
+    Chat -->|REST + SSE| API
+    Admin -->|REST| API
+
+    subgraph Backend[FastAPI + Agent Runtime]
+        API[API Layer]
+        Auth[Auth + RBAC]
+        Agents[MAF Execution]
+        Services[Models • Tools • Sessions • Memory]
+        API --> Auth
+        API --> Agents
+        API --> Services
+    end
+
+    Services --> DB[(MariaDB)]
+    Services --> Cache[(Redis)]
+    Services --> Obj[(MinIO)]
+
+    subgraph TenantBoundary[Tenant Isolation Boundary]
+        T1[Tenant A data]
+        T2[Tenant B data]
+        T3[Tenant N data]
+    end
+
+    Auth --> TenantBoundary
+```
+
+For deeper architecture detail, see [docs/architecture-overview.md](docs/architecture-overview.md).
+
+## Feature Snapshot
+
+### End Users
+- Streaming chat responses with SSE
+- Model selection from tenant-enabled providers
+- Templates, prompts, and skills
+- File uploads + RAG search support
+- Session branching, feedback, full-text search
+- Temporary sessions and finalization flow
+
+### Admins And Managers
+- Tenant, user, and role management
+- Model and tool registration with encrypted secrets
+- Template and skill governance
+- Usage analytics and audit logs
+- Demo tenant and public try-it-now controls
+
+### Platform
+- Multi-tenant authorization and data boundaries
+- Docker-native deployment for dev and production
+- Extensible tools and model adapters
+- Backend services that can be patched and extended safely
+
+## Folder Structure
+
+```text
+.
+├── backend/          # FastAPI app, agent runtime integration, services, DB models
+├── frontend/         # React app for Chat Area and Admin Area
+├── docs/             # Architecture, guides, deployment and data model docs
+└── infrastructure/   # Docker Compose, environment templates, reverse proxy config
+```
+
+## Documentation Map
+
+Start here:
+- [docs/README.md](docs/README.md)
+
+Role-specific guides:
+- [docs/user-guide.md](docs/user-guide.md)
+- [docs/admin-guide.md](docs/admin-guide.md)
+
+Engineering references:
+- [docs/architecture-overview.md](docs/architecture-overview.md)
+- [docs/backend-architecture.md](docs/backend-architecture.md)
+- [docs/frontend-architecture.md](docs/frontend-architecture.md)
+- [docs/data-model.md](docs/data-model.md)
+- [docs/deployment.md](docs/deployment.md)
+- [docs/agent-framework-integration.md](docs/agent-framework-integration.md)
+- [docs/deepseek-stabilizer.md](docs/deepseek-stabilizer.md)
+
+## GitHub Topics To Set
+
+Recommended repository topics:
+- ai-agents
+- multi-tenant
+- fastapi
+- react
+- llm
+- rag
+- self-hosted
+- docker-compose
+- microsoft-agent-framework
+- chat-widget
 
 ## License
 

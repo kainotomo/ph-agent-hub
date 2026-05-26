@@ -12,11 +12,45 @@ The frontend is a single React application with two protected product areas:
 
 The platform is fully containerized using Docker and includes supporting services such as MariaDB, Redis, and MinIO.
 
+![Dual UI and multi-tenant architecture](assets/dual-ui-multi-tenant.svg)
+
+## At A Glance
+
+- One frontend with two protected product surfaces: Chat Area and Admin Area
+- FastAPI backend with Microsoft Agent Framework runtime for orchestration
+- Tenant isolation enforced through auth claims, RBAC, and backend data scoping
+- Compose-based deployment for both development and production footprints
+
 ---
 
 ## 1. High-Level Architecture
 
 PH Agent Hub is built around a clean separation of responsibilities:
+
+```mermaid
+flowchart TB
+  subgraph FE[React Frontend]
+    Chat[Chat Area]
+    Admin[Admin Area]
+  end
+
+  Chat -->|REST + SSE| API
+  Admin -->|REST| API
+
+  subgraph BE[FastAPI + MAF Runtime]
+    API[API Layer]
+    Auth[Auth + RBAC]
+    Core[Models · Tools · Sessions · Memory]
+    API --> Auth
+    API --> Core
+  end
+
+  Core --> DB[(MariaDB)]
+  Core --> Redis[(Redis)]
+  Core --> Minio[(MinIO)]
+
+  Auth --> Tenants[Tenant Isolation Boundary]
+```
 
 ### **1.1 Backend (Agent Framework Server)**
 The backend is the core of the platform. It provides:
@@ -205,6 +239,7 @@ PH Agent Hub aims to provide:
 
 Additional documentation is provided in:
 
+- [README.md](README.md)
 - [backend-architecture.md](backend-architecture.md)
 - [frontend-architecture.md](frontend-architecture.md)
 - [data-model.md](data-model.md)

@@ -2,6 +2,12 @@
 
 This guide is for platform administrators (`admin` role) and tenant managers (`manager` role) who operate a PH Agent Hub instance. It covers deployment, configuration, and day-to-day management of tenants, users, AI models, tools, templates, and skills.
 
+Quick links:
+- Documentation index: [README.md](README.md)
+- Architecture overview: [architecture-overview.md](architecture-overview.md)
+
+![Dual UI and multi-tenant architecture](assets/dual-ui-multi-tenant.svg)
+
 ---
 
 ## 1. Roles and Permissions

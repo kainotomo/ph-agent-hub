@@ -19,6 +19,10 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
+
+class FollowUpQuestionsResponse(BaseModel):
+    questions: list[str]
+
 from ..agents.runner import run_agent
 from ..core.config import settings
 from ..core.dependencies import get_db, get_demo_context, DemoContext
@@ -379,3 +383,29 @@ async def cancel_demo_stream(
     """Cancel an active stream for the demo session."""
     await _assert_demo_enabled(db)
     await set_stream_cancel(ctx.session_id)
+
+
+# =============================================================================
+# GET /demo/session/follow-up-questions — retrieve follow-up questions
+# =============================================================================
+
+
+@router.get(
+    "/session/follow-up-questions",
+    response_model=FollowUpQuestionsResponse,
+)
+async def get_demo_follow_up_questions(
+    ctx: DemoContext = Depends(get_demo_context),
+    db: AsyncSession = Depends(get_db),
+):
+    """Retrieve follow-up questions for the demo session from Redis.
+
+    Questions are generated asynchronously by a background task after
+    the message response completes.  Polled once by the frontend when
+    the stream finishes.
+    """
+    await _assert_demo_enabled(db)
+    from ..core.redis import get_follow_up_questions as _redis_get_follow_up
+
+    questions = await _redis_get_follow_up(ctx.session_id)
+    return FollowUpQuestionsResponse(questions=questions or [])

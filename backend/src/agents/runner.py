@@ -901,6 +901,18 @@ async def run_agent(
             except Exception:
                 logger.exception("Failed to write usage log (non-streaming)")
 
+        # ---- 11. Post-response tasks (follow-up questions, auto-tagging) -----
+        _schedule_post_response_tasks(
+            model=cfg.model,
+            system_prompt=cfg.system_prompt,
+            user_message=user_message,
+            assistant_response=raw_response,
+            session_id=session_id,
+            tenant_id=tenant_id,
+            is_temporary=is_temporary,
+            temperature=cfg.temperature,
+        )
+
         return raw_response, assistant_msg_id
 
     finally:

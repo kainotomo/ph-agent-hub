@@ -65,6 +65,7 @@ interface ChatWindowProps {
   crossSessionMemoryEnabled?: boolean | null;
   embedded?: boolean;
   demo?: boolean;
+  featureFlags?: Record<string, boolean>;
   onSessionUpdate?: (data: Record<string, unknown>) => void;
 }
 
@@ -78,6 +79,7 @@ export function ChatWindow({
   crossSessionMemoryEnabled = null,
   embedded = false,
   demo = false,
+  featureFlags = {},
   onSessionUpdate,
 }: ChatWindowProps) {
   const [inputValue, setInputValue] = useState("");
@@ -225,11 +227,14 @@ export function ChatWindow({
   const fetchFollowUpQuestions = useCallback(
     (sid: string, setter: (questions: string[]) => void) => {
       const BASE_URL = import.meta.env.VITE_API_URL || "/api";
+      const endpoint = demo
+        ? `${BASE_URL}/demo/session/follow-up-questions`
+        : `${BASE_URL}/chat/session/${sid}/follow-up-questions`;
       setTimeout(async () => {
         try {
           const token = getToken();
           const res = await fetch(
-            `${BASE_URL}/chat/session/${sid}/follow-up-questions`,
+            endpoint,
             { headers: token ? { Authorization: `Bearer ${token}` } : {} },
           );
           if (res.ok) {
@@ -243,7 +248,7 @@ export function ChatWindow({
         }
       }, 1500);
     },
-    [],
+    [demo],
   );
 
   const handleSend = useCallback(async () => {
@@ -421,6 +426,7 @@ export function ChatWindow({
           queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
           queryClient.invalidateQueries({ queryKey: ["sessions"] });
         }
+        fetchFollowUpQuestions(sessionId, setFollowUpQuestions);
       },
     });
   }, [inputValue, streaming, sessionId, startStream, queryClient, pendingFiles, editingMsgId]);
@@ -1022,7 +1028,7 @@ export function ChatWindow({
                     justifyContent: "flex-start",
                   }}
                 >
-                  {followUpQuestions.map((q, i) => (
+                  {(featureFlags.follow_up_questions ?? true) && followUpQuestions.map((q, i) => (
                     <Button
                       key={i}
                       size="small"
@@ -1133,30 +1139,32 @@ export function ChatWindow({
         )}
 
         <div style={{ display: "flex", alignItems: "flex-end", gap: 8, width: "100%" }}>
-          <Upload
-            multiple
-            showUploadList={false}
-            beforeUpload={async (file) => {
-              await handleFileUpload(file);
-              return false;
-            }}
-            disabled={streaming || !!editingMsgId}
-            accept={
-              ".pdf,.csv,.txt,.md,.json,.png,.jpg,.jpeg,.gif,.webp,.xlsx,.docx,.pptx," +
-              "application/pdf,text/csv,text/plain,text/markdown," +
-              "application/json,image/png,image/jpeg,image/gif,image/webp," +
-              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet," +
-              "application/vnd.openxmlformats-officedocument.wordprocessingml.document," +
-              "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-            }
-          >
-            <Button
-              icon={<PaperClipOutlined />}
+          {(featureFlags.file_upload ?? true) && (
+            <Upload
+              multiple
+              showUploadList={false}
+              beforeUpload={async (file) => {
+                await handleFileUpload(file);
+                return false;
+              }}
               disabled={streaming || !!editingMsgId}
-              loading={uploading}
-              title="Attach files"
-            />
-          </Upload>
+              accept={
+                ".pdf,.csv,.txt,.md,.json,.png,.jpg,.jpeg,.gif,.webp,.xlsx,.docx,.pptx," +
+                "application/pdf,text/csv,text/plain,text/markdown," +
+                "application/json,image/png,image/jpeg,image/gif,image/webp," +
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet," +
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document," +
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+              }
+            >
+              <Button
+                icon={<PaperClipOutlined />}
+                disabled={streaming || !!editingMsgId}
+                loading={uploading}
+                title="Attach files"
+              />
+            </Upload>
+          )}
           <div style={{ flex: 1, minWidth: 0 }}>
             <TextArea
               value={inputValue}

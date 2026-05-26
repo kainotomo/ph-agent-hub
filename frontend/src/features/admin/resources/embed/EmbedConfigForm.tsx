@@ -78,10 +78,7 @@ export function EmbedConfigForm({ open, config, onClose, onSuccess }: EmbedConfi
           greeting_text: config.theme?.greeting_text || "",
           position: config.theme?.position || "bubble",
           file_upload: config.feature_flags?.file_upload ?? false,
-          model_selection: config.feature_flags?.model_selection ?? false,
-          feedback: config.feature_flags?.feedback ?? false,
           follow_up_questions: config.feature_flags?.follow_up_questions ?? true,
-          memory: config.feature_flags?.memory ?? false,
         });
       } else {
         form.resetFields();
@@ -93,10 +90,7 @@ export function EmbedConfigForm({ open, config, onClose, onSuccess }: EmbedConfi
           greeting_text: "Hi! How can I help?",
           position: "bubble",
           file_upload: false,
-          model_selection: false,
-          feedback: false,
           follow_up_questions: true,
-          memory: false,
         });
       }
       setNewToken(null);
@@ -135,10 +129,7 @@ export function EmbedConfigForm({ open, config, onClose, onSuccess }: EmbedConfi
 
     const feature_flags = {
       file_upload: !!values.file_upload,
-      model_selection: !!values.model_selection,
-      feedback: !!values.feedback,
       follow_up_questions: !!values.follow_up_questions,
-      memory: !!values.memory,
     };
 
     const payload = {
@@ -247,17 +238,8 @@ export function EmbedConfigForm({ open, config, onClose, onSuccess }: EmbedConfi
           <Form.Item name="file_upload" label="File Upload" valuePropName="checked">
             <Switch />
           </Form.Item>
-          <Form.Item name="model_selection" label="Model Selection" valuePropName="checked">
-            <Switch />
-          </Form.Item>
-          <Form.Item name="feedback" label="Message Feedback" valuePropName="checked">
-            <Switch />
-          </Form.Item>
           <Form.Item name="follow_up_questions" label="Follow-up Questions" valuePropName="checked">
             <Switch defaultChecked />
-          </Form.Item>
-          <Form.Item name="memory" label="Cross-session Memory" valuePropName="checked">
-            <Switch />
           </Form.Item>
         </Space>
 

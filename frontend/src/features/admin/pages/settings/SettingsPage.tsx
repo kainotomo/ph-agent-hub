@@ -177,10 +177,7 @@ export function SettingsPage() {
         license_key: storedLicense,
         demo_enabled: settingsData.settings.demo_enabled === "true",
         demo_file_upload: demoFlags.file_upload ?? false,
-        demo_model_selection: demoFlags.model_selection ?? false,
-        demo_feedback: demoFlags.feedback ?? false,
         demo_follow_up_questions: demoFlags.follow_up_questions ?? true,
-        demo_memory: demoFlags.memory ?? false,
       });
       setLicenseInput(storedLicense);
     }
@@ -205,10 +202,7 @@ export function SettingsPage() {
     // Demo feature flags stored as JSON
     const featureFlags = {
       file_upload: !!values.demo_file_upload,
-      model_selection: !!values.demo_model_selection,
-      feedback: !!values.demo_feedback,
       follow_up_questions: !!values.demo_follow_up_questions,
-      memory: !!values.demo_memory,
     };
     payload.demo_feature_flags = JSON.stringify(featureFlags);
     mutation.mutate(payload);
@@ -333,17 +327,8 @@ export function SettingsPage() {
                     <Form.Item name="demo_file_upload" valuePropName="checked" style={{ marginBottom: 8 }}>
                       <Checkbox>File Upload</Checkbox>
                     </Form.Item>
-                    <Form.Item name="demo_model_selection" valuePropName="checked" style={{ marginBottom: 8 }}>
-                      <Checkbox>Model Selection</Checkbox>
-                    </Form.Item>
-                    <Form.Item name="demo_feedback" valuePropName="checked" style={{ marginBottom: 8 }}>
-                      <Checkbox>Feedback (like/dislike)</Checkbox>
-                    </Form.Item>
                     <Form.Item name="demo_follow_up_questions" valuePropName="checked" style={{ marginBottom: 8 }}>
                       <Checkbox>Follow-up Questions</Checkbox>
-                    </Form.Item>
-                    <Form.Item name="demo_memory" valuePropName="checked" style={{ marginBottom: 8 }}>
-                      <Checkbox>Memory</Checkbox>
                     </Form.Item>
                   </Space>
                 ),

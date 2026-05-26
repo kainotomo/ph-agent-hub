@@ -109,6 +109,7 @@ PH Agent Hub supports a **demo tenant** for the "Try It Now" experience and embe
 - A banner: *"You're trying the demo — sign up to save your conversations"*
 - Sessions expire after **1 hour** of inactivity
 - No persistence — closing the page loses the session
+- Configurable features: file upload and follow-up questions (toggle in **Admin → Settings**)
 
 #### Usage
 

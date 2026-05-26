@@ -19,6 +19,9 @@ import {
   Space,
   Alert,
   Descriptions,
+  Switch,
+  Checkbox,
+  Collapse,
 } from "antd";
 import {
   SettingOutlined,
@@ -29,6 +32,7 @@ import {
   InfoCircleOutlined,
   EyeInvisibleOutlined,
   EyeOutlined,
+  RocketOutlined,
 } from "@ant-design/icons";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -160,9 +164,20 @@ export function SettingsPage() {
   useEffect(() => {
     if (settingsData?.settings) {
       const storedLicense = settingsData.settings.license_key || "";
+      let demoFlags: Record<string, boolean> = {};
+      try {
+        const raw = settingsData.settings.demo_feature_flags || "{}";
+        demoFlags = JSON.parse(raw);
+      } catch {
+        demoFlags = {};
+      }
+
       form.setFieldsValue({
         currency: settingsData.settings.currency || "EUR",
         license_key: storedLicense,
+        demo_enabled: settingsData.settings.demo_enabled === "true",
+        demo_file_upload: demoFlags.file_upload ?? false,
+        demo_follow_up_questions: demoFlags.follow_up_questions ?? true,
       });
       setLicenseInput(storedLicense);
     }
@@ -176,12 +191,20 @@ export function SettingsPage() {
     );
   }
 
-  const handleSave = (values: Record<string, string>) => {
+  const handleSave = (values: Record<string, string | boolean>) => {
     // Only include license_key if it was changed
-    const payload: Record<string, string> = { currency: values.currency };
+    const payload: Record<string, string> = { currency: values.currency as string };
     if (values.license_key !== undefined) {
-      payload.license_key = values.license_key || "";
+      payload.license_key = (values.license_key as string) || "";
     }
+    // demo_enabled is a boolean from Switch, store as "true"/"false" string
+    payload.demo_enabled = values.demo_enabled ? "true" : "false";
+    // Demo feature flags stored as JSON
+    const featureFlags = {
+      file_upload: !!values.demo_file_upload,
+      follow_up_questions: !!values.demo_follow_up_questions,
+    };
+    payload.demo_feature_flags = JSON.stringify(featureFlags);
     mutation.mutate(payload);
   };
 
@@ -277,6 +300,39 @@ export function SettingsPage() {
               tooltip="Used to format cost values across the app"
             >
               <Select options={CURRENCY_OPTIONS} />
+            </Form.Item>
+
+            {/* Demo Mode */}
+            <Form.Item
+              name="demo_enabled"
+              label={
+                <Space>
+                  <RocketOutlined />
+                  <span>Demo Mode</span>
+                </Space>
+              }
+              valuePropName="checked"
+              tooltip="When enabled, the login page shows a 'Try It Now' button and anonymous visitors can chat via /demo"
+            >
+              <Switch />
+            </Form.Item>
+
+            {/* Demo Features */}
+            <Form.Item label="Demo Features" style={{ marginBottom: 0 }}>
+              <Collapse ghost size="small" items={[{
+                key: "demo-features",
+                label: "Configure which features are available in the demo",
+                children: (
+                  <Space direction="vertical" style={{ width: "100%" }}>
+                    <Form.Item name="demo_file_upload" valuePropName="checked" style={{ marginBottom: 8 }}>
+                      <Checkbox>File Upload</Checkbox>
+                    </Form.Item>
+                    <Form.Item name="demo_follow_up_questions" valuePropName="checked" style={{ marginBottom: 8 }}>
+                      <Checkbox>Follow-up Questions</Checkbox>
+                    </Form.Item>
+                  </Space>
+                ),
+              }]} />
             </Form.Item>
 
             {/* License Key */}

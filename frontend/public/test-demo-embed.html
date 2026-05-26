@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Demo Embed Test</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      margin: 0;
+      padding: 32px;
+      background: #f5f5f5;
+    }
+    .container {
+      max-width: 800px;
+      margin: 0 auto;
+    }
+    h1 {
+      font-size: 24px;
+      margin-bottom: 8px;
+    }
+    p {
+      color: #666;
+      margin-bottom: 24px;
+    }
+    .instructions {
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 24px;
+      font-size: 14px;
+    }
+    .instructions code {
+      background: #f0f0f0;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 13px;
+    }
+    .note {
+      color: #999;
+      font-size: 12px;
+      margin-top: 16px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>PH Agent Hub — Demo Embed Test</h1>
+    <p>This page demonstrates the embeddable chat widget in demo mode.</p>
+
+    <div class="instructions">
+      <strong>How this works:</strong> The script tag below loads <code>embed.js</code> with
+      <code>data-ph-demo="true"</code>, which creates a chat bubble without requiring a
+      guest token or embed config. The chat session is auto-provisioned under the
+      configured demo tenant.
+    </div>
+
+    <!-- The embed script — this creates the chat bubble -->
+    <script src="/embed.js"
+            data-ph-demo="true"
+            data-ph-position="bubble"
+            data-ph-api-url="/api"
+    ></script>
+
+    <div class="note">
+      The chat bubble should appear in the bottom-right corner of this page.
+      Click it to open the demo chat.
+    </div>
+  </div>
+</body>
+</html>

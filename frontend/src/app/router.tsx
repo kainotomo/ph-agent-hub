@@ -9,6 +9,7 @@ import { createBrowserRouter } from "react-router-dom";
 import { RouteGuard } from "../shared/components/RouteGuard";
 import LoginPage from "../features/auth/LoginPage";
 import ChatPage from "../features/chat/routes/ChatPage";
+import { DemoPage } from "../features/chat/routes/DemoPage";
 import { WidgetPage } from "../features/chat/routes/WidgetPage";
 import AdminApp from "../features/admin/routes/AdminApp";
 
@@ -20,6 +21,10 @@ export const router = createBrowserRouter([
   {
     path: "/widget",
     element: <WidgetPage />,
+  },
+  {
+    path: "/demo",
+    element: <DemoPage />,
   },
   {
     element: <RouteGuard />,

@@ -11,6 +11,7 @@ import { useSearchParams } from "react-router-dom";
 import { ConfigProvider, Layout, Spin, Typography, theme as antTheme } from "antd";
 import { ChatWindow } from "../components/ChatWindow";
 import { setToken } from "../../../services/api";
+import { createDemoSession, type DemoConfig } from "../services/demo";
 
 const { Content } = Layout;
 const { Text } = Typography;
@@ -28,12 +29,45 @@ interface WidgetConfig {
 export function WidgetPage() {
   const [searchParams] = useSearchParams();
   const rawToken = searchParams.get("token");
+  const isDemo = searchParams.get("demo") === "true";
 
   const [config, setConfig] = useState<WidgetConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    // Demo mode: create a demo session instead of using a widget token
+    if (isDemo) {
+      createDemoSession()
+        .then((data: DemoConfig) => {
+          setToken(data.guest_token);
+          setConfig(data);
+
+          // Notify parent frame
+          window.parent.postMessage(
+            { type: "widget:ready", sessionId: data.session_id },
+            "*",
+          );
+
+          const observer = new ResizeObserver((entries) => {
+            for (const entry of entries) {
+              window.parent.postMessage(
+                { type: "widget:resize", height: entry.contentRect.height },
+                "*",
+              );
+            }
+          });
+          observer.observe(document.body);
+          setLoading(false);
+        })
+        .catch((err) => {
+          setError(typeof err === "string" ? err : "Demo is not available");
+          setLoading(false);
+        });
+      return;
+    }
+
+    // Normal widget mode: use the raw guest token
     if (!rawToken) {
       setError("Missing token parameter");
       setLoading(false);
@@ -73,7 +107,7 @@ export function WidgetPage() {
         setError(typeof err === "string" ? err : "Failed to load widget");
         setLoading(false);
       });
-  }, [rawToken]);
+  }, [rawToken, isDemo]);
 
   // Derive Ant Design theme from config
   const primaryColor = (config?.theme?.primary_color as string) || "#1677ff";
@@ -126,6 +160,8 @@ export function WidgetPage() {
             sessionId={config.session_id}
             isTemporary={true}
             embedded={true}
+            demo={isDemo}
+            featureFlags={config.feature_flags as Record<string, boolean> | undefined}
             selectedModelId={config.default_model_id ?? undefined}
             selectedSkillId={config.default_skill_id ?? undefined}
             selectedTemplateId={config.default_template_id ?? undefined}

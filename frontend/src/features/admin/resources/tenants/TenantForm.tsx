@@ -2,12 +2,15 @@
 // PH Agent Hub — Admin TenantForm
 // =============================================================================
 // Admin only; Ant Design Create/Edit Modal+Form.
+// Includes is_demo toggle for marking a tenant as the demo tenant.
 // =============================================================================
 
 import React from "react";
-import { Modal, Form, Input, message } from "antd";
+import { Modal, Form, Input, Switch, Typography, message } from "antd";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { createTenant, updateTenant, TenantData } from "../../services/admin";
+
+const { Text } = Typography;
 
 interface TenantFormProps {
   open: boolean;
@@ -23,7 +26,7 @@ export function TenantForm({ open, tenant, onClose }: TenantFormProps) {
   React.useEffect(() => {
     if (open) {
       if (tenant) {
-        form.setFieldsValue({ name: tenant.name });
+        form.setFieldsValue({ name: tenant.name, is_demo: tenant.is_demo });
       } else {
         form.resetFields();
       }
@@ -44,7 +47,7 @@ export function TenantForm({ open, tenant, onClose }: TenantFormProps) {
   });
 
   const updateMutation = useMutation({
-    mutationFn: ({ id, data }: { id: string; data: { name: string } }) =>
+    mutationFn: ({ id, data }: { id: string; data: { name: string; is_demo?: boolean | null } }) =>
       updateTenant(id, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["admin-tenants"] });
@@ -84,6 +87,22 @@ export function TenantForm({ open, tenant, onClose }: TenantFormProps) {
         >
           <Input />
         </Form.Item>
+        {isEdit && (
+          <Form.Item
+            name="is_demo"
+            label={
+              <span>
+                Demo Tenant{" "}
+                <Text type="secondary" style={{ fontWeight: 400, fontSize: 12 }}>
+                  — anonymous visitors get auto-provisioned sessions under this tenant
+                </Text>
+              </span>
+            }
+            valuePropName="checked"
+          >
+            <Switch />
+          </Form.Item>
+        )}
       </Form>
     </Modal>
   );

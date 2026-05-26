@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .api.admin import router as admin_router
 from .api.auth import router as auth_router
 from .api.chat import router as chat_router
+from .api.demo import router as demo_router
 from .api.memory import router as memory_router
 from .api.models import router as models_router
 from .api.prompts import router as prompts_router
@@ -122,6 +123,7 @@ app.include_router(templates_router, prefix="/api")
 app.include_router(prompts_router, prefix="/api")
 app.include_router(skills_router, prefix="/api")
 app.include_router(widget_router, prefix="/api")
+app.include_router(demo_router, prefix="/api")
 
 
 @app.get("/health")

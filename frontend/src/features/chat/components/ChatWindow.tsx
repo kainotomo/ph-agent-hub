@@ -64,6 +64,8 @@ interface ChatWindowProps {
   temperature?: number | null;
   crossSessionMemoryEnabled?: boolean | null;
   embedded?: boolean;
+  demo?: boolean;
+  featureFlags?: Record<string, boolean>;
   onSessionUpdate?: (data: Record<string, unknown>) => void;
 }
 
@@ -76,6 +78,8 @@ export function ChatWindow({
   temperature,
   crossSessionMemoryEnabled = null,
   embedded = false,
+  demo = false,
+  featureFlags = {},
   onSessionUpdate,
 }: ChatWindowProps) {
   const [inputValue, setInputValue] = useState("");
@@ -143,7 +147,7 @@ export function ChatWindow({
   const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
   const [regeneratingMsgId, setRegeneratingMsgId] = useState<string | null>(null);
 
-  const { streaming, startStream, startRegenerateStream, startEditStream, stopStream } = useStream();
+  const { streaming, startStream, startRegenerateStream, startEditStream, stopStream } = useStream(demo ? "demo" : "chat");
 
   const { data: messages, isLoading: loadingMessages } = useQuery({
     queryKey: ["messages", sessionId],
@@ -223,11 +227,14 @@ export function ChatWindow({
   const fetchFollowUpQuestions = useCallback(
     (sid: string, setter: (questions: string[]) => void) => {
       const BASE_URL = import.meta.env.VITE_API_URL || "/api";
+      const endpoint = demo
+        ? `${BASE_URL}/demo/session/follow-up-questions`
+        : `${BASE_URL}/chat/session/${sid}/follow-up-questions`;
       setTimeout(async () => {
         try {
           const token = getToken();
           const res = await fetch(
-            `${BASE_URL}/chat/session/${sid}/follow-up-questions`,
+            endpoint,
             { headers: token ? { Authorization: `Bearer ${token}` } : {} },
           );
           if (res.ok) {
@@ -241,7 +248,7 @@ export function ChatWindow({
         }
       }, 1500);
     },
-    [],
+    [demo],
   );
 
   const handleSend = useCallback(async () => {
@@ -366,16 +373,23 @@ export function ChatWindow({
       },
       onMessageComplete(data) {
         setPendingUserMessage(null);
-        setStreamingContent("");
-        setStreamingReasoningContent("");
-        setStreamingMessageId(null);
         setToolEvents([]);
         if (data.tokens_in || data.tokens_out) {
           setStreamingTokens({ tokens_in: data.tokens_in || 0, tokens_out: data.tokens_out || 0 });
         }
-        queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
-        queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
-        queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        if (!demo) {
+          // In chat mode, clear streaming state and refetch from API.
+          setStreamingContent("");
+          setStreamingReasoningContent("");
+          setStreamingMessageId(null);
+          queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+          queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+          queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        } else {
+          // In demo mode, keep streamingMessageId so the streaming
+          // content bubble remains visible as the final message.
+          setStreamingMessageId(data.message_id || "demo-response");
+        }
       },
       onFollowUpQuestions(questions) {
         setFollowUpQuestions(questions);
@@ -399,14 +413,19 @@ export function ChatWindow({
       },
       onClose() {
         setPendingUserMessage(null);
-        setStreamingContent("");
-        setStreamingReasoningContent("");
-        setStreamingMessageId(null);
         setToolEvents([]);
         setStreamingTokens(null);
-        queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
-        queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
-        queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        if (!demo) {
+          // In chat mode, clear streaming state and refetch from API.
+          // In demo mode, keep streaming state so the final message
+          // remains visible.
+          setStreamingContent("");
+          setStreamingReasoningContent("");
+          setStreamingMessageId(null);
+          queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+          queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+          queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        }
         fetchFollowUpQuestions(sessionId, setFollowUpQuestions);
       },
     });
@@ -524,10 +543,13 @@ export function ChatWindow({
       try {
         const formData = new FormData();
         formData.append("file", file);
+        const endpoint = demo
+          ? `/demo/session/upload`
+          : `/chat/session/${sessionId}/upload`;
         const res = await api<{
           file_id: string;
           original_filename: string;
-        }>(`/chat/session/${sessionId}/upload`, {
+        }>(endpoint, {
           method: "POST",
           body: formData,
         });
@@ -546,7 +568,7 @@ export function ChatWindow({
       }
       return false; // Prevent default Upload behavior
     },
-    [sessionId],
+    [sessionId, demo],
   );
 
   const handleRemoveFile = useCallback((fileId: string) => {
@@ -1009,7 +1031,7 @@ export function ChatWindow({
                     justifyContent: "flex-start",
                   }}
                 >
-                  {followUpQuestions.map((q, i) => (
+                  {(featureFlags.follow_up_questions ?? true) && followUpQuestions.map((q, i) => (
                     <Button
                       key={i}
                       size="small"
@@ -1120,30 +1142,32 @@ export function ChatWindow({
         )}
 
         <div style={{ display: "flex", alignItems: "flex-end", gap: 8, width: "100%" }}>
-          <Upload
-            multiple
-            showUploadList={false}
-            beforeUpload={async (file) => {
-              await handleFileUpload(file);
-              return false;
-            }}
-            disabled={streaming || !!editingMsgId}
-            accept={
-              ".pdf,.csv,.txt,.md,.json,.png,.jpg,.jpeg,.gif,.webp,.xlsx,.docx,.pptx," +
-              "application/pdf,text/csv,text/plain,text/markdown," +
-              "application/json,image/png,image/jpeg,image/gif,image/webp," +
-              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet," +
-              "application/vnd.openxmlformats-officedocument.wordprocessingml.document," +
-              "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-            }
-          >
-            <Button
-              icon={<PaperClipOutlined />}
+          {(featureFlags.file_upload ?? true) && (
+            <Upload
+              multiple
+              showUploadList={false}
+              beforeUpload={async (file) => {
+                await handleFileUpload(file);
+                return false;
+              }}
               disabled={streaming || !!editingMsgId}
-              loading={uploading}
-              title="Attach files"
-            />
-          </Upload>
+              accept={
+                ".pdf,.csv,.txt,.md,.json,.png,.jpg,.jpeg,.gif,.webp,.xlsx,.docx,.pptx," +
+                "application/pdf,text/csv,text/plain,text/markdown," +
+                "application/json,image/png,image/jpeg,image/gif,image/webp," +
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet," +
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document," +
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+              }
+            >
+              <Button
+                icon={<PaperClipOutlined />}
+                disabled={streaming || !!editingMsgId}
+                loading={uploading}
+                title="Attach files"
+              />
+            </Upload>
+          )}
           <div style={{ flex: 1, minWidth: 0 }}>
             <TextArea
               value={inputValue}

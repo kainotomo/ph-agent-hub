@@ -879,26 +879,39 @@ async def run_agent(
             )
 
         # ---- 10. Write usage log (non-streaming) -----------------------------
-        try:
-            await write_usage_log(
-                db,
-                tenant_id=current_user.tenant_id,
-                tenant_name=getattr(cfg, "tenant_name", "") or "",
-                user_id=current_user.id,
-                user_email=current_user.email,
-                user_full_name=current_user.display_name,
-                model_id=cfg.model.id,
-                model_name=cfg.model.name,
-                provider=cfg.model.provider,
-                tokens_in=tokens_in,
-                tokens_out=tokens_out,
-                cache_hit_tokens=cache_hit_tokens,
-                input_price=getattr(cfg.model, "input_price_per_1m", None),
-                output_price=getattr(cfg.model, "output_price_per_1m", None),
-                cache_hit_price=getattr(cfg.model, "cache_hit_price_per_1m", None),
-            )
-        except Exception:
-            logger.exception("Failed to write usage log (non-streaming)")
+        if current_user is not None:
+            try:
+                await write_usage_log(
+                    db,
+                    tenant_id=current_user.tenant_id,
+                    tenant_name=getattr(cfg, "tenant_name", "") or "",
+                    user_id=current_user.id,
+                    user_email=current_user.email,
+                    user_full_name=current_user.display_name,
+                    model_id=cfg.model.id,
+                    model_name=cfg.model.name,
+                    provider=cfg.model.provider,
+                    tokens_in=tokens_in,
+                    tokens_out=tokens_out,
+                    cache_hit_tokens=cache_hit_tokens,
+                    input_price=getattr(cfg.model, "input_price_per_1m", None),
+                    output_price=getattr(cfg.model, "output_price_per_1m", None),
+                    cache_hit_price=getattr(cfg.model, "cache_hit_price_per_1m", None),
+                )
+            except Exception:
+                logger.exception("Failed to write usage log (non-streaming)")
+
+        # ---- 11. Post-response tasks (follow-up questions, auto-tagging) -----
+        _schedule_post_response_tasks(
+            model=cfg.model,
+            system_prompt=cfg.system_prompt,
+            user_message=user_message,
+            assistant_response=raw_response,
+            session_id=session_id,
+            tenant_id=tenant_id,
+            is_temporary=is_temporary,
+            temperature=cfg.temperature,
+        )
 
         return raw_response, assistant_msg_id
 
@@ -1750,9 +1763,9 @@ async def _run_agent(
     if hasattr(result, "final_output"):
         return str(result.final_output), tokens_in, tokens_out, cache_hit
     if hasattr(result, "content"):
-        return str(result.content), tokens_in, tokens_out
+        return str(result.content), tokens_in, tokens_out, 0
 
-    return str(result), tokens_in, tokens_out
+    return str(result), tokens_in, tokens_out, 0
 
 
 async def _run_workflow(

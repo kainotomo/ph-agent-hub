@@ -6,6 +6,26 @@ This guide is for end users (`user` role) who use PH Agent Hub to chat with AI a
 
 ## 1. Getting Started
 
+### 1.0 Trying the Demo (No Account Required)
+
+If the platform administrator has enabled the demo, you can try PH Agent Hub
+without creating an account:
+
+1. On the **login page**, click **Try It Now**
+2. You're taken to a simplified chat interface — start typing immediately
+3. Your session is **anonymous and temporary** — it expires after 1 hour
+4. A banner reminds you that conversations are temporary
+5. Click **Sign Up Free** on the banner to create a full account
+
+**Limitations of demo mode:**
+- Sessions expire after 1 hour — all messages are lost on expiry
+- No sidebar, model selector, or settings are available
+- No memory or branching
+- Rate limits apply (10 sessions/hour, 30 messages/minute)
+
+The demo is intended to give you a quick taste of the platform. For full access,
+sign up for an account.
+
 ### 1.1 Logging In
 
 1. Open the PH Agent Hub web app in your browser

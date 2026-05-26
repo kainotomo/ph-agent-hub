@@ -66,6 +66,7 @@ export interface UserData {
 export interface TenantData {
   id: string;
   name: string;
+  is_demo: boolean;
   created_at: string;
   updated_at: string;
   total_tokens_in: number;
@@ -308,7 +309,7 @@ export function createTenant(data: { name: string }): Promise<TenantData> {
   return api<TenantData>("/admin/tenants", { method: "POST", body: data });
 }
 
-export function updateTenant(id: string, data: { name: string }): Promise<TenantData> {
+export function updateTenant(id: string, data: { name: string; is_demo?: boolean | null }): Promise<TenantData> {
   return api<TenantData>(`/admin/tenants/${id}`, { method: "PUT", body: data });
 }
 

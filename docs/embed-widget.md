@@ -86,6 +86,42 @@ Embedded chat uses **three layers of authentication**:
 
 ---
 
+## Demo Mode
+
+The embed widget supports a **demo mode** that does not require an existing embed config
+or guest token.  Instead, it auto-provisions a temporary session under the platform's
+configured demo tenant (see [Admin Guide: Demo Tenant](admin-guide.md#3-demo-tenant)).
+
+### Usage
+
+Add the `data-ph-demo="true"` attribute to the script tag (omit `data-ph-token`):
+
+```html
+<script src="https://your-domain.com/embed.js"
+        data-ph-demo="true"
+        data-ph-position="bubble"
+></script>
+```
+
+### How Demo Mode Differs from a Standard Embed
+
+| Feature | Standard Embed | Demo Mode |
+|---------|---------------|-----------|
+| Requires embed config | Yes | No (uses demo tenant) |
+| Guest token | `data-ph-token="embed_..."` | Not needed |
+| Session TTL | 24 hours | 1 hour |
+| Tenant | Config-specific tenant | Demo tenant |
+| Use case | Production deployments | Try before you sign up |
+
+### Prerequisites
+
+The platform admin must:
+1. Create a tenant and mark it as the **demo tenant** (see [Admin Guide](admin-guide.md#3-demo-tenant))
+2. Configure at least one model, skill, and template for that tenant
+3. Enable the demo mode in **Admin → Settings** (`demo_enabled = true`)
+
+---
+
 ## Admin Panel
 
 Navigate to **Admin → Embed Widget** to manage configurations.

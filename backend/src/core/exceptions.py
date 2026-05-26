@@ -42,6 +42,11 @@ class ConflictError(AppException):
         super().__init__(message, status_code=409)
 
 
+class ServiceUnavailableError(AppException):
+    def __init__(self, message: str = "Service unavailable"):
+        super().__init__(message, status_code=503)
+
+
 # ---------------------------------------------------------------------------
 # FastAPI exception handlers
 # ---------------------------------------------------------------------------

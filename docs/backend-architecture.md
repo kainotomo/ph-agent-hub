@@ -257,19 +257,53 @@ PUT    /admin/tools/:id
 DELETE /admin/tools/:id
 ```
 
-Tools now support a `mcp` type (alongside the existing `erpnext`, `membrane`, `custom`, `datetime`, etc.). MCP tools are synced automatically from MCP server configurations via the `POST /admin/mcp-servers/:id/sync-tools` endpoint.
+Tools now support a `mcp` type (alongside the existing `erpnext`, `membrane`, `datetime`, and many more — see the full list in §4). MCP tools are synced automatically from MCP server configurations via the `POST /admin/mcp-servers/:id/sync-tools` endpoint.
 
-### **3.12 Admin / Manager ERPNext Instances**
+### **3.12 Admin Groups**
 ```
-GET    /admin/tools/erpnext
-POST   /admin/tools/erpnext
-PUT    /admin/tools/erpnext/:instance_id
-DELETE /admin/tools/erpnext/:instance_id
+GET    /admin/groups
+POST   /admin/groups
+PUT    /admin/groups/:id
+DELETE /admin/groups/:id
+POST   /admin/groups/:id/models
+DELETE /admin/groups/:id/models/:modelId
+POST   /admin/groups/:id/tools
+DELETE /admin/groups/:id/tools/:toolId
 ```
 
-> Sensitive fields (`api_key`, `api_secret`) are never returned in response bodies. Values are transparently encrypted at rest via the `EncryptedString` ORM type.
+Groups are collections of models and tools that can be assigned to templates or skills for simplified configuration.
 
-### **3.13 Admin / Manager Templates**
+### **3.13 Admin Embed Configurations**
+```
+GET    /admin/embed-configs
+POST   /admin/embed-configs
+GET    /admin/embed-configs/:id
+PUT    /admin/embed-configs/:id
+DELETE /admin/embed-configs/:id
+POST   /admin/embed-configs/:id/regenerate-token
+```
+
+Embed configurations control the embeddable chat widget appearance and behavior. See [`embed-widget.md`](embed-widget.md) for details.
+
+### **3.14 Admin RAG Documents**
+```
+GET    /admin/rag/documents
+DELETE /admin/rag/documents/:id
+POST   /admin/rag/documents/:fileId/reindex
+```
+
+RAG document management — list, delete, and re-index uploaded documents. See [data-model.md](data-model.md) §4.2 for the data model.
+
+### **3.15 Admin Sessions**
+```
+GET    /admin/sessions
+GET    /admin/sessions/:id
+DELETE /admin/sessions/:id
+```
+
+Administrative session viewing and cleanup. Admins see all sessions; managers see sessions in their own tenant.
+
+### **3.16 Admin / Manager Templates**
 ```
 GET    /admin/templates
 POST   /admin/templates
@@ -277,7 +311,7 @@ PUT    /admin/templates/:id
 DELETE /admin/templates/:id
 ```
 
-### **3.14 Admin / Manager Skills**
+### **3.17 Admin / Manager Skills**
 ```
 GET    /admin/skills
 POST   /admin/skills
@@ -285,7 +319,7 @@ PUT    /admin/skills/:id
 DELETE /admin/skills/:id
 ```
 
-### **3.15 Analytics and Audit**
+### **3.18 Analytics and Audit**
 ```
 GET /admin/usage
 GET /admin/logs
@@ -302,75 +336,123 @@ GET /admin/audit
 /backend
   /src
     /api
-      auth.py
-      chat.py
-      models.py
-      prompts.py
-      skills.py
-      admin.py
+      admin.py             — admin/manager CRUD (users, tenants, models, tools, groups,
+                              templates, skills, embed configs, MCP servers, analytics, audit)
+      auth.py              — login, refresh, logout, me
+      chat.py              — sessions, messages, streaming, branches, feedback, files
+      demo.py              — public demo endpoint
+      memory.py            — user memory CRUD
+      models.py            — user-facing model listing
+      prompts.py           — user prompt CRUD
+      skills.py            — user skill CRUD
+      templates.py         — user-facing template listing
+      users.py             — user management
+      widget.py            — embed widget endpoints (guest sessions)
     /agents
-      runner.py
-      stabilizer.py
-      deepseek_patch.py
+      runner.py            — agent assembly, execution, streaming
+      stabilizer.py        — DeepSeek stabilizer middleware
+      deepseek_patch.py    — DeepSeek monkey-patches
+      registry.py          — MAF agent/workflow scanner (scans skills/ and workflows/)
+      identity.txt         — bot identity/system prompt
+      skills/              — MAF skill definitions (scanned at startup)
+      workflows/           — MAF workflow definitions (scanned at startup)
     /models
-      base.py
-      deepseek.py
-      openai.py
-      anthropic.py
-    /tools
-      mcp.py                — MCP tool runner (dynamically invokes MCP server tools)
-      erpnext.py
-      membrane.py
-      custom/
+      base.py              — provider client factory
+      deepseek.py          — DeepSeek ChatClient adapter
+      openai.py            — OpenAI ChatClient adapter
+      anthropic.py         — Anthropic ChatClient adapter
+      ollama.py            — Ollama ChatClient adapter
+    /tools                 — 30+ MAF tool implementations
+      mcp.py               — MCP tool runner (dynamically invokes MCP server tools)
+      erpnext.py           — ERPNext REST API tools
+      membrane.py          — Membrane tools
+      browser.py           — web scraping tool
+      calculator.py        — arithmetic tool
+      calendar.py          — date/time calculation tool
+      code_interpreter.py  — Python code execution tool
+      currency_exchange.py — FX rate lookup tool
+      custom_tool_executor.py  — user-defined code tool runner
+      datetime.py          — current date/time tool
+      document_generation.py   — document creation tool
+      email.py             — email sending tool
+      etf_data.py          — ETF market data tool
+      fetch_url.py         — HTTP fetch tool
+      file_list.py         — file listing tool
+      github.py            — GitHub API tool
+      image_generation.py  — AI image generation tool
+      market_overview.py   — market summary tool
+      memory.py            — memory management tool
+      pdf_extractor.py     — PDF text extraction tool
+      portfolio.py         — portfolio analysis tool
+      rag_search.py        — RAG document search tool
+      rss_feed.py          — RSS feed reader tool
+      sec_filings.py       — SEC filing lookup tool
+      slack.py             — Slack messaging tool
+      sql_query.py         — SQL query execution tool
+      stock_data.py        — stock price tool
+      weather.py           — weather forecast tool
+      web_search.py        — web search tool
+      wikipedia.py         — Wikipedia lookup tool
     /storage
       s3.py              — all MinIO/boto3 interactions; single module rule
     /services
-      user_service.py
-      tenant_service.py
-      model_service.py
-      tool_service.py
-      mcp_service.py          — MCP server CRUD, encryption, tool sync
-      erpnext_service.py
-      template_service.py
-      prompt_service.py
-      skill_service.py
-      session_service.py      — finalize_session (temp→permanent), sync_session_tools_for_skill
-      memory_service.py       — pagination, cross-session retrieval support
-      license_service.py      — Ed25519 license verification, tenant gating
-      audit_service.py
-      embedding_service.py
-      rag_service.py          — RAG ingestion, semantic search, document mgmt (Issue #250)
-      group_service.py
-      upload_service.py
-      usage_service.py
+      audit_service.py       — audit log writes/queries
+      embed_service.py       — embed configuration management
+      embedding_service.py   — text embedding generation
+      group_service.py       — model/tool group management
+      license_service.py     — Ed25519 license verification, tenant gating
+      mcp_service.py         — MCP server CRUD, encryption, tool sync
+      memory_service.py      — pagination, cross-session retrieval
+      model_service.py       — model CRUD
+      prompt_service.py      — user prompt CRUD
+      rag_service.py         — RAG ingestion, semantic search, doc management
+      session_service.py     — session CRUD, temp→permanent conversion
+      settings_service.py    — system settings management
+      skill_service.py       — skill CRUD
+      template_service.py    — template CRUD
+      tenant_service.py      — tenant CRUD
+      tool_service.py        — tool CRUD
+      upload_service.py      — file upload handling
+      usage_service.py       — usage analytics
+      user_service.py        — user CRUD
     /db
       base.py              — SQLAlchemy declarative base and async session factory
       /orm                 — SQLAlchemy ORM model definitions
-        users.py
-        tenants.py
-        models.py
-        tools.py
-        erpnext_instances.py
-        templates.py
-        prompts.py
-        skills.py
-        sessions.py
-        messages.py
-        memory.py
-        file_uploads.py
-        rag.py
-        usage_logs.py
+        app_settings.py
         audit_logs.py
+        embed_configs.py
+        file_uploads.py
+        groups.py
+        mcp_servers.py
+        memory.py
+        message_embeddings.py
+        messages.py
+        models.py
+        prompts.py
+        rag.py
+        sessions.py
+        skills.py
+        tags.py
+        templates.py
+        tenants.py
+        tools.py
+        usage_logs.py
+        user_tool_preferences.py
+        users.py
       /migrations          — Alembic migration scripts
         env.py
         versions/
     alembic.ini
     /core
       config.py
-      security.py
-      encryption.py     — Fernet encrypt/decrypt; the only module that imports cryptography
-      jwt.py
-      exceptions.py
+      dependencies.py    — FastAPI dependency injection helpers
+      encryption.py      — Fernet encrypt/decrypt; only module that imports cryptography
+      exceptions.py      — shared exception types and HTTP error handlers
+      jwt.py             — JWT encode/decode; single module rule
+      limiter.py         — rate-limiting helpers
+      pagination.py      — paginated query helpers
+      redis.py           — Redis client singleton
+      security.py        — password hashing
   Dockerfile
 ```
 
@@ -457,13 +539,14 @@ JWT logic lives exclusively in `/backend/src/core/jwt.py`. No other module encod
 
 ## 8. Encryption
 
-Sensitive fields (`models.api_key`, `erpnext_instances.api_key`, `erpnext_instances.api_secret`) are encrypted at the application layer using **Fernet symmetric encryption** (AES-128-CBC + HMAC-SHA256) from the Python `cryptography` library.
+Sensitive fields (`models.api_key`, MCP server env vars and headers) are encrypted at the application layer using **Fernet symmetric encryption** (AES-128-CBC + HMAC-SHA256) from the Python `cryptography` library.
 
 ### How it works
 - The encryption key is loaded from the `ENCRYPTION_KEY` environment variable at startup
 - All encrypt/decrypt operations go through `/backend/src/core/encryption.py` — the only file that imports `cryptography`
 - Values are encrypted before being written to MariaDB and decrypted after being read
-- The SQLAlchemy ORM models for `models` and `erpnext_instances` use a custom `EncryptedString` column type that transparently handles encrypt/decrypt at the ORM layer, so service code never handles raw ciphertext
+- The `models` ORM model uses a custom `EncryptedString` column type for `api_key` that transparently handles encrypt/decrypt at the ORM layer, so service code never handles raw ciphertext
+- MCP server secrets (env vars and HTTP headers) are also encrypted via `mcp_service.py` using the same Fernet key
 
 ### Key generation
 ```bash

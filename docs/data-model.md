@@ -105,19 +105,20 @@ Tools represent external integrations (ERPNext, Membrane, custom tools).
 
 ---
 
-## 1.5 ERPNext Instances (Tool Subtype)
+## 1.5 ERPNext (Tool Type)
 
-Stored as a tool config, but also available as a dedicated table for convenience.
+ERPNext integration is handled through the tool system. An ERPNext tool instance is created via the `/admin/tools` endpoint with `type=erpnext` and connection details stored in `tools.config` as a JSON object:
 
-**Table: erpnext_instances**
-- id (UUID, PK)
-- tenant_id (UUID, FK → tenants.id)
-- base_url (string)
-- api_key (string) — stored encrypted using Fernet symmetric encryption
-- api_secret (string) — stored encrypted using Fernet symmetric encryption
-- version (string)
-- created_at (timestamp)
-- updated_at (timestamp)
+```json
+{
+  "base_url": "https://erpnext.example.com",
+  "api_key": "encrypted...",
+  "api_secret": "encrypted...",
+  "version": "v15"
+}
+```
+
+Credentials in `tools.config` are encrypted at rest via the `EncryptedString` ORM column type when written through the tool management API. The dedicated `erpnext_instances` table was dropped in an earlier migration — all ERPNext configuration is now unified under the tools table.
 
 ---
 
@@ -548,8 +549,7 @@ Fields marked as encrypted in this schema use **application-level Fernet symmetr
 
 **Encrypted fields:**
 - `models.api_key`
-- `erpnext_instances.api_key`
-- `erpnext_instances.api_secret`
+- `tools.config` (when type is `erpnext` or `mcp` — contains credentials)
 
 ---
 

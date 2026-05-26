@@ -67,10 +67,12 @@ A log of key design decisions made during the design phase, with rationale. Orde
 ## D-07 — Fernet/AES-128-CBC for API key encryption
 
 **Date:** 2026-05-07
-**Decision:** Use application-level Fernet symmetric encryption (from the Python `cryptography` library) for sensitive DB fields: `models.api_key`, `erpnext_instances.api_key`, `erpnext_instances.api_secret`.
+**Decision:** Use application-level Fernet symmetric encryption (from the Python `cryptography` library) for sensitive DB fields: `models.api_key`.
 **Rationale:** Simple, no extra infrastructure, well-understood. The encryption key lives in an env var (`ENCRYPTION_KEY`). For a self-hosted platform where physical server access already implies full compromise, this threat model is appropriate. All encrypt/decrypt calls are in one module (`encryption.py`), making it replaceable with Vault or Azure Key Vault later without changing service code.
 **Alternatives considered:** DB-level encryption (same single-server trust problem), HashiCorp Vault (adds operational complexity, overkill for this threat model).
 **Reference:** [data-model.md](../data-model.md) §8, [backend-architecture.md](../backend-architecture.md) §8
+
+> **Note:** The original decision also listed `erpnext_instances.api_key` and `erpnext_instances.api_secret`. The dedicated `erpnext_instances` table was later dropped — ERPNext credentials are now stored in `tools.config` and encrypted using the same Fernet mechanism.
 
 ---
 

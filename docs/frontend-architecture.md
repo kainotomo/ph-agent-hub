@@ -102,23 +102,29 @@ The frontend should remain framework-light and avoid duplicating backend behavio
 
 ## 5. Route Structure
 
-Suggested route domains:
+Route domains:
 
 ```
 /
 /login
 /chat
 /chat/:sessionId
-/widget (embed iframe page — no auth required, uses guest token)
+/demo                               — public demo page
+/widget                             — embed iframe (no auth, guest token)
 /admin
 /admin/users
 /admin/tenants
 /admin/models
 /admin/tools
 /admin/mcp-servers
+/admin/groups                       — model/tool group management
 /admin/templates
 /admin/skills
 /admin/memories
+/admin/rag-documents                 — RAG document management
+/admin/embed                        — embed widget configuration
+/admin/sessions                     — administrative session viewer
+/admin/audit                        — audit log viewer
 /admin/analytics
 /admin/settings
 ```
@@ -436,6 +442,11 @@ Managers cannot create/delete tenants, access other tenants, or modify platform-
     /tools
     /templates
     /skills
+    /groups              — model/tool group assignment
+    /rag-documents       — RAG document list, delete, reindex
+    /embed               — embed widget configuration
+    /sessions            — administrative session viewer
+    /audit               — audit log viewer
   /pages
     /analytics
     /settings
@@ -445,4 +456,3 @@ Managers cannot create/delete tenants, access other tenants, or modify platform-
 ```
 
 The admin area uses [Refine](https://refine.dev/) for CRUD-heavy screens (resource lists, forms, tables, filters) and custom components as needed for analytics and operational views. Ant Design 5 with `@refinedev/antd` provides the UI component layer.
-- deliver a mobile-friendly, installable experience through PWA support

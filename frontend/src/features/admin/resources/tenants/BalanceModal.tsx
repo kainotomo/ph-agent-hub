@@ -141,6 +141,25 @@ export function BalanceModal({ tenant, onClose }: BalanceModalProps) {
               </Button>
               <Button
                 danger
+                onClick={async () => {
+                  try {
+                    const values = await form.validateFields();
+                    balanceMutation.mutate({
+                      id: tenant.id,
+                      amount_eur: -Math.abs(values.amount_eur),
+                      reason: values.reason || "admin_adjustment",
+                    });
+                  } catch {
+                    // validation failed
+                  }
+                }}
+                loading={balanceMutation.isPending}
+              >
+                Deduct Funds
+              </Button>
+              <Button
+                ghost
+                danger
                 onClick={() => {
                   Modal.confirm({
                     title: "Remove balance limit?",

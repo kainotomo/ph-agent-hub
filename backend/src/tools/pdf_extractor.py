@@ -117,7 +117,7 @@ def build_pdf_extractor_tools(tool_config: dict | None = None) -> list:
                 headers={
                     "User-Agent": (
                         "ph-agent-hub/1.0 (pdf-extractor; "
-                        "+https://github.com/phalouvas/ph-agent-hub)"
+                        "+https://github.com/kainotomo/ph-agent-hub)"
                     ),
                 },
             ) as client:

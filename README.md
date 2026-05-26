@@ -3,10 +3,10 @@
 ![PH Agent Hub Banner](docs/assets/ph-agent-hub-banner.svg)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Stars](https://img.shields.io/github/stars/kainotomo/ph-agent-hub?style=social)](https://github.com/kainotomo/ph-agent-hub)
+[![GitHub Stars](https://img.shields.io/github/stars/kainotomo/ph-agent-hub?label=stars&logo=github)](https://star-history.com/#kainotomo/ph-agent-hub&Date)
 [![Last Commit](https://img.shields.io/github/last-commit/kainotomo/ph-agent-hub)](https://github.com/kainotomo/ph-agent-hub)
 [![Issues](https://img.shields.io/github/issues/kainotomo/ph-agent-hub)](https://github.com/kainotomo/ph-agent-hub/issues)
-[![Docker Pulls](https://img.shields.io/badge/Docker%20Pulls-not%20published-lightgrey)](https://github.com/kainotomo/ph-agent-hub)
+[![Docker Pulls](https://img.shields.io/docker/pulls/phalouvas/ph-agent-hub-backend)](https://hub.docker.com/r/phalouvas/ph-agent-hub-backend)
 [![Build](https://img.shields.io/badge/Build-no%20workflow%20configured-lightgrey)](https://github.com/kainotomo/ph-agent-hub/actions)
 
 PH Agent Hub is a multi-tenant AI application platform for teams that need both:

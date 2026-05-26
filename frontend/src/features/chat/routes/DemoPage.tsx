@@ -176,6 +176,7 @@ export function DemoPage() {
             sessionId={config.session_id}
             isTemporary={true}
             embedded={true}
+            demo={true}
             selectedModelId={config.default_model_id ?? undefined}
             selectedSkillId={config.default_skill_id ?? undefined}
             selectedTemplateId={config.default_template_id ?? undefined}

@@ -64,6 +64,7 @@ interface ChatWindowProps {
   temperature?: number | null;
   crossSessionMemoryEnabled?: boolean | null;
   embedded?: boolean;
+  demo?: boolean;
   onSessionUpdate?: (data: Record<string, unknown>) => void;
 }
 
@@ -76,6 +77,7 @@ export function ChatWindow({
   temperature,
   crossSessionMemoryEnabled = null,
   embedded = false,
+  demo = false,
   onSessionUpdate,
 }: ChatWindowProps) {
   const [inputValue, setInputValue] = useState("");
@@ -143,7 +145,7 @@ export function ChatWindow({
   const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
   const [regeneratingMsgId, setRegeneratingMsgId] = useState<string | null>(null);
 
-  const { streaming, startStream, startRegenerateStream, startEditStream, stopStream } = useStream();
+  const { streaming, startStream, startRegenerateStream, startEditStream, stopStream } = useStream(demo ? "demo" : "chat");
 
   const { data: messages, isLoading: loadingMessages } = useQuery({
     queryKey: ["messages", sessionId],
@@ -366,16 +368,23 @@ export function ChatWindow({
       },
       onMessageComplete(data) {
         setPendingUserMessage(null);
-        setStreamingContent("");
-        setStreamingReasoningContent("");
-        setStreamingMessageId(null);
         setToolEvents([]);
         if (data.tokens_in || data.tokens_out) {
           setStreamingTokens({ tokens_in: data.tokens_in || 0, tokens_out: data.tokens_out || 0 });
         }
-        queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
-        queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
-        queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        if (!demo) {
+          // In chat mode, clear streaming state and refetch from API.
+          setStreamingContent("");
+          setStreamingReasoningContent("");
+          setStreamingMessageId(null);
+          queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+          queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+          queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        } else {
+          // In demo mode, keep streamingMessageId so the streaming
+          // content bubble remains visible as the final message.
+          setStreamingMessageId(data.message_id || "demo-response");
+        }
       },
       onFollowUpQuestions(questions) {
         setFollowUpQuestions(questions);
@@ -399,15 +408,19 @@ export function ChatWindow({
       },
       onClose() {
         setPendingUserMessage(null);
-        setStreamingContent("");
-        setStreamingReasoningContent("");
-        setStreamingMessageId(null);
         setToolEvents([]);
         setStreamingTokens(null);
-        queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
-        queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
-        queryClient.invalidateQueries({ queryKey: ["sessions"] });
-        fetchFollowUpQuestions(sessionId, setFollowUpQuestions);
+        if (!demo) {
+          // In chat mode, clear streaming state and refetch from API.
+          // In demo mode, keep streaming state so the final message
+          // remains visible.
+          setStreamingContent("");
+          setStreamingReasoningContent("");
+          setStreamingMessageId(null);
+          queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+          queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+          queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        }
       },
     });
   }, [inputValue, streaming, sessionId, startStream, queryClient, pendingFiles, editingMsgId]);

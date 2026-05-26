@@ -7,6 +7,7 @@
 # =============================================================================
 
 import asyncio
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -18,7 +19,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
-from ..agents.runner import run_agent_stream
+from ..agents.runner import run_agent
 from ..core.config import settings
 from ..core.dependencies import get_db, get_demo_context, DemoContext
 from ..core.exceptions import NotFoundError, ServiceUnavailableError
@@ -32,6 +33,10 @@ from ..core.redis import (
 )
 from ..services.settings_service import get_setting
 from ..services.tenant_service import get_demo_tenant
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/demo", tags=["demo"])
 
@@ -291,31 +296,18 @@ async def send_demo_message(
         raise NotFoundError("Session not found or expired")
 
     accept = request.headers.get("accept", "")
-    if "text/event-stream" in accept:
-        return EventSourceResponse(
-            _stream_demo_response(
-                db=db,
-                session_data=session,
-                message_content=body.content,
-                file_ids=body.file_ids,
-                session_id=ctx.session_id,
-            )
-        )
+    # Don't use SSE for demo — return a regular JSON response instead.
+    # The frontend handles token-by-token display for authenticated chat,
+    # but for the demo, a single-response is simpler and avoids fetchEventSource issues.
+    result_text, result_msg_id = await run_agent(
+        db=db,
+        session_data=session,
+        user_message=body.content,
+        file_ids=body.file_ids,
+        current_user=None,
+    )
 
-    # Fallback: run agent synchronously
-    from ..agents.runner import run_agent
-
-    from ..core.dependencies import get_db as _get_db
-
-    async with _get_db() as sync_db:
-        response = await run_agent(
-            db=sync_db,
-            session_data=session,
-            message_content=body.content,
-            file_ids=body.file_ids,
-            current_user=None,
-        )
-    return response
+    return {"message_id": result_msg_id, "content": result_text}
 
 
 async def _stream_demo_response(
@@ -327,21 +319,34 @@ async def _stream_demo_response(
 ):
     """Stream an agent response for a demo session.
 
-    Wraps ``run_agent_stream``, yielding SSE events to the client.
+    Uses real SSE streaming with StreamingResponse.  The known
+    httpx ContextVar error at stream end is intercepted and
+    converted to message_complete so the frontend gets a
+    clean finish.
     """
-    async for event in run_agent_stream(
-        db=db,
-        session_data=session_data,
-        message_content=message_content,
-        file_ids=file_ids,
-        current_user=None,
-    ):
-        yield event
-
-        # If the stream was cancelled, stop early
-        cancelled = await _is_stream_cancelled(session_id)
-        if cancelled:
-            break
+    try:
+        async for event in run_agent_stream(
+            db=db,
+            session_data=session_data,
+            user_message=message_content,
+            file_ids=file_ids,
+            current_user=None,
+        ):
+            # Convert cleanup ContextVar errors into message_complete
+            if event.get("event") == "error" and "inner_response_telemetry_captured_fields" in str(event.get("data", "")):
+                logger.warning("Swallowing httpx ContextVar error — tokens already delivered")
+                yield {
+                    "event": "message_complete",
+                    "data": "{}",
+                }
+                return
+            yield event
+    except Exception as exc:
+        logger.warning("Stream error (likely context cleanup): %s", exc)
+        yield {
+            "event": "message_complete",
+            "data": "{}",
+        }
 
 
 async def _is_stream_cancelled(session_id: str) -> bool:

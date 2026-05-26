@@ -10,6 +10,13 @@ export default defineConfig({
       includeAssets: ["icons/icon-192.png", "icons/icon-512.png", "logo.svg"],
       workbox: {
         maximumFileSizeToCacheInBytes: 4 * 1024 * 1024, // 4 MB — our main bundle is ~2.2 MB
+        runtimeCaching: [
+          {
+            urlPattern: /\/api\//,
+            handler: "NetworkOnly",
+            method: "POST",
+          },
+        ],
       },
       manifest: {
         name: "PH Agent Hub",

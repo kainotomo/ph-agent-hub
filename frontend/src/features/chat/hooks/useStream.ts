@@ -144,7 +144,7 @@ export type StreamEvent =
 // Hook
 // ---------------------------------------------------------------------------
 
-export function useStream() {
+export function useStream(apiPrefix: string = "chat") {
   const [streaming, setStreaming] = useState(false);
   const [streamingSessionId, setStreamingSessionId] = useState<string | null>(
     null,
@@ -187,9 +187,58 @@ export function useStream() {
 
       const token = getToken();
 
+      const isSessionInPath = apiPrefix === "chat";
+      const messageUrl = isSessionInPath
+        ? `${BASE_URL}/chat/session/${sessionId}/message`
+        : `${BASE_URL}/${apiPrefix}/session/message`;
+
+      // For non-chat modes (demo, widget), use regular fetch instead of
+      // fetchEventSource, which has issues with SSE POST requests.
+      if (!isSessionInPath) {
+        try {
+          // Don't use AbortController for demo — it conflicts with
+          // React StrictMode's lifecycle and causes signal aborts.
+          const res = await fetch(messageUrl, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            body: JSON.stringify({
+              content,
+              file_ids: fileIds || [],
+              ...(temperature !== undefined ? { temperature } : {}),
+            }),
+          });
+          if (!res.ok) {
+            throw new Error(`Request failed with status ${res.status}`);
+          }
+          const data = await res.json();
+          // Call onMessageComplete first so it finalizes the message
+          // without clearing content (the demo mode onMessageComplete
+          // handler sets the final content from the data).
+          handlers.onMessageComplete?.({
+            session_id: sessionId,
+            message_id: data.message_id || "",
+            content: data.content || "",
+            model_id: "",
+            model_name: "",
+          });
+          // Deliver tokens so the streaming UI shows the response
+          handlers.onToken?.(data.content || "", data.message_id || "");
+        } catch (err) {
+          handlers.onError?.(String(err), "");
+        } finally {
+          setStreaming(false);
+          setStreamingSessionId(null);
+          handlers.onClose?.();
+        }
+        return;
+      }
+
       try {
         await fetchEventSource(
-          `${BASE_URL}/chat/session/${sessionId}/message`,
+          messageUrl,
           {
             method: "POST",
             headers: {
@@ -300,7 +349,10 @@ export function useStream() {
       //    response, and ends the stream normally.
       try {
         const token = getToken();
-        await fetch(`${BASE_URL}/chat/session/${sessionId}/stream`, {
+        const streamUrl = apiPrefix === "chat"
+          ? `${BASE_URL}/chat/session/${sessionId}/stream`
+          : `${BASE_URL}/${apiPrefix}/session/stream`;
+        await fetch(streamUrl, {
           method: "DELETE",
           headers: token ? { Authorization: `Bearer ${token}` } : {},
         });

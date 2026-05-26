@@ -3,11 +3,11 @@
 ![PH Agent Hub Banner](docs/assets/ph-agent-hub-banner.svg)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Stars](https://img.shields.io/github/stars/phalouvas/ph-agent-hub?style=social)](https://github.com/phalouvas/ph-agent-hub)
-[![Last Commit](https://img.shields.io/github/last-commit/phalouvas/ph-agent-hub)](https://github.com/phalouvas/ph-agent-hub)
-[![Issues](https://img.shields.io/github/issues/phalouvas/ph-agent-hub)](https://github.com/phalouvas/ph-agent-hub/issues)
-[![Docker Pulls](https://img.shields.io/badge/Docker%20Pulls-not%20published-lightgrey)](https://github.com/phalouvas/ph-agent-hub)
-[![Build](https://img.shields.io/badge/Build-no%20workflow%20configured-lightgrey)](https://github.com/phalouvas/ph-agent-hub/actions)
+[![Stars](https://img.shields.io/github/stars/kainotomo/ph-agent-hub?style=social)](https://github.com/kainotomo/ph-agent-hub)
+[![Last Commit](https://img.shields.io/github/last-commit/kainotomo/ph-agent-hub)](https://github.com/kainotomo/ph-agent-hub)
+[![Issues](https://img.shields.io/github/issues/kainotomo/ph-agent-hub)](https://github.com/kainotomo/ph-agent-hub/issues)
+[![Docker Pulls](https://img.shields.io/badge/Docker%20Pulls-not%20published-lightgrey)](https://github.com/kainotomo/ph-agent-hub)
+[![Build](https://img.shields.io/badge/Build-no%20workflow%20configured-lightgrey)](https://github.com/kainotomo/ph-agent-hub/actions)
 
 PH Agent Hub is a multi-tenant AI application platform for teams that need both:
 - a production chat experience for end users
@@ -31,7 +31,7 @@ What you get in one system:
 ## Run In 3 Commands
 
 ```bash
-git clone https://github.com/phalouvas/ph-agent-hub.git
+git clone https://github.com/kainotomo/ph-agent-hub.git
 cd ph-agent-hub/infrastructure
 cp env.example env
 ```

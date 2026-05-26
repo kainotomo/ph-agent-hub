@@ -38,7 +38,7 @@ async def _rest_get(client: httpx.AsyncClient, lang: str, path: str) -> dict:
         url,
         headers={
             "User-Agent": "ph-agent-hub/1.0 (Wikipedia tool; "
-            "+https://github.com/phalouvas/ph-agent-hub)",
+            "+https://github.com/kainotomo/ph-agent-hub)",
             "Accept": "application/json",
         },
     )
@@ -161,7 +161,7 @@ def build_wikipedia_tools(tool_config: dict | None = None) -> list:
                     headers={
                         "User-Agent": (
                             "ph-agent-hub/1.0 (Wikipedia tool; "
-                            "+https://github.com/phalouvas/ph-agent-hub)"
+                            "+https://github.com/kainotomo/ph-agent-hub)"
                         ),
                         "Accept": "application/json",
                     },

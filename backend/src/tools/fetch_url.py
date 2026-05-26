@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_TIMEOUT: float = 30.0
 DEFAULT_MAX_CONTENT_LENGTH: int = 500_000
 DEFAULT_USER_AGENT: str = (
-    "ph-agent-hub/1.0 (fetch-url tool; +https://github.com/phalouvas/ph-agent-hub)"
+    "ph-agent-hub/1.0 (fetch-url tool; +https://github.com/kainotomo/ph-agent-hub)"
 )
 ALLOWED_SCHEMES: frozenset = frozenset({"http", "https"})
 

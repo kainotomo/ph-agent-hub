@@ -12,7 +12,6 @@ import {
   Select,
   Switch,
   message,
-  Typography,
 } from "antd";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -20,8 +19,6 @@ import {
   updateMcpServer,
   McpServerData,
 } from "../../services/admin";
-
-const { Text } = Typography;
 
 interface McpServerFormProps {
   open: boolean;

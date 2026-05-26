@@ -12,12 +12,10 @@ import {
   Input,
   Switch,
   Select,
-  ColorPicker,
   Divider,
   Typography,
   message,
   Space,
-  InputNumber,
 } from "antd";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
@@ -31,7 +29,6 @@ import {
 } from "../../services/admin";
 
 const { Text } = Typography;
-const { TextArea } = Input;
 
 interface EmbedConfigFormProps {
   open: boolean;
@@ -216,7 +213,7 @@ export function EmbedConfigForm({ open, config, onClose, onSuccess }: EmbedConfi
             <Select allowClear style={{ width: 200 }} placeholder="None">
               {(skills?.items || []).map((s) => (
                 <Select.Option key={s.id} value={s.id}>
-                  {s.name || s.title}
+                  {s.title}
                 </Select.Option>
               ))}
             </Select>

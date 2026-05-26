@@ -91,8 +91,8 @@ export function McpServerList() {
   }, [debouncedSearch, setSearch]);
 
   useEffect(() => {
-    updateParams({ transport: transportFilter, enabled: enabledFilter });
-  }, [transportFilter, enabledFilter, updateParams]);
+    updateParams({ enabled: enabledFilter });
+  }, [enabledFilter, updateParams]);
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => deleteMcpServer(id),
@@ -143,7 +143,7 @@ export function McpServerList() {
       dataIndex: "name",
       key: "name",
       sorter: true,
-      render: (name: string, record: McpServerData) => (
+      render: (name: string) => (
         <Space>
           <ApiOutlined />
           <span>{name}</span>

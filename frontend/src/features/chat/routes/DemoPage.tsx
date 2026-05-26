@@ -7,7 +7,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Alert, Button, ConfigProvider, Layout, Spin, Typography, theme as antTheme } from "antd";
+import { Button, ConfigProvider, Layout, Spin, Typography, theme as antTheme } from "antd";
 import { ChatWindow } from "../components/ChatWindow";
 import { setToken } from "../../../services/api";
 import { createDemoSession, type DemoConfig } from "../services/demo";

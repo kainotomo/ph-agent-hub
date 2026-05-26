@@ -12,7 +12,6 @@ import {
   Space,
   Tag,
   Popconfirm,
-  Switch,
   message,
   Grid,
   Typography,
@@ -27,7 +26,7 @@ import {
   SearchOutlined,
 } from "@ant-design/icons";
 import { useSearchParams } from "react-router-dom";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   listEmbedConfigs,
   deleteEmbedConfig,

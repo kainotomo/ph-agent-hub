@@ -804,6 +804,17 @@ async def _handle_streaming_message(
                 message_id=message_id,
                 file_ids=_valid_file_ids,
             ):
+                # Swallow httpx ContextVar cleanup errors at stream end
+                if (
+                    event_dict.get("event") == "error"
+                    and "inner_response_telemetry_captured_fields"
+                    in str(event_dict.get("data", ""))
+                ):
+                    logger.warning(
+                        "Swallowing httpx ContextVar error — tokens already delivered"
+                    )
+                    yield {"event": "message_complete", "data": "{}"}
+                    return
                 yield event_dict
         finally:
             # Ensure DB connection is cleanly returned to the pool even
@@ -844,13 +855,19 @@ async def _stream_with_heartbeat(
                 [anext_task], timeout=interval
             )
             if done:
-                event_dict = await anext_task
+                try:
+                    event_dict = await anext_task
+                except StopAsyncIteration:
+                    break
                 yield event_dict
             else:
                 # Heartbeat — inner task is still running, do NOT cancel it
                 yield {"event": "heartbeat", "data": "{}"}
                 # Wait for the inner task to complete, then yield its result
-                event_dict = await anext_task
+                try:
+                    event_dict = await anext_task
+                except StopAsyncIteration:
+                    break
                 yield event_dict
         except StopAsyncIteration:
             break
@@ -1195,6 +1212,17 @@ async def _handle_streaming_regenerate(
                 message_id=message_id,
                 file_ids=_file_ids,
             ):
+                # Swallow httpx ContextVar cleanup errors at stream end
+                if (
+                    event_dict.get("event") == "error"
+                    and "inner_response_telemetry_captured_fields"
+                    in str(event_dict.get("data", ""))
+                ):
+                    logger.warning(
+                        "Swallowing httpx ContextVar error — tokens already delivered"
+                    )
+                    yield {"event": "message_complete", "data": "{}"}
+                    return
                 yield event_dict
         finally:
             # Ensure DB connection is cleanly returned to the pool even

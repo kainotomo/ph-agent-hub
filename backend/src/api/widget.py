@@ -285,6 +285,17 @@ async def _stream_widget_response(
     )
 
     async for event_dict in stream:
+        # Swallow httpx ContextVar cleanup errors at stream end
+        if (
+            event_dict.get("event") == "error"
+            and "inner_response_telemetry_captured_fields"
+            in str(event_dict.get("data", ""))
+        ):
+            logger.warning(
+                "Swallowing httpx ContextVar error — tokens already delivered"
+            )
+            yield {"event": "message_complete", "data": "{}"}
+            return
         yield event_dict
 
 

@@ -20,7 +20,7 @@ without creating an account:
 **Limitations of demo mode:**
 - Sessions expire after 1 hour — all messages are lost on expiry
 - No sidebar, model selector, or settings are available
-- No file uploads, memory, or branching
+- No memory or branching
 - Rate limits apply (10 sessions/hour, 30 messages/minute)
 
 The demo is intended to give you a quick taste of the platform. For full access,

@@ -99,9 +99,14 @@ PH Agent Hub supports a **demo tenant** for the "Try It Now" experience and embe
 3. **Configure models**: Add at least one model with valid credentials under the demo tenant
 4. **Configure skills and templates**: Set up the chat experience visitors will see
    - Optionally set default model, skill, and template — these are auto-selected when a demo session starts
-5. **Enable demo mode**: Go to **Admin → Settings** → add `demo_enabled: true`
+5. **Enable demo mode**: Go to **Admin → Settings** → toggle **Demo Mode** ON
    - When disabled, the "Try It Now" button is hidden and demo API endpoints return 503
-6. **Rate limits**: Demo sessions are rate-limited (10 sessions/hour per IP, 30 messages/minute per session) to prevent abuse
+6. **Configure demo features**: In **Admin → Settings** → **Demo Features**, toggle:
+   - **File Upload** — allow visitors to attach files
+   - **Follow-up Questions** — show suggested follow-ups after each response
+   - *Note: Follow-up questions also require `follow_up_questions_enabled` to be ON
+     on the model itself (edit the model in **Admin → Models**)*
+7. **Rate limits**: Demo sessions are rate-limited (10 sessions/hour per IP, 30 messages/minute per session) to prevent abuse
 
 #### What Visitors See
 

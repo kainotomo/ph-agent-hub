@@ -1,8 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
-import path from "path";
-import fs from "fs";
 
 export default defineConfig({
   plugins: [
@@ -49,31 +47,12 @@ export default defineConfig({
           },
         ],
       },
+      // Dev mode: registration is inlined in index.html to avoid Vite's
+      // SPA fallback returning HTML for /registerSW.js (Issue #263).
       devOptions: {
-        enabled: true,
+        enabled: false,
       },
     }),
-    // Serve PWA dev files from dev-dist/ (Vite doesn't auto-serve them)
-    {
-      name: "serve-dev-dist",
-      configureServer(server) {
-        const devDist = path.resolve(__dirname, "dev-dist");
-        server.middlewares.use((req, res, next) => {
-          const url = req.url || "";
-          // Only handle known PWA dev files
-          if (url === "/registerSW.js" || url === "/sw.js" || url.startsWith("/workbox-")) {
-            const filePath = path.join(devDist, url.replace(/^\//, ""));
-            if (fs.existsSync(filePath)) {
-              res.setHeader("Content-Type", url.endsWith(".js") ? "application/javascript" : "text/javascript");
-              res.setHeader("Cache-Control", "no-cache");
-              res.end(fs.readFileSync(filePath, "utf-8"));
-              return;
-            }
-          }
-          next();
-        });
-      },
-    },
   ],
   server: {
     port: 3000,

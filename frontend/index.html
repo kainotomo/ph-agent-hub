@@ -15,5 +15,11 @@
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
+    <!-- PWA service worker registration (inline to avoid Vite dev server SPA fallback bug) -->
+    <script>
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/dev-sw.js?dev-sw', { scope: '/', type: 'classic' });
+      }
+    </script>
   </body>
 </html>

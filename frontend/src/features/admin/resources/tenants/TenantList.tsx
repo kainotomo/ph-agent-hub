@@ -188,6 +188,14 @@ export function TenantList() {
   const nearLimit = !atLimit && tenantStatus && tenantStatus.license_status !== "valid"
     && tenantStatus.total_tenants >= tenantStatus.effective_limit - 1;
 
+  // Balance warnings (Phase 6)
+  const warningTenants = tenantsData.filter((t) => t.balance_warning);
+  const blockedTenants = tenantsData.filter(
+    (t) => t.balance_euros !== null && t.balance_euros <= 0,
+  );
+  const hasBalanceWarnings = warningTenants.length > 0 || blockedTenants.length > 0;
+  const lowBalanceCount = warningTenants.length + blockedTenants.length;
+
   return (
     <div>
       {/* Tenant capacity banner (Issue #243) */}
@@ -232,6 +240,49 @@ export function TenantList() {
             />
           )}
         </div>
+      )}
+
+      {/* Low-balance warning banner (Phase 6) */}
+      {hasBalanceWarnings && (
+        <Alert
+          type="warning"
+          icon={<WarningOutlined />}
+          message={
+            <span>
+              <strong>{lowBalanceCount}</strong>{" "}
+              {lowBalanceCount === 1 ? "tenant has" : "tenants have"} low balance
+              {blockedTenants.length > 0 && (
+                <>
+                  {" — "}
+                  <strong>{blockedTenants.length}</strong>{" "}
+                  {blockedTenants.length === 1 ? "is" : "are"} blocked
+                </>
+              )}
+            </span>
+          }
+          description={
+            <span>
+              Top up their balance to restore service.
+              {blockedTenants.length > 0 && (
+                <span>
+                  {" "}
+                  Blocked tenants:{" "}
+                  {blockedTenants.map((t) => t.name).join(", ")}.
+                </span>
+              )}
+              {warningTenants.length > 0 && (
+                <span>
+                  {" "}
+                  Below warning threshold:{" "}
+                  {warningTenants.map((t) => t.name).join(", ")}.
+                </span>
+              )}
+            </span>
+          }
+          showIcon
+          closable
+          style={{ marginBottom: 16 }}
+        />
       )}
 
       <Space style={{ marginBottom: 16 }} wrap>

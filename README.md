@@ -185,20 +185,6 @@ Engineering references:
 - [docs/agent-framework-integration.md](docs/agent-framework-integration.md)
 - [docs/deepseek-stabilizer.md](docs/deepseek-stabilizer.md)
 
-## GitHub Topics To Set
-
-Recommended repository topics:
-- ai-agents
-- multi-tenant
-- fastapi
-- react
-- llm
-- rag
-- self-hosted
-- docker-compose
-- microsoft-agent-framework
-- chat-widget
-
 ## 💼 Licensing
 
 - **Free**: MIT license, up to 3 tenants — [get started](https://github.com/kainotomo/ph-agent-hub)

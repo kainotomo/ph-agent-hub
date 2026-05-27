@@ -35,8 +35,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Try to restore session on mount
+  // Try to restore session on mount (skip for widget/demo — they use guest tokens)
   useEffect(() => {
+    const path = window.location.pathname;
+    const isAnonymous = path.startsWith("/widget") || path.startsWith("/demo");
+
+    if (isAnonymous) {
+      setLoading(false);
+      return;
+    }
+
     const token = getToken();
     if (token) {
       // Verify existing token

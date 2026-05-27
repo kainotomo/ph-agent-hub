@@ -31,6 +31,7 @@ import {
   summarizeSession,
   finalizeSession,
 } from "../services/chat";
+import { getDemoMessages } from "../services/demo";
 import api, { getToken } from "../../../services/api";
 import {
   ModelSelector,
@@ -151,11 +152,31 @@ export function ChatWindow({
 
   const { data: messages, isLoading: loadingMessages } = useQuery({
     queryKey: ["messages", sessionId],
-    queryFn: () => listMessages(sessionId),
+    queryFn: () =>
+      demo
+        ? getDemoMessages().then((msgs) =>
+            msgs.map((m) => ({
+              id: m.id,
+              session_id: m.session_id,
+              sender: m.role as "user" | "assistant",
+              content: [{ type: "text" as const, text: m.content }],
+              model_id: null,
+              model_name: null,
+              model_provider: null,
+              tool_calls: null,
+              tokens_in: null,
+              tokens_out: null,
+              is_deleted: false,
+              created_at: m.created_at,
+              updated_at: m.created_at,
+            })),
+          )
+        : listMessages(sessionId),
     refetchInterval: false,
   });
 
   // Fetch models to determine if selected model supports thinking
+  // (skipped in demo mode to avoid 401 triggering auto-refresh)
   interface ModelInfo {
     id: string;
     name: string;
@@ -165,6 +186,7 @@ export function ChatWindow({
   const { data: modelList } = useQuery({
     queryKey: ["models"],
     queryFn: () => api<ModelInfo[]>("/models"),
+    enabled: !demo,
   });
   const selectedModel = useMemo(
     () => (modelList || []).find((m) => m.id === selectedModelId),
@@ -219,6 +241,18 @@ export function ChatWindow({
       }
     }
   }, [messages, editingMsgId]);
+
+  // In demo mode, when persisted messages arrive from Redis after a stream
+  // completes, clear the streaming bubble so the real messages show instead.
+  const prevMessagesLenRef = useRef(0);
+  useEffect(() => {
+    if (demo && messages && messages.length > 0 && messages.length > prevMessagesLenRef.current && streamingMessageId) {
+      setStreamingContent("");
+      setStreamingReasoningContent("");
+      setStreamingMessageId(null);
+    }
+    prevMessagesLenRef.current = messages?.length ?? 0;
+  }, [demo, messages, streamingMessageId]);
 
   // ---- Fetch follow-up questions after stream closes (Issue #126) -----------
   // The backend now generates follow-up questions in a background task so
@@ -421,14 +455,18 @@ export function ChatWindow({
         setStreamingTokens(null);
         if (!demo) {
           // In chat mode, clear streaming state and refetch from API.
-          // In demo mode, keep streaming state so the final message
-          // remains visible.
           setStreamingContent("");
           setStreamingReasoningContent("");
           setStreamingMessageId(null);
           queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
           queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
           queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        } else {
+          // In demo mode, refetch persisted messages from Redis without
+          // clearing streaming state yet — the streaming bubble stays
+          // visible until the refetched messages arrive, then a useEffect
+          // below swaps the streaming bubble for real persisted messages.
+          queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
         }
         fetchFollowUpQuestions(sessionId, setFollowUpQuestions);
         // Re-fetch sessions after a delay so auto-generated tags appear

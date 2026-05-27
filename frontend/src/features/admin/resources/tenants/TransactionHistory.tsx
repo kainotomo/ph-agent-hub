@@ -9,7 +9,6 @@ import { Drawer, Table, Typography, Tag } from "antd";
 import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import {
   getTenantBalanceTransactions,
-  BalanceTransactionData,
   TenantData,
 } from "../../services/admin";
 import { formatCurrency } from "../../../../shared/utils/formatCurrency";

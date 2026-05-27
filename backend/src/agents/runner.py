@@ -2152,6 +2152,11 @@ async def run_agent_stream(
             }
 
         # ---- 7. Run agent or workflow (streaming) ------------------------
+        logger.info(
+            "Stream execution: type=%s, skill=%s",
+            cfg.execution_type,
+            getattr(cfg.skill, "name", None) if cfg.skill else None,
+        )
         if cfg.execution_type == "workflow":
             stream = _run_workflow_stream(
                 model=cfg.model,
@@ -2533,6 +2538,10 @@ async def _run_agent_stream(
     )
 
     response_stream = agent.run(user_message, stream=True)
+    logger.info(
+        "Agent.run returned: type=%s",
+        type(response_stream).__module__ + "." + type(response_stream).__qualname__,
+    )
 
     step_index = 0
     # Aggregate streaming tool calls: call_id -> {name, args_str}
@@ -2548,7 +2557,9 @@ async def _run_agent_stream(
             )
         except StopAsyncIteration:
             break
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, Exception):
+            # Stream exhausted or error — break so post-loop code
+            # (token extraction, final yields) can still run.
             break
         inner_event_count += 1
         if inner_event_count <= 5 or inner_event_count % 20 == 0:
@@ -2609,7 +2620,10 @@ async def _run_agent_stream(
                     "step_index": step_index,
                     "total_steps_so_far": step_index,
                 }, session_id=session_id, message_id=message_id)
-    # After stream is exhausted, get final response for token counts
+    # After stream exhausted, get final response for token counts.
+    # MAF's ResponseStream caches the final result internally, so
+    # calling get_final_response() here is safe.  If it fails, we
+    # fall back to a rough token estimate.
     try:
         final = await response_stream.get_final_response()
         if token_counts is not None:
@@ -2621,7 +2635,6 @@ async def _run_agent_stream(
             if usage and isinstance(usage, dict):
                 token_counts["in"] = usage.get("input_token_count", 0) or 0
                 token_counts["out"] = usage.get("output_token_count", 0) or 0
-                # MAF stores cached_tokens as "prompt/cached_tokens" (slash-separated)
                 cache_hit = usage.get("prompt/cached_tokens", 0) or 0
                 if cache_hit == 0:
                     cache_hit = usage.get("cache_read_input_tokens", 0) or 0
@@ -2633,7 +2646,12 @@ async def _run_agent_stream(
                     cache_hit = usage.get("cached_tokens", 0) or 0
                 token_counts["cache_hit"] = cache_hit
     except Exception:
-        pass  # Token count is best-effort for Phase 7
+        logger.warning("Token extraction via get_final_response failed", exc_info=True)
+    except Exception as _exc:
+        logger.warning(
+            "Token extraction skipped for session %s: %s [%s]",
+            session_id, type(_exc).__name__, _exc,
+        )
 
 
 async def _run_workflow_stream(

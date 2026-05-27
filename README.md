@@ -9,6 +9,12 @@
 [![Docker Pulls](https://img.shields.io/docker/pulls/phalouvas/ph-agent-hub-backend)](https://hub.docker.com/r/phalouvas/ph-agent-hub-backend)
 [![Build](https://img.shields.io/badge/Build-no%20workflow%20configured-lightgrey)](https://github.com/kainotomo/ph-agent-hub/actions)
 
+## Screenshots
+
+| Chat UI | Admin UI | Widget Demo |
+|---|---|---|
+| ![Chat Interface](docs/assets/chat-ui.jpeg) | ![Admin Panel](docs/assets/admin-ui.jpeg) | ![Embeddable Widget](docs/assets/widget-demo.jpeg) |
+
 PH Agent Hub is a multi-tenant AI application platform for teams that need both:
 - a production chat experience for end users
 - an operational admin control plane for models, tools, tenancy, and governance

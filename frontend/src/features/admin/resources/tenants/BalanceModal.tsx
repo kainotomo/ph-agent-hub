@@ -71,7 +71,7 @@ export function BalanceModal({ tenant, onClose }: BalanceModalProps) {
       open={!!tenant}
       onCancel={onClose}
       footer={null}
-      destroyOnClose
+      destroyOnHidden
     >
       {tenant && (
         <>

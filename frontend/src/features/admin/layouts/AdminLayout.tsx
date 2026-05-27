@@ -236,7 +236,7 @@ export function AdminLayout() {
             onClose={() => setMobileMenuOpen(false)}
             placement="left"
             width={260}
-            bodyStyle={{ padding: 0, background: "#001529" }}
+            styles={{ body: { padding: 0, background: "#001529" } }}
           >
             {sidebarContent}
           </Drawer>

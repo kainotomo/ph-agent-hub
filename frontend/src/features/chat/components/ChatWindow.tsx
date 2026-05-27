@@ -331,6 +331,10 @@ export function ChatWindow({
           queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
           queryClient.invalidateQueries({ queryKey: ["sessions"] });
           fetchFollowUpQuestions(sessionId, setFollowUpQuestions);
+          // Re-fetch sessions after a delay so auto-generated tags appear
+          setTimeout(() => {
+            queryClient.invalidateQueries({ queryKey: ["sessions"] });
+          }, 3000);
         },
       });
       return;
@@ -427,6 +431,10 @@ export function ChatWindow({
           queryClient.invalidateQueries({ queryKey: ["sessions"] });
         }
         fetchFollowUpQuestions(sessionId, setFollowUpQuestions);
+        // Re-fetch sessions after a delay so auto-generated tags appear
+        setTimeout(() => {
+          queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        }, 3000);
       },
     });
   }, [inputValue, streaming, sessionId, startStream, queryClient, pendingFiles, editingMsgId]);
@@ -532,6 +540,10 @@ export function ChatWindow({
         queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
         queryClient.invalidateQueries({ queryKey: ["sessions"] });
         fetchFollowUpQuestions(sessionId, setFollowUpQuestions);
+        // Re-fetch sessions after a delay so auto-generated tags appear
+        setTimeout(() => {
+          queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        }, 3000);
       },
     });
   }, [streaming, sessionId, startRegenerateStream, queryClient]);

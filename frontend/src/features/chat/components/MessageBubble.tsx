@@ -407,9 +407,7 @@ function MessageBubbleInner({
                 disabled={disabled}
               >
                 <Text style={{ fontSize: 11, color: "#8c8c8c" }}>
-                  {message.tokens_out != null
-                    ? message.tokens_out
-                    : (message.tokens_in ?? 0) + (message.tokens_out ?? 0)}
+                  {message.tokens_out ?? message.tokens_in ?? 0}
                 </Text>
               </Button>
             </Tooltip>
@@ -491,6 +489,9 @@ function MessageBubbleInner({
 export const MessageBubble = React.memo(MessageBubbleInner, (prev, next) =>
   prev.message.id === next.message.id &&
   prev.message.content === next.message.content &&
+  prev.message.tokens_in === next.message.tokens_in &&
+  prev.message.tokens_out === next.message.tokens_out &&
+  prev.message.model_name === next.message.model_name &&
   prev.streaming === next.streaming &&
   prev.regenerating === next.regenerating &&
   prev.disabled === next.disabled &&

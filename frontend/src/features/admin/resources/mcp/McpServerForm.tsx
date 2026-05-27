@@ -123,7 +123,7 @@ export function McpServerForm({ open, server, onClose }: McpServerFormProps) {
       onOk={handleSubmit}
       confirmLoading={createMutation.isPending || updateMutation.isPending}
       width={640}
-      destroyOnClose
+      destroyOnHidden
     >
       <Form
         form={form}

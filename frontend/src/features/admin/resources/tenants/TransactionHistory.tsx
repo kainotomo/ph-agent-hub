@@ -89,7 +89,7 @@ export function TransactionHistory({ tenant, onClose }: TransactionHistoryProps)
       open={!!tenant}
       onClose={onClose}
       width={640}
-      destroyOnClose
+      destroyOnHidden
     >
       <Table
         columns={columns}

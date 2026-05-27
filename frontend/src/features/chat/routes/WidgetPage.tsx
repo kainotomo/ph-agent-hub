@@ -10,7 +10,7 @@ import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { ConfigProvider, Layout, Spin, Typography, theme as antTheme } from "antd";
 import { ChatWindow } from "../components/ChatWindow";
-import { setToken } from "../../../services/api";
+import { setToken, setSkipAutoRefresh } from "../../../services/api";
 import { createDemoSession, type DemoConfig } from "../services/demo";
 
 const { Content } = Layout;
@@ -38,6 +38,9 @@ export function WidgetPage() {
   useEffect(() => {
     // Demo mode: create a demo session instead of using a widget token
     if (isDemo) {
+      // Prevent api() auto-refresh from overwriting the demo guest token
+      setSkipAutoRefresh(true);
+
       createDemoSession()
         .then((data: DemoConfig) => {
           setToken(data.guest_token);
@@ -68,6 +71,9 @@ export function WidgetPage() {
     }
 
     // Normal widget mode: use the raw guest token
+    // Prevent api() auto-refresh from overwriting the guest token
+    setSkipAutoRefresh(true);
+
     if (!rawToken) {
       setError("Missing token parameter");
       setLoading(false);

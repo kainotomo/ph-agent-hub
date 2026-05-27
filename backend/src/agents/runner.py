@@ -934,8 +934,15 @@ async def run_agent(
                     logger.exception("Failed to deduct usage from tenant balance")
 
         # ---- 11. Post-response tasks (follow-up questions, auto-tagging) -----
+        _model_snapshot = {
+            "model_id": cfg.model.model_id,
+            "provider": cfg.model.provider,
+            "base_url": cfg.model.base_url,
+            "api_key": cfg.model.api_key,
+            "follow_up_questions_enabled": cfg.model.follow_up_questions_enabled,
+        }
         _schedule_post_response_tasks(
-            model=cfg.model,
+            model_snapshot=_model_snapshot,
             system_prompt=cfg.system_prompt,
             user_message=user_message,
             assistant_response=raw_response,

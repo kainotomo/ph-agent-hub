@@ -9,6 +9,7 @@ const BASE_URL = import.meta.env.VITE_API_URL || "/api";
 
 let _token: string | null = null;
 let _refreshPromise: Promise<string | null> | null = null;
+let _skipAutoRefresh = false;
 
 export function setToken(token: string | null): void {
   _token = token;
@@ -16,6 +17,10 @@ export function setToken(token: string | null): void {
 
 export function getToken(): string | null {
   return _token;
+}
+
+export function setSkipAutoRefresh(skip: boolean): void {
+  _skipAutoRefresh = skip;
 }
 
 // ---------------------------------------------------------------------------
@@ -92,8 +97,8 @@ export async function api<T = unknown>(
 
   let res = await fetch(`${BASE_URL}${path}`, fetchOptions);
 
-  // Auto-refresh on 401
-  if (res.status === 401 && !skipAuth && _token) {
+  // Auto-refresh on 401 (skipped for widget/demo modes to avoid overwriting guest tokens)
+  if (res.status === 401 && !skipAuth && _token && !_skipAutoRefresh) {
     const newToken = await doRefreshOnce();
     if (newToken) {
       headers["Authorization"] = `Bearer ${newToken}`;

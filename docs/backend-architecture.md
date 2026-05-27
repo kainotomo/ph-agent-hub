@@ -65,6 +65,17 @@ Each request is routed based on:
 - Tenant‑specific templates and shared skills
 - User‑owned prompts and personal skills within the tenant boundary
 
+### **1.7 Spending Limit Enforcement**
+Tenants with a numeric `balance_euros` have a spending limit enforced on every agent run:
+
+1. **Pre-flight check**: Before any LLM call, the agent runner queries the tenant's balance. If `balance_euros <= 0`, the request is rejected with HTTP 402 (`InsufficientBalanceError`) and a clear error message.
+2. **Unlimited tenants**: Tenants with `balance_euros IS NULL` are skipped entirely — no check, no deduction.
+3. **Post-call deduction**: After a successful agent run (both streaming and non-streaming), the computed cost from the usage log is atomically deducted: `UPDATE tenants SET balance_euros = balance_euros - cost WHERE id = :tenant_id`.
+4. **Last-call grace**: A call is allowed if `balance > 0` at the time of the check, even if the cost exceeds the remaining balance — the balance may go negative after that one call, blocking subsequent requests.
+5. **Audit trail**: Every balance change is recorded in the `balance_transactions` table with a snapshot of the balance after the transaction.
+
+The balance is stored and updated directly in MariaDB using atomic `UPDATE` statements — no Redis dependency is needed for this feature.
+
 ### **1.7 Extensibility**
 The backend is designed to be fully patchable:
 - Custom model adapters

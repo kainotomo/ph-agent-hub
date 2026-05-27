@@ -40,6 +40,15 @@ from ..services.tenant_service import (
     update_tenant as _svc_update_tenant,
 )
 from ..services.usage_service import list_usage_logs, get_tenant_aggregates, get_user_aggregates
+from ..services.balance_service import (
+    add_funds as _svc_add_funds,
+    deduct_usage,
+    disable_limit as _svc_disable_limit,
+    get_balance,
+    get_transaction_history,
+    get_warning_threshold,
+    set_warning_threshold as _svc_set_warning_threshold,
+)
 from ..services.settings_service import get_all_settings, set_settings
 from ..services.user_service import (
     create_user as _svc_create_user,
@@ -180,6 +189,9 @@ class TenantResponse(BaseModel):
     id: str
     name: str
     is_demo: bool
+    balance_euros: float | None = None
+    warning_threshold_eur: float | None = None
+    balance_warning: bool = False
     created_at: datetime
     updated_at: datetime
     total_tokens_in: int = 0
@@ -429,6 +441,14 @@ async def list_tenants(
         resp.total_tokens_in = agg.get("total_tokens_in", 0)
         resp.total_tokens_out = agg.get("total_tokens_out", 0)
         resp.total_cost = agg.get("total_cost", 0.0)
+        # Compute balance_warning: balance is numeric, above 0, but below threshold
+        if (
+            t.balance_euros is not None
+            and t.warning_threshold_eur is not None
+            and t.balance_euros > 0
+            and t.balance_euros <= t.warning_threshold_eur
+        ):
+            resp.balance_warning = True
         results.append(resp)
 
     total_pages = max(1, -(-total // page_size)) if current_user.role == "admin" else 1
@@ -532,6 +552,145 @@ async def delete_tenant(
         ip_address=_get_client_ip(request),
         tenant_id=None,
     )
+
+
+# =============================================================================
+# Balance Endpoints (admin only)
+# =============================================================================
+
+
+class BalanceUpdateRequest(BaseModel):
+    amount_eur: float
+    reason: str = "admin_adjustment"
+
+
+class BalanceConfigRequest(BaseModel):
+    warning_threshold_eur: float | None = None
+
+
+class BalanceTransactionResponse(BaseModel):
+    id: str
+    tenant_id: str
+    admin_user_id: str | None = None
+    amount_eur: float
+    balance_after: float
+    reason: str
+    reference_type: str | None = None
+    reference_id: str | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+@router.put("/tenants/{tenant_id}/balance", response_model=TenantResponse)
+async def update_tenant_balance(
+    tenant_id: str,
+    body: BalanceUpdateRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    _admin: UserORM = Depends(require_admin),
+):
+    """Add or subtract funds from a tenant's balance (admin only).
+
+    Positive amount_eur = top-up (may enable limit for previously unlimited tenant).
+    Negative amount_eur = deduction.
+    """
+    from decimal import Decimal
+
+    txn = await _svc_add_funds(
+        db,
+        tenant_id=tenant_id,
+        amount_eur=Decimal(str(body.amount_eur)),
+        admin_user_id=_admin.id,
+        reason=body.reason,
+    )
+
+    # Reload tenant for response
+    from ..services.tenant_service import get_tenant_by_id as _svc_get_tenant_by_id
+
+    tenant = await _svc_get_tenant_by_id(db, tenant_id)
+
+    await write_audit_log(
+        db,
+        actor=_admin,
+        action="tenant.balance_updated",
+        target_type="tenant",
+        target_id=tenant_id,
+        ip_address=_get_client_ip(request),
+        tenant_id=None,
+    )
+    return TenantResponse.model_validate(tenant)
+
+
+@router.delete("/tenants/{tenant_id}/balance", status_code=204)
+async def disable_tenant_balance_limit(
+    tenant_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    _admin: UserORM = Depends(require_admin),
+):
+    """Remove the balance limit for a tenant, making it unlimited again (admin only)."""
+    await _svc_disable_limit(
+        db,
+        tenant_id=tenant_id,
+        admin_user_id=_admin.id,
+        reason="admin_disabled",
+    )
+    await write_audit_log(
+        db,
+        actor=_admin,
+        action="tenant.balance_disabled",
+        target_type="tenant",
+        target_id=tenant_id,
+        ip_address=_get_client_ip(request),
+        tenant_id=None,
+    )
+
+
+@router.get("/tenants/{tenant_id}/balance/transactions")
+async def list_balance_transactions(
+    tenant_id: str,
+    page: int = 1,
+    page_size: int = 25,
+    db: AsyncSession = Depends(get_db),
+    _admin: UserORM = Depends(require_admin),
+):
+    """Get paginated balance transaction history for a tenant (admin only)."""
+    transactions, total = await get_transaction_history(
+        db, tenant_id=tenant_id, page=page, page_size=page_size,
+    )
+    items = [BalanceTransactionResponse.model_validate(t) for t in transactions]
+    total_pages = max(1, -(-total // page_size))
+    return PaginatedResponse(
+        items=items, total=total, page=page,
+        page_size=page_size, total_pages=total_pages,
+    )
+
+
+@router.put("/tenants/{tenant_id}/balance/config", response_model=TenantResponse)
+async def update_tenant_balance_config(
+    tenant_id: str,
+    body: BalanceConfigRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    _admin: UserORM = Depends(require_admin),
+):
+    """Set or clear the warning threshold for a tenant (admin only)."""
+    tenant = await _svc_set_warning_threshold(
+        db,
+        tenant_id=tenant_id,
+        threshold_eur=body.warning_threshold_eur,
+    )
+    await write_audit_log(
+        db,
+        actor=_admin,
+        action="tenant.balance_config_updated",
+        target_type="tenant",
+        target_id=tenant_id,
+        ip_address=_get_client_ip(request),
+        tenant_id=None,
+    )
+    return TenantResponse.model_validate(tenant)
 
 
 # =============================================================================

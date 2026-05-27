@@ -65,7 +65,8 @@ export function SkillForm({ open, skill, duplicateFrom, onClose }: SkillFormProp
 
   const { data: tenants } = useQuery({
     queryKey: ["admin-tenants"],
-    queryFn: () => listTenants().then(r => r.items),
+    queryFn: () => listTenants(),
+    select: (data) => data?.items || [],
     enabled: open && isAdmin,
   });
 

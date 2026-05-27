@@ -17,6 +17,12 @@ export default defineConfig({
             method: "POST",
           },
         ],
+        navigateFallbackDenylist: [
+          /\/api\//,
+          /\.json$/,
+          /sw\.js$/,
+          /registerSW\.js$/,
+        ],
       },
       manifest: {
         name: "PH Agent Hub",
@@ -41,8 +47,10 @@ export default defineConfig({
           },
         ],
       },
+      // Dev mode: registration is inlined in index.html to avoid Vite's
+      // SPA fallback returning HTML for /registerSW.js (Issue #263).
       devOptions: {
-        enabled: true,
+        enabled: false,
       },
     }),
   ],

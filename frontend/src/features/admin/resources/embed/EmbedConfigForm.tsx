@@ -160,7 +160,7 @@ export function EmbedConfigForm({ open, config, onClose, onSuccess }: EmbedConfi
       onCancel={onClose}
       confirmLoading={createMutation.isPending || updateMutation.isPending}
       width={640}
-      destroyOnClose
+      destroyOnHidden
     >
       <Form form={form} layout="vertical" style={{ marginTop: 16 }}>
         <Form.Item name="name" label="Name" rules={[{ required: true, message: "Name is required" }]}>

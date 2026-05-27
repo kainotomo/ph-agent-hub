@@ -53,8 +53,8 @@ export function ToolForm({ open, tool, duplicateFrom, onClose }: ToolFormProps) 
 
   const { data: tenants } = useQuery({
     queryKey: ["admin-tenants"],
-    queryFn: () => listTenants().then(r => r.items),
-    select: (data: TenantData[]) => data,
+    queryFn: () => listTenants(),
+    select: (data) => data?.items || [],
     enabled: open && isAdmin,
   });
 

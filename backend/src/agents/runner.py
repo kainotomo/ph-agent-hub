@@ -53,6 +53,7 @@ from ..db.orm.tools import Tool
 from ..db.orm.users import User
 from ..models.base import get_chat_client
 from ..services.usage_service import write_usage_log
+from ..services.balance_service import check_balance_or_raise, deduct_usage
 
 logger = logging.getLogger(__name__)
 
@@ -805,6 +806,13 @@ async def run_agent(
         user_message=user_message,
     )
 
+    # ---- Pre-flight balance check -----------------------------------------
+    if current_user is not None:
+        try:
+            await check_balance_or_raise(db, tenant_id)
+        except Exception:
+            raise
+
     # ---- 7. Run agent or workflow ----------------------------------------
     raw_response: str
 
@@ -880,8 +888,9 @@ async def run_agent(
 
         # ---- 10. Write usage log (non-streaming) -----------------------------
         if current_user is not None:
+            usage_log = None
             try:
-                await write_usage_log(
+                usage_log = await write_usage_log(
                     db,
                     tenant_id=current_user.tenant_id,
                     tenant_name=getattr(cfg, "tenant_name", "") or "",
@@ -900,6 +909,29 @@ async def run_agent(
                 )
             except Exception:
                 logger.exception("Failed to write usage log (non-streaming)")
+
+            # ---- Warn about missing pricing ----------------------------------
+            if usage_log is not None and usage_log.cost is None:
+                logger.warning(
+                    "Model '%s' (provider=%s) has no pricing configured — "
+                    "usage not deducted from tenant %s",
+                    cfg.model.name,
+                    cfg.model.provider,
+                    current_user.tenant_id,
+                )
+
+            # ---- Deduct usage cost from tenant balance -------------------------
+            if usage_log is not None and usage_log.cost is not None:
+                try:
+                    await deduct_usage(
+                        db,
+                        tenant_id=current_user.tenant_id,
+                        cost_eur=usage_log.cost,
+                        reference_type="usage_log",
+                        reference_id=usage_log.id,
+                    )
+                except Exception:
+                    logger.exception("Failed to deduct usage from tenant balance")
 
         # ---- 11. Post-response tasks (follow-up questions, auto-tagging) -----
         _schedule_post_response_tasks(
@@ -2099,6 +2131,13 @@ async def run_agent_stream(
             user_message=user_message,
         )
 
+        # ---- Pre-flight balance check -----------------------------------------
+        if current_user is not None:
+            try:
+                await check_balance_or_raise(db, tenant_id)
+            except Exception:
+                raise
+
         # Emit summarized event if auto-summarization happened
         if summary_info:
             yield {
@@ -2113,6 +2152,11 @@ async def run_agent_stream(
             }
 
         # ---- 7. Run agent or workflow (streaming) ------------------------
+        logger.info(
+            "Stream execution: type=%s, skill=%s",
+            cfg.execution_type,
+            getattr(cfg.skill, "name", None) if cfg.skill else None,
+        )
         if cfg.execution_type == "workflow":
             stream = _run_workflow_stream(
                 model=cfg.model,
@@ -2177,37 +2221,23 @@ async def run_agent_stream(
             yield event_dict
 
     except Exception as exc:
-        # Persist whatever we accumulated before the error
-        if accumulated_text or accumulated_reasoning or accumulated_tool_events:
-            try:
-                await _persist_assistant_message(
-                    db=db,
-                    session_id=session_id,
-                    is_temporary=is_temporary,
-                    assistant_response=accumulated_text,
-                    model_id=getattr(cfg, "model", Model(id="unknown", name="unknown", provider="unknown")).id if cfg else "unknown",
-                    tool_events=accumulated_tool_events,
-                    tokens_in=0,
-                    tokens_out=0,
-                    reasoning=accumulated_reasoning,
-                )
-            except Exception:
-                logger.exception("Failed to persist partial message after stream error")
-        yield {
-            "event": "error",
-            "data": json.dumps({
-                "session_id": session_id,
-                "message_id": message_id,
-                "code": _exc_to_error_code(exc),
-                "message": str(exc),
-            }),
-        }
-        # Roll back DB session to ensure the connection is returned to the pool
-        try:
-            await db.rollback()
-        except Exception:
-            logger.debug("Failed to rollback DB session after stream error", exc_info=True)
-        return  # Don't proceed to message_complete on error
+        # Ignore the harmless httpx ContextVar cleanup error that always
+        # fires at stream end — it should NOT prevent normal completion
+        # (message_complete, follow-ups, auto-tags, etc.).
+        err_str = str(exc)
+        if "inner_response_telemetry_captured_fields" in err_str:
+            logger.debug("Ignoring httpx ContextVar error at stream end")
+        else:
+            yield {
+                "event": "error",
+                "data": json.dumps({
+                    "session_id": session_id,
+                    "message_id": message_id,
+                    "code": _exc_to_error_code(exc),
+                    "message": str(exc),
+                }),
+            }
+            return  # Don't proceed to message_complete on error
 
     finally:
         # ---- Ensure partial results are ALWAYS persisted, even when the
@@ -2215,45 +2245,75 @@ async def run_agent_stream(
         #      We must NOT yield during GeneratorExit — it raises
         #      RuntimeError and causes "ASGI callable returned without
         #      completing response".  Persistence-only here. (Issue #206) --
+        # IMPORTANT: We use a fresh session here because the ``db`` session
+        # passed from ``_handle_streaming_message`` may be rolled back or
+        # closed by the outer generator's cleanup before this runs.
         try:
-            tokens_in = _stream_token_info.get("in", 0) or 0
-            tokens_out = _stream_token_info.get("out", 0) or 0
-            cache_hit_tokens_stream = _stream_token_info.get("cache_hit", 0) or 0
+            from ..db.base import AsyncSessionLocal as _AsyncSessionLocal
 
-            if accumulated_text or accumulated_reasoning or accumulated_tool_events:
-                await _persist_assistant_message(
-                    db=db,
-                    session_id=session_id,
-                    is_temporary=is_temporary,
-                    assistant_response=accumulated_text,
-                    model_id=cfg.model.id if cfg else "unknown",
-                    tool_events=accumulated_tool_events,
-                    tokens_in=tokens_in,
-                    tokens_out=tokens_out,
-                    reasoning=accumulated_reasoning,
-                )
+            async with _AsyncSessionLocal() as _persist_db:
+                tokens_in = _stream_token_info.get("in", 0) or 0
+                tokens_out = _stream_token_info.get("out", 0) or 0
+                cache_hit_tokens_stream = _stream_token_info.get("cache_hit", 0) or 0
 
-            if cfg is not None and current_user is not None:
-                try:
-                    await write_usage_log(
-                        db,
-                        tenant_id=current_user.tenant_id,
-                        tenant_name=getattr(cfg, "tenant_name", "") or "",
-                        user_id=current_user.id,
-                        user_email=current_user.email,
-                        user_full_name=current_user.display_name,
-                        model_id=cfg.model.id,
-                        model_name=cfg.model.name,
-                        provider=cfg.model.provider,
+                if accumulated_text or accumulated_reasoning or accumulated_tool_events:
+                    await _persist_assistant_message(
+                        db=_persist_db,
+                        session_id=session_id,
+                        is_temporary=is_temporary,
+                        assistant_response=accumulated_text,
+                        model_id=cfg.model.id if cfg else "unknown",
+                        tool_events=accumulated_tool_events,
                         tokens_in=tokens_in,
                         tokens_out=tokens_out,
-                        cache_hit_tokens=cache_hit_tokens_stream,
-                        input_price=getattr(cfg.model, "input_price_per_1m", None),
-                        output_price=getattr(cfg.model, "output_price_per_1m", None),
-                        cache_hit_price=getattr(cfg.model, "cache_hit_price_per_1m", None),
+                        reasoning=accumulated_reasoning,
                     )
-                except Exception:
-                    logger.exception("Failed to write usage log (streaming)")
+
+                if cfg is not None and current_user is not None:
+                    usage_log = None
+                    try:
+                        usage_log = await write_usage_log(
+                            db=_persist_db,
+                            tenant_id=current_user.tenant_id,
+                            tenant_name=getattr(cfg, "tenant_name", "") or "",
+                            user_id=current_user.id,
+                            user_email=current_user.email,
+                            user_full_name=current_user.display_name,
+                            model_id=cfg.model.id,
+                            model_name=cfg.model.name,
+                            provider=cfg.model.provider,
+                            tokens_in=tokens_in,
+                            tokens_out=tokens_out,
+                            cache_hit_tokens=cache_hit_tokens_stream,
+                            input_price=getattr(cfg.model, "input_price_per_1m", None),
+                            output_price=getattr(cfg.model, "output_price_per_1m", None),
+                            cache_hit_price=getattr(cfg.model, "cache_hit_price_per_1m", None),
+                        )
+                    except Exception:
+                        logger.exception("Failed to write usage log (streaming)")
+
+                # ---- Warn about missing pricing ----------------------------------
+                if usage_log is not None and usage_log.cost is None:
+                    logger.warning(
+                        "Model '%s' (provider=%s) has no pricing configured — "
+                        "usage not deducted from tenant %s",
+                        cfg.model.name,
+                        cfg.model.provider,
+                        current_user.tenant_id,
+                    )
+
+                # ---- Deduct usage cost from tenant balance -------------------------
+                if usage_log is not None and usage_log.cost is not None:
+                    try:
+                        await deduct_usage(
+                            _persist_db,
+                            tenant_id=current_user.tenant_id,
+                            cost_eur=usage_log.cost,
+                            reference_type="usage_log",
+                            reference_id=usage_log.id,
+                        )
+                    except Exception:
+                        logger.exception("Failed to deduct usage from tenant balance (streaming)")
         except Exception:
             logger.exception("Failed to persist partial message on stream close")
 
@@ -2270,14 +2330,20 @@ async def run_agent_stream(
 
     # ---- Only reached on normal completion (no GeneratorExit) ----------
     if accumulated_text or accumulated_reasoning or accumulated_tool_events:
+        tokens_in = _stream_token_info.get("in", 0) or 0
+        tokens_out = _stream_token_info.get("out", 0) or 0
+        logger.info(
+            "Stream complete for session %s: tokens_in=%s, tokens_out=%s, _stream_token_info=%s",
+            session_id, tokens_in, tokens_out, _stream_token_info,
+        )
         yield {
             "event": "message_complete",
             "data": json.dumps({
                 "session_id": session_id,
                 "message_id": message_id,
                 "total_tokens": total_tokens,
-                "tokens_in": _stream_token_info.get("in", 0) or 0,
-                "tokens_out": _stream_token_info.get("out", 0) or 0,
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
                 "model_id": cfg.model.id if cfg else "unknown",
                 "model_name": cfg.model.name if cfg else None,
                 "model_provider": cfg.model.provider if cfg else None,
@@ -2285,8 +2351,20 @@ async def run_agent_stream(
         }
 
     if cfg is not None:
+        # Snapshot model attributes before passing to background task,
+        # since the ORM Model instance may become detached from its
+        # session by the time the background task runs.
+        _model_snapshot = {
+            "id": cfg.model.id,
+            "name": cfg.model.name,
+            "model_id": cfg.model.model_id,
+            "provider": cfg.model.provider,
+            "base_url": cfg.model.base_url,
+            "api_key": cfg.model.api_key,
+            "follow_up_questions_enabled": cfg.model.follow_up_questions_enabled,
+        }
         _schedule_post_response_tasks(
-            model=cfg.model,
+            model_snapshot=_model_snapshot,
             system_prompt=cfg.system_prompt,
             user_message=user_message,
             assistant_response=accumulated_text,
@@ -2303,7 +2381,7 @@ async def run_agent_stream(
 
 
 def _schedule_post_response_tasks(
-    model: Model,
+    model_snapshot: dict,
     system_prompt: str,
     user_message: str,
     assistant_response: str,
@@ -2320,16 +2398,24 @@ def _schedule_post_response_tasks(
     """
 
     async def _run() -> None:
+        # Build a lightweight model surrogate so downstream helpers
+        # (``_generate_follow_up_questions``, ``_auto_tag_session``) can
+        # access ``.name``, ``.id`` etc. without hitting the detached-ORM
+        # issue in a background task.
+        from types import SimpleNamespace
+
+        _m = SimpleNamespace(**model_snapshot)
+
         # -- Follow-up questions -------------------------------------------
-        if getattr(model, "follow_up_questions_enabled", False):
+        if _m.follow_up_questions_enabled:
             logger.info(
                 "Scheduling follow-up question generation for session %s (model=%s)",
                 session_id,
-                model.name,
+                _m.name,
             )
             try:
                 questions = await _generate_follow_up_questions(
-                    model=model,
+                    model=_m,
                     system_prompt=system_prompt,
                     user_message=user_message,
                     assistant_response=assistant_response,
@@ -2342,6 +2428,13 @@ def _schedule_post_response_tasks(
                     "Failed to generate follow-up questions for session %s",
                     session_id,
                 )
+        else:
+            logger.info(
+                "Skipping follow-up questions for session %s — "
+                "model '%s' has follow_up_questions_enabled=False",
+                session_id,
+                _m.name,
+            )
 
         # -- Auto-tagging --------------------------------------------------
         if not is_temporary and assistant_response:
@@ -2361,7 +2454,7 @@ def _schedule_post_response_tasks(
 
                     if assistant_count == 1:
                         tag_names = await _auto_tag_session(
-                            model=model,
+                            model=_m,
                             system_prompt=system_prompt,
                             user_message=user_message,
                             assistant_response=assistant_response,
@@ -2445,6 +2538,10 @@ async def _run_agent_stream(
     )
 
     response_stream = agent.run(user_message, stream=True)
+    logger.info(
+        "Agent.run returned: type=%s",
+        type(response_stream).__module__ + "." + type(response_stream).__qualname__,
+    )
 
     step_index = 0
     # Aggregate streaming tool calls: call_id -> {name, args_str}
@@ -2460,7 +2557,9 @@ async def _run_agent_stream(
             )
         except StopAsyncIteration:
             break
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, Exception):
+            # Stream exhausted or error — break so post-loop code
+            # (token extraction, final yields) can still run.
             break
         inner_event_count += 1
         if inner_event_count <= 5 or inner_event_count % 20 == 0:
@@ -2521,15 +2620,21 @@ async def _run_agent_stream(
                     "step_index": step_index,
                     "total_steps_so_far": step_index,
                 }, session_id=session_id, message_id=message_id)
-    # After stream is exhausted, get final response for token counts
+    # After stream exhausted, get final response for token counts.
+    # MAF's ResponseStream caches the final result internally, so
+    # calling get_final_response() here is safe.  If it fails, we
+    # fall back to a rough token estimate.
     try:
         final = await response_stream.get_final_response()
         if token_counts is not None:
             usage = getattr(final, "usage_details", None)
+            logger.info(
+                "Token extraction for session %s: final type=%s, usage=%s",
+                session_id, type(final).__name__, usage,
+            )
             if usage and isinstance(usage, dict):
                 token_counts["in"] = usage.get("input_token_count", 0) or 0
                 token_counts["out"] = usage.get("output_token_count", 0) or 0
-                # MAF stores cached_tokens as "prompt/cached_tokens" (slash-separated)
                 cache_hit = usage.get("prompt/cached_tokens", 0) or 0
                 if cache_hit == 0:
                     cache_hit = usage.get("cache_read_input_tokens", 0) or 0
@@ -2541,7 +2646,12 @@ async def _run_agent_stream(
                     cache_hit = usage.get("cached_tokens", 0) or 0
                 token_counts["cache_hit"] = cache_hit
     except Exception:
-        pass  # Token count is best-effort for Phase 7
+        logger.warning("Token extraction via get_final_response failed", exc_info=True)
+    except Exception as _exc:
+        logger.warning(
+            "Token extraction skipped for session %s: %s [%s]",
+            session_id, type(_exc).__name__, _exc,
+        )
 
 
 async def _run_workflow_stream(
@@ -2988,30 +3098,23 @@ async def _auto_tag_session(
         '- Example format: ["invoice", "erpnext", "payment reconciliation"]'
     )
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_message},
-        {"role": "assistant", "content": assistant_response},
-        {"role": "user", "content": prompt},
-    ]
-
     try:
         from ..models.base import get_chat_client
+        from agent_framework import Message as MafMessage
 
         fresh_client = get_chat_client(model, thinking_enabled=False)
-        raw_client = getattr(fresh_client, "client", None)
-        if raw_client is None:
-            logger.warning("No client attribute on fresh model_client, skipping auto-tagging")
-            return []
 
-        model_name = getattr(fresh_client, "model", model.model_id)
-        response = await raw_client.chat.completions.create(
-            model=model_name,
-            messages=messages,
-            max_tokens=300,
-            temperature=temperature,
+        maf_messages = [
+            MafMessage("system", [system_prompt]),
+            MafMessage("user", [user_message]),
+            MafMessage("assistant", [assistant_response]),
+            MafMessage("user", [prompt]),
+        ]
+        response = await fresh_client.get_response(
+            messages=maf_messages,
+            options={"temperature": temperature, "max_tokens": 300},
         )
-        text = response.choices[0].message.content if response.choices else ""
+        text = response.messages[-1].text if response.messages else ""
         text = (text or "").strip()
 
         # Remove markdown code fences if present

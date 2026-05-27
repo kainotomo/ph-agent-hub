@@ -28,6 +28,8 @@ import {
   WarningOutlined,
   KeyOutlined,
   StarOutlined,
+  DollarOutlined,
+  HistoryOutlined,
 } from "@ant-design/icons";
 import { useMutation, useQueryClient, useQuery } from "@tanstack/react-query";
 import {
@@ -40,6 +42,8 @@ import type { TenantStatusData } from "../../services/admin";
 import { useAdminTable } from "../../hooks/useAdminTable";
 import { useDebounce } from "../../hooks/useDebounce";
 import { TenantForm } from "./TenantForm";
+import { BalanceModal } from "./BalanceModal";
+import { TransactionHistory } from "./TransactionHistory";
 import { formatCurrency } from "../../../../shared/utils/formatCurrency";
 
 const { useBreakpoint } = Grid;
@@ -50,6 +54,8 @@ export function TenantList() {
   const [creating, setCreating] = useState(false);
   const [forceDelete, setForceDelete] = useState(false);
   const [searchText, setSearchText] = useState("");
+  const [balanceTenant, setBalanceTenant] = useState<TenantData | null>(null);
+  const [historyTenant, setHistoryTenant] = useState<TenantData | null>(null);
   const screens = useBreakpoint();
   const isMobile = !screens.md;
   const queryClient = useQueryClient();
@@ -103,6 +109,31 @@ export function TenantList() {
       ),
     },
     {
+      title: "Balance",
+      dataIndex: "balance_euros",
+      key: "balance_euros",
+      render: (v: number | null, record: TenantData) => {
+        if (v === null) {
+          return <Text type="secondary">Unlimited</Text>;
+        }
+        return (
+          <Space>
+            <Text type={v <= 0 ? "danger" : undefined}>
+              {formatCurrency(v)}
+            </Text>
+            {record.balance_warning && (
+              <Tooltip title="Balance below warning threshold">
+                <WarningOutlined style={{ color: "#faad14" }} />
+              </Tooltip>
+            )}
+            {v <= 0 && (
+              <Tag color="error">Blocked</Tag>
+            )}
+          </Space>
+        );
+      },
+    },
+    {
       title: "Cost",
       dataIndex: "total_cost",
       key: "total_cost",
@@ -121,6 +152,16 @@ export function TenantList() {
       key: "actions",
       render: (_: unknown, record: TenantData) => (
         <Space>
+          <Button
+            icon={<DollarOutlined />}
+            size="small"
+            onClick={() => setBalanceTenant(record)}
+          />
+          <Button
+            icon={<HistoryOutlined />}
+            size="small"
+            onClick={() => setHistoryTenant(record)}
+          />
           <Button
             icon={<EditOutlined />}
             size="small"
@@ -146,6 +187,14 @@ export function TenantList() {
   const atLimit = tenantStatus && !tenantStatus.can_create;
   const nearLimit = !atLimit && tenantStatus && tenantStatus.license_status !== "valid"
     && tenantStatus.total_tenants >= tenantStatus.effective_limit - 1;
+
+  // Balance warnings (Phase 6)
+  const warningTenants = tenantsData.filter((t) => t.balance_warning);
+  const blockedTenants = tenantsData.filter(
+    (t) => t.balance_euros !== null && t.balance_euros <= 0,
+  );
+  const hasBalanceWarnings = warningTenants.length > 0 || blockedTenants.length > 0;
+  const lowBalanceCount = warningTenants.length + blockedTenants.length;
 
   return (
     <div>
@@ -191,6 +240,49 @@ export function TenantList() {
             />
           )}
         </div>
+      )}
+
+      {/* Low-balance warning banner (Phase 6) */}
+      {hasBalanceWarnings && (
+        <Alert
+          type="warning"
+          icon={<WarningOutlined />}
+          message={
+            <span>
+              <strong>{lowBalanceCount}</strong>{" "}
+              {lowBalanceCount === 1 ? "tenant has" : "tenants have"} low balance
+              {blockedTenants.length > 0 && (
+                <>
+                  {" — "}
+                  <strong>{blockedTenants.length}</strong>{" "}
+                  {blockedTenants.length === 1 ? "is" : "are"} blocked
+                </>
+              )}
+            </span>
+          }
+          description={
+            <span>
+              Top up their balance to restore service.
+              {blockedTenants.length > 0 && (
+                <span>
+                  {" "}
+                  Blocked tenants:{" "}
+                  {blockedTenants.map((t) => t.name).join(", ")}.
+                </span>
+              )}
+              {warningTenants.length > 0 && (
+                <span>
+                  {" "}
+                  Below warning threshold:{" "}
+                  {warningTenants.map((t) => t.name).join(", ")}.
+                </span>
+              )}
+            </span>
+          }
+          showIcon
+          closable
+          style={{ marginBottom: 16 }}
+        />
       )}
 
       <Space style={{ marginBottom: 16 }} wrap>
@@ -239,6 +331,16 @@ export function TenantList() {
               style={{ marginBottom: 8 }}
               actions={[
                 <Button
+                  icon={<DollarOutlined />}
+                  type="link"
+                  onClick={() => setBalanceTenant(tenant)}
+                />,
+                <Button
+                  icon={<HistoryOutlined />}
+                  type="link"
+                  onClick={() => setHistoryTenant(tenant)}
+                />,
+                <Button
                   icon={<EditOutlined />}
                   type="link"
                   onClick={() => setEditingTenant(tenant)}
@@ -256,11 +358,26 @@ export function TenantList() {
               ]}
             >
               <Card.Meta
-                title={tenant.name}
+                title={
+                  <Space>
+                    {tenant.name}
+                    {tenant.balance_euros !== null && tenant.balance_euros <= 0 && (
+                      <Tag color="error">Blocked</Tag>
+                    )}
+                  </Space>
+                }
                 description={
-                  <Text type="secondary">
-                    Created: {new Date(tenant.created_at).toLocaleDateString()}
-                  </Text>
+                  <Space direction="vertical" size={2}>
+                    <Text type="secondary">
+                      Balance: {tenant.balance_euros !== null ? formatCurrency(tenant.balance_euros) : "Unlimited"}
+                      {tenant.balance_warning && (
+                        <WarningOutlined style={{ color: "#faad14", marginLeft: 4 }} />
+                      )}
+                    </Text>
+                    <Text type="secondary">
+                      Created: {new Date(tenant.created_at).toLocaleDateString()}
+                    </Text>
+                  </Space>
                 }
               />
             </Card>
@@ -291,6 +408,16 @@ export function TenantList() {
           setEditingTenant(null);
           setCreating(false);
         }}
+      />
+
+      <BalanceModal
+        tenant={balanceTenant}
+        onClose={() => setBalanceTenant(null)}
+      />
+
+      <TransactionHistory
+        tenant={historyTenant}
+        onClose={() => setHistoryTenant(null)}
       />
     </div>
   );

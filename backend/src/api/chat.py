@@ -788,41 +788,52 @@ async def _handle_streaming_message(
     modified_message: str = "",
     valid_file_ids: list[str] | None = None,
 ) -> EventSourceResponse:
-    """Assemble and return an SSE EventSourceResponse for a streaming agent run."""
+    """Assemble and return an SSE EventSourceResponse for a streaming agent run.
+
+    NOTE: FastAPI closes the dependency-injected ``db`` session as soon as
+    this function returns the ``EventSourceResponse`` — well before the
+    streaming generator finishes.  We therefore create a **dedicated**
+    session here so the generator's ``finally`` block can persist the
+    assistant message, write usage logs, deduct balance, etc. without
+    hitting ``ResourceClosedError: This transaction is closed``.
+    """
+    from ..db.base import AsyncSessionLocal
+
     message_id = str(uuid.uuid4())
     _valid_file_ids = valid_file_ids or []
     _user_message = modified_message or body.content
 
     async def inner_gen() -> AsyncIterator[dict]:
         """The inner generator that yields SSE event dicts."""
-        try:
-            async for event_dict in run_agent_stream(
-                session_data=data,
-                user_message=_user_message,
-                db=db,
-                current_user=current_user,
-                message_id=message_id,
-                file_ids=_valid_file_ids,
-            ):
-                # Swallow httpx ContextVar cleanup errors at stream end
-                if (
-                    event_dict.get("event") == "error"
-                    and "inner_response_telemetry_captured_fields"
-                    in str(event_dict.get("data", ""))
-                ):
-                    logger.warning(
-                        "Swallowing httpx ContextVar error — tokens already delivered"
-                    )
-                    yield {"event": "message_complete", "data": "{}"}
-                    return
-                yield event_dict
-        finally:
-            # Ensure DB connection is cleanly returned to the pool even
-            # when the client disconnects mid-stream (asyncio.CancelledError).
+        async with AsyncSessionLocal() as stream_db:
             try:
-                await db.rollback()
-            except Exception:
-                pass
+                async for event_dict in run_agent_stream(
+                    session_data=data,
+                    user_message=_user_message,
+                    db=stream_db,
+                    current_user=current_user,
+                    message_id=message_id,
+                    file_ids=_valid_file_ids,
+                ):
+                    # Swallow httpx ContextVar cleanup errors at stream end
+                    if (
+                        event_dict.get("event") == "error"
+                        and "inner_response_telemetry_captured_fields"
+                        in str(event_dict.get("data", ""))
+                    ):
+                        logger.warning(
+                            "Swallowing httpx ContextVar error — tokens already delivered"
+                        )
+                        yield {"event": "message_complete", "data": "{}"}
+                        return
+                    yield event_dict
+            finally:
+                # Ensure DB connection is cleanly returned to the pool even
+                # when the client disconnects mid-stream (asyncio.CancelledError).
+                try:
+                    await stream_db.rollback()
+                except Exception:
+                    pass
 
     # Wrap with heartbeat to keep proxy connections alive
     gen = _stream_with_heartbeat(inner_gen(), interval=15)

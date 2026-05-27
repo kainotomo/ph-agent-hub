@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: GitHub Discussions
+    url: https://github.com/kainotomo/ph-agent-hub/discussions
+    about: Please ask questions, share ideas, and discuss general topics here.
+  - name: Documentation
+    url: https://github.com/kainotomo/ph-agent-hub/tree/main/docs
+    about: Check the documentation for setup guides, architecture, and usage instructions.

@@ -193,6 +193,14 @@ Recommended repository topics:
 - microsoft-agent-framework
 - chat-widget
 
-## License
+## 💼 Licensing
 
-See [LICENSE](LICENSE).
+- **Free**: MIT license, up to 3 tenants — [get started](https://github.com/kainotomo/ph-agent-hub)
+- **Pro**: €299/year, unlimited tenants — [buy license](https://kainotomo.com/ph-agent-hub/pro-license)
+- **Cloud Hosted**: €49/month, fully managed — [get hosted](https://kainotomo.com/ph-agent-hub/cloud-hosted)
+
+## 💬 Community
+
+- 🐛 [Report a bug](https://github.com/kainotomo/ph-agent-hub/issues/new)
+- 📧 Email: info@kainotomo.com
+- 🌐 Website: [kainotomo.com](https://kainotomo.com/ph-agent-hub)

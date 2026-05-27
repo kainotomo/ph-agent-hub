@@ -58,8 +58,25 @@ Tenants isolate:
 - id (UUID, PK)
 - name (string, unique)
 - is_demo (boolean, default false) — marks this tenant as the demo tenant (only one can be true at a time)
+- balance_euros (decimal(12,6), nullable) — current euro balance; NULL means unlimited (no limit enforced), any numeric value means a spending limit is active
+- warning_threshold_eur (decimal(12,6), nullable) — when the balance drops at or below this value, the admin dashboard shows a warning banner and the tenant row displays a ⚠️ badge
 - created_at (timestamp)
 - updated_at (timestamp)
+
+### 1.2.1 Balance Transactions
+
+Every balance change (admin top-up, usage deduction, limit disable) is recorded as an immutable audit log entry. Positive amounts are top-ups; negative amounts are deductions.
+
+**Table: balance_transactions**
+- id (UUID, PK)
+- tenant_id (UUID, FK → tenants.id, indexed) — the affected tenant
+- admin_user_id (UUID, FK → users.id, nullable) — the admin who performed the change; NULL for system-triggered deductions
+- amount_eur (decimal(12,6)) — positive = funds added, negative = funds deducted
+- balance_after (decimal(12,6)) — the tenant's balance immediately after this transaction
+- reason (string(255)) — human-readable reason (e.g., `admin_top_up`, `usage_deduction`, `admin_adjustment`, `admin_disabled`)
+- reference_type (string(50), nullable) — e.g., `usage_log` for auto-deductions
+- reference_id (UUID, nullable) — ID of the referenced entity (e.g., the usage log entry)
+- created_at (timestamp)
 
 ---
 

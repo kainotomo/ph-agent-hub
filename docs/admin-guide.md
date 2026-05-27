@@ -135,7 +135,54 @@ PH Agent Hub supports a **demo tenant** for the "Try It Now" experience and embe
 
 ---
 
-## 4. Managing Users
+## 4. Managing Tenant Balances
+
+PH Agent Hub supports per-tenant euro balances for tracking and limiting spending on model API calls. This is an opt-in feature — tenants with no balance set (NULL) have unlimited usage.
+
+### 4.1 Enable a Balance Limit
+
+1. Go to **Admin Area → Tenants**
+2. Click the **$** button next to the tenant
+3. Enter an amount (€) and an optional reason
+4. Click **Add Funds**
+
+The first time funds are added to a tenant, the spending limit is **enabled**. The tenant's usage will now be deducted from this balance.
+
+### 4.2 Deduct Funds
+
+1. Open the same **$** modal for the tenant
+2. Enter the amount to deduct and an optional reason
+3. Click **Deduct Funds**
+
+### 4.3 Remove the Limit
+
+1. Open the **$** modal for the tenant
+2. Click **Remove Limit**
+3. Confirm — the balance is cleared (set to NULL) and the tenant becomes unlimited again
+
+### 4.4 View Transaction History
+
+Click the **history** button next to any tenant to see a paginated log of all balance changes (top-ups, deductions, limit removals).
+
+### 4.5 Balance Display in Tenant List
+
+The **Balance** column shows:
+| Value | Meaning |
+|---|---|
+| **Unlimited** | No balance limit set (tenant can use unlimited API calls) |
+| **€X.XX** | Current remaining balance with spending limit active |
+| **€X.XX + ⚠️** | Balance is below the configured warning threshold |
+| **€X.XX + Blocked** | Balance is €0 or below — subsequent API calls will be rejected |
+
+When one or more tenants have low balances, a **warning banner** appears at the top of the Tenants page listing affected tenants.
+
+### 4.6 Warning Threshold
+
+You can configure a warning threshold per tenant via the `PUT /admin/tenants/{id}/balance/config` API. When balance drops at or below this value, the admin panel shows a ⚠️ badge next to the balance.
+
+---
+
+## 5. Managing Users
 
 ### 4.1 Create a User
 
@@ -162,11 +209,11 @@ Toggle the user's **Active** status off. Deactivated users cannot log in. Their 
 
 ---
 
-## 5. Managing AI Models
+## 6. Managing AI Models
 
 Models are configured per tenant. Each model row represents an AI provider + API key combination.
 
-### 5.1 Add a Model
+### 6.1 Add a Model
 
 1. Go to **Admin Area → Models**
 2. Click **Create**
@@ -184,11 +231,11 @@ Models are configured per tenant. Each model row represents an AI provider + API
 | **Routing Priority** | Integer. Lower numbers are preferred when multiple models match. |
 | **Tenant** | Which tenant this model belongs to |
 
-### 5.2 Enable / Disable Models
+### 6.2 Enable / Disable Models
 
 Toggle the **Enabled** flag. Disabled models are hidden from the user-facing model selector. Existing sessions that had the model selected will continue to work until the user switches.
 
-### 5.3 API Key Security
+### 6.3 API Key Security
 
 - API keys are stored encrypted with Fernet symmetric encryption
 - The encryption key is the `ENCRYPTION_KEY` env variable — **never lose this key**
@@ -197,11 +244,11 @@ Toggle the **Enabled** flag. Disabled models are hidden from the user-facing mod
 
 ---
 
-## 6. Managing Tools
+## 7. Managing Tools
 
 Tools extend agent capabilities — they can call external APIs, query ERPNext instances, or run custom code.
 
-### 6.1 Tool Types
+### 7.1 Tool Types
 
 | Type | Category | Description | Configuration |
 |---|---|---|---|
@@ -232,7 +279,7 @@ Tools extend agent capabilities — they can call external APIs, query ERPNext i
 | **web_search** | Web | SearXNG-backed web search | `searxng_url` |
 | **wikipedia** | Knowledge | Article lookup and summary | `language` |
 
-### 6.2 Add a Tool
+### 7.2 Add a Tool
 
 1. Go to **Admin Area → Tools**
 2. Click **Create**
@@ -274,7 +321,7 @@ Tools extend agent capabilities — they can call external APIs, query ERPNext i
 
 > **Note:** API keys and secrets in the config JSON are **not** automatically encrypted. Use the `EncryptedString` format in the database, or encrypt values manually with the Fernet key before storing them in config JSON. Tools that expect encrypted values (`github.token`, `image_generation.api_key`, `slack.bot_token`, `email.smtp_password`, `email.api_key`, `calendar.credentials`, `sql_query.connection_string`) will attempt decryption at runtime and fall back to plaintext if decryption fails.
 
-### 6.3 Tool-Specific Notes
+### 7.3 Tool-Specific Notes
 
 **Financial tools** (`stock_data`, `market_overview`, `etf_data`, `sec_filings`, `portfolio`, `currency_exchange`): No API keys required. All data comes from free public sources (yfinance, SEC EDGAR, ECB).
 
@@ -288,11 +335,11 @@ Tools extend agent capabilities — they can call external APIs, query ERPNext i
 
 ---
 
-## 7. Managing MCP Servers
+## 8. Managing MCP Servers
 
 MCP (Model Context Protocol) servers let you connect external tools without writing code. Instead of building each integration manually, you configure a connection to any MCP-compliant server and sync its tools into the platform. Synced MCP tools appear in the **Tools** list with type `mcp` and category `MCP`, and work identically to built-in tools in the chat area.
 
-### 7.1 Supported Transports
+### 8.1 Supported Transports
 
 | Transport | Use Case |
 |---|---|
@@ -300,7 +347,7 @@ MCP (Model Context Protocol) servers let you connect external tools without writ
 | **Stdio** | Local MCP servers spawned as a subprocess (e.g., `npx @modelcontextprotocol/server-github`). Requires the server runtime (Node.js, Python, etc.) to be available in the backend container, or route through an HTTP proxy sidecar (`supergateway`). |
 | **WebSocket** | Persistent bidirectional connections for streaming use cases. |
 
-### 7.2 Add an MCP Server
+### 8.2 Add an MCP Server
 
 1. Go to **Admin Area → MCP Servers**
 2. Click **Add MCP Server**
@@ -318,7 +365,7 @@ MCP (Model Context Protocol) servers let you connect external tools without writ
 5. Click **OK** to save the configuration
 6. Click **Sync Tools** to discover the server's tools and register them as Tool records
 
-### 7.3 Syncing Tools
+### 8.3 Syncing Tools
 
 When you click **Sync Tools**, the platform:
 1. Connects to the MCP server and calls its `tools/list` endpoint
@@ -334,7 +381,7 @@ Synced tools immediately become available for:
 - Skill assignment (via **Skills**)
 - Session activation (via the chat area's tool selector)
 
-### 7.4 Synced Tools vs Built-in Tools
+### 8.4 Synced Tools vs Built-in Tools
 
 Synced MCP tools function identically to built-in tools:
 - They appear in the **Tools** list as type `mcp`
@@ -344,7 +391,7 @@ Synced MCP tools function identically to built-in tools:
 
 The only operational difference is that synced MCP tools trigger an outbound connection to the configured MCP server when invoked, which adds network latency.
 
-### 7.5 Managing MCP Servers
+### 8.5 Managing MCP Servers
 
 From the **MCP Servers** list you can:
 - **Edit** — change the server name, transport, URL, auth headers, or allowed tools filter
@@ -355,7 +402,7 @@ From the **MCP Servers** list you can:
 
 > **Note:** Deleting an MCP server also deletes all associated Tool records. To preserve the tools but stop the server, disable it instead.
 
-### 7.6 Security Considerations
+### 8.6 Security Considerations
 
 - **Secrets at rest**: Environment variables and HTTP headers are encrypted using the Fernet key (`ENCRYPTION_KEY`). The admin API returns masked values (`ghp_****`).
 - **Network access**: The backend container must be able to reach the MCP server URL. For local servers, use the Docker host address (`host.docker.internal` on Docker Desktop, `172.17.0.1` on Linux).
@@ -363,9 +410,9 @@ From the **MCP Servers** list you can:
 
 ---
 
-## 8. Managing Templates & Skills
+## 9. Managing Templates & Skills
 
-### 7.1 Templates
+### 9.1 Templates
 
 Templates define reusable system prompts and default configurations for agent sessions. They include:
 - System prompt text
@@ -375,7 +422,7 @@ Templates define reusable system prompts and default configurations for agent se
 
 Users select templates when creating or configuring chat sessions.
 
-### 7.2 Skills
+### 9.2 Skills
 
 Skills are named agent execution profiles that bundle model, template, and tool defaults. There are two types:
 
@@ -397,7 +444,7 @@ Both types share:
 
 **Tenant skills** (created in Admin Area, `visibility=tenant`) are available to all users in the tenant. **Personal skills** (created by users in the chat area) are owned by the creating user.
 
-### 7.3 MAF Target Keys
+### 9.3 MAF Target Keys
 
 The `maf_target_key` is only required for **Workflow Based** skills. It must match a registered workflow module in the backend codebase (`src/agents/workflows/`). If the key doesn't match any registered target, the backend logs a warning on startup but does not crash.
 
@@ -405,7 +452,7 @@ For Prompt Based skills, the key is auto-generated from the title if left empty 
 
 ---
 
-## 8. Embed Widget Configurations
+## 10. Embed Widget Configurations
 
 Embed configurations let you offer the AI chat assistant on external websites via
 a `<script>` tag. See the dedicated [`embed-widget.md`](embed-widget.md) guide for
@@ -436,17 +483,17 @@ full details.
 
 ---
 
-## 9. Licensing & Tenant Gating *(v1.10)*
+## 11. Licensing & Tenant Gating *(v1.10)*
 
 PH Agent Hub supports a free/pro licensing model that controls how many tenants can be created.
 
-### 8.1 Free Tier
+### 11.1 Free Tier
 
 - By default, a fresh deployment allows up to **3 tenants** (configurable via `MAX_FREE_TENANTS`)
 - When the limit is reached, attempting to create a new tenant returns `402 Payment Required`
 - No license key is required — the free tier works out of the box
 
-### 8.2 Pro License
+### 11.2 Pro License
 
 To remove the tenant limit, install a Pro license:
 
@@ -461,7 +508,7 @@ To remove the tenant limit, install a Pro license:
 - If the license key is invalid, expired, or tampered with, the system falls back to the free tier limit
 - Leaving `LICENSE_PUBLIC_KEY` empty disables license verification entirely (free tier only)
 
-### 8.3 License Key Input
+### 11.3 License Key Input
 
 When entering a license key:
 - Internal whitespace is automatically stripped
@@ -470,11 +517,11 @@ When entering a license key:
 
 ---
 
-## 9. Groups (Access Control)
+## 12. Groups (Access Control)
 
 Groups let you control which users can access specific models and tools. Instead of making every model and tool available to an entire tenant, you can restrict access to subsets of users.
 
-### 9.1 How Groups Work
+### 12.1 How Groups Work
 
 - **Create a group** — a named container (e.g., "Finance Team", "Developers")
 - **Add members** — assign users to the group
@@ -485,20 +532,20 @@ A user can belong to multiple groups. When group-based access is active, users s
 - **Models** that are assigned to at least one of their groups (or marked `is_public`)
 - **Tools** that are assigned to at least one of their groups (or marked `is_public`)
 
-### 9.2 Create a Group
+### 12.2 Create a Group
 
 1. Go to **Admin Area → Groups**
 2. Click **Create**
 3. Enter a group name
 4. Save
 
-### 9.3 Manage Group Members
+### 12.3 Manage Group Members
 
 1. Open a group
 2. Go to the **Members** tab
 3. Add or remove users
 
-### 9.4 Assign Models and Tools
+### 12.4 Assign Models and Tools
 
 1. Open a group
 2. Go to the **Models** or **Tools** tab
@@ -506,9 +553,9 @@ A user can belong to multiple groups. When group-based access is active, users s
 
 ---
 
-## 10. Admin Memory & Session Management
+## 13. Admin Memory & Session Management
 
-### 10.1 Memory Management
+### 13.1 Memory Management
 
 **Admin Area → Memories** shows all memory entries across the platform:
 - **Admins**: See all memory entries, optionally filtered by tenant or user
@@ -516,7 +563,7 @@ A user can belong to multiple groups. When group-based access is active, users s
 
 You can view and delete any memory entry. Deleting a memory entry removes it permanently — the user will no longer see it in their Memory Manager.
 
-### 10.2 Session Management
+### 13.2 Session Management
 
 **Admin Area → Sessions** provides a read-only view of all permanent chat sessions:
 - **Admins**: See all sessions across all tenants
@@ -526,9 +573,9 @@ You can view session metadata (title, user, tags, pin status) and delete session
 
 ---
 
-## 11. Analytics & Monitoring
+## 14. Analytics & Monitoring
 
-### 11.1 Usage Analytics
+### 13.1 Usage Analytics
 
 **Admin Area → Analytics** shows token usage:
 - **Admins**: See all tenants
@@ -536,7 +583,7 @@ You can view session metadata (title, user, tags, pin status) and delete session
 
 Usage logs are written automatically on every completed agent run (both streaming and non-streaming).
 
-### 11.2 Audit Logs
+### 13.2 Audit Logs
 
 **Admin Area → Audit** shows a read-only log of all administrative mutations:
 - Who performed the action
@@ -545,13 +592,13 @@ Usage logs are written automatically on every completed agent run (both streamin
 
 Audit logs are **immutable** — they cannot be deleted or modified. Only admins can view them.
 
-### 11.3 System Logs
+### 13.3 System Logs
 
 **Admin Area → Logs** provides a view of agent activity and error logs. (Currently a stub — detailed log strategy is planned for a future release.)
 
 ---
 
-## 12. Security Best Practices
+## 15. Security Best Practices
 
 1. **Change the default admin password** immediately after first deployment
 2. **Use strong, unique values** for `JWT_SECRET` and `ENCRYPTION_KEY`
@@ -564,7 +611,7 @@ Audit logs are **immutable** — they cannot be deleted or modified. Only admins
 
 ---
 
-## 13. Troubleshooting
+## 16. Troubleshooting
 
 ### Backend won't start
 

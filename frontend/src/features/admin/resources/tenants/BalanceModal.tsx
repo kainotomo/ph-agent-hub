@@ -126,9 +126,8 @@ export function BalanceModal({ tenant, onClose }: BalanceModalProps) {
             <Form.Item
               name="reason"
               label="Reason"
-              rules={[{ required: true, message: "Please enter a reason" }]}
             >
-              <Input placeholder="e.g. Monthly top-up, Customer credit" />
+              <Input placeholder="Optional — e.g. Monthly top-up, Customer credit" />
             </Form.Item>
 
             <Space style={{ width: "100%", justifyContent: "flex-end" }}>

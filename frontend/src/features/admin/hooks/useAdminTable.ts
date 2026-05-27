@@ -5,7 +5,7 @@
 // Wraps TanStack Query's useQuery and Ant Design Table's onChange handler.
 // =============================================================================
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { useQuery, type QueryKey } from "@tanstack/react-query";
 import type { PaginatedResponse, ListParams } from "../services/admin";
 import type { TablePaginationConfig } from "antd";
@@ -23,6 +23,27 @@ export function useAdminTable<T>(
     page_size: 25,
     ...initialParams,
   });
+
+  // Track previous initialParams so we can detect meaningful changes
+  // (e.g. tenant_id from URL) and sync them into the internal params state.
+  const prevInitialRef = useRef(initialParams);
+
+  useEffect(() => {
+    const prev = prevInitialRef.current;
+    const hasChanged = Object.keys({ ...prev, ...initialParams }).some(
+      (key) =>
+        prev[key as keyof typeof prev] !==
+        initialParams[key as keyof typeof initialParams],
+    );
+    if (hasChanged) {
+      prevInitialRef.current = initialParams;
+      setParams((prevParams) => ({
+        ...prevParams,
+        ...initialParams,
+        page: 1, // reset to first page when external filter changes
+      }));
+    }
+  }, [initialParams]);
 
   const { data, isLoading, isFetching } = useQuery({
     queryKey: [...queryKey, params] as QueryKey,

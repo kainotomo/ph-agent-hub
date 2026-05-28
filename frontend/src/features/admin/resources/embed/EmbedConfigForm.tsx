@@ -106,7 +106,7 @@ export function EmbedConfigForm({ open, config, onClose, onSuccess }: EmbedConfi
     onSuccess: (result) => {
       setNewToken(result.guest_token || null);
       message.success("Embed config created! Copy the snippet below.");
-      onSuccess();
+      // Keep modal open so the user can copy the snippet
     },
     onError: (err: Error) => message.error(err.message),
   });
@@ -122,6 +122,12 @@ export function EmbedConfigForm({ open, config, onClose, onSuccess }: EmbedConfi
   });
 
   const handleSubmit = async () => {
+    // If creation already succeeded, just close the modal
+    if (newToken) {
+      onSuccess();
+      return;
+    }
+
     const values = await form.validateFields();
 
     const theme = {

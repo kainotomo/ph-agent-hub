@@ -122,8 +122,9 @@ async def _assert_demo_enabled(db: AsyncSession) -> None:
 # Rate limiting keys
 # ---------------------------------------------------------------------------
 
-DEMO_SESSION_LIMIT = "10/hour"
-DEMO_MESSAGE_LIMIT = "30/minute"
+DEMO_SESSION_LIMIT = "5/hour"
+DEMO_MESSAGE_LIMIT = "20/minute"
+DEMO_TOTAL_MESSAGE_LIMIT = "50/hour"
 
 
 # =============================================================================
@@ -186,6 +187,9 @@ async def create_demo_session(
         feature_flags = {}
     if not isinstance(feature_flags, dict):
         feature_flags = {}
+
+    # Disable follow-up questions by default in demo mode
+    feature_flags["follow_up_questions"] = False
 
     data = {
         "id": session_id,
@@ -298,6 +302,7 @@ async def list_demo_messages(
 
 @router.post("/session/message")
 @limiter.limit(DEMO_MESSAGE_LIMIT)
+@limiter.limit(DEMO_TOTAL_MESSAGE_LIMIT)
 async def send_demo_message(
     body: DemoMessageCreate,
     request: Request,

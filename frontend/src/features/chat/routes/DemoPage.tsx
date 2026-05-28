@@ -152,8 +152,8 @@ export function DemoPage() {
           }}
         >
           <span>
-            🚀 You&apos;re trying the demo.{" "}
-            <strong>Your conversations are temporary and expire after 1 hour.</strong>
+            � Demo Mode —{" "}
+            <strong>Sessions expire after 1 hour and are not saved.</strong>
           </span>
           <Button
             type="default"

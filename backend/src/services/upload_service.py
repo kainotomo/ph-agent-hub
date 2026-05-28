@@ -488,6 +488,42 @@ async def _delete_temp_upload_by_id(db: AsyncSession, file_id: str) -> None:
     await db.flush()
 
 
+async def delete_demo_temp_uploads(db: AsyncSession) -> int:
+    """Delete all temporary file uploads belonging to the demo tenant.
+
+    Returns the number of uploads deleted.  Runs more frequently than the
+    general orphan cleanup (every 6 hours vs every 24 hours) so demo data
+    doesn't linger in the DB and MinIO.
+    """
+    from ..services.tenant_service import get_demo_tenant
+
+    tenant = await get_demo_tenant(db)
+    if tenant is None:
+        return 0
+
+    result = await db.execute(
+        select(FileUpload).where(
+            FileUpload.tenant_id == tenant.id,
+            FileUpload.is_temporary == True,  # noqa: E712
+        )
+    )
+    uploads = list(result.scalars().all())
+
+    for upload in uploads:
+        try:
+            await s3.delete_object(bucket=upload.bucket, key=upload.storage_key)
+        except Exception:
+            pass  # Best-effort: MinIO object may already be gone
+
+    if uploads:
+        ids = [u.id for u in uploads]
+        await db.execute(delete(FileUpload).where(FileUpload.id.in_(ids)))
+        await db.commit()
+
+    logger.info("Deleted %d temporary file uploads for demo tenant %s", len(uploads), tenant.id)
+    return len(uploads)
+
+
 # ---------------------------------------------------------------------------
 # Fresh DB session for background tasks
 # ---------------------------------------------------------------------------

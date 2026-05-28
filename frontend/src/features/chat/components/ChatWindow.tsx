@@ -21,6 +21,7 @@ import {
   CloseOutlined,
   ToolOutlined,
   DatabaseOutlined,
+  LoginOutlined,
 } from "@ant-design/icons";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { MessageBubble } from "./MessageBubble";
@@ -148,6 +149,15 @@ export function ChatWindow({
 
   const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
   const [regeneratingMsgId, setRegeneratingMsgId] = useState<string | null>(null);
+  const [ctaDismissed, setCtaDismissed] = useState(false);
+
+  // Welcome suggestions for first-time demo users
+  const DEMO_WELCOME_SUGGESTIONS = [
+    "What can you do?",
+    "Explain multi-tenancy",
+    "Write a Python script",
+    "Summarize a document",
+  ];
 
   const { streaming, startStream, startRegenerateStream, startEditStream, stopStream } = useStream(demo ? "demo" : "chat");
 
@@ -175,6 +185,9 @@ export function ChatWindow({
         : listMessages(sessionId),
     refetchInterval: false,
   });
+
+  // Count user messages for CTA trigger (demo mode only)
+  const userMessageCount = (messages || []).filter((m: any) => m.sender === "user").length;
 
   // Fetch models to determine if selected model supports thinking
   // (skipped in demo mode to avoid 401 triggering auto-refresh)
@@ -1052,6 +1065,62 @@ export function ChatWindow({
                 <div style={{ textAlign: "center", padding: 48 }}>
                   <Spin />
                 </div>
+              ) : demo ? (
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    padding: "48px 32px",
+                    textAlign: "center",
+                  }}
+                >
+                  <div style={{ fontSize: 48, marginBottom: 16 }}>
+                    👋
+                  </div>
+                  <Text strong style={{ fontSize: 18, marginBottom: 8 }}>
+                    I&apos;m an AI assistant. Try asking me:
+                  </Text>
+                  <div
+                    style={{
+                      display: "flex",
+                      flexWrap: "wrap",
+                      gap: 8,
+                      marginTop: 12,
+                      justifyContent: "center",
+                    }}
+                  >
+                    {DEMO_WELCOME_SUGGESTIONS.map((q) => (
+                      <Button
+                        key={q}
+                        size="small"
+                        type="default"
+                        style={{
+                          borderRadius: 16,
+                          maxWidth: "100%",
+                          whiteSpace: "normal",
+                          height: "auto",
+                          padding: "4px 12px",
+                          textAlign: "left",
+                        }}
+                        onClick={() => {
+                          setInputValue(q);
+                          setTimeout(() => {
+                            const textarea = document.querySelector(
+                              `[data-session-id="${sessionId}"] textarea, #chat-input-${sessionId}`
+                            ) as HTMLTextAreaElement;
+                            if (textarea) {
+                              textarea.focus();
+                            }
+                          }, 0);
+                        }}
+                      >
+                        {q}
+                      </Button>
+                    ))}
+                  </div>
+                </div>
               ) : (
                 <Empty
                   description="No messages yet. Start a conversation!"
@@ -1168,6 +1237,43 @@ export function ChatWindow({
         />
       )}
       </div>
+
+      {/* Demo CTA banner — shown after 3+ user messages */}
+      {demo && userMessageCount >= 3 && !ctaDismissed && (
+        <Alert
+          message={
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 12,
+              }}
+            >
+              <span>
+                🤖 Like what you see?{" "}
+                <strong>Sign up to save your conversations!</strong>
+              </span>
+              <Button
+                type="primary"
+                size="small"
+                icon={<LoginOutlined />}
+                href="/login"
+                target="_top"
+              >
+                Sign Up Free
+              </Button>
+            </div>
+          }
+          type="info"
+          closable
+          onClose={() => setCtaDismissed(true)}
+          style={{
+            margin: "0 16px 0",
+            borderLeft: "4px solid #1677ff",
+          }}
+        />
+      )}
 
       {/* Input area */}
       <div

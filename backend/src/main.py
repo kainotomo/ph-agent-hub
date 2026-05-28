@@ -83,7 +83,7 @@ async def lifespan(app: FastAPI):
     task.cancel()
 
 
-app = FastAPI(title="PH Agent Hub", version="1.12.2", lifespan=lifespan)
+app = FastAPI(title="PH Agent Hub", version="1.13.1", lifespan=lifespan)
 
 # ---------------------------------------------------------------------------
 # Middleware

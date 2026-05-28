@@ -1017,9 +1017,14 @@ export function ChatWindow({
                 }
                 onRegenerate={
                   msg.sender === "assistant" && !isTemporary && messages
-                    ? messages.filter((m: any) => m.sender === "assistant" && !m.is_deleted).at(-1)?.id === msg.id
-                      ? handleRegenerate
-                      : undefined
+                    ? (() => {
+                        const assistants = messages.filter(
+                          (m: any) => m.sender === "assistant" && !m.is_deleted,
+                        );
+                        return assistants[assistants.length - 1]?.id === msg.id
+                          ? handleRegenerate
+                          : undefined;
+                      })()
                     : undefined
                 }
                 disabled={streaming}

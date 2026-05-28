@@ -2863,7 +2863,6 @@ class EmbedConfigAdminResponse(BaseModel):
     id: str
     tenant_id: str
     name: str
-    allowed_origins: str | None = None
     is_active: bool
     theme: dict | None = None
     feature_flags: dict | None = None
@@ -2879,7 +2878,6 @@ class EmbedConfigAdminResponse(BaseModel):
 
 class EmbedConfigAdminCreate(BaseModel):
     name: str
-    allowed_origins: str | None = None
     theme: dict | None = None
     feature_flags: dict | None = None
     default_model_id: str | None = None
@@ -2889,7 +2887,6 @@ class EmbedConfigAdminCreate(BaseModel):
 
 class EmbedConfigAdminUpdate(BaseModel):
     name: str | None = None
-    allowed_origins: str | None = None
     is_active: bool | None = None
     theme: dict | None = None
     feature_flags: dict | None = None
@@ -2935,7 +2932,6 @@ async def admin_create_embed_config(
         db,
         tenant_id=current_user.tenant_id,
         name=body.name,
-        allowed_origins=body.allowed_origins,
         theme=body.theme,
         feature_flags=body.feature_flags,
         default_model_id=body.default_model_id,
@@ -2990,7 +2986,6 @@ async def admin_update_embed_config(
     updated = await _svc_update_embed_config(
         db, config_id,
         name=body.name,
-        allowed_origins=body.allowed_origins,
         is_active=body.is_active,
         theme=body.theme,
         feature_flags=body.feature_flags,

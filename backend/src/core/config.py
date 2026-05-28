@@ -64,7 +64,6 @@ class Settings(BaseSettings):
 
     # --- Embeddable Widget ---
     EMBED_GUEST_TOKEN_SECRET: str = ""
-    WIDGET_ALLOWED_ORIGINS: str = "*"
 
     # --- Logging ---
     LOG_LEVEL: str = "INFO"

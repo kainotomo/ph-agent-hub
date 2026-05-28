@@ -184,7 +184,6 @@ Renders the chat widget inline where the script tag is placed. Useful for dedica
 - **Separate JWT secret**: `EMBED_GUEST_TOKEN_SECRET` is independent from `JWT_SECRET`
 - **Short TTL**: Guest JWTs expire after 5 minutes. Session-level auth is the actual credential.
 - **Temporary sessions only**: Guest sessions are Redis-only with 24h TTL. No database persistence.
-- **Origin whitelist**: Optional `allowed_origins` field restricts which domains can embed the widget
 - **Feature flags enforced server-side**: The embed config's `feature_flags` are loaded into the guest JWT and enforced by the backend — UI-only hiding is not sufficient
 
 ---
@@ -196,14 +195,14 @@ Renders the chat widget inline where the script tag is placed. Useful for dedica
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `EMBED_GUEST_TOKEN_SECRET` | Yes | — | Separate JWT secret for guest token signing. Generate with `python -c "import secrets; print(secrets.token_hex(32))"` |
-| `WIDGET_ALLOWED_ORIGINS` | No | `*` | Comma-separated CORS origins for widget API (default allows all — use origin whitelist in embed config for security) |
+
 
 ### Embed Config Fields
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | string | Display name for admin reference |
-| `allowed_origins` | string | Comma-separated allowed domains (optional) |
+
 | `is_active` | boolean | Whether the config is active |
 | `theme.primary_color` | string | Hex color for UI accents (default: `#1677ff`) |
 | `theme.logo_url` | string | URL to logo image shown in header |
@@ -253,7 +252,6 @@ Renders the chat widget inline where the script tag is placed. Useful for dedica
 2. Verify the guest token is correct in the `<script>` tag
 3. Ensure `embed.js` is accessible at the configured URL
 4. Check that the embed config is set to **Active** in the admin panel
-5. If using `allowed_origins`, ensure your domain is whitelisted
 
 ### "Invalid guest token" error
 
@@ -263,7 +261,6 @@ Renders the chat widget inline where the script tag is placed. Useful for dedica
 
 ### Cross-origin issues
 
-1. Add your website's domain to `CORS_ALLOWED_ORIGINS` in the backend env
 2. If using production, verify the SSL certificate is valid
 3. The iframe communicates via `postMessage` — no additional CORS needed for the iframe
 

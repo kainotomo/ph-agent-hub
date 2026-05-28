@@ -21,7 +21,6 @@ import {
   CloseOutlined,
   ToolOutlined,
   DatabaseOutlined,
-  LoginOutlined,
 } from "@ant-design/icons";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { MessageBubble } from "./MessageBubble";

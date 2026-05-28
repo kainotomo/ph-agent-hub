@@ -155,6 +155,11 @@ class ToolResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class AssistantMessageUpdate(BaseModel):
+    """Payload for PATCH editing an assistant message in-place."""
+    content: str
+
+
 class FeedbackCreate(BaseModel):
     rating: str
     comment: str | None = None
@@ -235,6 +240,43 @@ async def _require_session_owner(
         raise ForbiddenError("You do not own this session")
     if session_data.get("tenant_id") != current_user.tenant_id:
         raise ForbiddenError("Session belongs to a different tenant")
+
+
+async def _truncate_after_message(
+    db: AsyncSession,
+    session_id: str,
+    message: Message,
+) -> int:
+    """Hard-delete all messages in the session after *message*.
+
+    Deletes feedback rows, file uploads, and the messages themselves.
+    Returns the count of messages deleted (excludes the target).
+    Does NOT commit — the caller is responsible for committing.
+    """
+    result = await db.execute(
+        select(Message)
+        .where(
+            Message.session_id == session_id,
+            Message.is_deleted == False,  # noqa: E712
+            Message.created_at > message.created_at,
+        )
+        .order_by(Message.created_at)
+    )
+    subsequent = list(result.scalars().all())
+
+    for msg in subsequent:
+        # Delete feedback rows (FK constraint)
+        await db.execute(
+            delete(MessageFeedback).where(
+                MessageFeedback.message_id == msg.id
+            )
+        )
+        # Delete file uploads (MinIO + DB rows)
+        await upload_service.delete_uploads_for_message(db, msg.id)
+        # Hard-delete the message
+        await db.delete(msg)
+
+    return len(subsequent)
 
 
 async def _inject_file_content(
@@ -950,31 +992,9 @@ async def edit_user_message(
     if original_msg.sender != "user":
         raise ValidationError("Only user messages can be edited")
 
-    # Find and hard-delete the assistant response that follows this user message
-    child_result = await db.execute(
-        select(Message).where(
-            Message.session_id == session_id,
-            Message.is_deleted == False,  # noqa: E712
-        )
-        .order_by(Message.created_at)
-    )
-    all_msgs = list(child_result.scalars().all())
-
-    # Find the assistant message immediately after this user message
-    original_idx = None
-    for i, m in enumerate(all_msgs):
-        if m.id == message_id:
-            original_idx = i
-            break
-
-    # Hard-delete the assistant response that belongs to this user message
-    if original_idx is not None and original_idx + 1 < len(all_msgs):
-        next_msg = all_msgs[original_idx + 1]
-        if next_msg.sender == "assistant":
-            await db.delete(next_msg)
-            await upload_service.delete_uploads_for_message(db, next_msg.id)
-
-    # Hard-delete the original user message
+    # Truncate all messages after this user message, then hard-delete
+    # the original user message itself.
+    await _truncate_after_message(db, session_id, original_msg)
     await upload_service.delete_uploads_for_message(db, message_id)
     await db.delete(original_msg)
     await db.commit()
@@ -1043,6 +1063,9 @@ async def delete_message(
     if msg is None:
         raise NotFoundError("Message not found")
 
+    # Truncate all messages after this one
+    await _truncate_after_message(db, session_id, msg)
+
     # Delete feedback rows first (FK constraint)
     await db.execute(
         delete(MessageFeedback).where(
@@ -1058,6 +1081,62 @@ async def delete_message(
 
     await db.commit()
     return Response(status_code=204)
+
+
+@router.patch(
+    "/session/{session_id}/message/{message_id}",
+    response_model=MessageResponse,
+)
+async def update_assistant_message(
+    session_id: str,
+    message_id: str,
+    body: AssistantMessageUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(get_current_user),
+):
+    """Edit an assistant message in-place (no agent re-run).
+
+    Updates the message content and truncates all subsequent messages.
+    Unlike PUT (which edits a user message and re-runs the agent),
+    this endpoint only modifies the stored text — no regeneration.
+    """
+    data = await _load_session(db, session_id)
+    await _require_session_owner(data, current_user)
+
+    if data.get("is_temporary", False):
+        raise ValidationError(
+            "Message editing is not supported for temporary sessions"
+        )
+
+    # Load the assistant message
+    msg_result = await db.execute(
+        select(Message).where(
+            Message.id == message_id,
+            Message.session_id == session_id,
+        )
+    )
+    msg = msg_result.scalar_one_or_none()
+    if msg is None:
+        raise NotFoundError("Message not found")
+    if msg.sender != "assistant":
+        raise ValidationError("Only assistant messages can be edited with PATCH")
+
+    # Truncate all subsequent messages
+    deleted_count = await _truncate_after_message(db, session_id, msg)
+
+    # Update content in-place
+    msg.content = [{"type": "text", "text": body.content}]
+    await db.commit()
+    await db.refresh(msg)
+
+    logger.info(
+        "Assistant message %s edited in session %s — truncated %d subsequent message(s)",
+        message_id,
+        session_id,
+        deleted_count,
+    )
+
+    return MessageResponse.model_validate(msg)
 
 
 @router.post(
@@ -1099,6 +1178,23 @@ async def regenerate_assistant_message(
         raise NotFoundError("Message not found")
     if assistant_msg.sender != "assistant":
         raise ValidationError("Only assistant messages can be regenerated")
+
+    # Restrict regeneration to the last assistant message in the session.
+    last_msg_result = await db.execute(
+        select(Message)
+        .where(
+            Message.session_id == session_id,
+            Message.is_deleted == False,  # noqa: E712
+        )
+        .order_by(Message.created_at.desc())
+        .limit(1)
+    )
+    last_msg = last_msg_result.scalar_one_or_none()
+    if last_msg is None or last_msg.id != message_id:
+        raise ValidationError(
+            "Only the most recent assistant message can be regenerated. "
+            "Use edit (PATCH) to modify earlier responses."
+        )
 
     # Find the user message immediately before this assistant message
     all_msgs_result = await db.execute(

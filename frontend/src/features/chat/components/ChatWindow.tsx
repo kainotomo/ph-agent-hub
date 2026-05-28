@@ -30,6 +30,7 @@ import {
   deleteMessage,
   summarizeSession,
   finalizeSession,
+  updateAssistantMessage,
 } from "../services/chat";
 import { getDemoMessages } from "../services/demo";
 import api, { getToken } from "../../../services/api";
@@ -504,6 +505,11 @@ export function ChatWindow({
     setEditingMsgId(null);
     setInputValue("");
   }, []);
+
+  const handleEditAssistant = useCallback(async (messageId: string, newContent: string) => {
+    await updateAssistantMessage(sessionId, messageId, newContent);
+    queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+  }, [sessionId, queryClient]);
 
   const handleDelete = useCallback(async (messageId: string) => {
     await deleteMessage(sessionId, messageId);
@@ -989,14 +995,31 @@ export function ChatWindow({
                 message={msg}
                 sessionId={sessionId}
                 onEdit={msg.sender === "user" ? handleEdit : undefined}
+                onEditAssistant={
+                  msg.sender === "assistant" && !isTemporary
+                    ? handleEditAssistant
+                    : undefined
+                }
+                hasSubsequentMessages={
+                  messages
+                    ? messages.some(
+                        (m: any) =>
+                          m.created_at > msg.created_at &&
+                          m.id !== regeneratingMsgId &&
+                          m.id !== editingMsgId,
+                      )
+                    : false
+                }
                 onDelete={
                   !isTemporary
                     ? handleDelete
                     : undefined
                 }
                 onRegenerate={
-                  msg.sender === "assistant" && !isTemporary
-                    ? handleRegenerate
+                  msg.sender === "assistant" && !isTemporary && messages
+                    ? messages.filter((m: any) => m.sender === "assistant" && !m.is_deleted).at(-1)?.id === msg.id
+                      ? handleRegenerate
+                      : undefined
                     : undefined
                 }
                 disabled={streaming}

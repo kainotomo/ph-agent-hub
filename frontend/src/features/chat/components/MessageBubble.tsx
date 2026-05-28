@@ -6,8 +6,8 @@
 // tool activity display for tool_start/tool_result events.
 // =============================================================================
 
-import React from "react";
-import { Typography, Space, Collapse, Tag, Button, Popconfirm, App, Spin, Tooltip } from "antd";
+import React, { useState } from "react";
+import { Typography, Space, Collapse, Tag, Button, Popconfirm, App, Spin, Tooltip, Input, Modal } from "antd";
 import {
   UserOutlined,
   RobotOutlined,
@@ -20,6 +20,8 @@ import {
   CopyOutlined,
   CompressOutlined,
   DollarOutlined,
+  CheckOutlined,
+  CloseOutlined,
 } from "@ant-design/icons";
 import { useQuery } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
@@ -71,6 +73,8 @@ interface MessageBubbleProps {
   onEdit?: (messageId: string) => void;
   onDelete?: (messageId: string) => void;
   onRegenerate?: (messageId: string) => void;
+  onEditAssistant?: (messageId: string, newContent: string) => Promise<void>;
+  hasSubsequentMessages?: boolean;
   disabled?: boolean;
   regenerating?: boolean;
   streaming?: boolean;
@@ -82,6 +86,8 @@ function MessageBubbleInner({
   onEdit,
   onDelete,
   onRegenerate,
+  onEditAssistant,
+  hasSubsequentMessages,
   disabled,
   regenerating,
   streaming,
@@ -89,6 +95,11 @@ function MessageBubbleInner({
   const isUser = message.sender === "user";
   const isSystem = message.sender === "system";
   const contentItems = parseContent(message.content);
+
+  // Inline editing state for assistant messages
+  const [isEditingAssistant, setIsEditingAssistant] = useState(false);
+  const [editContent, setEditContent] = useState("");
+  const [savingEdit, setSavingEdit] = useState(false);
 
   // Separate text, reasoning, and tool events
   const textItems = contentItems.filter((c) => c.type === "text");
@@ -207,53 +218,96 @@ function MessageBubbleInner({
           />
         )}
 
-        {textItems.map((item, i) => (
-          <div key={i} style={isUser ? undefined : { maxWidth: 750 }}>
-            {isUser ? (
-              <Text style={{ color: "#fff", whiteSpace: "pre-wrap" }}>
-                {item.text}
-              </Text>
-            ) : (
-              <div className="markdown-body" style={{ fontSize: 14 }}>
-                <ReactMarkdown
-                  remarkPlugins={[remarkGfm]}
-                  components={{
-                    code({ className, children, ...props }) {
-                      const match = /language-(\w+)/.exec(
-                        className || "",
-                      );
-                      const codeStr = String(children).replace(
-                        /\n$/,
-                        "",
-                      );
-                      if (match) {
-                        return (
-                          <SyntaxHighlighter
-                            style={oneDark}
-                            language={match[1]}
-                            PreTag="div"
-                          >
-                            {codeStr}
-                          </SyntaxHighlighter>
-                        );
-                      }
-                      return (
-                        <code
-                          className={className}
-                          {...(props as Record<string, unknown>)}
-                        >
-                          {children}
-                        </code>
-                      );
-                    },
-                  }}
-                >
-                  {item.text || ""}
-                </ReactMarkdown>
-              </div>
-            )}
+        {/* Inline edit mode for assistant messages */}
+        {isEditingAssistant && !isUser ? (
+          <div style={{ maxWidth: 750 }}>
+            <Input.TextArea
+              value={editContent}
+              onChange={(e) => setEditContent(e.target.value)}
+              autoSize={{ minRows: 4, maxRows: 20 }}
+              style={{ marginBottom: 8 }}
+              disabled={savingEdit}
+            />
+            <Space>
+              <Button
+                type="primary"
+                size="small"
+                icon={<CheckOutlined />}
+                loading={savingEdit}
+                onClick={async () => {
+                  if (!onEditAssistant) return;
+                  setSavingEdit(true);
+                  try {
+                    await onEditAssistant(message.id, editContent);
+                    setIsEditingAssistant(false);
+                  } catch {
+                    messageApi.error("Failed to save edit");
+                  } finally {
+                    setSavingEdit(false);
+                  }
+                }}
+              >
+                Save
+              </Button>
+              <Button
+                size="small"
+                icon={<CloseOutlined />}
+                onClick={() => setIsEditingAssistant(false)}
+                disabled={savingEdit}
+              >
+                Cancel
+              </Button>
+            </Space>
           </div>
-        ))}
+        ) : (
+          textItems.map((item, i) => (
+            <div key={i} style={isUser ? undefined : { maxWidth: 750 }}>
+              {isUser ? (
+                <Text style={{ color: "#fff", whiteSpace: "pre-wrap" }}>
+                  {item.text}
+                </Text>
+              ) : (
+                <div className="markdown-body" style={{ fontSize: 14 }}>
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    components={{
+                      code({ className, children, ...props }) {
+                        const match = /language-(\w+)/.exec(
+                          className || "",
+                        );
+                        const codeStr = String(children).replace(
+                          /\n$/,
+                          "",
+                        );
+                        if (match) {
+                          return (
+                            <SyntaxHighlighter
+                              style={oneDark}
+                              language={match[1]}
+                              PreTag="div"
+                            >
+                              {codeStr}
+                            </SyntaxHighlighter>
+                          );
+                        }
+                        return (
+                          <code
+                            className={className}
+                            {...(props as Record<string, unknown>)}
+                          >
+                            {children}
+                          </code>
+                        );
+                      },
+                    }}
+                  >
+                    {item.text || ""}
+                  </ReactMarkdown>
+                </div>
+              )}
+            </div>
+          ))
+        )}
 
         {/* Tool calls / results */}
         {toolItems.length > 0 && (
@@ -412,6 +466,31 @@ function MessageBubbleInner({
               </Button>
             </Tooltip>
           )}
+          {onEditAssistant && (
+            <Button
+              type="text"
+              size="small"
+              icon={<EditOutlined />}
+              onClick={() => {
+                const text = textItems.map((t) => t.text || "").join("\n");
+                if (hasSubsequentMessages) {
+                  Modal.confirm({
+                    title: "Edit this response?",
+                    content:
+                      "Editing this response will remove the messages that follow it. Continue?",
+                    onOk: () => {
+                      setEditContent(text);
+                      setIsEditingAssistant(true);
+                    },
+                  });
+                } else {
+                  setEditContent(text);
+                  setIsEditingAssistant(true);
+                }
+              }}
+              disabled={disabled || isEditingAssistant}
+            />
+          )}
           {onRegenerate && (
             <Button
               type="text"
@@ -423,7 +502,8 @@ function MessageBubbleInner({
           )}
           {onDelete && (
             <Popconfirm
-              title="Delete this message?"
+              title={hasSubsequentMessages ? "Delete this message and all that follow?" : "Delete this message?"}
+              description={hasSubsequentMessages ? "This will also remove all messages after this one." : undefined}
               onConfirm={() => onDelete(message.id)}
             >
               <Button
@@ -498,6 +578,8 @@ export const MessageBubble = React.memo(MessageBubbleInner, (prev, next) =>
   prev.onEdit === next.onEdit &&
   prev.onDelete === next.onDelete &&
   prev.onRegenerate === next.onRegenerate &&
+  prev.onEditAssistant === next.onEditAssistant &&
+  prev.hasSubsequentMessages === next.hasSubsequentMessages &&
   prev.sessionId === next.sessionId
 );
 

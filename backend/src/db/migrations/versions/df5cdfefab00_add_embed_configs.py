@@ -25,7 +25,6 @@ def upgrade() -> None:
         sa.Column('tenant_id', mysql.CHAR(length=36), nullable=False),
         sa.Column('name', sa.String(length=255), nullable=False),
         sa.Column('guest_token_hash', sa.String(length=255), nullable=False),
-        sa.Column('allowed_origins', sa.Text(), nullable=True),
         sa.Column('is_active', sa.Boolean(), nullable=False),
         sa.Column('theme', sa.JSON(), nullable=True),
         sa.Column('feature_flags', sa.JSON(), nullable=True),

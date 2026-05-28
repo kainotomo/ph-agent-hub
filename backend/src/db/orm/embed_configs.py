@@ -27,7 +27,6 @@ class EmbedConfig(Base):
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     guest_token_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    allowed_origins: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     # --- Theme ---

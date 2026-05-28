@@ -16,13 +16,13 @@ import {
   Grid,
   Typography,
   Tooltip,
+  Modal,
 } from "antd";
 import {
   EditOutlined,
   DeleteOutlined,
   PlusOutlined,
   KeyOutlined,
-  CopyOutlined,
   SearchOutlined,
 } from "@ant-design/icons";
 import { useSearchParams } from "react-router-dom";
@@ -42,6 +42,7 @@ const { Text } = Typography;
 export function EmbedConfigList() {
   const [editingConfig, setEditingConfig] = useState<EmbedConfigData | null>(null);
   const [creating, setCreating] = useState(false);
+  const [regeneratedToken, setRegeneratedToken] = useState<string | null>(null);
   const screens = useBreakpoint();
   const isMobile = !screens.md;
   const queryClient = useQueryClient();
@@ -67,26 +68,13 @@ export function EmbedConfigList() {
     mutationFn: (id: string) => regenerateEmbedToken(id),
     onSuccess: (data) => {
       message.success("Token regenerated");
-      // Show the new token
       if (data.guest_token) {
-        navigator.clipboard.writeText(data.guest_token).then(
-          () => message.success("New token copied to clipboard"),
-          () => message.info(`New token: ${data.guest_token}`),
-        );
+        setRegeneratedToken(data.guest_token);
       }
       queryClient.invalidateQueries({ queryKey: ["admin-embed-configs"] });
     },
     onError: (err: Error) => message.error(err.message),
   });
-
-  const copySnippet = (config: EmbedConfigData) => {
-    const token = config.guest_token || "YOUR_TOKEN_HERE";
-    const snippet = `<script src="/embed.js" data-ph-token="${token}"></script>`;
-    navigator.clipboard.writeText(snippet).then(
-      () => message.success("Embed snippet copied to clipboard"),
-      () => message.info("Could not copy snippet automatically"),
-    );
-  };
 
   const columns = [
     {
@@ -134,13 +122,6 @@ export function EmbedConfigList() {
               size="small"
               icon={<EditOutlined />}
               onClick={() => setEditingConfig(record)}
-            />
-          </Tooltip>
-          <Tooltip title="Copy embed snippet">
-            <Button
-              size="small"
-              icon={<CopyOutlined />}
-              onClick={() => copySnippet(record)}
             />
           </Tooltip>
           <Tooltip title="Regenerate token (old one stops working)">
@@ -230,6 +211,7 @@ export function EmbedConfigList() {
         onClose={() => {
           setCreating(false);
           setEditingConfig(null);
+          queryClient.invalidateQueries({ queryKey: ["admin-embed-configs"] });
         }}
         onSuccess={() => {
           setCreating(false);
@@ -237,6 +219,40 @@ export function EmbedConfigList() {
           queryClient.invalidateQueries({ queryKey: ["admin-embed-configs"] });
         }}
       />
+
+      {/* Regenerate token modal */}
+      <Modal
+        title="Token Regenerated"
+        open={!!regeneratedToken}
+        onCancel={() => setRegeneratedToken(null)}
+        onOk={() => setRegeneratedToken(null)}
+        okText="Done"
+        cancelText={null}
+      >
+        {regeneratedToken && (
+          <>
+            <p style={{ marginBottom: 12, color: "#666" }}>
+              The old token has been invalidated. Copy the new snippet below:
+            </p>
+            <div
+              style={{
+                background: "#f5f5f5",
+                padding: 12,
+                borderRadius: 6,
+                border: "1px solid #d9d9d9",
+              }}
+            >
+              <Text
+                code
+                copyable
+                style={{ fontSize: 12, wordBreak: "break-all" }}
+              >
+                {`<script src="/embed.js" data-ph-token="${regeneratedToken}"></script>`}
+              </Text>
+            </div>
+          </>
+        )}
+      </Modal>
     </div>
   );
 }

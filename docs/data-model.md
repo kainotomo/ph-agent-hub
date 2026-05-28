@@ -221,7 +221,6 @@ Groups restrict which models and tools specific users can access. Models and too
 | `tenant_id` | UUID (FK → tenants) | Owning tenant |
 | `name` | VARCHAR(255) | Display name |
 | `guest_token_hash` | VARCHAR(255) | SHA-256 hash of the guest token (raw token never stored) |
-| `allowed_origins` | TEXT | Comma-separated domain whitelist |
 | `is_active` | BOOLEAN | Whether the config is active |
 | `theme` | JSON | Widget theme: `primary_color`, `logo_url`, `greeting_text`, `position` |
 | `feature_flags` | JSON | Feature toggles: `file_upload`, `model_selection`, `feedback`, `follow_up_questions`, `memory` |

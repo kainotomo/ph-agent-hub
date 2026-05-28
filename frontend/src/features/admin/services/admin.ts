@@ -741,7 +741,6 @@ export interface EmbedConfigData {
   id: string;
   tenant_id: string;
   name: string;
-  allowed_origins: string | null;
   is_active: boolean;
   theme: Record<string, unknown> | null;
   feature_flags: Record<string, unknown> | null;
@@ -755,7 +754,6 @@ export interface EmbedConfigData {
 
 export interface EmbedConfigCreate {
   name: string;
-  allowed_origins?: string | null;
   theme?: Record<string, unknown> | null;
   feature_flags?: Record<string, unknown> | null;
   default_model_id?: string | null;
@@ -765,7 +763,6 @@ export interface EmbedConfigCreate {
 
 export interface EmbedConfigUpdate {
   name?: string;
-  allowed_origins?: string | null;
   is_active?: boolean;
   theme?: Record<string, unknown> | null;
   feature_flags?: Record<string, unknown> | null;

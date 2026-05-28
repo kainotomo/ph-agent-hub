@@ -74,7 +74,6 @@ export function EmbedConfigForm({ open, config, onClose, onSuccess }: EmbedConfi
       if (config) {
         form.setFieldsValue({
           name: config.name,
-          allowed_origins: config.allowed_origins || "",
           is_active: config.is_active,
           default_model_id: config.default_model_id || undefined,
           default_skill_id: config.default_skill_id || undefined,
@@ -90,7 +89,6 @@ export function EmbedConfigForm({ open, config, onClose, onSuccess }: EmbedConfi
         form.resetFields();
         form.setFieldsValue({
           is_active: true,
-          allowed_origins: "",
           primary_color: "#1677ff",
           logo_url: "",
           greeting_text: "Hi! How can I help?",
@@ -108,7 +106,7 @@ export function EmbedConfigForm({ open, config, onClose, onSuccess }: EmbedConfi
     onSuccess: (result) => {
       setNewToken(result.guest_token || null);
       message.success("Embed config created! Copy the snippet below.");
-      onSuccess();
+      // Keep modal open so the user can copy the snippet
     },
     onError: (err: Error) => message.error(err.message),
   });
@@ -124,6 +122,12 @@ export function EmbedConfigForm({ open, config, onClose, onSuccess }: EmbedConfi
   });
 
   const handleSubmit = async () => {
+    // If creation already succeeded, just close the modal
+    if (newToken) {
+      onSuccess();
+      return;
+    }
+
     const values = await form.validateFields();
 
     const theme = {
@@ -140,7 +144,6 @@ export function EmbedConfigForm({ open, config, onClose, onSuccess }: EmbedConfi
 
     const payload = {
       name: values.name,
-      allowed_origins: values.allowed_origins || null,
       theme,
       feature_flags,
       default_model_id: values.default_model_id || null,
@@ -174,10 +177,6 @@ export function EmbedConfigForm({ open, config, onClose, onSuccess }: EmbedConfi
       <Form form={form} layout="vertical" style={{ marginTop: 16 }}>
         <Form.Item name="name" label="Name" rules={[{ required: true, message: "Name is required" }]}>
           <Input placeholder="e.g. Support Widget for example.com" />
-        </Form.Item>
-
-        <Form.Item name="allowed_origins" label="Allowed Origins (comma-separated)">
-          <Input placeholder="https://example.com,https://app.example.com" />
         </Form.Item>
 
         <Form.Item name="is_active" label="Active" valuePropName="checked">

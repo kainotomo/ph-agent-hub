@@ -70,6 +70,7 @@ function parseContent(content: unknown): ContentItem[] {
 interface MessageBubbleProps {
   message: MessageData;
   sessionId: string;
+  showFeedback?: boolean;
   onEdit?: (messageId: string) => void;
   onDelete?: (messageId: string) => void;
   onRegenerate?: (messageId: string) => void;
@@ -83,6 +84,7 @@ interface MessageBubbleProps {
 function MessageBubbleInner({
   message,
   sessionId,
+  showFeedback = true,
   onEdit,
   onDelete,
   onRegenerate,
@@ -421,10 +423,12 @@ function MessageBubbleInner({
           style={{ marginLeft: 4, marginTop: 2 }}
           size="small"
         >
-          <MessageFeedback
-            sessionId={sessionId}
-            messageId={message.id}
-          />
+          {showFeedback && (
+            <MessageFeedback
+              sessionId={sessionId}
+              messageId={message.id}
+            />
+          )}
           <Button
             type="text"
             size="small"

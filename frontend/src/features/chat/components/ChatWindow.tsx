@@ -1035,6 +1035,7 @@ export function ChatWindow({
                 key={msg.id}
                 message={msg}
                 sessionId={sessionId}
+                showFeedback={!embedded && !demo}
                 onEdit={msg.sender === "user" ? handleEdit : undefined}
                 onEditAssistant={
                   msg.sender === "assistant" && !isTemporary

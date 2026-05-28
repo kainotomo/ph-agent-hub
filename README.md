@@ -8,12 +8,15 @@
 [![Issues](https://img.shields.io/github/issues/kainotomo/ph-agent-hub)](https://github.com/kainotomo/ph-agent-hub/issues)
 [![Docker Pulls](https://img.shields.io/docker/pulls/phalouvas/ph-agent-hub-backend)](https://hub.docker.com/r/phalouvas/ph-agent-hub-backend)
 [![Build](https://img.shields.io/badge/Build-no%20workflow%20configured-lightgrey)](https://github.com/kainotomo/ph-agent-hub/actions)
+[![Try the Widget](https://img.shields.io/badge/Try%20the%20Widget-Live-brightgreen)](https://kainotomo.com/ph-agent-hub)
 
 ## Screenshots
 
 | Chat UI | Admin UI | Widget Demo |
 |---|---|---|
 | ![Chat Interface](docs/assets/chat-ui.jpeg) | ![Admin Panel](docs/assets/admin-ui.jpeg) | ![Embeddable Widget](docs/assets/widget-demo.jpeg) |
+
+> **💬 Live embedded widget** — Visit [kainotomo.com/ph-agent-hub](https://kainotomo.com/ph-agent-hub) and click the chat icon in the bottom-right corner to try the embedded widget yourself.
 
 PH Agent Hub is a multi-tenant AI application platform for teams that need both:
 - a production chat experience for end users

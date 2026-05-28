@@ -131,7 +131,6 @@ Navigate to **Admin → Embed Widget** to manage configurations.
 1. Click **New Embed Config**
 2. Fill in:
    - **Name**: A descriptive label (e.g., "Support Widget for example.com")
-   - **Allowed Origins**: Comma-separated list of domains (optional, for CORS)
    - **Active**: Toggle on/off
 3. Configure **Theme**:
    - Primary Color: Hex color for the chat bubble and accents
@@ -141,13 +140,12 @@ Navigate to **Admin → Embed Widget** to manage configurations.
 4. Select **Default Model/Skill/Template** (optional — uses tenant defaults)
 5. Configure **Features** (toggles):
    - File Upload, Model Selection, Message Feedback, Follow-up Questions, Cross-session Memory
-6. Click **Create** → the embed snippet is shown **once**. Copy it immediately.
+6. Click **Create** → the embed snippet is shown **once** inside the form. Copy it, then click **OK** to close.
 
 ### Managing Configs
 
 - **Edit**: Change name, theme, features, defaults
-- **Copy Snippet**: Copy the `<script>` tag again
-- **Regenerate Token**: Invalidates the old token immediately. Update your website's snippet.
+- **Regenerate Token** (🔑): Invalidates the old token immediately. A modal shows the new full `<script>` snippet — copy it and update your website.
 - **Delete**: Permanently removes the config. Existing sessions continue until their 24h TTL expires.
 
 ---
@@ -185,6 +183,7 @@ Renders the chat widget inline where the script tag is placed. Useful for dedica
 - **Short TTL**: Guest JWTs expire after 5 minutes. Session-level auth is the actual credential.
 - **Temporary sessions only**: Guest sessions are Redis-only with 24h TTL. No database persistence.
 - **Feature flags enforced server-side**: The embed config's `feature_flags` are loaded into the guest JWT and enforced by the backend — UI-only hiding is not sufficient
+- **CSP frame-ancestors**: The nginx config sets a `Content-Security-Policy: frame-ancestors` header to prevent clickjacking. Configure `WIDGET_ALLOWED_ORIGINS` in your env to allow specific domains to embed the widget.
 
 ---
 
@@ -202,7 +201,6 @@ Renders the chat widget inline where the script tag is placed. Useful for dedica
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | string | Display name for admin reference |
-
 | `is_active` | boolean | Whether the config is active |
 | `theme.primary_color` | string | Hex color for UI accents (default: `#1677ff`) |
 | `theme.logo_url` | string | URL to logo image shown in header |
@@ -261,8 +259,8 @@ Renders the chat widget inline where the script tag is placed. Useful for dedica
 
 ### Cross-origin issues
 
-2. If using production, verify the SSL certificate is valid
-3. The iframe communicates via `postMessage` — no additional CORS needed for the iframe
+1. If using production, verify the SSL certificate is valid
+2. The iframe communicates via `postMessage` — no additional CORS needed for the iframe
 
 ### SSE streaming not working
 

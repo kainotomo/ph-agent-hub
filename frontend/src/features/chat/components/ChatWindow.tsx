@@ -69,6 +69,8 @@ interface ChatWindowProps {
   embedded?: boolean;
   demo?: boolean;
   widget?: boolean;
+  greetingText?: string;
+  logoUrl?: string;
   featureFlags?: Record<string, boolean>;
   onSessionUpdate?: (data: Record<string, unknown>) => void;
 }
@@ -84,6 +86,8 @@ export function ChatWindow({
   embedded = false,
   demo = false,
   widget = false,
+  greetingText = "",
+  logoUrl = "",
   featureFlags = {},
   onSessionUpdate,
 }: ChatWindowProps) {
@@ -1089,7 +1093,7 @@ export function ChatWindow({
                 <div style={{ textAlign: "center", padding: 48 }}>
                   <Spin />
                 </div>
-              ) : demo ? (
+              ) : demo || widget ? (
                 <div
                   style={{
                     display: "flex",
@@ -1100,50 +1104,65 @@ export function ChatWindow({
                     textAlign: "center",
                   }}
                 >
-                  <div style={{ fontSize: 48, marginBottom: 16 }}>
-                    👋
-                  </div>
+                  {logoUrl ? (
+                    <img
+                      src={logoUrl}
+                      alt="Logo"
+                      style={{
+                        maxWidth: 120,
+                        maxHeight: 48,
+                        marginBottom: 16,
+                        objectFit: "contain",
+                      }}
+                    />
+                  ) : (
+                    <div style={{ fontSize: 48, marginBottom: 16 }}>
+                      👋
+                    </div>
+                  )}
                   <Text strong style={{ fontSize: 18, marginBottom: 8 }}>
-                    I&apos;m an AI assistant. Try asking me:
+                    {greetingText || (demo ? "I'm an AI assistant. Try asking me:" : "Start a conversation!")}
                   </Text>
-                  <div
-                    style={{
-                      display: "flex",
-                      flexWrap: "wrap",
-                      gap: 8,
-                      marginTop: 12,
-                      justifyContent: "center",
-                    }}
-                  >
-                    {DEMO_WELCOME_SUGGESTIONS.map((q) => (
-                      <Button
-                        key={q}
-                        size="small"
-                        type="default"
-                        style={{
-                          borderRadius: 16,
-                          maxWidth: "100%",
-                          whiteSpace: "normal",
-                          height: "auto",
-                          padding: "4px 12px",
-                          textAlign: "left",
-                        }}
-                        onClick={() => {
-                          setInputValue(q);
-                          setTimeout(() => {
-                            const textarea = document.querySelector(
-                              `[data-session-id="${sessionId}"] textarea, #chat-input-${sessionId}`
-                            ) as HTMLTextAreaElement;
-                            if (textarea) {
-                              textarea.focus();
-                            }
-                          }, 0);
-                        }}
-                      >
-                        {q}
-                      </Button>
-                    ))}
-                  </div>
+                  {demo && (
+                    <div
+                      style={{
+                        display: "flex",
+                        flexWrap: "wrap",
+                        gap: 8,
+                        marginTop: 12,
+                        justifyContent: "center",
+                      }}
+                    >
+                      {DEMO_WELCOME_SUGGESTIONS.map((q) => (
+                        <Button
+                          key={q}
+                          size="small"
+                          type="default"
+                          style={{
+                            borderRadius: 16,
+                            maxWidth: "100%",
+                            whiteSpace: "normal",
+                            height: "auto",
+                            padding: "4px 12px",
+                            textAlign: "left",
+                          }}
+                          onClick={() => {
+                            setInputValue(q);
+                            setTimeout(() => {
+                              const textarea = document.querySelector(
+                                `[data-session-id="${sessionId}"] textarea, #chat-input-${sessionId}`
+                              ) as HTMLTextAreaElement;
+                              if (textarea) {
+                                textarea.focus();
+                              }
+                            }, 0);
+                          }}
+                        >
+                          {q}
+                        </Button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ) : (
                 <Empty

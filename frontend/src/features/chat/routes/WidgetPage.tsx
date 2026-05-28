@@ -115,8 +115,10 @@ export function WidgetPage() {
       });
   }, [rawToken, isDemo]);
 
-  // Derive Ant Design theme from config
+  // Derive Ant Design theme and embedded branding from config
   const primaryColor = (config?.theme?.primary_color as string) || "#1677ff";
+  const greetingText = (config?.theme?.greeting_text as string) || "";
+  const logoUrl = (config?.theme?.logo_url as string) || "";
   const themeConfig = {
     algorithm: antTheme.defaultAlgorithm,
     token: {
@@ -168,6 +170,8 @@ export function WidgetPage() {
             embedded={true}
             demo={isDemo}
             widget={!isDemo}
+            greetingText={isDemo ? "" : greetingText}
+            logoUrl={isDemo ? "" : logoUrl}
             featureFlags={config.feature_flags as Record<string, boolean> | undefined}
             selectedModelId={config.default_model_id ?? undefined}
             selectedSkillId={config.default_skill_id ?? undefined}

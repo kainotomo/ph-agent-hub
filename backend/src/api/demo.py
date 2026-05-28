@@ -122,7 +122,7 @@ async def _assert_demo_enabled(db: AsyncSession) -> None:
 # Rate limiting keys
 # ---------------------------------------------------------------------------
 
-DEMO_SESSION_LIMIT = "5/hour"
+DEMO_SESSION_LIMIT = "10/hour"
 DEMO_MESSAGE_LIMIT = "20/minute"
 DEMO_TOTAL_MESSAGE_LIMIT = "50/hour"
 

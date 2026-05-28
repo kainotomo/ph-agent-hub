@@ -26,6 +26,7 @@ import {
   listModels,
   listSkills,
   listTemplates,
+  listTenants,
 } from "../../services/admin";
 
 const { Text } = Typography;
@@ -58,6 +59,14 @@ export function EmbedConfigForm({ open, config, onClose, onSuccess }: EmbedConfi
     queryFn: () => listTemplates({ page_size: 200 }),
     enabled: open,
   });
+
+  const { data: tenants } = useQuery({
+    queryKey: ["admin-tenants-embed-selector"],
+    queryFn: () => listTenants(),
+    enabled: open,
+  });
+
+  const tenantNameById = new Map((tenants?.items || []).map((t: { id: string; name: string }) => [t.id, t.name]));
 
   // Reset form when opening/closing
   useEffect(() => {
@@ -201,10 +210,13 @@ export function EmbedConfigForm({ open, config, onClose, onSuccess }: EmbedConfi
 
         <Space size="large" wrap>
           <Form.Item name="default_model_id" label="Default Model">
-            <Select allowClear style={{ width: 200 }} placeholder="Tenant default">
+            <Select allowClear style={{ width: 240 }} placeholder="Tenant default">
               {(models?.items || []).map((m) => (
                 <Select.Option key={m.id} value={m.id}>
                   {m.name}
+                  {tenantNameById.has(m.tenant_id)
+                    ? ` (${tenantNameById.get(m.tenant_id)})`
+                    : ""}
                 </Select.Option>
               ))}
             </Select>

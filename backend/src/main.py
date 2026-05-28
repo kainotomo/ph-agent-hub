@@ -49,6 +49,26 @@ async def _cleanup_orphaned_temp_uploads() -> None:
             pass  # Best-effort: never let a cleanup failure crash the task
 
 
+async def _cleanup_demo_temp_uploads() -> None:
+    """Periodic background task: delete temp file uploads for the demo tenant.
+
+    Runs every 6 hours to keep demo data from accumulating in MinIO and the
+    DB.  This is more frequent than the general orphan cleanup (24h) because
+    demo data is ephemeral and can build up quickly with anonymous usage.
+    """
+    from .db.base import AsyncSessionLocal
+    from .services.upload_service import delete_demo_temp_uploads
+
+    DEMO_CLEANUP_INTERVAL = 6 * 3600  # 6 hours
+    while True:
+        await asyncio.sleep(DEMO_CLEANUP_INTERVAL)
+        try:
+            async with AsyncSessionLocal() as db:
+                await delete_demo_temp_uploads(db)
+        except Exception:
+            pass  # Best-effort: never let a cleanup failure crash the task
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup: scan MAF registry, load agent identity, start cleanup task."""
@@ -76,14 +96,18 @@ async def lifespan(app: FastAPI):
         await startup_scan(db)
 
     # Start background cleanup for orphaned temp uploads
-    task = asyncio.create_task(_cleanup_orphaned_temp_uploads())
+    orphan_cleanup_task = asyncio.create_task(_cleanup_orphaned_temp_uploads())
+
+    # Start background cleanup for demo tenant temp uploads (every 6 hours)
+    demo_cleanup_task = asyncio.create_task(_cleanup_demo_temp_uploads())
 
     yield
 
-    task.cancel()
+    orphan_cleanup_task.cancel()
+    demo_cleanup_task.cancel()
 
 
-app = FastAPI(title="PH Agent Hub", version="1.13.1", lifespan=lifespan)
+app = FastAPI(title="PH Agent Hub", version="1.14.0", lifespan=lifespan)
 
 # ---------------------------------------------------------------------------
 # Middleware

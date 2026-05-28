@@ -6,19 +6,17 @@
 // =============================================================================
 
 import { useCallback, useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+
 import { Button, ConfigProvider, Layout, Spin, Typography, theme as antTheme } from "antd";
 import { ChatWindow } from "../components/ChatWindow";
 import { setToken } from "../../../services/api";
 import { createDemoSession, type DemoConfig } from "../services/demo";
-import { LoginOutlined } from "@ant-design/icons";
+import { GithubOutlined } from "@ant-design/icons";
 
 const { Content } = Layout;
 const { Text } = Typography;
 
 export function DemoPage() {
-  const navigate = useNavigate();
-
   const [config, setConfig] = useState<DemoConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -55,10 +53,6 @@ export function DemoPage() {
       colorPrimary: "#1677ff",
       borderRadius: 8,
     },
-  };
-
-  const handleSignUp = () => {
-    navigate("/login");
   };
 
   if (loading) {
@@ -99,8 +93,13 @@ export function DemoPage() {
         <Button type="primary" onClick={initSession}>
           Try Again
         </Button>
-        <Button type="link" onClick={handleSignUp}>
-          Sign up for a full account
+        <Button
+          type="link"
+          href="https://github.com/kainotomo/ph-agent-hub"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          Get Started on GitHub
         </Button>
       </div>
     );
@@ -124,8 +123,13 @@ export function DemoPage() {
         <Button type="primary" onClick={initSession}>
           Start a New Demo
         </Button>
-        <Button type="link" onClick={handleSignUp}>
-          Sign up for a full account
+        <Button
+          type="link"
+          href="https://github.com/kainotomo/ph-agent-hub"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          Get Started on GitHub
         </Button>
       </div>
     );
@@ -152,21 +156,23 @@ export function DemoPage() {
           }}
         >
           <span>
-            🚀 You&apos;re trying the demo.{" "}
-            <strong>Your conversations are temporary and expire after 1 hour.</strong>
+            � Demo Mode —{" "}
+            <strong>Sessions expire after 1 hour and are not saved.</strong>
           </span>
           <Button
             type="default"
             size="small"
-            icon={<LoginOutlined />}
-            onClick={handleSignUp}
+            icon={<GithubOutlined />}
+            href="https://github.com/kainotomo/ph-agent-hub"
+            target="_blank"
+            rel="noopener noreferrer"
             style={{
               background: "rgba(255,255,255,0.2)",
               borderColor: "rgba(255,255,255,0.4)",
               color: "#fff",
             }}
           >
-            Sign Up Free
+            Get Started on GitHub
           </Button>
         </div>
 

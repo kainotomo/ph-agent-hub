@@ -1252,16 +1252,16 @@ export function ChatWindow({
             >
               <span>
                 🤖 Like what you see?{" "}
-                <strong>Sign up to save your conversations!</strong>
+                <strong>Deploy your own instance →</strong>
               </span>
               <Button
                 type="primary"
                 size="small"
-                icon={<LoginOutlined />}
-                href="/login"
-                target="_top"
+                href="https://github.com/kainotomo/ph-agent-hub"
+                target="_blank"
+                rel="noopener noreferrer"
               >
-                Sign Up Free
+                Get Started on GitHub
               </Button>
             </div>
           }

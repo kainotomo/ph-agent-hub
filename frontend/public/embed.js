@@ -149,9 +149,18 @@
   }
 
   // ---- Init based on position ----
-  if (position === "inline") {
-    initInline();
+  function init() {
+    if (position === "inline") {
+      initInline();
+    } else {
+      initBubble();
+    }
+  }
+
+  // Wait for DOM to be ready (supports script placed in <head>)
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
   } else {
-    initBubble();
+    init();
   }
 })();

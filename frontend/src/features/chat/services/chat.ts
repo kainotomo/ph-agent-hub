@@ -202,6 +202,18 @@ export function regenerateMessage(
   });
 }
 
+/** Update an assistant message in-place (PATCH — no agent re-run). */
+export function updateAssistantMessage(
+  sessionId: string,
+  messageId: string,
+  content: string,
+): Promise<MessageData> {
+  return api<MessageData>(`/chat/session/${sessionId}/message/${messageId}`, {
+    method: "PATCH",
+    body: { content },
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Message Feedback
 // ---------------------------------------------------------------------------

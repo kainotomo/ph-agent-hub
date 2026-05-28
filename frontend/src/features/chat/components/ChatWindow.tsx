@@ -33,6 +33,7 @@ import {
   updateAssistantMessage,
 } from "../services/chat";
 import { getDemoMessages } from "../services/demo";
+import { getWidgetMessages } from "../services/widget";
 import api, { getToken } from "../../../services/api";
 import {
   ModelSelector,
@@ -67,6 +68,7 @@ interface ChatWindowProps {
   crossSessionMemoryEnabled?: boolean | null;
   embedded?: boolean;
   demo?: boolean;
+  widget?: boolean;
   featureFlags?: Record<string, boolean>;
   onSessionUpdate?: (data: Record<string, unknown>) => void;
 }
@@ -81,6 +83,7 @@ export function ChatWindow({
   crossSessionMemoryEnabled = null,
   embedded = false,
   demo = false,
+  widget = false,
   featureFlags = {},
   onSessionUpdate,
 }: ChatWindowProps) {
@@ -158,7 +161,9 @@ export function ChatWindow({
     "Summarize a document",
   ];
 
-  const { streaming, startStream, startRegenerateStream, startEditStream, stopStream } = useStream(demo ? "demo" : "chat");
+  const { streaming, startStream, startRegenerateStream, startEditStream, stopStream } = useStream(
+    demo ? "demo" : widget ? "widget" : "chat"
+  );
 
   const { data: messages, isLoading: loadingMessages } = useQuery({
     queryKey: ["messages", sessionId],
@@ -181,7 +186,25 @@ export function ChatWindow({
               updated_at: m.created_at,
             })),
           )
-        : listMessages(sessionId),
+        : widget
+          ? getWidgetMessages().then((msgs) =>
+              msgs.map((m) => ({
+                id: m.id,
+                session_id: m.session_id,
+                sender: m.role as "user" | "assistant",
+                content: [{ type: "text" as const, text: m.content }],
+                model_id: null,
+                model_name: null,
+                model_provider: null,
+                tool_calls: null,
+                tokens_in: null,
+                tokens_out: null,
+                is_deleted: false,
+                created_at: m.created_at,
+                updated_at: m.created_at,
+              })),
+            )
+          : listMessages(sessionId),
     refetchInterval: false,
   });
 
@@ -276,7 +299,9 @@ export function ChatWindow({
       const BASE_URL = import.meta.env.VITE_API_URL || "/api";
       const endpoint = demo
         ? `${BASE_URL}/demo/session/follow-up-questions`
-        : `${BASE_URL}/chat/session/${sid}/follow-up-questions`;
+        : widget
+          ? `${BASE_URL}/widget/session/follow-up-questions`
+          : `${BASE_URL}/chat/session/${sid}/follow-up-questions`;
       setTimeout(async () => {
         try {
           const token = getToken();

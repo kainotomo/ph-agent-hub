@@ -167,6 +167,7 @@ export function WidgetPage() {
             isTemporary={true}
             embedded={true}
             demo={isDemo}
+            widget={!isDemo}
             featureFlags={config.feature_flags as Record<string, boolean> | undefined}
             selectedModelId={config.default_model_id ?? undefined}
             selectedSkillId={config.default_skill_id ?? undefined}

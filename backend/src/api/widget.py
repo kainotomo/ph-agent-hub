@@ -28,6 +28,7 @@ from ..core.redis import (
     store_temp_session,
 )
 from ..services.embed_service import get_embed_config_by_token
+from ..core.redis import get_follow_up_questions as _get_follow_up_questions
 
 router = APIRouter(prefix="/widget", tags=["widget"])
 
@@ -60,6 +61,10 @@ class WidgetSessionResponse(BaseModel):
     is_temporary: bool = True
 
     model_config = {"from_attributes": True}
+
+
+class FollowUpQuestionsResponse(BaseModel):
+    questions: list[str]
 
 
 class WidgetMessageCreate(BaseModel):
@@ -311,3 +316,25 @@ async def stop_widget_stream(
     """Stop the active stream for the current widget session."""
     await set_stream_cancel(ctx.session_id)
     return {"status": "ok"}
+
+
+# =============================================================================
+# GET /widget/session/follow-up-questions — retrieve follow-up questions
+# =============================================================================
+
+
+@router.get(
+    "/session/follow-up-questions",
+    response_model=FollowUpQuestionsResponse,
+)
+async def get_widget_follow_up_questions(
+    ctx: GuestContext = Depends(get_guest_context),
+):
+    """Retrieve follow-up questions for the widget session from Redis.
+
+    Questions are generated asynchronously by a background task after
+    the message response completes.  Polled once by the frontend when
+    the stream finishes.
+    """
+    questions = await _get_follow_up_questions(ctx.session_id)
+    return FollowUpQuestionsResponse(questions=questions or [])

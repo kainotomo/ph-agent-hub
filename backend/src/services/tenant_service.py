@@ -193,8 +193,8 @@ async def force_delete_tenant(db: AsyncSession, tenant_id: str) -> None:
     1. message_feedback, session_tags, session_active_tools,
     #    skill_allowed_tools,
        tool_groups, model_groups, user_group_members
-    2. messages, memory, file_uploads (S3 first, then DB)
-    3. prompts, skills, templates, sessions
+    2. messages, memory, file_uploads (S3 first, then DB), embed_configs
+    3. prompts, sessions, skills, templates
     4. tags, rag_documents, tools, models, user_groups
     5. cross-tenant rows referencing users being deleted:
        user_tool_preferences, user_group_members, message_feedback,
@@ -227,6 +227,7 @@ async def force_delete_tenant(db: AsyncSession, tenant_id: str) -> None:
     from ..db.orm.messages import Message, MessageFeedback
     from ..db.orm.usage_logs import UsageLog
     from ..db.orm.audit_logs import AuditLog
+    from ..db.orm.embed_configs import EmbedConfig
 
     # Verify the tenant exists
     result = await db.execute(_select(Tenant).where(Tenant.id == tenant_id))
@@ -328,6 +329,11 @@ async def force_delete_tenant(db: AsyncSession, tenant_id: str) -> None:
             )
         )
     )
+    # Embed configs FK to models (nullable), skills (nullable), templates (nullable)
+    # — delete before those tables are cleaned up in steps 3 & 4.
+    await db.execute(
+        _delete(EmbedConfig).where(EmbedConfig.tenant_id == tenant_id)
+    )
     await db.flush()
 
     # ==================================================================
@@ -336,15 +342,19 @@ async def force_delete_tenant(db: AsyncSession, tenant_id: str) -> None:
     await db.execute(
         _delete(Prompt).where(Prompt.tenant_id == tenant_id)
     )
-    # Skills FK to default_prompt_id (SET NULL), so prompts can be deleted first
-    await db.execute(
-        _delete(Skill).where(Skill.tenant_id == tenant_id)
-    )
-    # Sessions FK to skills (nullable), templates (nullable), models (nullable)
+    # Sessions FK to skills (selected_skill_id), templates (selected_template_id),
+    # and models (selected_model_id) — all nullable, so delete sessions first
+    # to avoid FK violations.
     await db.execute(
         _delete(SessionORM).where(SessionORM.tenant_id == tenant_id)
     )
-    # Templates FK to models (nullable), users (nullable)
+    # Skills FK to default_prompt_id (SET NULL), so prompts can be deleted first.
+    # Sessions are already deleted so selected_skill_id FKs won't block.
+    await db.execute(
+        _delete(Skill).where(Skill.tenant_id == tenant_id)
+    )
+    # Templates FK to models (nullable), users (nullable).
+    # Sessions are already deleted so selected_template_id FKs won't block.
     await db.execute(
         _delete(Template).where(Template.tenant_id == tenant_id)
     )
@@ -374,11 +384,16 @@ async def force_delete_tenant(db: AsyncSession, tenant_id: str) -> None:
 
     # 5a — Tables with a direct user_id FK and no tenant_id (or the
     #      tenant-scoped delete already handled same-tenant rows).
-    await db.execute(
-        _delete(UserToolPreference).where(
-            UserToolPreference.user_id.in_(user_ids_subq)
+    try:
+        await db.execute(
+            _delete(UserToolPreference).where(
+                UserToolPreference.user_id.in_(user_ids_subq)
+            )
         )
-    )
+    except Exception:
+        # user_tool_preferences table may not exist if the migration
+        # hasn't been applied yet — best-effort cleanup.
+        pass
     await db.execute(
         _delete(UserGroupMember).where(
             UserGroupMember.user_id.in_(user_ids_subq)

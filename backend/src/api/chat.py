@@ -69,6 +69,7 @@ class SessionCreate(BaseModel):
     active_tool_ids: list[str] | None = None
     thinking_enabled: bool | None = None
     temperature: float | None = None
+    auto_route_enabled: bool = False
 
 
 class SessionUpdate(BaseModel):
@@ -80,6 +81,7 @@ class SessionUpdate(BaseModel):
     thinking_enabled: bool | None = None
     temperature: float | None = None
     cross_session_retrieval_enabled: bool | None = None
+    auto_route_enabled: bool | None = None
 
 
 class TagResponse(BaseModel):
@@ -103,6 +105,7 @@ class SessionResponse(BaseModel):
     thinking_enabled: bool | None
     temperature: float | None
     cross_session_retrieval_enabled: bool | None = None
+    auto_route_enabled: bool = False
     tags: list[TagResponse] = []
     created_at: datetime
     updated_at: datetime
@@ -205,6 +208,7 @@ def _session_to_dict(session: Session) -> dict[str, Any]:
         "selected_model_id": session.selected_model_id,
         "thinking_enabled": session.thinking_enabled,
         "temperature": session.temperature,
+        "auto_route_enabled": session.auto_route_enabled,
         "cross_session_retrieval_enabled": session.cross_session_retrieval_enabled,
         "created_at": session.created_at.isoformat(),
         "updated_at": session.updated_at.isoformat(),
@@ -363,13 +367,18 @@ async def create_session(
     # Resolve active tool IDs: explicit list > always-on + skill tools > empty
     active_tool_ids = body.active_tool_ids
     if active_tool_ids is None:
-        pref_result = await db.execute(
-            select(UserToolPreference.tool_id).where(
-                UserToolPreference.user_id == current_user.id,
-                UserToolPreference.always_on == True,  # noqa: E712
+        # Auto-activate: user's always-on tools + skill tools
+        always_on_ids: set[str] = set()
+        try:
+            pref_result = await db.execute(
+                select(UserToolPreference.tool_id).where(
+                    UserToolPreference.user_id == current_user.id,
+                    UserToolPreference.always_on == True,  # noqa: E712
+                )
             )
-        )
-        always_on_ids = {row[0] for row in pref_result.all()}
+            always_on_ids = {row[0] for row in pref_result.all()}
+        except Exception:
+            logger.debug("user_tool_preferences table not available, skipping always-on tools")
 
         # Include skill's tools if a skill is selected
         skill_tool_ids: set[str] = set()
@@ -398,6 +407,7 @@ async def create_session(
             "selected_template_id": body.selected_template_id,
             "selected_skill_id": body.selected_skill_id,
             "selected_model_id": body.selected_model_id,
+            "auto_route_enabled": body.auto_route_enabled,
             "thinking_enabled": body.thinking_enabled,
             "temperature": body.temperature,
             "active_tool_ids": active_tool_ids,
@@ -417,6 +427,7 @@ async def create_session(
             "selected_template_id": body.selected_template_id,
             "selected_skill_id": body.selected_skill_id,
             "selected_model_id": body.selected_model_id,
+            "auto_route_enabled": body.auto_route_enabled,
             "thinking_enabled": body.thinking_enabled,
             "temperature": body.temperature,
             "tags": [],
@@ -435,6 +446,7 @@ async def create_session(
             selected_template_id=body.selected_template_id,
             selected_skill_id=body.selected_skill_id,
             selected_model_id=body.selected_model_id,
+            auto_route_enabled=body.auto_route_enabled,
             thinking_enabled=body.thinking_enabled,
             temperature=body.temperature,
         )
@@ -494,6 +506,7 @@ async def get_session(
         "selected_model_id": data.get("selected_model_id"),
         "thinking_enabled": data.get("thinking_enabled"),
         "temperature": data.get("temperature"),
+        "auto_route_enabled": data.get("auto_route_enabled", False),
         "cross_session_retrieval_enabled": data.get("cross_session_retrieval_enabled"),
         "tags": data.get("tags", []),
         "created_at": _parse_datetime(data.get("created_at")),
@@ -527,13 +540,17 @@ async def update_session(
 
         # Sync skill tools in Redis blob
         if skill_changed:
-            pref_result = await db.execute(
-                select(UserToolPreference.tool_id).where(
-                    UserToolPreference.user_id == current_user.id,
-                    UserToolPreference.always_on == True,  # noqa: E712
+            always_on_ids: set[str] = set()
+            try:
+                pref_result = await db.execute(
+                    select(UserToolPreference.tool_id).where(
+                        UserToolPreference.user_id == current_user.id,
+                        UserToolPreference.always_on == True,  # noqa: E712
+                    )
                 )
-            )
-            always_on_ids = {row[0] for row in pref_result.all()}
+                always_on_ids = {row[0] for row in pref_result.all()}
+            except Exception:
+                logger.debug("user_tool_preferences table not available, skipping always-on tools")
 
             # Fetch old skill tool IDs
             from ..db.orm.skills import SkillAllowedTool
@@ -589,13 +606,18 @@ async def update_session(
         )
 
         if skill_changed:
-            pref_result = await db.execute(
-                select(UserToolPreference.tool_id).where(
-                    UserToolPreference.user_id == current_user.id,
-                    UserToolPreference.always_on == True,  # noqa: E712
+            always_on_ids: list[str] = []
+            try:
+                pref_result = await db.execute(
+                    select(UserToolPreference.tool_id).where(
+                        UserToolPreference.user_id == current_user.id,
+                        UserToolPreference.always_on == True,  # noqa: E712
+                    )
                 )
-            )
-            always_on_ids = [row[0] for row in pref_result.all()]
+                always_on_ids = [row[0] for row in pref_result.all()]
+            except Exception:
+                logger.debug("user_tool_preferences table not available, skipping always-on tools")
+
             await session_service.sync_session_tools_for_skill(
                 db=db,
                 session_id=session_id,
@@ -766,6 +788,55 @@ async def send_message(
         else:
             await session_service.update_session(db, session_id, title=auto_title)
             data["title"] = auto_title
+
+    # ---- Auto-routing: if enabled and no model assigned yet, route
+    #      the first user message to the best model in one shot. -------
+    if data.get("auto_route_enabled") and not data.get("selected_model_id"):
+        from ..services.router_service import route_message
+        from ..db.orm.models import Model as ModelORM
+
+        tenant_id = data.get("tenant_id", current_user.tenant_id)
+        user_id = data.get("user_id", current_user.id)
+
+        # 1. Route the message: classifier LLM picks the best model_id
+        selected_id = await route_message(db, body.content, tenant_id, user_id)
+
+        # 2. Fallback if router returned nothing
+        if selected_id is None:
+            user_result = await db.execute(
+                select(UserORM).where(UserORM.id == user_id)
+            )
+            user_row = user_result.scalar_one_or_none()
+            if user_row and user_row.default_model_id:
+                selected_id = user_row.default_model_id
+            else:
+                from ..services.model_service import list_models
+
+                models, _ = await list_models(db, tenant_id=tenant_id, user_id=user_id)
+                enabled = [m for m in models if m.enabled]
+                if enabled:
+                    selected_id = enabled[0].id
+
+        # 3. Lock in the model on the session
+        if selected_id:
+            # Resolve model name for logging
+            model_result = await db.execute(
+                select(ModelORM).where(ModelORM.id == selected_id)
+            )
+            picked_model = model_result.scalar_one_or_none()
+            model_label = f"{picked_model.name} ({picked_model.provider})" if picked_model else selected_id
+            logger.info(
+                "🧠 Auto-routed session %s to model %s",
+                session_id, model_label,
+            )
+
+            data["selected_model_id"] = selected_id
+            if data.get("is_temporary"):
+                await store_temp_session(session_id, data)
+            else:
+                await session_service.update_session(
+                    db, session_id, selected_model_id=selected_id
+                )
 
     # Detect streaming request via Accept header
     accept = request.headers.get("accept", "")

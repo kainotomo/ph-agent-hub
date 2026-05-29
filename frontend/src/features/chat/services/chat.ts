@@ -27,6 +27,7 @@ export interface SessionData {
   selected_template_id: string | null;
   selected_skill_id: string | null;
   selected_model_id: string | null;
+  auto_route_enabled?: boolean;
   thinking_enabled?: boolean | null;
   temperature?: number | null;
   cross_session_retrieval_enabled?: boolean | null;
@@ -103,6 +104,7 @@ export function createSession(data: {
   selected_template_id?: string;
   selected_skill_id?: string;
   selected_model_id?: string;
+  auto_route_enabled?: boolean;
   active_tool_ids?: string[];
 }): Promise<SessionData> {
   return api<SessionData>("/chat/session", {
@@ -127,6 +129,7 @@ export function updateSession(
     selected_template_id?: string | null;
     selected_skill_id?: string | null;
     selected_model_id?: string | null;
+    auto_route_enabled?: boolean;
   },
 ): Promise<SessionData> {
   return api<SessionData>(`/chat/session/${id}`, {

@@ -44,6 +44,7 @@ import {
   SessionToolActivation,
   MemoryManager,
 } from "./";
+import { AUTO_ROUTE_VALUE } from "./ModelSelector";
 
 const { TextArea } = Input;
 const { Text } = Typography;
@@ -66,6 +67,7 @@ interface ChatWindowProps {
   selectedSkillId?: string;
   temperature?: number | null;
   crossSessionMemoryEnabled?: boolean | null;
+  autoRouteEnabled?: boolean;
   embedded?: boolean;
   demo?: boolean;
   widget?: boolean;
@@ -83,6 +85,7 @@ export function ChatWindow({
   selectedSkillId,
   temperature,
   crossSessionMemoryEnabled = null,
+  autoRouteEnabled = false,
   embedded = false,
   demo = false,
   widget = false,
@@ -105,6 +108,18 @@ export function ChatWindow({
   const [toolEvents, setToolEvents] = useState<Array<{type: string; data: Record<string, unknown>}>>([]);
   const [followUpQuestions, setFollowUpQuestions] = useState<string[]>([]);
   const [finalizing, setFinalizing] = useState(false);
+
+  // Model change handler: "Auto" (__auto__) → null model + auto_route_enabled
+  const handleModelChange = useCallback(
+    (id: string) => {
+      if (id === AUTO_ROUTE_VALUE) {
+        onSessionUpdate?.({ selected_model_id: null, auto_route_enabled: true });
+      } else {
+        onSessionUpdate?.({ selected_model_id: id, auto_route_enabled: false });
+      }
+    },
+    [onSessionUpdate],
+  );
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const prevLoadingRef = useRef(true);
   const queryClient = useQueryClient();
@@ -818,8 +833,8 @@ export function ChatWindow({
             />
           )}
           <ModelSelector
-            value={selectedModelId}
-            onChange={(id) => onSessionUpdate?.({ selected_model_id: id })}
+            value={autoRouteEnabled && !selectedModelId ? AUTO_ROUTE_VALUE : selectedModelId}
+            onChange={handleModelChange}
           />
           <TemplateSelector
             value={selectedTemplateId}
@@ -913,8 +928,8 @@ export function ChatWindow({
         >
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <ModelSelector
-            value={selectedModelId}
-            onChange={(id) => onSessionUpdate?.({ selected_model_id: id })}
+            value={autoRouteEnabled && !selectedModelId ? AUTO_ROUTE_VALUE : selectedModelId}
+            onChange={handleModelChange}
           />
           <TemplateSelector
             value={selectedTemplateId}

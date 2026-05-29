@@ -104,6 +104,7 @@ export interface ModelData {
   thinking_enabled: boolean;
   reasoning_effort: string | null;
   follow_up_questions_enabled: boolean;
+  auto_route_eligible: boolean;
   context_length: number | null;
   input_price_per_1m: number | null;
   output_price_per_1m: number | null;

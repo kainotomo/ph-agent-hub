@@ -107,6 +107,7 @@ export function ModelForm({ open, model, duplicateFrom, onClose }: ModelFormProp
           thinking_enabled: duplicateFrom.thinking_enabled,
           reasoning_effort: duplicateFrom.reasoning_effort,
           follow_up_questions_enabled: duplicateFrom.follow_up_questions_enabled,
+          auto_route_eligible: duplicateFrom.auto_route_eligible,
           context_length: duplicateFrom.context_length,
           input_price_per_1m: duplicateFrom.input_price_per_1m,
           output_price_per_1m: duplicateFrom.output_price_per_1m,
@@ -130,6 +131,7 @@ export function ModelForm({ open, model, duplicateFrom, onClose }: ModelFormProp
           thinking_enabled: model.thinking_enabled,
           reasoning_effort: model.reasoning_effort,
           follow_up_questions_enabled: model.follow_up_questions_enabled,
+          auto_route_eligible: model.auto_route_eligible,
           context_length: model.context_length,
           input_price_per_1m: model.input_price_per_1m,
           output_price_per_1m: model.output_price_per_1m,
@@ -147,6 +149,7 @@ export function ModelForm({ open, model, duplicateFrom, onClose }: ModelFormProp
           thinking_enabled: false,
           reasoning_effort: "high",
           follow_up_questions_enabled: false,
+          auto_route_eligible: true,
           context_length: undefined,
           input_price_per_1m: undefined,
           output_price_per_1m: undefined,
@@ -348,6 +351,14 @@ export function ModelForm({ open, model, duplicateFrom, onClose }: ModelFormProp
           label="Follow-up Questions"
           valuePropName="checked"
           tooltip="When enabled, the model will suggest 3 follow-up questions after each response, displayed as clickable chips in the chat"
+        >
+          <Switch />
+        </Form.Item>
+        <Form.Item
+          name="auto_route_eligible"
+          label="Auto-Route Eligible"
+          valuePropName="checked"
+          tooltip="When enabled, the intelligent router may automatically select this model based on the task category"
         >
           <Switch />
         </Form.Item>

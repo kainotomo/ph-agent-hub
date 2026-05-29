@@ -249,6 +249,7 @@ class ModelCreate(BaseModel):
     reasoning_effort: str | None = None
     follow_up_questions_enabled: bool = False
     context_length: int | None = None
+    auto_route_eligible: bool = True
     input_price_per_1m: float | None = None
     output_price_per_1m: float | None = None
     cache_hit_price_per_1m: float | None = None
@@ -269,6 +270,7 @@ class ModelUpdate(BaseModel):
     reasoning_effort: str | None = None
     follow_up_questions_enabled: bool | None = None
     context_length: int | None = None
+    auto_route_eligible: bool | None = None
     input_price_per_1m: float | None = None
     output_price_per_1m: float | None = None
     cache_hit_price_per_1m: float | None = None
@@ -289,6 +291,7 @@ class ModelResponse(BaseModel):
     reasoning_effort: str | None = None
     follow_up_questions_enabled: bool = False
     context_length: int | None = None
+    auto_route_eligible: bool = True
     input_price_per_1m: float | None = None
     output_price_per_1m: float | None = None
     cache_hit_price_per_1m: float | None = None
@@ -940,6 +943,7 @@ async def create_model(
         temperature=body.temperature,
         thinking_enabled=body.thinking_enabled,
         follow_up_questions_enabled=body.follow_up_questions_enabled,
+        auto_route_eligible=body.auto_route_eligible,
         context_length=body.context_length,
         input_price_per_1m=body.input_price_per_1m,
         output_price_per_1m=body.output_price_per_1m,
@@ -998,6 +1002,8 @@ async def update_model(
         update_kwargs["reasoning_effort"] = body.reasoning_effort
     if body.follow_up_questions_enabled is not None:
         update_kwargs["follow_up_questions_enabled"] = body.follow_up_questions_enabled
+    if body.auto_route_eligible is not None:
+        update_kwargs["auto_route_eligible"] = body.auto_route_eligible
     if body.context_length is not None:
         update_kwargs["context_length"] = body.context_length
     if body.input_price_per_1m is not None:

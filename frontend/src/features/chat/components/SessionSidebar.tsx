@@ -87,6 +87,7 @@ export function SessionSidebar() {
       createSession({
         title: "New Chat",
         is_temporary: is_temporary ?? false,
+        auto_route_enabled: true,
       }),
     onSuccess: (data) => {
       queryClient.setQueryData(["sessions"], (old: SessionData[] | undefined) =>

@@ -30,15 +30,16 @@ async def create_session(
     selected_model_id: str | None = None,
     thinking_enabled: bool | None = None,
     temperature: float | None = None,
+    auto_route_enabled: bool = False,
 ) -> Session:
     """Create a new permanent session.
 
-    If no selected_model_id is provided, auto-assigns:
-    1. user.default_model_id
-    2. First accessible enabled model for the user
+    If auto_route_enabled is True, selected_model_id is intentionally kept
+    None — the model will be resolved on the first user message by the
+    router service.
     """
-    # Auto-assign model if none provided
-    if selected_model_id is None:
+    # Auto-assign model only if auto-routing is NOT enabled
+    if not auto_route_enabled and selected_model_id is None:
         user_result = await db.execute(select(User).where(User.id == user_id))
         user = user_result.scalar_one_or_none()
         if user and user.default_model_id:
@@ -63,6 +64,7 @@ async def create_session(
         selected_model_id=selected_model_id,
         thinking_enabled=thinking_enabled,
         temperature=temperature,
+        auto_route_enabled=auto_route_enabled,
     )
     db.add(session)
     await db.commit()

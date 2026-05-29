@@ -3,16 +3,19 @@
 // =============================================================================
 // Ant Design Select; fetches GET /models; pre-selects default;
 // supports "Set as default" action via star icon.
+// When value is "__auto__", shows "Auto (Recommended)".
 // =============================================================================
 
 import React from "react";
 import { Select, Space, Typography, Button, Tooltip, message } from "antd";
-import { StarOutlined, StarFilled } from "@ant-design/icons";
+import { StarOutlined, StarFilled, ThunderboltOutlined } from "@ant-design/icons";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { setDefaultModel, getMe } from "../../../services/auth";
 import api from "../../../services/api";
 
 const { Text } = Typography;
+
+export const AUTO_ROUTE_VALUE = "__auto__";
 
 interface ModelData {
   id: string;
@@ -24,7 +27,7 @@ interface ModelData {
   thinking_enabled: boolean;
   max_tokens: number;
   temperature: number;
-  routing_priority: number;
+  auto_route_eligible?: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -57,7 +60,8 @@ export function ModelSelector({ value, onChange, style }: ModelSelectorProps) {
   });
 
   const defaultModelId = userProfile?.default_model_id;
-  const isCurrentDefault = value && value === defaultModelId;
+  const isAutoRoute = value === AUTO_ROUTE_VALUE;
+  const isCurrentDefault = value && value === defaultModelId && !isAutoRoute;
 
   return (
     <Space direction="vertical" size={0} style={style}>
@@ -72,13 +76,19 @@ export function ModelSelector({ value, onChange, style }: ModelSelectorProps) {
           placeholder="Select model"
           style={{ minWidth: 160 }}
           allowClear
-          options={(models || []).map((m) => ({
-            label: `${m.name} (${m.provider})`,
-            value: m.id,
-          }))}
+          options={[
+            {
+              label: "⚡ Auto (Recommended)",
+              value: AUTO_ROUTE_VALUE,
+            },
+            ...(models || []).map((m) => ({
+              label: `${m.name} (${m.provider})`,
+              value: m.id,
+            })),
+          ]}
           notFoundContent={isLoading ? "Loading..." : "No models available"}
         />
-        {value && (
+        {value && value !== AUTO_ROUTE_VALUE && (
           <Tooltip
             title={
               isCurrentDefault
@@ -93,6 +103,15 @@ export function ModelSelector({ value, onChange, style }: ModelSelectorProps) {
               }
               loading={setDefaultMutation.isPending}
               type={isCurrentDefault ? "primary" : "default"}
+            />
+          </Tooltip>
+        )}
+        {value === AUTO_ROUTE_VALUE && (
+          <Tooltip title="Model auto-selected on first message">
+            <Button
+              icon={<ThunderboltOutlined />}
+              type="primary"
+              style={{ borderLeft: "none" }}
             />
           </Tooltip>
         )}

@@ -158,6 +158,17 @@ export function ModelList() {
       ),
     },
     {
+      title: "Auto-Route",
+      dataIndex: "auto_route_eligible",
+      key: "auto_route_eligible",
+      render: (eligible: boolean) =>
+        eligible ? (
+          <Tag color="green">Eligible</Tag>
+        ) : (
+          <Tag>Not Eligible</Tag>
+        ),
+    },
+    {
       title: "Tenant",
       dataIndex: "tenant_id",
       key: "tenant_id",
@@ -289,6 +300,11 @@ export function ModelList() {
                     <Text type="secondary">
                       Max tokens: {model.max_tokens} · Temp: {model.temperature}
                     </Text>
+                    {model.auto_route_eligible ? (
+                      <Tag color="green" style={{ fontSize: 11 }}>Auto-Route</Tag>
+                    ) : (
+                      <Tag style={{ fontSize: 11 }}>No Auto-Route</Tag>
+                    )}
                     <Switch
                       checked={model.enabled}
                       onChange={(checked) =>

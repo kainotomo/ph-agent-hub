@@ -112,6 +112,7 @@ export function ChatPage() {
             selectedSkillId={session.selected_skill_id ?? undefined}
             temperature={session.temperature ?? null}
             crossSessionMemoryEnabled={session.cross_session_retrieval_enabled ?? null}
+            autoRouteEnabled={session.auto_route_enabled ?? false}
             onSessionUpdate={handleSessionUpdate}
           />
         ) : (

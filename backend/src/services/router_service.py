@@ -77,13 +77,10 @@ async def route_message(
         logger.warning("No eligible models found for tenant %s", tenant_id)
         return None
 
-    # 2. Pick the cheapest model as the classifier (exclude from candidates)
+    # 2. Pick the cheapest model as the classifier
     eligible.sort(key=lambda m: (m.input_price_per_1m or 999999))
     classifier_model = eligible[0]
-    # Candidates: all eligible models EXCEPT the classifier itself
-    candidates = [m for m in eligible if m.id != classifier_model.id]
-    if not candidates:
-        candidates = eligible  # fallback: use all if only one model exists
+    candidates = eligible  # all eligible models are candidates
 
     # Build model list string (model_id · name · provider · price)
     model_lines = []
@@ -122,20 +119,20 @@ async def route_message(
             chosen_model_id, classifier_model.model_id, len(candidates),
         )
 
-        # 4. Validate: find the matching model by model_id
-        for m in candidates:
+        # 4. Validate: find the matching model by model_id in eligible list
+        for m in eligible:
             if m.model_id.lower() == chosen_model_id:
                 return m.id  # DB UUID
 
         logger.warning(
             "Classifier returned unknown model_id '%s' — falling back to %s",
-            chosen_model_id, candidates[0].model_id,
+            chosen_model_id, eligible[0].model_id,
         )
-        return candidates[0].id
+        return eligible[0].id
 
     except Exception:
-        logger.exception("Model routing failed — falling back to cheapest candidate")
-        return candidates[0].id
+        logger.exception("Model routing failed — falling back to cheapest eligible")
+        return eligible[0].id
     finally:
         try:
             await client.aclose()

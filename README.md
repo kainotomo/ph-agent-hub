@@ -9,6 +9,7 @@
 [![Docker Pulls](https://img.shields.io/docker/pulls/phalouvas/ph-agent-hub-backend)](https://hub.docker.com/r/phalouvas/ph-agent-hub-backend)
 [![Build](https://img.shields.io/badge/Build-no%20workflow%20configured-lightgrey)](https://github.com/kainotomo/ph-agent-hub/actions)
 [![Try the Widget](https://img.shields.io/badge/Try%20the%20Widget-Live-brightgreen)](https://kainotomo.com/ph-agent-hub)
+[![Demo Video](https://img.shields.io/badge/📺-Watch%20Demo-red?style=flat-square)](https://youtu.be/iy5mO3nRxH0)
 
 ## Screenshots
 

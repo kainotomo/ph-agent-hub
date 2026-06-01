@@ -192,7 +192,7 @@ export function McpServerForm({ open, server, onClose }: McpServerFormProps) {
         <Form.Item
           name="env_vars"
           label="Environment Variables"
-          tooltip="One KEY=VALUE per line"
+          tooltip="One KEY=VALUE or KEY: VALUE per line"
         >
           <Input.TextArea
             rows={3}
@@ -203,7 +203,7 @@ export function McpServerForm({ open, server, onClose }: McpServerFormProps) {
         <Form.Item
           name="headers"
           label="HTTP Headers"
-          tooltip="One KEY=VALUE per line (for HTTP auth)"
+          tooltip="One KEY=VALUE or KEY: VALUE per line (for HTTP auth)"
         >
           <Input.TextArea
             rows={3}
@@ -237,10 +237,16 @@ function parseKeyValueText(text: string | undefined): Record<string, string> | n
   for (const line of text.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-    const eqIndex = trimmed.indexOf("=");
-    if (eqIndex > 0) {
-      const key = trimmed.slice(0, eqIndex).trim();
-      const value = trimmed.slice(eqIndex + 1).trim();
+
+    // Try = separator first, then : separator (supports both formats)
+    let sepIndex = trimmed.indexOf("=");
+    if (sepIndex <= 0) {
+      sepIndex = trimmed.indexOf(":");
+    }
+
+    if (sepIndex > 0) {
+      const key = trimmed.slice(0, sepIndex).trim();
+      const value = trimmed.slice(sepIndex + 1).trim();
       if (key) result[key] = value;
     }
   }

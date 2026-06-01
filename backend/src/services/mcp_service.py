@@ -390,10 +390,17 @@ def _build_mcp_tool_instance(server: McpServer):
     }
 
     if server.transport == "streamable_http":
+        from httpx import AsyncClient, Timeout
+
+        http_client = AsyncClient(
+            follow_redirects=True,
+            timeout=Timeout(30.0, read=300.0),
+            headers=hdrs,
+        )
         return MCPStreamableHTTPTool(
             **common_kwargs,
             url=server.url,
-            header_provider=lambda _ctx: hdrs,
+            http_client=http_client,
         )
     elif server.transport == "websocket":
         return MCPWebsocketTool(

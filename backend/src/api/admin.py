@@ -1343,8 +1343,8 @@ async def list_mcp_servers(
         decrypted_env = decrypt_env_vars(s)
         decrypted_headers = decrypt_headers(s)
         server_dict = {c.name: getattr(s, c.name) for c in s.__table__.columns}
-        server_dict["env_vars"] = mask_dict(decrypted_env)
-        server_dict["headers"] = mask_dict(decrypted_headers)
+        server_dict["env_vars"] = decrypted_env
+        server_dict["headers"] = decrypted_headers
         data = McpServerResponse.model_validate(server_dict)
         items.append(data)
 
@@ -1391,8 +1391,8 @@ async def create_mcp_server(
     decrypted_env = decrypt_env_vars(server)
     decrypted_headers = decrypt_headers(server)
     server_dict = {c.name: getattr(server, c.name) for c in server.__table__.columns}
-    server_dict["env_vars"] = mask_dict(decrypted_env)
-    server_dict["headers"] = mask_dict(decrypted_headers)
+    server_dict["env_vars"] = decrypted_env
+    server_dict["headers"] = decrypted_headers
     data = McpServerResponse.model_validate(server_dict)
     return data
 
@@ -1413,8 +1413,8 @@ async def get_mcp_server(
     decrypted_env = decrypt_env_vars(server)
     decrypted_headers = decrypt_headers(server)
     server_dict = {c.name: getattr(server, c.name) for c in server.__table__.columns}
-    server_dict["env_vars"] = mask_dict(decrypted_env)
-    server_dict["headers"] = mask_dict(decrypted_headers)
+    server_dict["env_vars"] = decrypted_env
+    server_dict["headers"] = decrypted_headers
     data = McpServerResponse.model_validate(server_dict)
     return data
 
@@ -1456,8 +1456,8 @@ async def update_mcp_server(
     decrypted_env = decrypt_env_vars(server)
     decrypted_headers = decrypt_headers(server)
     server_dict = {c.name: getattr(server, c.name) for c in server.__table__.columns}
-    server_dict["env_vars"] = mask_dict(decrypted_env)
-    server_dict["headers"] = mask_dict(decrypted_headers)
+    server_dict["env_vars"] = decrypted_env
+    server_dict["headers"] = decrypted_headers
     data = McpServerResponse.model_validate(server_dict)
     return data
 

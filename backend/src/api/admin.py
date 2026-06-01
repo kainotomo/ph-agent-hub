@@ -1340,10 +1340,12 @@ async def list_mcp_servers(
     total_pages = max(1, -(-total // page_size))
     items = []
     for s in servers:
-        data = McpServerResponse.model_validate(s)
-        # Mask secrets
-        data.env_vars = mask_dict(decrypt_env_vars(s))
-        data.headers = mask_dict(decrypt_headers(s))
+        decrypted_env = decrypt_env_vars(s)
+        decrypted_headers = decrypt_headers(s)
+        server_dict = {c.name: getattr(s, c.name) for c in s.__table__.columns}
+        server_dict["env_vars"] = mask_dict(decrypted_env)
+        server_dict["headers"] = mask_dict(decrypted_headers)
+        data = McpServerResponse.model_validate(server_dict)
         items.append(data)
 
     return PaginatedResponse(
@@ -1386,9 +1388,12 @@ async def create_mcp_server(
         tenant_id=current_user.tenant_id,
         ip_address=_get_client_ip(request),
     )
-    data = McpServerResponse.model_validate(server)
-    data.env_vars = mask_dict(decrypt_env_vars(server))
-    data.headers = mask_dict(decrypt_headers(server))
+    decrypted_env = decrypt_env_vars(server)
+    decrypted_headers = decrypt_headers(server)
+    server_dict = {c.name: getattr(server, c.name) for c in server.__table__.columns}
+    server_dict["env_vars"] = mask_dict(decrypted_env)
+    server_dict["headers"] = mask_dict(decrypted_headers)
+    data = McpServerResponse.model_validate(server_dict)
     return data
 
 
@@ -1405,9 +1410,12 @@ async def get_mcp_server(
     if current_user.role == "manager" and server.tenant_id != current_user.tenant_id:
         raise ForbiddenError("Managers can only view MCP servers in their own tenant")
 
-    data = McpServerResponse.model_validate(server)
-    data.env_vars = mask_dict(decrypt_env_vars(server))
-    data.headers = mask_dict(decrypt_headers(server))
+    decrypted_env = decrypt_env_vars(server)
+    decrypted_headers = decrypt_headers(server)
+    server_dict = {c.name: getattr(server, c.name) for c in server.__table__.columns}
+    server_dict["env_vars"] = mask_dict(decrypted_env)
+    server_dict["headers"] = mask_dict(decrypted_headers)
+    data = McpServerResponse.model_validate(server_dict)
     return data
 
 
@@ -1445,9 +1453,12 @@ async def update_mcp_server(
         tenant_id=current_user.tenant_id,
         ip_address=_get_client_ip(request),
     )
-    data = McpServerResponse.model_validate(server)
-    data.env_vars = mask_dict(decrypt_env_vars(server))
-    data.headers = mask_dict(decrypt_headers(server))
+    decrypted_env = decrypt_env_vars(server)
+    decrypted_headers = decrypt_headers(server)
+    server_dict = {c.name: getattr(server, c.name) for c in server.__table__.columns}
+    server_dict["env_vars"] = mask_dict(decrypted_env)
+    server_dict["headers"] = mask_dict(decrypted_headers)
+    data = McpServerResponse.model_validate(server_dict)
     return data
 
 

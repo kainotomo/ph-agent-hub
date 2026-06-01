@@ -1533,13 +1533,11 @@ async def _auto_select_tools(
 
     # ── Step 1: Build candidate pool ────────────────────────────────────
     # Collect all enabled tools for the tenant (including tools not
-    # manually selected by the user).  Exclude MCP-type tools — they
-    # involve external server connections best left to manual selection.
+    # manually selected by the user).
     result = await db.execute(
         select(Tool).where(
             Tool.tenant_id == tenant_id,
             Tool.enabled == True,  # noqa: E712
-            Tool.type != "mcp",
         )
     )
     candidate_tools: list[Tool] = list(result.scalars().all())

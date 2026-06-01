@@ -119,6 +119,7 @@ async def _resolve_session_config(
             user_message=user_message or "",
             current_callables=active_tool_callables,
             cleanup_clients=cleanup_clients,
+            context_length=context_length,
         )
 
     # 5. Determine execution type and name
@@ -1505,6 +1506,7 @@ async def _auto_select_tools(
     user_message: str,
     current_callables: list,
     cleanup_clients: list,
+    context_length: int | None = None,
 ) -> list:
     """Auto-select tool shortlist for the current user message.
 
@@ -1521,6 +1523,7 @@ async def _auto_select_tools(
         current_callables: Tools already resolved by _resolve_tool_callables
             (manual selection or skill fallback).
         cleanup_clients: Client list for cleanup registration.
+        context_length: Model context length for output cap.
 
     Returns:
         Shortlisted list of callables to pass to the agent.
@@ -1530,12 +1533,13 @@ async def _auto_select_tools(
 
     # ── Step 1: Build candidate pool ────────────────────────────────────
     # Collect all enabled tools for the tenant (including tools not
-    # manually selected by the user).  These form the "tenant-approved"
-    # pool from which auto-selection may draw.
+    # manually selected by the user).  Exclude MCP-type tools — they
+    # involve external server connections best left to manual selection.
     result = await db.execute(
         select(Tool).where(
             Tool.tenant_id == tenant_id,
             Tool.enabled == True,  # noqa: E712
+            Tool.type != "mcp",
         )
     )
     candidate_tools: list[Tool] = list(result.scalars().all())
@@ -1640,9 +1644,20 @@ async def _auto_select_tools(
     # Sort descending by score
     scored.sort(key=lambda x: -x[1])
 
-    # ── Step 4: Deterministic filter (Top-K) ───────────────────────────
+    # ── Step 4: Deduplicate by (name, type) before Top-K ───────────────
+    # Prevents duplicate tool records (e.g., two "Weather" tools) from
+    # confusing the MAF Agent — duplicates cause empty response streams.
+    seen_names: set[str] = set()
+    deduped: list[tuple[Tool, float]] = []
+    for tool, score in scored:
+        key = f"{tool.name}|{tool.type}"
+        if key not in seen_names:
+            seen_names.add(key)
+            deduped.append((tool, score))
+
+    # ── Step 5: Deterministic filter (Top-K) ───────────────────────────
     top_k = getattr(settings, "AUTO_SELECT_TOOLS_TOP_K", 5)
-    shortlisted_tools = [t for t, _ in scored[:top_k]]
+    shortlisted_tools = [t for t, _ in deduped[:top_k]]
 
     if not shortlisted_tools:
         return current_callables
@@ -1734,6 +1749,9 @@ async def _auto_select_tools(
                     exc_info=True,
                 )
                 callables.remove(item)
+
+    # ---- Cap tool output size to prevent context overflow (Issue #206) ----
+    callables = [_wrap_tool_with_output_cap(t, context_length=context_length) for t in callables]
 
     return callables
 

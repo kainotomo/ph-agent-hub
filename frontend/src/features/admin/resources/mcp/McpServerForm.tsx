@@ -13,11 +13,13 @@ import {
   Switch,
   message,
 } from "antd";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   createMcpServer,
   updateMcpServer,
+  listTools,
   McpServerData,
+  ToolData,
 } from "../../services/admin";
 
 interface McpServerFormProps {
@@ -112,6 +114,24 @@ export function McpServerForm({ open, server, onClose }: McpServerFormProps) {
       // validation failed
     }
   };
+
+  // Fetch synced MCP tools for this server to show as allowed_tools options
+  const { data: mcpToolsData } = useQuery({
+    queryKey: ["admin-tools", "mcp", server?.id],
+    queryFn: () => listTools({ type: "mcp", page_size: 100 }),
+    enabled: isEdit && !!server?.id,
+  });
+
+  const mcpToolOptions = React.useMemo(() => {
+    if (!mcpToolsData?.items || !server?.id) return [];
+    return mcpToolsData.items
+      .filter((t) => t.config?.mcp_server_id === server.id)
+      .map((t) => ({
+        value: t.config?.tool_name as string,
+        label: t.config?.tool_name as string,
+      }))
+      .filter((o) => o.value);
+  }, [mcpToolsData, server?.id]);
 
   const transport = Form.useWatch("transport", form);
 
@@ -214,12 +234,12 @@ export function McpServerForm({ open, server, onClose }: McpServerFormProps) {
         <Form.Item
           name="allowed_tools"
           label="Allowed Tools"
-          tooltip="Leave empty to allow all tools from this server"
+          tooltip="Leave empty to allow all tools from this server. Select or type tool names to restrict."
         >
           <Select
             mode="tags"
-            placeholder="Type tool names and press Enter"
-            open={false}
+            placeholder="Select or type tool names"
+            options={mcpToolOptions}
           />
         </Form.Item>
 

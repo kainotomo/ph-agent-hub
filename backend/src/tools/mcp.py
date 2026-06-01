@@ -83,9 +83,13 @@ async def build_mcp_tool_callables(
 
     mcp_tool_name = config.get("tool_name", tool.name)
 
+    # If the runner passed a list of allowed tool names (from deduplication),
+    # use it to restrict which tools from this server are exposed.
+    session_allowed_names: list[str] | None = config.get("_allowed_tool_names")
+
     common_kwargs = {
         "name": server.name,
-        "allowed_tools": server.allowed_tools,
+        "allowed_tools": session_allowed_names or server.allowed_tools,
         "approval_mode": "never_require",
     }
 

@@ -90,9 +90,20 @@ async def build_mcp_tool_callables(
     }
 
     if server.transport == "streamable_http":
+        # Create an httpx client with headers baked in, so auth is sent
+        # during the initial connect() handshake (not just call_tool).
+        import httpx
+        http_client = httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=httpx.Timeout(30.0, read=300.0),
+            headers=headers,
+        )
+        if cleanup_clients is not None:
+            cleanup_clients.append(http_client)
         mcp_tool = MCPStreamableHTTPTool(
             **common_kwargs,
             url=server.url,
+            http_client=http_client,
             header_provider=lambda _ctx: headers,
         )
     elif server.transport == "websocket":

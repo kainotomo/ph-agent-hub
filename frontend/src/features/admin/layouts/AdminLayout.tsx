@@ -181,7 +181,7 @@ export function AdminLayout() {
   );
 
   return (
-    <Layout style={{ minHeight: "100vh" }}>
+    <Layout style={{ height: "100vh" }}>
       {isMobile ? (
         <>
           <Header
@@ -286,7 +286,7 @@ export function AdminLayout() {
             </Space>
           </Header>
         )}
-        <Content style={{ margin: 24 }}>
+        <Content style={{ margin: 24, overflow: "auto" }}>
           <Outlet />
         </Content>
       </Layout>

@@ -1570,10 +1570,24 @@ async def _auto_select_tools(
         selected_tool_ids.update(row[0] for row in sk_result.all())
 
     # ── Step 3: Score candidates ────────────────────────────────────────
-    # Simple heuristic: tools matching the user message by name, category,
-    # or type get a boost.  Selected/prior tools also get extra weight.
+    # Multi-signal heuristic: exact match, intent keywords, word overlap,
+    # category/type match, and prior-selection boost.
     message_lower = (user_message or "").lower()
     message_words = set(message_lower.split())
+
+    # Intent-to-tool keyword map: common user intents → tool name/type hints
+    INTENT_KEYWORDS: dict[str, list[str]] = {
+        "datetime": ["time", "date", "clock", "today", "now", "current"],
+        "weather": ["weather", "temperature", "forecast", "rain", "sunny"],
+        "calculator": ["calculate", "calc", "math", "sum", "plus", "minus", "multiply", "divide"],
+        "web_search": ["search", "find", "look up", "google", "browse"],
+        "fetch_url": ["url", "website", "webpage", "page", "http", "fetch"],
+        "stock_data": ["stock", "price", "ticker", "market", "share", "aapl", "msft", "nvda"],
+        "sec_filings": ["sec", "filing", "10-k", "10-q", "edgar", "financial"],
+        "wikipedia": ["wikipedia", "wiki", "encyclopedia"],
+        "currency_exchange": ["currency", "exchange rate", "convert", "usd", "eur"],
+        "rag_search": ["rag", "document", "knowledge", "search my"],
+    }
 
     scored: list[tuple[Tool, float]] = []
     for tool in candidate_tools:
@@ -1583,19 +1597,37 @@ async def _auto_select_tools(
         if tool.id in selected_tool_ids:
             score += 5.0
 
-        # Name match: tool name found in user message
         tool_name_lower = (tool.name or "").lower()
+        tool_type_lower = (tool.type or "").lower()
+        category_lower = (tool.category or "").lower()
+
+        # Build combined identifier for keyword matching
+        combined_id = f"{tool_name_lower} {tool_type_lower} {category_lower}"
+
+        # Intent keyword match: if any intent keyword appears in the message
+        # AND the tool matches that intent key, give strong boost
+        for intent_key, intent_words in INTENT_KEYWORDS.items():
+            if intent_key in combined_id:
+                for word in intent_words:
+                    if word in message_lower:
+                        score += 4.0
+                        break  # one boost per matching intent group
+
+        # Name match: tool name found verbatim in user message
         if tool_name_lower and tool_name_lower in message_lower:
             score += 3.0
 
         # Category match: category keyword found in message
-        category_lower = (tool.category or "").lower()
         if category_lower and category_lower in message_lower:
             score += 2.0
 
+        # Category words (split by underscore) match message words
+        for cat_part in category_lower.split("_"):
+            if cat_part in message_words:
+                score += 1.5
+
         # Type match: tool type keyword found in message
-        type_lower = (tool.type or "").lower()
-        if type_lower in message_words:
+        if tool_type_lower in message_words:
             score += 1.5
 
         # Keyword overlap: common words between tool name and message

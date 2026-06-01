@@ -178,7 +178,7 @@ export function ToolList() {
         { text: "Public", value: true },
         { text: "Private", value: false },
       ],
-      onFilter: (value, record) => record.is_public === value,
+      onFilter: (value: boolean | string | number, record: ToolData) => record.is_public === value,
       render: (v: boolean) =>
         v ? (
           <Tag icon={<EyeOutlined />} color="blue">

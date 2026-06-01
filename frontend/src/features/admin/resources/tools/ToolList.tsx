@@ -21,7 +21,7 @@ import {
   Select,
   Input,
 } from "antd";
-import { EditOutlined, DeleteOutlined, CopyOutlined, SearchOutlined } from "@ant-design/icons";
+import { EditOutlined, DeleteOutlined, CopyOutlined, SearchOutlined, EyeOutlined, EyeInvisibleOutlined } from "@ant-design/icons";
 import { useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -170,6 +170,27 @@ export function ToolList() {
       ),
     },
     {
+      title: "Public",
+      dataIndex: "is_public",
+      key: "is_public",
+      width: 90,
+      filters: [
+        { text: "Public", value: true },
+        { text: "Private", value: false },
+      ],
+      onFilter: (value, record) => record.is_public === value,
+      render: (v: boolean) =>
+        v ? (
+          <Tag icon={<EyeOutlined />} color="blue">
+            Public
+          </Tag>
+        ) : (
+          <Tag icon={<EyeInvisibleOutlined />}>
+            Private
+          </Tag>
+        ),
+    },
+    {
       title: "Actions",
       key: "actions",
       render: (_: unknown, record: ToolData) => (
@@ -288,6 +309,11 @@ export function ToolList() {
                       <Tag color="purple">{tool.type}</Tag>
                       {tool.type === "custom" && tool.code && (
                         <Tag color="green" style={{ fontSize: 11 }}>code</Tag>
+                      )}
+                      {tool.is_public ? (
+                        <Tag icon={<EyeOutlined />} color="blue" style={{ fontSize: 11 }}>Public</Tag>
+                      ) : (
+                        <Tag icon={<EyeInvisibleOutlined />} style={{ fontSize: 11 }}>Private</Tag>
                       )}
                     </Space>
                     <Switch

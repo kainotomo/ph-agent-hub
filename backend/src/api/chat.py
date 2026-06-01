@@ -49,7 +49,7 @@ from ..db.orm.sessions import Session
 from ..db.orm.tools import Tool
 from ..db.orm.user_tool_preferences import UserToolPreference
 from ..db.orm.users import User as UserORM
-from ..services import session_service, upload_service
+from ..services import audit_service, session_service, upload_service
 from ..storage import s3
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -70,6 +70,7 @@ class SessionCreate(BaseModel):
     thinking_enabled: bool | None = None
     temperature: float | None = None
     auto_route_enabled: bool = False
+    auto_select_tools: bool = True
 
 
 class SessionUpdate(BaseModel):
@@ -82,6 +83,7 @@ class SessionUpdate(BaseModel):
     temperature: float | None = None
     cross_session_retrieval_enabled: bool | None = None
     auto_route_enabled: bool | None = None
+    auto_select_tools: bool | None = None
 
 
 class TagResponse(BaseModel):
@@ -106,6 +108,7 @@ class SessionResponse(BaseModel):
     temperature: float | None
     cross_session_retrieval_enabled: bool | None = None
     auto_route_enabled: bool = False
+    auto_select_tools: bool = True
     tags: list[TagResponse] = []
     created_at: datetime
     updated_at: datetime
@@ -209,6 +212,7 @@ def _session_to_dict(session: Session) -> dict[str, Any]:
         "thinking_enabled": session.thinking_enabled,
         "temperature": session.temperature,
         "auto_route_enabled": session.auto_route_enabled,
+        "auto_select_tools": session.auto_select_tools,
         "cross_session_retrieval_enabled": session.cross_session_retrieval_enabled,
         "created_at": session.created_at.isoformat(),
         "updated_at": session.updated_at.isoformat(),
@@ -408,6 +412,7 @@ async def create_session(
             "selected_skill_id": body.selected_skill_id,
             "selected_model_id": body.selected_model_id,
             "auto_route_enabled": body.auto_route_enabled,
+            "auto_select_tools": body.auto_select_tools,
             "thinking_enabled": body.thinking_enabled,
             "temperature": body.temperature,
             "active_tool_ids": active_tool_ids,
@@ -428,6 +433,7 @@ async def create_session(
             "selected_skill_id": body.selected_skill_id,
             "selected_model_id": body.selected_model_id,
             "auto_route_enabled": body.auto_route_enabled,
+            "auto_select_tools": body.auto_select_tools,
             "thinking_enabled": body.thinking_enabled,
             "temperature": body.temperature,
             "tags": [],
@@ -447,6 +453,7 @@ async def create_session(
             selected_skill_id=body.selected_skill_id,
             selected_model_id=body.selected_model_id,
             auto_route_enabled=body.auto_route_enabled,
+            auto_select_tools=body.auto_select_tools,
             thinking_enabled=body.thinking_enabled,
             temperature=body.temperature,
         )
@@ -507,6 +514,7 @@ async def get_session(
         "thinking_enabled": data.get("thinking_enabled"),
         "temperature": data.get("temperature"),
         "auto_route_enabled": data.get("auto_route_enabled", False),
+        "auto_select_tools": data.get("auto_select_tools", True),
         "cross_session_retrieval_enabled": data.get("cross_session_retrieval_enabled"),
         "tags": data.get("tags", []),
         "created_at": _parse_datetime(data.get("created_at")),
@@ -581,6 +589,27 @@ async def update_session(
 
         await store_temp_session(session_id, data)
 
+        # Audit: auto_select_tools change
+        if "auto_select_tools" in update_fields:
+            old_val = data.get("auto_select_tools", True)
+            new_val = update_fields.get("auto_select_tools")
+            if old_val != new_val:
+                try:
+                    await audit_service.write_audit_log(
+                        db=db,
+                        actor=current_user,
+                        action="session.auto_select_tools_changed",
+                        target_type="session",
+                        target_id=session_id,
+                        payload={
+                            "old_value": old_val,
+                            "new_value": new_val,
+                        },
+                        tenant_id=current_user.tenant_id,
+                    )
+                except Exception:
+                    logger.warning("Failed to write audit log for auto_select_tools change")
+
         return {
             "id": data["id"],
             "tenant_id": data["tenant_id"],
@@ -593,6 +622,7 @@ async def update_session(
             "selected_model_id": data.get("selected_model_id"),
             "thinking_enabled": data.get("thinking_enabled"),
             "temperature": data.get("temperature"),
+            "auto_select_tools": data.get("auto_select_tools", True),
             "cross_session_retrieval_enabled": data.get("cross_session_retrieval_enabled"),
             "tags": [],
             "created_at": _parse_datetime(data.get("created_at")),
@@ -626,6 +656,27 @@ async def update_session(
                 tenant_id=current_user.tenant_id,
                 always_on_ids=always_on_ids,
             )
+
+        # Audit: auto_select_tools change
+        if "auto_select_tools" in update_fields:
+            old_val = data.get("auto_select_tools", True)
+            new_val = update_fields.get("auto_select_tools")
+            if old_val != new_val:
+                try:
+                    await audit_service.write_audit_log(
+                        db=db,
+                        actor=current_user,
+                        action="session.auto_select_tools_changed",
+                        target_type="session",
+                        target_id=session_id,
+                        payload={
+                            "old_value": old_val,
+                            "new_value": new_val,
+                        },
+                        tenant_id=current_user.tenant_id,
+                    )
+                except Exception:
+                    logger.warning("Failed to write audit log for auto_select_tools change")
 
         return SessionResponse.model_validate(session)
 

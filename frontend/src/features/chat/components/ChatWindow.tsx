@@ -68,6 +68,7 @@ interface ChatWindowProps {
   temperature?: number | null;
   crossSessionMemoryEnabled?: boolean | null;
   autoRouteEnabled?: boolean;
+  autoSelectTools?: boolean;
   embedded?: boolean;
   demo?: boolean;
   widget?: boolean;
@@ -86,6 +87,7 @@ export function ChatWindow({
   temperature,
   crossSessionMemoryEnabled = null,
   autoRouteEnabled = false,
+  autoSelectTools = true,
   embedded = false,
   demo = false,
   widget = false,
@@ -1475,6 +1477,8 @@ export function ChatWindow({
           open={toolsOpen}
           onClose={() => setToolsOpen(false)}
           selectedSkillId={selectedSkillId}
+          autoSelectTools={autoSelectTools}
+          onAutoSelectToolsChange={(v) => onSessionUpdate?.({ auto_select_tools: v })}
         />
       )}
     </div>

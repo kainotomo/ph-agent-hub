@@ -47,6 +47,9 @@ class Session(Base):
 
     auto_route_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
+    # ---- Auto tool selection (Issue #287) -- default ON
+    auto_select_tools: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
     # ---- Cross-session memory (Issue #229) -- tri-state: None=inherit from skill
     cross_session_retrieval_enabled: Mapped[bool | None] = mapped_column(
         Boolean, nullable=True, default=None

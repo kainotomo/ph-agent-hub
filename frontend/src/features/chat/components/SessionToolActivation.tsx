@@ -60,6 +60,8 @@ interface SessionToolActivationProps {
   open: boolean;
   onClose: () => void;
   selectedSkillId?: string;
+  autoSelectTools?: boolean;
+  onAutoSelectToolsChange?: (v: boolean) => void;
 }
 
 export function SessionToolActivation({
@@ -67,6 +69,8 @@ export function SessionToolActivation({
   open,
   onClose,
   selectedSkillId,
+  autoSelectTools = true,
+  onAutoSelectToolsChange,
 }: SessionToolActivationProps) {
   const queryClient = useQueryClient();
 
@@ -160,6 +164,17 @@ export function SessionToolActivation({
       onClose={onClose}
       width={420}
     >
+      <div style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 8 }}>
+        <Switch
+          size="small"
+          checked={autoSelectTools}
+          title="When ON, the LLM can auto-select relevant tools from your tenant-approved pool. When OFF, only manually activated tools are used."
+          onChange={(v) => onAutoSelectToolsChange?.(v)}
+        />
+        <Text style={{ fontSize: 13 }}>
+          {autoSelectTools ? "🤖 Auto-select tools" : "🤖 Manual tool selection"}
+        </Text>
+      </div>
       {groupedTools.length === 0 && !loadingAvailable ? (
         <Empty description="No tools available for your tenant" />
       ) : (

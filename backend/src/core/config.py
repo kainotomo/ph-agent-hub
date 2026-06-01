@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     # --- Logging ---
     LOG_LEVEL: str = "INFO"
 
+    # --- Auto tool selection (Issue #287) ---
+    AUTO_SELECT_TOOLS_TOP_K: int = 3
+
     # --- Licensing (Issue #243) ---
     MAX_FREE_TENANTS: int = 3
     LICENSE_PUBLIC_KEY: str = ""

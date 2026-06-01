@@ -110,6 +110,18 @@ async def _resolve_session_config(
         context_length=context_length,
     )
 
+    # 4b. Auto-select Top-K shortlist if auto_select_tools is enabled
+    if session_data.get("auto_select_tools", True):
+        active_tool_callables = await _auto_select_tools(
+            db=db,
+            session_data=session_data,
+            tenant_id=tenant_id,
+            user_message=user_message or "",
+            current_callables=active_tool_callables,
+            cleanup_clients=cleanup_clients,
+            context_length=context_length,
+        )
+
     # 5. Determine execution type and name
     execution_type = skill.execution_type if skill else "agent"
     # Normalize: workflow_based → workflow, prompt_based → agent
@@ -1485,6 +1497,261 @@ async def _resolve_tool_callables(
                 callables.remove(item)
 
     return callables, cleanup_clients
+
+
+async def _auto_select_tools(
+    db: AsyncSession,
+    session_data: dict,
+    tenant_id: str,
+    user_message: str,
+    current_callables: list,
+    cleanup_clients: list,
+    context_length: int | None = None,
+) -> list:
+    """Auto-select tool shortlist for the current user message.
+
+    Called when ``session_data["auto_select_tools"]`` is true.
+    Builds a candidate pool from tenant-approved enabled tools, using
+    session-selected and skill-preselected tools as ranking priors, then
+    applies a heuristic relevance ranker to produce a Top-K shortlist.
+
+    Args:
+        db: Active DB session.
+        session_data: Unified session dict (from DB or Redis).
+        tenant_id: Resolved tenant ID.
+        user_message: The current user message text.
+        current_callables: Tools already resolved by _resolve_tool_callables
+            (manual selection or skill fallback).
+        cleanup_clients: Client list for cleanup registration.
+        context_length: Model context length for output cap.
+
+    Returns:
+        Shortlisted list of callables to pass to the agent.
+    """
+    session_id = session_data["id"]
+    is_temporary = session_data.get("is_temporary", False)
+
+    # ── Step 1: Build candidate pool ────────────────────────────────────
+    # Collect all enabled tools for the tenant (including tools not
+    # manually selected by the user).
+    result = await db.execute(
+        select(Tool).where(
+            Tool.tenant_id == tenant_id,
+            Tool.enabled == True,  # noqa: E712
+        )
+    )
+    candidate_tools: list[Tool] = list(result.scalars().all())
+
+    if not candidate_tools:
+        # No tenant-approved tools — fall back to current callables
+        return current_callables
+
+    # ── Step 2: Identify selected tool IDs (manual + skill) as priors ──
+    selected_tool_ids: set[str] = set()
+
+    # Manually activated tools for this session
+    if is_temporary:
+        raw_ids = session_data.get("active_tool_ids", [])
+        selected_tool_ids.update(raw_ids)
+    else:
+        sa_result = await db.execute(
+            select(SessionActiveTool.tool_id).where(
+                SessionActiveTool.session_id == session_id
+            )
+        )
+        selected_tool_ids.update(row[0] for row in sa_result.all())
+
+    # Skill-preselected tools
+    skill_id = session_data.get("selected_skill_id")
+    if skill_id:
+        sk_result = await db.execute(
+            select(SkillAllowedTool.tool_id).where(
+                SkillAllowedTool.skill_id == skill_id
+            )
+        )
+        selected_tool_ids.update(row[0] for row in sk_result.all())
+
+    # ── Step 3: Score candidates ────────────────────────────────────────
+    # Multi-signal heuristic: exact match, intent keywords, word overlap,
+    # category/type match, and prior-selection boost.
+    message_lower = (user_message or "").lower()
+    message_words = set(message_lower.split())
+
+    # Intent-to-tool keyword map: common user intents → tool name/type hints
+    INTENT_KEYWORDS: dict[str, list[str]] = {
+        "datetime": ["time", "date", "clock", "today", "now", "current"],
+        "weather": ["weather", "temperature", "forecast", "rain", "sunny"],
+        "calculator": ["calculate", "calc", "math", "sum", "plus", "minus", "multiply", "divide"],
+        "web_search": ["search", "find", "look up", "google", "browse"],
+        "fetch_url": ["url", "website", "webpage", "page", "http", "fetch"],
+        "stock_data": ["stock", "price", "ticker", "market", "share", "aapl", "msft", "nvda"],
+        "sec_filings": ["sec", "filing", "10-k", "10-q", "edgar", "financial"],
+        "wikipedia": ["wikipedia", "wiki", "encyclopedia"],
+        "currency_exchange": ["currency", "exchange rate", "convert", "usd", "eur"],
+        "rag_search": ["rag", "document", "knowledge", "search my"],
+    }
+
+    scored: list[tuple[Tool, float]] = []
+    for tool in candidate_tools:
+        score = 0.0
+
+        # Prior boost: tools already selected or skill-associated
+        if tool.id in selected_tool_ids:
+            score += 5.0
+
+        tool_name_lower = (tool.name or "").lower()
+        tool_type_lower = (tool.type or "").lower()
+        category_lower = (tool.category or "").lower()
+
+        # Build combined identifier for keyword matching
+        combined_id = f"{tool_name_lower} {tool_type_lower} {category_lower}"
+
+        # Intent keyword match: if any intent keyword appears in the message
+        # AND the tool matches that intent key, give strong boost
+        for intent_key, intent_words in INTENT_KEYWORDS.items():
+            if intent_key in combined_id:
+                for word in intent_words:
+                    if word in message_lower:
+                        score += 4.0
+                        break  # one boost per matching intent group
+
+        # Name match: tool name found verbatim in user message
+        if tool_name_lower and tool_name_lower in message_lower:
+            score += 3.0
+
+        # Category match: category keyword found in message
+        if category_lower and category_lower in message_lower:
+            score += 2.0
+
+        # Category words (split by underscore) match message words
+        for cat_part in category_lower.split("_"):
+            if cat_part in message_words:
+                score += 1.5
+
+        # Type match: tool type keyword found in message
+        if tool_type_lower in message_words:
+            score += 1.5
+
+        # Keyword overlap: common words between tool name and message
+        name_words = set(tool_name_lower.split()) if tool_name_lower else set()
+        overlap = len(name_words & message_words)
+        score += overlap * 1.0
+
+        scored.append((tool, score))
+
+    # Sort descending by score
+    scored.sort(key=lambda x: -x[1])
+
+    # ── Step 4: Deduplicate by (name, type) before Top-K ───────────────
+    # Prevents duplicate tool records (e.g., two "Weather" tools) from
+    # confusing the MAF Agent — duplicates cause empty response streams.
+    seen_names: set[str] = set()
+    deduped: list[tuple[Tool, float]] = []
+    for tool, score in scored:
+        key = f"{tool.name}|{tool.type}"
+        if key not in seen_names:
+            seen_names.add(key)
+            deduped.append((tool, score))
+
+    # ── Step 5: Deterministic filter (Top-K) ───────────────────────────
+    top_k = getattr(settings, "AUTO_SELECT_TOOLS_TOP_K", 5)
+    shortlisted_tools = [t for t, _ in deduped[:top_k]]
+
+    if not shortlisted_tools:
+        return current_callables
+
+    logger.info(
+        "Auto-select: pool=%d, selected_priors=%d, top_k=%d, selected=%s",
+        len(candidate_tools),
+        len(selected_tool_ids),
+        top_k,
+        [t.name for t in shortlisted_tools],
+    )
+
+    # ── Step 5: Build callables for shortlisted tools ──────────────────
+    # Reuse the existing _build_tool_callables dispatch.
+    callables: list = []
+    mcp_by_server: dict[str, list[Tool]] = {}
+
+    for tool in shortlisted_tools:
+        if tool.type == "mcp":
+            server_id = (tool.config or {}).get("mcp_server_id")
+            if server_id:
+                mcp_by_server.setdefault(server_id, []).append(tool)
+            else:
+                tc = await _build_tool_callables(
+                    db, tool, tenant_id,
+                    session_id=session_id, cleanup_clients=cleanup_clients,
+                )
+                callables.extend(tc)
+        else:
+            tc = await _build_tool_callables(
+                db, tool, tenant_id,
+                session_id=session_id, cleanup_clients=cleanup_clients,
+            )
+            callables.extend(tc)
+
+    # Build ONE callable per MCP server
+    for server_id, server_tools in mcp_by_server.items():
+        tool_names = [
+            (t.config or {}).get("tool_name", "")
+            for t in server_tools
+            if (t.config or {}).get("tool_name")
+        ]
+        primary = server_tools[0]
+        orig_config = dict(primary.config or {})
+        primary.config = {**orig_config, "_allowed_tool_names": tool_names}
+        tc = await _build_tool_callables(
+            db, primary, tenant_id,
+            session_id=session_id, cleanup_clients=cleanup_clients,
+        )
+        callables.extend(tc)
+        primary.config = orig_config
+
+    # ── Step 6: Add always-available built-in tools ────────────────────
+    # file_list and memory tools (same logic as _resolve_tool_callables)
+    try:
+        from ..tools.file_list import build_file_list_tool
+        file_list_tools = build_file_list_tool(
+            db, session_id, tenant_id,
+            is_temporary=is_temporary,
+            uploaded_file_ids=session_data.get("uploaded_file_ids"),
+        )
+        callables.extend(file_list_tools)
+    except Exception:
+        logger.warning("Failed to build file_list tool for session %s", session_id, exc_info=True)
+
+    user_id = session_data.get("user_id", "")
+    if user_id and not is_temporary:
+        try:
+            from ..tools.memory import build_memory_tools
+            memory_tools = build_memory_tools(db, user_id, tenant_id)
+            callables.extend(memory_tools)
+        except Exception:
+            logger.warning("Failed to build memory tools for user=%s", user_id, exc_info=True)
+
+    # ── Step 7: Connect MCP tools ──────────────────────────────────────
+    from agent_framework import MCPStreamableHTTPTool, MCPStdioTool, MCPWebsocketTool
+    _MCP_TYPES = (MCPStreamableHTTPTool, MCPStdioTool, MCPWebsocketTool)
+
+    for item in callables[:]:
+        if isinstance(item, _MCP_TYPES):
+            try:
+                await item.connect()
+                cleanup_clients.append(item)
+                logger.info("Connected MCP tool '%s'", getattr(item, "name", "unknown"))
+            except Exception:
+                logger.warning(
+                    "Failed to connect MCP tool '%s'; removing from agent tools",
+                    getattr(item, "name", "unknown"),
+                    exc_info=True,
+                )
+                callables.remove(item)
+
+    # ---- Cap tool output size to prevent context overflow (Issue #206) ----
+    callables = [_wrap_tool_with_output_cap(t, context_length=context_length) for t in callables]
+
+    return callables
 
 
 async def _build_tool_callables(

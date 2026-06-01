@@ -31,6 +31,7 @@ async def create_session(
     thinking_enabled: bool | None = None,
     temperature: float | None = None,
     auto_route_enabled: bool = False,
+    auto_select_tools: bool = True,
 ) -> Session:
     """Create a new permanent session.
 
@@ -65,6 +66,7 @@ async def create_session(
         thinking_enabled=thinking_enabled,
         temperature=temperature,
         auto_route_enabled=auto_route_enabled,
+        auto_select_tools=auto_select_tools,
     )
     db.add(session)
     await db.commit()

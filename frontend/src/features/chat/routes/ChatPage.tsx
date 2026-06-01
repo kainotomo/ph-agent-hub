@@ -113,6 +113,7 @@ export function ChatPage() {
             temperature={session.temperature ?? null}
             crossSessionMemoryEnabled={session.cross_session_retrieval_enabled ?? null}
             autoRouteEnabled={session.auto_route_enabled ?? false}
+            autoSelectTools={session.auto_select_tools ?? true}
             onSessionUpdate={handleSessionUpdate}
           />
         ) : (

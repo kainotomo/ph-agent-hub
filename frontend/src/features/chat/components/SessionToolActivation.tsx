@@ -168,13 +168,11 @@ export function SessionToolActivation({
         <Switch
           size="small"
           checked={autoSelectTools}
-          checkedChildren="🤖 Auto Select"
-          unCheckedChildren="🤖 Manual"
           title="When ON, the LLM can auto-select relevant tools from your tenant-approved pool. When OFF, only manually activated tools are used."
           onChange={(v) => onAutoSelectToolsChange?.(v)}
         />
         <Text style={{ fontSize: 13 }}>
-          {autoSelectTools ? "Auto-select tools" : "Manual tool selection"}
+          {autoSelectTools ? "🤖 Auto-select tools" : "🤖 Manual tool selection"}
         </Text>
       </div>
       {groupedTools.length === 0 && !loadingAvailable ? (

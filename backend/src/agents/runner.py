@@ -1381,13 +1381,51 @@ async def _resolve_tool_callables(
                         len(tools), skill.title,
                     )
 
-    # Build callables for each tool
+    # Build callables for each tool, deduplicating MCP tools by server_id
+    # to avoid opening multiple connections to the same server.
     callables: list = []
+    mcp_by_server: dict[str, list[Tool]] = {}
     for tool in tools:
-        tool_callables = await _build_tool_callables(
-            db, tool, tenant_id, session_id=session_id, cleanup_clients=cleanup_clients
+        if tool.type == "mcp":
+            server_id = (tool.config or {}).get("mcp_server_id")
+            if server_id:
+                mcp_by_server.setdefault(server_id, []).append(tool)
+            else:
+                # No server reference — build individually (will log warning)
+                tc = await _build_tool_callables(
+                    db, tool, tenant_id,
+                    session_id=session_id, cleanup_clients=cleanup_clients,
+                )
+                callables.extend(tc)
+        else:
+            tc = await _build_tool_callables(
+                db, tool, tenant_id,
+                session_id=session_id, cleanup_clients=cleanup_clients,
+            )
+            callables.extend(tc)
+
+    # Build ONE callable per MCP server, filtering to only the tools
+    # that are active in this session.
+    for server_id, server_tools in mcp_by_server.items():
+        # Use the first tool record as the primary, but restrict to only
+        # the tool names the user actually activated.
+        tool_names = [
+            (t.config or {}).get("tool_name", "")
+            for t in server_tools
+            if (t.config or {}).get("tool_name")
+        ]
+        primary = server_tools[0]
+        # Inject the tool-name filter into the primary's config so that
+        # build_mcp_tool_callables passes it as allowed_tools.
+        orig_config = dict(primary.config or {})
+        primary.config = {**orig_config, "_allowed_tool_names": tool_names}
+        tc = await _build_tool_callables(
+            db, primary, tenant_id,
+            session_id=session_id, cleanup_clients=cleanup_clients,
         )
-        callables.extend(tool_callables)
+        callables.extend(tc)
+        # Restore original config (in-memory only, no DB write)
+        primary.config = orig_config
 
     # ---- Built-in tool: list_uploaded_files (always available) ----------
     # This discovery tool lets the agent see what files are attached to
@@ -2567,6 +2605,7 @@ async def _run_agent_stream(
     pending_calls: dict[str, dict] = {}
 
     inner_event_count = 0
+    last_update = None
     response_iter = response_stream.__aiter__()
     while True:
         try:
@@ -2580,6 +2619,7 @@ async def _run_agent_stream(
             # Stream exhausted or error — break so post-loop code
             # (token extraction, final yields) can still run.
             break
+        last_update = update
         inner_event_count += 1
         if inner_event_count <= 5 or inner_event_count % 20 == 0:
             content_types = [getattr(c, "type", "?") for c in (update.contents if hasattr(update, 'contents') else [])]
@@ -2639,13 +2679,35 @@ async def _run_agent_stream(
                     "step_index": step_index,
                     "total_steps_so_far": step_index,
                 }, session_id=session_id, message_id=message_id)
-    # After stream exhausted, get final response for token counts.
-    # MAF's ResponseStream caches the final result internally, so
-    # calling get_final_response() here is safe.  If it fails, we
-    # fall back to a rough token estimate.
-    try:
-        final = await response_stream.get_final_response()
-        if token_counts is not None:
+
+    # ---- Token extraction -------------------------------------------------
+    # After the stream is exhausted, attempt to collect usage metadata.
+    # Approach (defensive):
+    #   1. Try the cached _final_result on the ResponseStream (avoids
+    #      re-awaiting consumed coroutines on wrapped/inner streams).
+    #   2. If unavailable, fall back to get_final_response().
+    #   3. If all else fails, skip token extraction gracefully.
+    if token_counts is not None:
+        final = getattr(response_stream, "_final_result", None)
+        if final is None:
+            try:
+                final = await response_stream.get_final_response()
+            except RuntimeError:
+                logger.warning(
+                    "Token extraction skipped for session %s: "
+                    "get_final_response() unavailable after stream exhaustion",
+                    session_id,
+                )
+                final = None
+            except Exception:
+                logger.warning(
+                    "Token extraction via get_final_response failed for "
+                    "session %s",
+                    session_id, exc_info=True,
+                )
+                final = None
+
+        if final is not None:
             usage = getattr(final, "usage_details", None)
             logger.info(
                 "Token extraction for session %s: final type=%s, usage=%s",
@@ -2664,13 +2726,6 @@ async def _run_agent_stream(
                 if cache_hit == 0:
                     cache_hit = usage.get("cached_tokens", 0) or 0
                 token_counts["cache_hit"] = cache_hit
-    except Exception:
-        logger.warning("Token extraction via get_final_response failed", exc_info=True)
-    except Exception as _exc:
-        logger.warning(
-            "Token extraction skipped for session %s: %s [%s]",
-            session_id, type(_exc).__name__, _exc,
-        )
 
 
 async def _run_workflow_stream(

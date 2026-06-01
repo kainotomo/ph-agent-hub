@@ -19,7 +19,6 @@ import {
   updateMcpServer,
   listTools,
   McpServerData,
-  ToolData,
 } from "../../services/admin";
 
 interface McpServerFormProps {

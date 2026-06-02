@@ -99,6 +99,8 @@ class FileUploadResponse(BaseModel):
     content_type: str
     size_bytes: int
     created_at: datetime
+    embedding_warning: str | None = None
+    """If set, the embedding API was unavailable and TF-IDF fallback was used."""
 
 
 # ---------------------------------------------------------------------------
@@ -425,12 +427,18 @@ async def upload_demo_file(
         content_type=content_type,
     )
 
+    # Check whether the embedding API has credentials configured
+    from ..tools.rag_search import _check_embedding_available
+
+    embed_ok, embed_reason = _check_embedding_available()
+
     return FileUploadResponse(
         file_id=upload.id,
         original_filename=upload.original_filename,
         content_type=upload.content_type,
         size_bytes=upload.size_bytes,
         created_at=upload.created_at,
+        embedding_warning=embed_reason if not embed_ok else None,
     )
 
 

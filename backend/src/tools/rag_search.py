@@ -170,6 +170,36 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
 # Embedding client
 # ---------------------------------------------------------------------------
 
+def _check_embedding_available(
+    api_key: str | None = None,
+) -> tuple[bool, str | None]:
+    """Check whether embedding API credentials are configured (zero network).
+
+    Returns ``(available, reason)``:
+    - ``available`` — ``True`` if a key is present, ``False`` if fallback
+      will be used.
+    - ``reason`` — human-readable explanation when ``available`` is
+      ``False``, otherwise ``None``.
+    """
+    resolved_key = api_key
+    if not resolved_key:
+        try:
+            from ..core.config import settings
+        except ImportError:
+            from core.config import settings  # noqa: F811
+
+        resolved_key = getattr(settings, "OPENAI_API_KEY", None)
+
+    if not resolved_key:
+        return (
+            False,
+            "No embedding API key configured. "
+            "RAG indexing will use fallback TF-IDF embeddings. "
+            "Set OPENAI_API_KEY or configure an api_key in the RAG tool config.",
+        )
+    return (True, None)
+
+
 async def _get_embeddings(
     texts: list[str],
     model: str = DEFAULT_EMBEDDING_MODEL,
@@ -184,10 +214,25 @@ async def _get_embeddings(
     if not texts:
         return []
 
+    # Skip the API call entirely when no key is configured — avoids
+    # a guaranteed 401 and the associated log noise.
+    available, reason = _check_embedding_available(api_key)
+    if not available:
+        global _fallback_reason_logged
+        if not _fallback_reason_logged:
+            logger.info("Embedding API key missing — using fallback TF-IDF (%s)", reason)
+            _fallback_reason_logged = True
+        else:
+            logger.debug("Fallback TF-IDF embedding (already warned)")
+        return [_fallback_embed(text) for text in texts]
+
     # Try to use the platform's embedding model
     try:
         import httpx
-        from ..core.config import settings
+        try:
+            from ..core.config import settings
+        except ImportError:
+            from core.config import settings  # noqa: F811
 
         # Determine the embedding endpoint
         if base_url:
@@ -222,16 +267,30 @@ async def _get_embeddings(
                 data = response.json()
                 return [item["embedding"] for item in data["data"]]
             else:
-                logger.warning(
-                    "Embedding API returned %d: %s",
-                    response.status_code,
-                    response.text[:200],
-                )
+                # 401 is expected when the key is invalid/misconfigured —
+                # log at debug level to avoid alarming operators.
+                if response.status_code == 401:
+                    logger.debug(
+                        "Embedding API returned 401 (unauthorized): %s "
+                        "— using fallback TF-IDF",
+                        response.text[:200],
+                    )
+                else:
+                    logger.warning(
+                        "Embedding API returned %d: %s",
+                        response.status_code,
+                        response.text[:200],
+                    )
     except Exception as exc:
         logger.warning("Failed to get embeddings from API: %s", exc)
 
     # Fallback: use a simple bag-of-words embedding
-    logger.info("Using fallback TF-IDF-like embedding")
+    global _fallback_reason_logged
+    if not _fallback_reason_logged:
+        logger.info("Embedding API failed — using fallback TF-IDF")
+        _fallback_reason_logged = True
+    else:
+        logger.debug("Fallback TF-IDF embedding (already warned)")
     return [_fallback_embed(text) for text in texts]
 
 
@@ -267,6 +326,9 @@ def _fallback_embed(text: str, dim: int = 256) -> list[float]:
 # ---------------------------------------------------------------------------
 # Tool factory
 # ---------------------------------------------------------------------------
+
+# Module-level flag to log the verbose fallback reason only once per process.
+_fallback_reason_logged: bool = False
 
 # Global vector store instance (per process) — used as a cache layer on top
 # of the DB.  When db + tenant_id are provided, tools also persist to / read

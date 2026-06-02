@@ -7,6 +7,7 @@
 import math
 import os
 import sys
+import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -360,3 +361,69 @@ class TestListDocuments:
         )
         assert total == 0
         assert items == []
+
+
+# ===========================================================================
+# Unit tests — embedding config & fallback detection
+# ===========================================================================
+
+
+class TestCheckEmbeddingAvailable:
+    """Tests for ``tools.rag_search._check_embedding_available``."""
+
+    def test_no_key_returns_false(self):
+        from tools.rag_search import _check_embedding_available
+
+        available, reason = _check_embedding_available(api_key=None)
+        assert available is False
+        assert reason is not None
+        assert "No embedding API key" in reason
+
+    def test_empty_key_returns_false(self):
+        from tools.rag_search import _check_embedding_available
+
+        available, reason = _check_embedding_available(api_key="")
+        assert available is False
+
+    def test_valid_key_returns_true(self):
+        from tools.rag_search import _check_embedding_available
+
+        available, reason = _check_embedding_available(api_key="sk-test-123")
+        assert available is True
+        assert reason is None
+
+
+class TestGetEmbeddingsFallback:
+    """Tests for ``tools.rag_search._get_embeddings`` fallback path."""
+
+    @patch("tools.rag_search._check_embedding_available", return_value=(False, "No key"))
+    async def test_no_key_uses_fallback_directly(self, mock_check):
+        """When no key is configured, fallback is used without an API call."""
+        from tools.rag_search import _get_embeddings
+
+        result = await _get_embeddings(["hello world"])
+        assert result is not None
+        assert len(result) == 1
+        assert len(result[0]) == 256  # TF-IDF dim
+        mock_check.assert_called_once()
+
+    @patch("tools.rag_search._check_embedding_available", return_value=(True, None))
+    @patch("tools.rag_search._fallback_embed", return_value=[0.5] * 256)
+    async def test_api_401_triggers_fallback(self, mock_fallback, mock_check):
+        """When API returns 401, fallback is used."""
+        from tools.rag_search import _get_embeddings
+
+        import httpx
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_response = unittest.mock.MagicMock()
+            mock_response.status_code = 401
+            mock_response.text = '{"error": "unauthorized"}'
+            mock_instance = unittest.mock.AsyncMagicMock()
+            mock_instance.post.return_value = mock_response
+            mock_client.return_value.__aenter__.return_value = mock_instance
+
+            result = await _get_embeddings(["hello"])
+
+        assert result is not None
+        assert len(result) == 1

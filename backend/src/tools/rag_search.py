@@ -285,7 +285,6 @@ async def _get_embeddings(
         logger.warning("Failed to get embeddings from API: %s", exc)
 
     # Fallback: use a simple bag-of-words embedding
-    global _fallback_reason_logged
     if not _fallback_reason_logged:
         logger.info("Embedding API failed — using fallback TF-IDF")
         _fallback_reason_logged = True

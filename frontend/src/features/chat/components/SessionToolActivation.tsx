@@ -10,6 +10,7 @@ import {
   Drawer,
   List,
   Switch,
+  Tag,
   Typography,
   Empty,
   Space,
@@ -224,9 +225,9 @@ export function SessionToolActivation({
                       <Space size={4}>
                         {tool.name}
                         {skillToolIds.has(tool.id) && (
-                          <Text type="secondary" style={{ fontSize: 11, fontStyle: "italic" }}>
+                          <Tag color="blue" style={{ fontSize: 11, lineHeight: "18px", margin: 0 }}>
                             from skill
-                          </Text>
+                          </Tag>
                         )}
                       </Space>
                     }

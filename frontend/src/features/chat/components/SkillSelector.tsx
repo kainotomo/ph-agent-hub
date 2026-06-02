@@ -6,7 +6,7 @@
 // =============================================================================
 
 import React, { useState } from "react";
-import { Select, Space, Typography, Button } from "antd";
+import { Select, Space, Tag, Typography, Button } from "antd";
 import { SettingOutlined } from "@ant-design/icons";
 import { useQuery } from "@tanstack/react-query";
 import api from "../../../services/api";
@@ -65,7 +65,16 @@ export function SkillSelector({
             style={{ minWidth: 160 }}
             allowClear
             options={(skills || []).map((s) => ({
-              label: s.title,
+              label: (
+                <Space size={4}>
+                  {s.title}
+                  {s.tool_ids && s.tool_ids.length > 0 && (
+                    <Tag color="blue" style={{ fontSize: 11, lineHeight: "18px", margin: 0 }}>
+                      {s.tool_ids.length} tool{s.tool_ids.length !== 1 ? "s" : ""}
+                    </Tag>
+                  )}
+                </Space>
+              ),
               value: s.id,
             }))}
             notFoundContent={isLoading ? "Loading..." : "No skills available"}

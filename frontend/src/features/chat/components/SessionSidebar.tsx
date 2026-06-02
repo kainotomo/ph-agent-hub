@@ -6,7 +6,7 @@
 // links to MemoryManager, SessionSearch, logout.
 // =============================================================================
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
   Alert,
   Layout,
@@ -140,6 +140,18 @@ export function SessionSidebar() {
     );
   });
 
+  // Auto-scroll to active session when it changes or data loads.
+  useEffect(() => {
+    if (!sessionId) return;
+    const timer = setTimeout(() => {
+      const el = document.querySelector(`[data-session-id="${sessionId}"]`);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [sessionId, sessions]);
+
   const handleNewChat = (temporary = false) => {
     createMutation.mutate({ is_temporary: temporary });
   };
@@ -266,6 +278,7 @@ export function SessionSidebar() {
             locale={{ emptyText: "No sessions" }}
             renderItem={(item) => (
               <List.Item
+                data-session-id={item.id}
                 onClick={() => {
                   navigate(sessionId === item.id ? "/chat" : `/chat/${item.id}`);
                   if (isMobile) setMobileOpen(false);

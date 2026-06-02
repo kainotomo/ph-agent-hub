@@ -71,7 +71,7 @@ services:
     command:
       - sh
       - -c
-      - alembic upgrade heads && python scripts/seed.py && uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+      - pip install debugpy && alembic upgrade heads && python scripts/seed.py && python -Xfrozen_modules=off -m debugpy --listen 0.0.0.0:5678 -m uvicorn src.main:app --host 0.0.0.0 --port 8000
     depends_on:
       mariadb:
         condition: service_healthy
@@ -81,6 +81,7 @@ services:
       - ../backend:/app
     ports:
       - "8000:8000"
+      - "5678:5678"  # debugpy (VS Code remote attach)
     networks:
       - phagent-network
 

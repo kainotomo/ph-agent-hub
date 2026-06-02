@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     # --- Cross-session memory (Issue #229) ---
     CROSS_SESSION_EMBEDDING_MODEL: str = "text-embedding-3-small"
 
+    # --- Embedding API (RAG + cross-session memory) ---
+    OPENAI_API_KEY: str = ""
+    """API key for the embedding endpoint (OpenAI-compatible)."""
+    EMBEDDING_API_URL: str = ""
+    """Override embedding endpoint URL (default: https://api.openai.com/v1/embeddings)."""
+
     # --- Security ---
     COOKIE_SECURE: bool = False
     CORS_ALLOWED_ORIGINS: str = "http://localhost:3000"

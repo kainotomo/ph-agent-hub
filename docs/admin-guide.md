@@ -329,7 +329,16 @@ Tools extend agent capabilities — they can call external APIs, query ERPNext i
 
 **Browser**: Uses Playwright with headless Chromium. Blocks internal/private IPs for security. Screenshots stored in MinIO/S3.
 
-**RAG Search**: Falls back to local TF-IDF embeddings when no embedding API key is configured. For production use, configure an OpenAI-compatible embedding endpoint.
+**RAG Search**: By default, the system attempts to use an OpenAI-compatible
+embedding API (`text-embedding-3-small`) to generate vector embeddings for
+semantic search. When no embedding API key is configured, it falls back to
+local TF-IDF-like hashing (256‑dim).
+
+> **Fallback warning**: File uploads will still succeed (HTTP 201), but the
+> response will include an `embedding_warning` field when fallback is active.
+> Upgrade search quality by configuring an embedding API key via the
+> `OPENAI_API_KEY` environment variable or in the RAG tool config JSON
+> (`api_key` field).
 
 **Calendar**: Currently supports Google Calendar only (API key for read-only, OAuth/service account for write). CalDAV support planned.
 

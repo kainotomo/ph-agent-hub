@@ -1607,13 +1607,16 @@ async def get_session_context(
 
     all_messages = await _get_messages_for_session(db, session_id, is_temporary)
 
-    # Find the most recent non-summarized assistant message with tokens_in
+    # Find the most recent assistant message with tokens_in.
+    # We do NOT skip summarized messages — the most recent assistant
+    # message's tokens_in represents the full prompt at that point,
+    # including any summarized history. After summarization, the next
+    # new assistant message will have a lower tokens_in reflecting the
+    # compressed context.
     tokens_used = 0
     for msg in reversed(all_messages):
         sender = _msg_get(msg, "sender", "")
         if sender != "assistant":
-            continue
-        if _msg_get(msg, "summarized", False):
             continue
         tokens_in = _msg_get(msg, "tokens_in", None)
         if tokens_in is not None and tokens_in > 0:

@@ -393,6 +393,7 @@ export function ChatWindow({
           queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
           queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
           queryClient.invalidateQueries({ queryKey: ["sessions"] });
+          queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
         },
         onFollowUpQuestions(questions) {
           setFollowUpQuestions(questions);
@@ -481,6 +482,7 @@ export function ChatWindow({
           queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
           queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
           queryClient.invalidateQueries({ queryKey: ["sessions"] });
+          queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
         } else {
           // In demo mode, keep streamingMessageId so the streaming
           // content bubble remains visible as the final message.
@@ -519,6 +521,7 @@ export function ChatWindow({
           queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
           queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
           queryClient.invalidateQueries({ queryKey: ["sessions"] });
+          queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
         } else {
           // In demo mode, refetch persisted messages from Redis without
           // clearing streaming state yet — the streaming bubble stays
@@ -609,6 +612,7 @@ export function ChatWindow({
         queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
         queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
         queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
       },
       onFollowUpQuestions(questions) {
         setFollowUpQuestions(questions);
@@ -640,6 +644,7 @@ export function ChatWindow({
         queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
         queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
         queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
         fetchFollowUpQuestions(sessionId, setFollowUpQuestions);
         // Re-fetch sessions after a delay so auto-generated tags appear
         setTimeout(() => {

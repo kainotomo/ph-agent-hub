@@ -53,8 +53,6 @@ export function ContextIndicator({ sessionId }: ContextIndicatorProps) {
     queryKey: ["sessionContext", sessionId],
     queryFn: () => getSessionContext(sessionId!),
     enabled: !!sessionId,
-    refetchInterval: false,
-    staleTime: 10_000,
   });
 
   const tokensUsed = data?.tokens_used ?? 0;
@@ -149,34 +147,34 @@ export function ContextIndicator({ sessionId }: ContextIndicatorProps) {
       onOpenChange={setPopoverOpen}
       placement="bottomLeft"
     >
-      <Tooltip title="Context Window">
-        {hasContextLength ? (
-          <div
-            style={{
-              cursor: "pointer",
-              display: "inline-flex",
-              alignItems: "center",
-              lineHeight: 0,
-              padding: "2px 0",
-            }}
-          >
+      <Tooltip title={`${progressPct.toFixed(0)}%`}>
+        <Button
+          type="text"
+          size="small"
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 0,
+            lineHeight: 0,
+            height: 24,
+            width: 24,
+          }}
+        >
+          {hasContextLength ? (
             <Progress
               type="circle"
               percent={progressPct}
-              size={28}
+              size={22}
               strokeColor={strokeColor}
               trailColor="#d9d9d9"
               format={() => ""}
-              strokeWidth={8}
+              strokeWidth={5}
             />
-          </div>
-        ) : (
-          <Button
-            type="text"
-            icon={<CompressOutlined />}
-            size="small"
-          />
-        )}
+          ) : (
+            <CompressOutlined style={{ fontSize: 14, color: "#8c8c8c" }} />
+          )}
+        </Button>
       </Tooltip>
     </Popover>
   );

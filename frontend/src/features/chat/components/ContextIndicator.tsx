@@ -6,7 +6,7 @@
 // counts and a "Compact Conversation" button (Issue #309).
 // =============================================================================
 
-import React, { useState, useCallback } from "react";
+import { useState, useCallback } from "react";
 import { Button, Popover, Progress, Tooltip, Typography, message } from "antd";
 import { CompressOutlined } from "@ant-design/icons";
 import { useQuery, useQueryClient } from "@tanstack/react-query";

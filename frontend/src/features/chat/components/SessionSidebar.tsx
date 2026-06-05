@@ -38,6 +38,7 @@ import {
   MenuOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
+  ReloadOutlined,
 } from "@ant-design/icons";
 import { Logo } from "../../../shared/components/Logo";
 import { useNavigate, useParams } from "react-router-dom";
@@ -209,6 +210,14 @@ export function SessionSidebar() {
                   icon={<DatabaseOutlined />}
                   size="small"
                   onClick={() => setMemoryOpen(true)}
+                />
+              </Tooltip>
+              <Tooltip title="Refresh">
+                <Button
+                  type="text"
+                  icon={<ReloadOutlined />}
+                  size="small"
+                  onClick={() => window.location.reload()}
                 />
               </Tooltip>
               <Tooltip title="Collapse sidebar">

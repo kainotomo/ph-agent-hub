@@ -1603,25 +1603,43 @@ async def get_session_context(
             )
 
     # Get messages to find the most recent token count
-    from ..agents.runner import _get_messages_for_session
+    from ..agents.runner import (
+        _get_messages_for_session,
+        _estimate_tokens,
+        _extract_message_text,
+    )
 
     all_messages = await _get_messages_for_session(db, session_id, is_temporary)
 
-    # Find the most recent assistant message with tokens_in.
-    # We do NOT skip summarized messages — the most recent assistant
-    # message's tokens_in represents the full prompt at that point,
-    # including any summarized history. After summarization, the next
-    # new assistant message will have a lower tokens_in reflecting the
-    # compressed context.
-    tokens_used = 0
-    for msg in reversed(all_messages):
-        sender = _msg_get(msg, "sender", "")
-        if sender != "assistant":
-            continue
-        tokens_in = _msg_get(msg, "tokens_in", None)
-        if tokens_in is not None and tokens_in > 0:
-            tokens_used = tokens_in
-            break
+    # Check if any messages have been summarized
+    has_summarized = any(
+        _msg_get(m, "summarized", False) for m in all_messages
+    )
+
+    if has_summarized:
+        # After summarization, the actual context is: summary + recent messages.
+        # Estimate the current tokens by summing the summary system message
+        # and all non-summarized messages.
+        tokens_used = 0
+        for msg in all_messages:
+            sender = _msg_get(msg, "sender", "")
+            is_summarized = _msg_get(msg, "summarized", False)
+
+            # Include system messages (the summary) and non-summarized messages
+            if sender == "system" or not is_summarized:
+                text = _extract_message_text(_msg_get(msg, "content"))
+                tokens_used += _estimate_tokens(text)
+    else:
+        # No summarization — use the most recent assistant's provider-reported tokens_in
+        tokens_used = 0
+        for msg in reversed(all_messages):
+            sender = _msg_get(msg, "sender", "")
+            if sender != "assistant":
+                continue
+            tokens_in = _msg_get(msg, "tokens_in", None)
+            if tokens_in is not None and tokens_in > 0:
+                tokens_used = tokens_in
+                break
 
     # Compute percentage
     percentage: float | None = None

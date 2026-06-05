@@ -15,7 +15,6 @@ import {
   StopOutlined,
   DownOutlined,
   PaperClipOutlined,
-  CompressOutlined,
   RobotOutlined,
   EditOutlined,
   CloseOutlined,
@@ -28,7 +27,6 @@ import { useStream } from "../hooks/useStream";
 import {
   listMessages,
   deleteMessage,
-  summarizeSession,
   finalizeSession,
   updateAssistantMessage,
 } from "../services/chat";
@@ -239,6 +237,7 @@ export function ChatWindow({
     name: string;
     thinking_enabled: boolean;
     provider: string;
+    context_length?: number | null;
   }
   const { data: modelList } = useQuery({
     queryKey: ["models"],
@@ -394,6 +393,7 @@ export function ChatWindow({
           queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
           queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
           queryClient.invalidateQueries({ queryKey: ["sessions"] });
+          queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
         },
         onFollowUpQuestions(questions) {
           setFollowUpQuestions(questions);
@@ -482,6 +482,7 @@ export function ChatWindow({
           queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
           queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
           queryClient.invalidateQueries({ queryKey: ["sessions"] });
+          queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
         } else {
           // In demo mode, keep streamingMessageId so the streaming
           // content bubble remains visible as the final message.
@@ -520,6 +521,7 @@ export function ChatWindow({
           queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
           queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
           queryClient.invalidateQueries({ queryKey: ["sessions"] });
+          queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
         } else {
           // In demo mode, refetch persisted messages from Redis without
           // clearing streaming state yet — the streaming bubble stays
@@ -610,6 +612,7 @@ export function ChatWindow({
         queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
         queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
         queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
       },
       onFollowUpQuestions(questions) {
         setFollowUpQuestions(questions);
@@ -641,6 +644,7 @@ export function ChatWindow({
         queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
         queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
         queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
         fetchFollowUpQuestions(sessionId, setFollowUpQuestions);
         // Re-fetch sessions after a delay so auto-generated tags appear
         setTimeout(() => {
@@ -855,27 +859,6 @@ export function ChatWindow({
           >
             Tools
           </Button>
-          <Button
-            size="small"
-            icon={<CompressOutlined />}
-            onClick={async () => {
-              try {
-                const result = await summarizeSession(sessionId);
-                notification.success({
-                  message: "Conversation Summarized",
-                  description: `Compressed ${result.summarized_message_count} messages. Saved ~${result.tokens_saved} tokens.`,
-                  placement: "topRight",
-                  duration: 5,
-                });
-                queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
-              } catch (err: any) {
-                message.error(err?.message || "Summarization failed");
-              }
-            }}
-            title="Summarize conversation"
-          >
-            Summarize
-          </Button>
           <Switch
             size="small"
             checked={localCrossSessionMemory ?? false}
@@ -961,26 +944,6 @@ export function ChatWindow({
             }}
           >
             Tools
-          </Button>
-          <Button
-            icon={<CompressOutlined />}
-            onClick={async () => {
-              try {
-                const result = await summarizeSession(sessionId);
-                notification.success({
-                  message: "Conversation Summarized",
-                  description: `Compressed ${result.summarized_message_count} messages. Saved ~${result.tokens_saved} tokens.`,
-                  placement: "topRight",
-                  duration: 5,
-                });
-                queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
-              } catch (err: any) {
-                message.error(err?.message || "Summarization failed");
-              }
-            }}
-            title="Summarize conversation"
-          >
-            Summarize
           </Button>
           {modelSupportsThinking && (
             <Switch

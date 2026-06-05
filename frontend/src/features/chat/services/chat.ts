@@ -152,6 +152,22 @@ export function finalizeSession(id: string): Promise<SessionData> {
 }
 
 // ---------------------------------------------------------------------------
+// Session Context Window (Issue #309)
+// ---------------------------------------------------------------------------
+
+export interface SessionContextData {
+  tokens_used: number;
+  context_length: number | null;
+  percentage: number | null;
+}
+
+export function getSessionContext(
+  sessionId: string,
+): Promise<SessionContextData> {
+  return api<SessionContextData>(`/chat/session/${sessionId}/context`);
+}
+
+// ---------------------------------------------------------------------------
 // Summarization (Issue #29)
 // ---------------------------------------------------------------------------
 

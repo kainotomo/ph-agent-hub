@@ -28,6 +28,7 @@ class ModelResponse(BaseModel):
     thinking_enabled: bool
     reasoning_effort: str | None = None
     follow_up_questions_enabled: bool
+    context_length: int | None = None
     created_at: datetime
     updated_at: datetime
 

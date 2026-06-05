@@ -1549,6 +1549,90 @@ async def get_follow_up_questions(
 
 
 # =============================================================================
+# Session Context Window — Issue #309
+# =============================================================================
+
+
+class SessionContextResponse(BaseModel):
+    """Context window usage for a session.
+
+    Uses the most recent assistant message's provider-reported tokens_in
+    as the total context consumed.  context_length comes from the model.
+    """
+    tokens_used: int = 0
+    context_length: int | None = None
+    percentage: float | None = None
+    """Computed percentage (0.0–100.0), or None if context_length is unknown."""
+
+
+@router.get(
+    "/session/{session_id}/context",
+    response_model=SessionContextResponse,
+)
+async def get_session_context(
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(get_current_user),
+):
+    """Get context window usage for a session.
+
+    Returns the most recent provider-reported token count and the
+    session's model context length, so the UI can render a progress
+    indicator.
+    """
+    data = await _load_session(db, session_id)
+    await _require_session_owner(data, current_user)
+
+    is_temporary = data.get("is_temporary", False)
+
+    # Resolve model context_length
+    context_length: int | None = None
+    model_id = data.get("selected_model_id")
+    if model_id:
+        try:
+            from ..db.orm.models import Model as ModelORM
+            model_result = await db.execute(
+                select(ModelORM).where(ModelORM.id == model_id)
+            )
+            model_row = model_result.scalar_one_or_none()
+            if model_row is not None:
+                context_length = model_row.context_length
+        except Exception:
+            logger.warning(
+                "Failed to resolve context_length for model %s", model_id,
+            )
+
+    # Get messages to find the most recent token count
+    from ..agents.runner import _get_messages_for_session
+
+    all_messages = await _get_messages_for_session(db, session_id, is_temporary)
+
+    # Find the most recent non-summarized assistant message with tokens_in
+    tokens_used = 0
+    for msg in reversed(all_messages):
+        sender = _msg_get(msg, "sender", "")
+        if sender != "assistant":
+            continue
+        if _msg_get(msg, "summarized", False):
+            continue
+        tokens_in = _msg_get(msg, "tokens_in", None)
+        if tokens_in is not None and tokens_in > 0:
+            tokens_used = tokens_in
+            break
+
+    # Compute percentage
+    percentage: float | None = None
+    if context_length is not None and context_length > 0:
+        percentage = round(tokens_used / context_length * 100, 1)
+
+    return SessionContextResponse(
+        tokens_used=tokens_used,
+        context_length=context_length,
+        percentage=percentage,
+    )
+
+
+# =============================================================================
 # Message Summarization — Issue #29
 # =============================================================================
 

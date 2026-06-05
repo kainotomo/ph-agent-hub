@@ -53,6 +53,7 @@ import {
   addTagToSession,
   removeTagFromSession,
 } from "../services/chat";
+import { ContextIndicator } from "./ContextIndicator";
 import { MemoryManager } from "./MemoryManager";
 import { SessionSearch } from "./SessionSearch";
 
@@ -196,6 +197,7 @@ export function SessionSidebar() {
           <Logo size={28} showText={!collapsed} textColor="#141414" />
           {!collapsed && (
             <Space size={4}>
+              <ContextIndicator sessionId={sessionId} />
               <Tooltip title="Search">
                 <Button
                   type="text"

@@ -758,8 +758,6 @@ async def _persist_system_message(
                 "id": msg_id,
                 "sender": "system",
                 "content": content,
-                "parent_message_id": None,
-                "branch_index": 0,
                 "created_at": now.isoformat(),
             },
         )
@@ -769,8 +767,6 @@ async def _persist_system_message(
             session_id=session_id,
             sender="system",
             content=content,
-            parent_message_id=None,
-            branch_index=0,
             created_at=now,
         )
         db.add(msg)

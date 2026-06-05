@@ -147,7 +147,7 @@ export function ContextIndicator({ sessionId }: ContextIndicatorProps) {
       onOpenChange={setPopoverOpen}
       placement="bottomLeft"
     >
-      <Tooltip title={`${progressPct.toFixed(0)}%`}>
+      <Tooltip title={`${progressPct.toFixed(1)}%`}>
         <Button
           type="text"
           size="small"

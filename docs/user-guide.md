@@ -171,10 +171,10 @@ Tools let the AI interact with external systems — query databases, call APIs, 
 | **Financial** | Stock Data, Market Overview, ETF Data, Currency Exchange, Portfolio, SEC Filings | Get stock quotes, analyze portfolios, check exchange rates, read SEC filings |
 | **Enterprise** | ERPNext, SQL Query | Query your ERP system, run read-only SQL on your database |
 | **Utility** | Calculator, Code Interpreter, Datetime, Document Generation, Weather | Do math, run Python code, check dates/times, generate PDFs/Excel/CSV, check weather |
-| **Communication** | Slack, Email | Send messages to Slack channels, send emails |
+| **Communication** | Slack, Email | Send messages to Slack channels; **read, send, search, and manage emails** from your connected accounts |
 | **Creative** | Image Generation | Generate images from text descriptions (DALL·E 3, Stable Diffusion) |
 | **MCP** | (dynamically synced) | External tools connected by your administrator via MCP servers — GitHub, databases, file systems, or any MCP-compatible service |
-| **Productivity** | Calendar | Check your calendar, schedule meetings, find free time slots |
+| **Productivity** | Calendar, Tasks | Check your calendar, schedule meetings, find free time slots; **create, update, and manage tasks and to-do lists** from your connected accounts |
 | **DevOps** | GitHub | Search code, list issues/PRs, read files from GitHub/GitLab repos |
 
 ### 6.2 Activate Tools
@@ -209,10 +209,83 @@ Toggle a tool off to prevent the AI from using it. The change takes effect immed
 - **Check tool results** — the AI shows you what each tool returned so you can verify accuracy
 - **Financial tools are free** — stock data, market overview, and currency exchange require no API keys
 - **Generated files** — PDFs, Excel files, images, and screenshots appear as download links in the chat
+- **Personal accounts** — tools like Email, Calendar, and Tasks can use your own connected accounts. Set them up in **Account Settings** (gear icon in the sidebar)
 
 ---
 
-## 7. File Uploads
+## 8. Account Settings
+
+Account Settings lets you connect your personal email, calendar, and task accounts so the AI agent can read, send, and manage them on your behalf.
+
+### 8.1 Accessing Account Settings
+
+Click the **gear icon** ⚙️ in the chat sidebar (next to Logout) to open Account Settings, or navigate directly to `/settings`.
+
+### 8.2 Connecting an Email Account
+
+The agent can connect to any email account that supports IMAP (Gmail, Outlook, Yahoo, Fastmail, etc.).
+
+**Option A: Google OAuth (recommended)**
+1. In Account Settings, click **Connect Account** under Email
+2. Click **Google (Gmail)**
+3. A Google consent popup opens — sign in and grant access
+4. You're redirected back to Account Settings — the account appears with a green dot
+
+**Option B: Microsoft OAuth (recommended)**
+1. Click **Connect Account** → **Microsoft (Outlook)**
+2. Sign in via the Microsoft consent popup
+
+**Option C: Manual IMAP setup**
+1. Click **Connect Account** → **Other Email (IMAP)**
+2. Fill in:
+   - **Account Label** — a name you'll recognize (e.g., "Work Email")
+   - **Email Address**
+   - **IMAP Server** and **Port** (typically `imap.gmail.com:993` for Gmail)
+   - **SMTP Server** and **Port** (typically `smtp.gmail.com:587` for Gmail)
+   - **Password** — use an **app password** if you have 2FA enabled (see your provider's security settings)
+3. Click **Test Connection** to verify the credentials work
+4. Click **Save Account**
+
+### 8.3 Connecting Calendar and Tasks
+
+If you've connected a Google or Microsoft account via OAuth, you can connect calendar and tasks using the same provider. Click **Connect Account** under Calendar or Tasks and choose the provider — the OAuth popup will request the necessary permissions automatically.
+
+For Google, the same OAuth consent can grant access to Gmail, Google Calendar, and Google Tasks simultaneously.
+
+### 8.4 Managing Connected Accounts
+
+Each connected account shows:
+- **Status dot** — 🟢 Active, 🟡 Expired (reconnect needed), 🔴 Error
+- **Provider badge** — Gmail, Outlook, or IMAP
+- **Default star** ⭐ — clicking sets this account as the default
+- **Test button** 🔄 — tests the connection
+- **Remove button** 🗑️ — removes the account (agent can no longer access it)
+
+You can have **multiple accounts** for the same tool type (e.g., Work Gmail + Personal Gmail). When you have multiple accounts, use the `account_label` parameter to tell the agent which one to use.
+
+### 8.5 What the Agent Can Do
+
+Once connected, the agent can:
+- **Read emails** — "What's in my inbox?"
+- **Search emails** — "Find emails from Sarah about the budget"
+- **Get full email body** — "Show me the full content of the first email"
+- **Send emails** — "Send a reply saying I'll review it tomorrow"
+- **Mark as read/unread** — "Mark that email as read"
+- **Move to folders** — "Move it to my Work folder"
+- **List folders** — "What folders do I have?"
+- **Check calendar** — "What meetings do I have today?"
+- **Create events** — "Schedule a 30-minute call with Bob tomorrow at 2 PM"
+- **Manage tasks** — "Create a task to review the Q3 budget by Friday"
+
+### 8.6 Troubleshooting
+
+- **"Test connection failed"** — verify your IMAP/SMTP server addresses and port numbers. For Gmail/Outlook with 2FA, use an **app password** (not your regular password).
+- **"Token expired"** (OAuth only) — click the **Reconnect** button next to the account to re-authenticate.
+- **"No accounts connected"** — the agent will tell you if no email/calendar/task accounts are found. Go to Account Settings to add one.
+
+---
+
+## 9. File Uploads
 
 You can attach files to your chat sessions for the AI to reference.
 

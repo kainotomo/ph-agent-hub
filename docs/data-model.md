@@ -113,7 +113,7 @@ Tools represent external integrations (ERPNext, Membrane, custom tools).
 - id (UUID, PK)
 - tenant_id (UUID, FK → tenants.id)
 - name (string)
-- type (enum: erpnext, membrane, custom, datetime, web_search, fetch_url, weather, calculator, wikipedia, rss_feed, currency_exchange, market_overview, etf_data, stock_data, portfolio, sec_filings, code_interpreter, sql_query, document_generation, browser, rag_search, github, calendar, image_generation, slack, email, mcp)
+- type (enum: erpnext, membrane, custom, datetime, web_search, fetch_url, weather, calculator, wikipedia, rss_feed, currency_exchange, market_overview, etf_data, stock_data, portfolio, sec_filings, code_interpreter, sql_query, document_generation, browser, rag_search, github, calendar, image_generation, slack, email, mcp, tasks)
 - config (JSON)
 - enabled (boolean)
 - is_public (boolean, default false) — when true, tool is available to all users regardless of group membership
@@ -152,7 +152,39 @@ Users can mark tools as "always on" so they're automatically activated in new se
 
 ---
 
-## 1.7 MCP Servers (Model Context Protocol)
+## 1.7 User Tool Credentials (Issue #312)
+
+Per-user credentials for tools that require personal authentication (email, calendar, tasks). Each row represents one connected account — a user can have multiple accounts for the same tool type (e.g., Work Gmail + Personal Gmail).
+
+Credentials and OAuth tokens are encrypted at rest via the `EncryptedString` ORM column type, using the same Fernet encryption as the `models.api_key` field.
+
+**Table: user_tool_credentials**
+- id (UUID, PK)
+- user_id (UUID, FK → users.id, CASCADE) — who owns this credential
+- tool_id (UUID, FK → tools.id, CASCADE) — which tool this credential is for
+- label (string, 255, NOT NULL) — user-defined display name (e.g., "Work Gmail")
+- provider (enum: gmail, outlook, imap, google, microsoft) — the authentication provider
+- email_address (string, 255, nullable) — primary email address for this account
+- credentials (Text, nullable) — encrypted JSON: IMAP/SMTP passwords, client IDs, etc.
+- oauth_tokens (Text, nullable) — encrypted JSON: access_token, refresh_token, expires_at
+- is_default (boolean, default false) — when true, this account is used when no account_label is specified
+- status (enum: active, expired, revoked, error) — whether the credential is usable
+- created_at (timestamp)
+- updated_at (timestamp)
+
+**Unique constraint:** `(user_id, tool_id, email_address)` — prevents registering the same email for the same tool twice.
+
+**Relationships:**
+- Belongs to a `User` (CASCADE delete)
+- Belongs to a `Tool` (CASCADE delete)
+
+**Credential resolution at runtime:**
+1. When the agent run resolves tools, it queries `user_tool_credentials` for the current user
+2. Active credentials are passed to the tool factory (`build_email_tools`, `build_calendar_tools`, `build_tasks_tools`)
+3. User credentials override tenant-level `tool.config` for the same fields
+4. Tools with connected accounts are always included in the agent's tool set (even when auto-select would otherwise exclude them)
+
+---
 
 MCP servers allow connecting external tool sources without writing custom integration code. Each server exposes tools discovered via the MCP protocol that are registered as individual Tool records with `type="mcp"`.
 

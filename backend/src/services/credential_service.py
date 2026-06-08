@@ -11,8 +11,10 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import joinedload
 
 from ..core.exceptions import NotFoundError, ValidationError
+from ..db.orm.tools import Tool
 from ..db.orm.user_tool_credentials import UserToolCredential
 
 

@@ -9,6 +9,7 @@ import json
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
+from sqlalchemy import select as _select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.dependencies import get_current_user, get_db
@@ -38,6 +39,7 @@ class CredentialResponse(BaseModel):
     id: str
     user_id: str
     tool_id: str
+    tool_type: str = ""
     label: str
     provider: str
     email_address: str | None
@@ -94,12 +96,17 @@ class OAuthUrlResponse(BaseModel):
 # =============================================================================
 
 
-def _cred_to_response(cred: UserToolCredential) -> CredentialResponse:
+def _cred_to_response(
+    cred: UserToolCredential,
+    tool_type_map: dict[str, str] | None = None,
+) -> CredentialResponse:
     """Convert ORM to response model, masking sensitive fields."""
+    tt = (tool_type_map or {}).get(cred.tool_id, "")
     return CredentialResponse(
         id=cred.id,
         user_id=cred.user_id,
         tool_id=cred.tool_id,
+        tool_type=tt,
         label=cred.label,
         provider=cred.provider,
         email_address=cred.email_address,
@@ -115,6 +122,36 @@ def _cred_to_response(cred: UserToolCredential) -> CredentialResponse:
 # =============================================================================
 
 
+@router.get("/tool-id", response_model=dict)
+async def get_tool_id_by_type(
+    tool_type: str = Query(..., description="Tool type (email, calendar, tasks)"),
+    current_user: UserORM = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Look up a tool's ID by its type.
+
+    Used by the frontend when creating credentials — the user selects
+    a tool type (email, calendar, tasks) and needs the actual tool ID
+    to pass to the create credential endpoint.
+    """
+    result = await db.execute(
+        _select(ToolORM)
+        .where(
+            ToolORM.type == tool_type,
+            ToolORM.tenant_id == current_user.tenant_id,
+            ToolORM.enabled == True,  # noqa: E712
+        )
+        .limit(1)
+    )
+    tool = result.scalar_one_or_none()
+    if not tool:
+        raise NotFoundError(
+            f"No enabled '{tool_type}' tool found. "
+            f"An administrator must create one in Admin Area → Tools."
+        )
+    return {"tool_id": tool.id}
+
+
 @router.get("", response_model=CredentialListResponse)
 async def list_credentials(
     tool_id: str | None = Query(None, description="Filter by tool ID"),
@@ -122,11 +159,23 @@ async def list_credentials(
     db: AsyncSession = Depends(get_db),
 ):
     """List all connected accounts for the current user, optionally filtered by tool."""
+
     items = await _svc_list_credentials(
         db, user_id=current_user.id, tool_id=tool_id,
     )
+
+    # Build tool_id → tool_type map for the response
+    tool_ids = list({c.tool_id for c in items})
+    tool_type_map: dict[str, str] = {}
+    if tool_ids:
+        tools_result = await db.execute(
+            _select(ToolORM).where(ToolORM.id.in_(tool_ids))
+        )
+        for t in tools_result.scalars().all():
+            tool_type_map[t.id] = t.type
+
     return CredentialListResponse(
-        items=[_cred_to_response(c) for c in items],
+        items=[_cred_to_response(c, tool_type_map) for c in items],
         total=len(items),
     )
 

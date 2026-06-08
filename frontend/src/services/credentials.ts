@@ -14,6 +14,7 @@ export interface CredentialData {
   id: string;
   user_id: string;
   tool_id: string;
+  tool_type: string;
   label: string;
   provider: string;
   email_address: string | null;
@@ -21,6 +22,15 @@ export interface CredentialData {
   status: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface CreateCredentialRequest {
+  tool_id: string;
+  label: string;
+  provider: string;
+  email_address?: string;
+  credentials?: Record<string, unknown>;
+  is_default?: boolean;
 }
 
 export interface CredentialListResponse {
@@ -59,6 +69,17 @@ function qs(params: Record<string, string | undefined>): string {
 
 export function listCredentials(tool_id?: string): Promise<CredentialListResponse> {
   return api<CredentialListResponse>(`/credentials${qs({ tool_id })}`);
+}
+
+export function createCredential(data: CreateCredentialRequest): Promise<CredentialData> {
+  return api<CredentialData>("/credentials", {
+    method: "POST",
+    body: data,
+  });
+}
+
+export function getToolIdByType(tool_type: string): Promise<{ tool_id: string }> {
+  return api<{ tool_id: string }>(`/credentials/tool-id${qs({ tool_type })}`);
 }
 
 export function deleteCredential(credential_id: string): Promise<void> {

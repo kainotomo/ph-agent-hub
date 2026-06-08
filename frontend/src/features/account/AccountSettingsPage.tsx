@@ -41,10 +41,12 @@ import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   listCredentials,
+  createCredential,
   deleteCredential,
   testConnection,
   updateCredential,
   testRawImap,
+  getToolIdByType,
   getGoogleOAuthUrl,
   getMicrosoftOAuthUrl,
   CredentialData,
@@ -431,12 +433,35 @@ function ManualSetupModal({
 
   const handleSave = async () => {
     try {
-      await form.validateFields();
+      const values = await form.validateFields();
       setCreating(true);
-      message.success("Manual IMAP setup completed. Account connected.");
+
+      // Look up the email tool ID
+      const { tool_id } = await getToolIdByType("email");
+
+      // Create the credential with IMAP details
+      await createCredential({
+        tool_id,
+        label: values.label,
+        provider: "imap",
+        email_address: values.email,
+        credentials: {
+          imap_host: values.imap_host,
+          imap_port: parseInt(values.imap_port, 10),
+          username: values.email,
+          password: values.password,
+          smtp_host: values.smtp_host,
+          smtp_port: parseInt(values.smtp_port, 10),
+        },
+        is_default: true,
+      });
+
+      message.success(`"${values.label}" connected successfully`);
       onSaved();
-    } catch {
-      // Form validation or creation error
+    } catch (err: unknown) {
+      if (err instanceof Error) {
+        message.error(err.message);
+      }
     }
     setCreating(false);
   };
@@ -557,16 +582,8 @@ function ManualSetupModal({
 
 function groupByToolType(credentials: CredentialData[]): Record<string, CredentialData[]> {
   const grouped: Record<string, CredentialData[]> = {};
-  // Map tool names to tool types based on provider patterns
   for (const cred of credentials) {
-    // Determine tool type from provider
-    // IMAP and Gmail providers are typically linked to email tools
-    // Google/Microsoft providers could be email, calendar, or tasks
-    // A more accurate approach would use the actual tool type from the DB
-
-    // For now, we use a heuristic — group by tool_id pattern
-    // The exact mapping depends on how the admin created the tools
-    const toolType = cred.tool_id; // Simplified — in production, resolve tool.type
+    const toolType = cred.tool_type || cred.tool_id;
     if (!grouped[toolType]) {
       grouped[toolType] = [];
     }

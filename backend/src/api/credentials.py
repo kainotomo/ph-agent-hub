@@ -22,6 +22,7 @@ from ..services.credential_service import (
     update_credential as _svc_update_credential,
     delete_credential as _svc_delete_credential,
     test_connection as _svc_test_connection,
+    test_raw_imap_connection as _svc_test_raw_imap,
 )
 from ..db.orm.user_tool_credentials import UserToolCredential
 
@@ -74,6 +75,13 @@ class TestConnectionResponse(BaseModel):
     ok: bool
     message: str
     folders: list[str] | None = None
+
+
+class TestRawImapRequest(BaseModel):
+    host: str
+    port: int = 993
+    username: str
+    password: str
 
 
 class OAuthUrlResponse(BaseModel):
@@ -185,6 +193,22 @@ async def delete_credential(
 ):
     """Remove a connected account and revoke its access."""
     await _svc_delete_credential(db, credential_id, user_id=current_user.id)
+
+
+@router.post("/test-imap", response_model=TestConnectionResponse)
+async def test_raw_imap(
+    body: TestRawImapRequest,
+    current_user: UserORM = Depends(get_current_user),
+):
+    """Test IMAP connectivity with raw credentials (pre-save validation).
+
+    Used by the manual IMAP setup form to verify credentials before saving.
+    """
+    result = await _svc_test_raw_imap(
+        host=body.host, port=body.port,
+        username=body.username, password=body.password,
+    )
+    return TestConnectionResponse(**result)
 
 
 @router.post("/{credential_id}/test", response_model=TestConnectionResponse)

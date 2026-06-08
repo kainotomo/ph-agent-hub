@@ -81,6 +81,13 @@ export function testConnection(credential_id: string): Promise<TestConnectionRes
   });
 }
 
+export function testRawImap(host: string, port: number, username: string, password: string): Promise<TestConnectionResponse> {
+  return api<TestConnectionResponse>("/credentials/test-imap", {
+    method: "POST",
+    body: { host, port, username, password },
+  });
+}
+
 // ---------------------------------------------------------------------------
 // OAuth
 // ---------------------------------------------------------------------------

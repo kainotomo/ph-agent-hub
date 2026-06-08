@@ -222,26 +222,18 @@ async def delete_user_credentials(
 async def test_connection(
     credential: UserToolCredential,
 ) -> dict:
-    """Test whether a credential can connect to its provider.
+    """Test whether a credential can connect to its provider."""
+    return await _do_test_connection(credential)
 
-    For IMAP: attempts to open an IMAP connection and foldr list.
-    For OAuth: attempts a token refresh or API call.
 
-    Returns:
-        A dict with ``ok`` (bool), ``message`` (str), and optionally
-        ``folders`` (list[str]) for IMAP accounts.
+async def test_raw_imap_connection(
+    host: str, port: int, username: str, password: str,
+) -> dict:
+    """Test IMAP connectivity without a stored credential.
+
+    Used by the pre-save test in the manual IMAP setup UI.
     """
-    provider = credential.provider
-    creds = json.loads(credential.credentials) if credential.credentials else {}
-    tokens = json.loads(credential.oauth_tokens) if credential.oauth_tokens else {}
-
-    if provider == "imap":
-        return await _test_imap_connection(creds)
-    elif provider in ("gmail", "outlook", "google", "microsoft"):
-        # OAuth-based — test token validity by making a lightweight API call
-        return await _test_oauth_connection(provider, tokens, creds)
-    else:
-        return {"ok": False, "message": f"Unknown provider: {provider}"}
+    return await _test_imap_connection_raw(host, port, username, password)
 
 
 # ---------------------------------------------------------------------------
@@ -272,49 +264,63 @@ async def _unset_default_for_tool(db: AsyncSession, user_id: str, tool_id: str) 
     )
 
 
-async def _test_imap_connection(creds: dict) -> dict:
-    """Test IMAP connectivity."""
-    import imaplib
+async def _do_test_connection(credential: UserToolCredential) -> dict:
+    """Test a stored credential against its provider."""
+    import json
+    provider = credential.provider
+    creds = json.loads(credential.credentials) if credential.credentials else {}
+    tokens = json.loads(credential.oauth_tokens) if credential.oauth_tokens else {}
 
-    host = creds.get("imap_host", "")
-    port = int(creds.get("imap_port", 993))
-    username = creds.get("username", "")
-    password = creds.get("password", "")
+    if provider == "imap":
+        return await _test_imap_connection(creds)
+    elif provider in ("gmail", "outlook", "google", "microsoft"):
+        return await _test_oauth_connection(provider, tokens, creds)
+    else:
+        return {"ok": False, "message": f"Unknown provider: {provider}"}
 
+
+async def _test_imap_connection_raw(host: str, port: int, username: str, password: str) -> dict:
+    """Test raw IMAP credentials (without a stored credential row)."""
     if not host:
-        return {"ok": False, "message": "IMAP host not configured"}
+        return {"ok": False, "message": "IMAP host not provided"}
     if not username:
-        return {"ok": False, "message": "IMAP username not configured"}
+        return {"ok": False, "message": "IMAP username not provided"}
     if not password:
-        return {"ok": False, "message": "IMAP password not configured"}
+        return {"ok": False, "message": "IMAP password not provided"}
+
+    import asyncio
+    import imaplib
+    import ssl
 
     try:
-        import asyncio
-        import ssl
-
-        def _connect() -> tuple[list[str], str]:
-            context = ssl.create_default_context()
-            conn = imaplib.IMAP4_SSL(host, port, ssl_context=context)
+        def _connect():
+            ctx = ssl.create_default_context()
+            conn = imaplib.IMAP4_SSL(host, port, ssl_context=ctx)
             conn.login(username, password)
             folders = []
             typ, data = conn.list()
             if typ == "OK":
                 for item in data:
                     parts = item.decode().split(' "/" ')
-                    if len(parts) == 2:
-                        folders.append(parts[1])
-                    elif len(item) > 0:
-                        folders.append(item.decode().strip())
+                    folders.append(parts[1] if len(parts) == 2 else item.decode().strip())
             conn.logout()
             return folders, f"Connected. Found {len(folders)} folders."
 
         folders, message = await asyncio.to_thread(_connect)
         return {"ok": True, "message": message, "folders": folders[:20]}
-
     except imaplib.IMAP4.error as exc:
         return {"ok": False, "message": f"IMAP auth failed: {exc}"}
     except Exception as exc:
         return {"ok": False, "message": f"Connection failed: {exc}"}
+
+
+async def _test_imap_connection(creds: dict) -> dict:
+    """Test IMAP connectivity from a stored credential dict."""
+    host = creds.get("imap_host", "")
+    port = int(creds.get("imap_port", 993))
+    username = creds.get("username", "")
+    password = creds.get("password", "")
+    return await _test_imap_connection_raw(host, port, username, password)
 
 
 async def _test_oauth_connection(provider: str, tokens: dict, creds: dict) -> dict:

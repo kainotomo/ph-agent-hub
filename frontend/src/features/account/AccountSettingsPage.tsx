@@ -44,6 +44,7 @@ import {
   deleteCredential,
   testConnection,
   updateCredential,
+  testRawImap,
   getGoogleOAuthUrl,
   getMicrosoftOAuthUrl,
   CredentialData,
@@ -442,11 +443,24 @@ function ManualSetupModal({
 
   const handleTest = async () => {
     try {
-      await form.validateFields();
+      const values = await form.validateFields();
       setTesting(true);
-      message.success("Connection test passed");
-    } catch {
-      // Validation error
+      const result = await testRawImap(
+        values.imap_host,
+        parseInt(values.imap_port, 10),
+        values.email,
+        values.password,
+      );
+      if (result.ok) {
+        message.success(result.message);
+      } else {
+        message.warning(result.message);
+      }
+    } catch (err: unknown) {
+      if (err instanceof Error) {
+        message.error(err.message);
+      }
+      // Form validation errors from validateFields are shown inline
     }
     setTesting(false);
   };

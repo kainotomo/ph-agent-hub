@@ -5,7 +5,7 @@
 // Supports OAuth (Google, Microsoft) and manual IMAP setup.
 // =============================================================================
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Layout,
   Card,
@@ -37,7 +37,7 @@ import {
   ArrowLeftOutlined,
   ReloadOutlined,
 } from "@ant-design/icons";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   listCredentials,
@@ -100,12 +100,41 @@ const STATUS_LABELS: Record<string, string> = {
 export function AccountSettingsPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const [searchParams] = useSearchParams();
   const [connectModal, setConnectModal] = useState<{
     open: boolean;
     toolId: string;
     toolType: string;
   }>({ open: false, toolId: "", toolType: "" });
   const [imapModal, setImapModal] = useState(false);
+
+  // Handle OAuth callback redirect in popup window
+  useEffect(() => {
+    const connected = searchParams.get("connected");
+    if (connected === "true") {
+      // If we're in a popup window, close it and notify the opener
+      if (window.opener) {
+        window.opener.postMessage({ type: "oauth-connected" }, window.location.origin);
+        window.close();
+      } else {
+        // Direct navigation — just refresh credentials
+        queryClient.invalidateQueries({ queryKey: ["credentials"] });
+        message.success("Account connected successfully");
+      }
+    }
+  }, [searchParams, queryClient]);
+
+  // Listen for OAuth popup completion from child windows
+  useEffect(() => {
+    function handleMessage(event: MessageEvent) {
+      if (event.data?.type === "oauth-connected") {
+        queryClient.invalidateQueries({ queryKey: ["credentials"] });
+        message.success("Account connected successfully");
+      }
+    }
+    window.addEventListener("message", handleMessage);
+    return () => window.removeEventListener("message", handleMessage);
+  }, [queryClient]);
 
   // Fetch all credentials
   const { data: credentials, isLoading } = useQuery({

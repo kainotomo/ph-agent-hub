@@ -155,21 +155,23 @@ def _parse_datetime(dt_str: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def build_calendar_tools(tool_config: dict | None = None) -> list:
+def build_calendar_tools(
+    tool_config: dict | None = None,
+    user_credentials: list | None = None,
+) -> list:
     """Return a list of MAF @tool-decorated async functions for calendar.
 
-    Supports Google Calendar API (service account, OAuth refresh token, or API key).
-    CalDAV support planned for future updates.
+    Supports Google Calendar API (service account, OAuth, API key),
+    and Microsoft Graph Calendar. When ``user_credentials`` are
+    provided, per-user OAuth tokens override tenant-level config.
 
     Args:
         tool_config: ``Tool.config`` JSON dict.  May include:
             - ``provider`` (str): "google" (default)
             - ``credentials`` (dict): Google API credentials
-                - For service account: ``client_email``, ``private_key``
-                - For OAuth: ``client_id``, ``client_secret``, ``refresh_token``
-                - For API key: ``api_key``
             - ``calendar_id`` (str): Calendar ID (default "primary")
             - ``timezone`` (str): Timezone for events (default "UTC")
+        user_credentials: List of ``UserToolCredential`` ORM rows.
 
     Returns:
         A list of callables ready to pass to ``Agent(tools=...)``.
@@ -180,9 +182,25 @@ def build_calendar_tools(tool_config: dict | None = None) -> list:
     calendar_id: str = config.get("calendar_id", "primary")
     timezone_str: str = config.get("timezone", "UTC")
 
+    # ---- Resolve user OAuth tokens if available (Issue #312) ----------
+    user_creds_map = {}
+    if user_credentials:
+        uc = user_credentials[0]  # Use first available credential
+        cp, cd, tk, ce = _parse_credential(uc)
+        if tk.get("access_token"):
+            user_creds_map = {
+                "provider": cp,
+                "access_token": tk["access_token"],
+                "refresh_token": tk.get("refresh_token", ""),
+                "calendar_id": config.get("calendar_id", "primary"),
+            }
+
     # ------------------------------------------------------------------
     @tool
-    async def list_events(date_from: str, date_to: str | None = None, max_results: int = 25) -> dict:
+    async def list_events(
+        date_from: str, date_to: str | None = None, max_results: int = 25,
+        calendar_label: str | None = None,
+    ) -> dict:
         """List calendar events in a date range.
 
         Args:
@@ -480,4 +498,39 @@ def build_calendar_tools(tool_config: dict | None = None) -> list:
             "business_hours": f"{work_start.strftime('%H:%M')} - {work_end.strftime('%H:%M')}",
         }
 
-    return [list_events, create_event, find_free_slots]
+    # ------------------------------------------------------------------
+    @tool
+    async def list_calendar_accounts() -> dict:
+        """List connected calendar accounts available to the agent.
+
+        Returns:
+            Dict with ``accounts`` (list) and ``total``.
+        """
+        if not user_credentials:
+            return {"accounts": [], "message": "No calendar accounts connected."}
+
+        accounts = [
+            {"label": c.label, "email": c.email_address or "", "provider": c.provider,
+             "is_default": c.is_default, "status": c.status}
+            for c in user_credentials if c.status == "active"
+        ]
+        return {"accounts": accounts, "total": len(accounts)}
+
+    tools = [list_events, create_event, find_free_slots]
+    if user_credentials:
+        tools.append(list_calendar_accounts)
+    return tools
+
+
+# ---------------------------------------------------------------------------
+# Credential parsing helper (shared with email tool pattern)
+# ---------------------------------------------------------------------------
+
+def _parse_credential(cred) -> tuple[str, dict, dict, str | None]:
+    """Extract (provider, creds_dict, tokens_dict, email) from a credential ORM row."""
+    import json
+    provider = cred.provider if hasattr(cred, "provider") else ""
+    creds_raw = getattr(cred, "credentials", None)
+    tokens_raw = getattr(cred, "oauth_tokens", None)
+    email = getattr(cred, "email_address", None)
+    return provider, json.loads(creds_raw) if creds_raw else {}, json.loads(tokens_raw) if tokens_raw else {}, email

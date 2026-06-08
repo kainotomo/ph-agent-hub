@@ -18,6 +18,7 @@ from .prompts import Prompt
 from .skills import Skill, SkillAllowedTool
 from .sessions import Session, SessionActiveTool
 from .tags import Tag, SessionTag
+from .user_tool_credentials import UserToolCredential
 from .messages import Message, MessageFeedback
 from .memory import Memory
 from .message_embeddings import MessageEmbedding
@@ -46,6 +47,7 @@ __all__ = [
     "SessionActiveTool",
     "Tag",
     "SessionTag",
+    "UserToolCredential",
     "Message",
     "MessageFeedback",
     "Memory",

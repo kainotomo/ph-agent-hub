@@ -254,13 +254,13 @@ Tools extend agent capabilities — they can call external APIs, query ERPNext i
 |---|---|---|---|
 | **browser** | Web | Playwright headless Chromium — screenshot pages, extract text, extract tables | `timeout`, `viewport_width`, `viewport_height` |
 | **calculator** | Utility | Safe AST expression evaluator | None |
-| **calendar** | Productivity | Google Calendar — list/create events, find free slots | `provider`, `credentials`, `calendar_id`, `timezone` |
+| **calendar** | Productivity | Google Calendar or Microsoft Outlook — list/create events, find free slots. Supports tenant-level service accounts and per-user OAuth. | `provider`, `credentials`, `calendar_id`, `timezone` |
 | **code_interpreter** | Utility | Docker-sandboxed Python execution (pandas, numpy, matplotlib, plotly) | `timeout`, `allow_network` |
 | **currency_exchange** | Financial | Exchange rates via frankfurter.dev (ECB data) | `base_currency`, `timeout` |
 | **custom** | Extensibility | Admin-authored sandboxed Python tools | `code` (Python), `config` (JSON) |
 | **datetime** | Utility | Timezone-aware date/time queries | `timezone` |
 | **document_generation** | Utility | Markdown→PDF (weasyprint), list→Excel (openpyxl), list→CSV | `company_logo_url` |
-| **email** | Communication | Send emails via SMTP or SendGrid API | `provider`, `smtp_host`, `smtp_port`, `smtp_username`, `smtp_password`, `api_key`, `from_email`, `from_name`, `allowed_recipients` |
+| **email** | Communication | Send, read, search, and manage emails. Supports SMTP/SendGrid (tenant-level) and per-user connected accounts (IMAP, Gmail API, Microsoft Graph). Users connect their own accounts via Account Settings. | `provider`, `smtp_host`, `smtp_port`, `smtp_username`, `smtp_password`, `api_key`, `from_email`, `from_name`, `allowed_recipients` |
 | **erpnext** | Enterprise | ERPNext full CRUD, file upload, doctype metadata | `base_url`, `api_key`, `api_secret` |
 | **etf_data** | Financial | ETF holdings and profiles (yfinance) | None |
 | **fetch_url** | Web | HTTP GET fetching with HTML→text conversion | `timeout`, `user_agent` |
@@ -275,6 +275,7 @@ Tools extend agent capabilities — they can call external APIs, query ERPNext i
 | **slack** | Communication | Send messages to Slack channels | `webhook_url`, `bot_token`, `default_channel`, `allowed_channels` |
 | **sql_query** | Enterprise | Read-only SQL against tenant-configured DB (PostgreSQL, MySQL, MariaDB) | `connection_string`, `row_limit` |
 | **stock_data** | Financial | Stock quotes, historical prices, financials, analyst ratings (yfinance) | None |
+| **tasks** | Productivity | Create, update, and list tasks via Google Tasks or Microsoft To Do. Requires per-user OAuth. Users connect via Account Settings. | None |
 | **weather** | Utility | Weather via wttr.in | None |
 | **web_search** | Web | SearXNG-backed web search | `searxng_url` |
 | **wikipedia** | Knowledge | Article lookup and summary | `language` |
@@ -319,7 +320,7 @@ Tools extend agent capabilities — they can call external APIs, query ERPNext i
 5. Set **Enabled** to ON
 6. Configure **Public** access — when ON, all tenant users can use the tool regardless of group membership
 
-> **Note:** API keys and secrets in the config JSON are **not** automatically encrypted. Use the `EncryptedString` format in the database, or encrypt values manually with the Fernet key before storing them in config JSON. Tools that expect encrypted values (`github.token`, `image_generation.api_key`, `slack.bot_token`, `email.smtp_password`, `email.api_key`, `calendar.credentials`, `sql_query.connection_string`) will attempt decryption at runtime and fall back to plaintext if decryption fails.
+> **Note:** API keys and secrets in the config JSON are **not** automatically encrypted. Use the `EncryptedString` format in the database, or encrypt values manually with the Fernet key before storing them in config JSON. Tools that expect encrypted values (`github.token`, `image_generation.api_key`, `slack.bot_token`, `email.smtp_password`, `email.api_key`, `calendar.credentials`, `sql_query.connection_string`) will attempt decryption at runtime and fall back to plaintext if decryption fails. Per-user credentials stored in `user_tool_credentials` are encrypted at the ORM level automatically.
 
 ### 7.3 Tool-Specific Notes
 
@@ -340,7 +341,11 @@ local TF-IDF-like hashing (256‑dim).
 > `OPENAI_API_KEY` environment variable or in the RAG tool config JSON
 > (`api_key` field).
 
-**Calendar**: Currently supports Google Calendar only (API key for read-only, OAuth/service account for write). CalDAV support planned.
+**Calendar**: Currently supports Google Calendar (API key, OAuth, service account) and Microsoft Graph Calendar (OAuth). Admins can configure tenant-level service accounts; users can connect personal calendars via Account Settings.
+
+**Email**: When using per-user accounts (IMAP, Gmail, Outlook), users connect their own credentials in Account Settings. The admin only needs to create one Email tool (type=`email`, config=`{}`).
+
+**Tasks**: Requires per-user OAuth (Google Tasks or Microsoft To Do). Users connect their accounts in Account Settings. Admins create one Tasks tool (type=`tasks`, config=`{}`).
 
 ---
 
@@ -419,9 +424,84 @@ From the **MCP Servers** list you can:
 
 ---
 
-## 9. Managing Templates & Skills
+## 9. Configuring OAuth for Personal Accounts (Issue #312)
 
-### 9.1 Templates
+Some tools (Email, Calendar, Tasks) support **per-user credentials** — each user connects their own account (Gmail, Outlook, etc.) instead of sharing a single tenant-level configuration.
+
+### 9.1 How It Works
+
+1. **Admin creates one tool** per type (e.g., one "Email" tool, one "Calendar" tool)
+2. **Users connect their own accounts** in Account Settings (gear icon in the chat sidebar)
+3. **Credentials are stored per-user** in the `user_tool_credentials` table, encrypted at rest
+4. **At runtime**, the agent uses each user's credentials automatically — no manual tool activation needed
+
+Tools with connected accounts are **always available** in the agent's tool set, regardless of auto-selection keyword matching.
+
+### 9.2 Google OAuth Setup
+
+To allow users to connect Gmail, Google Calendar, and Google Tasks:
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com) → **APIs & Services**
+2. Create a project (or select an existing one)
+3. Enable these APIs:
+   - `Gmail API`
+   - `Google Calendar API`
+   - `Google Tasks API`
+4. Go to **Credentials** → **Create Credentials** → **OAuth 2.0 Client ID**
+5. Application type: **Web application**
+6. Add the authorized redirect URI: `{API_BASE_URL}/api/credentials/oauth/google/callback`
+7. Copy the **Client ID** and **Client Secret**
+8. Add them to the environment configuration:
+
+```env
+GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=your-client-secret
+API_BASE_URL=https://api.your-domain.com
+FRONTEND_URL=https://app.your-domain.com
+```
+
+### 9.3 Microsoft OAuth Setup
+
+To allow users to connect Outlook, Outlook Calendar, and Microsoft To Do:
+
+1. Go to [Azure Portal → App registrations](https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade)
+2. Click **New registration**
+3. Name: `PH Agent Hub` (or any name)
+4. Supported account types: **Accounts in any organizational directory and personal Microsoft accounts**
+5. Redirect URI: `{API_BASE_URL}/api/credentials/oauth/microsoft/callback`
+6. Click **Register**
+7. Copy the **Application (client) ID**
+8. Go to **Certificates & secrets** → **New client secret** → copy the value
+9. Go to **API permissions** → **Add a permission** → **Microsoft Graph** → **Delegated permissions**
+10. Add these scopes:
+    - `Mail.Read`
+    - `Mail.Send`
+    - `Calendars.ReadWrite`
+    - `Tasks.ReadWrite`
+    - `offline_access`
+11. Click **Grant admin consent** (optional for personal accounts, required for organizational accounts)
+12. Add to environment:
+
+```env
+MS_CLIENT_ID=your-application-id
+MS_CLIENT_SECRET=your-client-secret
+```
+
+### 9.4 User Setup (No Action Required from Admin)
+
+Once OAuth is configured, users:
+1. Click the gear icon ⚙️ in the chat sidebar → **Account Settings**
+2. Click **Connect Account** for Email, Calendar, or Tasks
+3. Choose Google or Microsoft — the OAuth popup handles authentication
+4. Their accounts appear with a green status dot
+
+Manual IMAP setup (for providers without OAuth) is available from Account Settings → Connect Account → Other Email (IMAP).
+
+---
+
+## 10. Managing Templates & Skills
+
+### 10.1 Templates
 
 Templates define reusable system prompts and default configurations for agent sessions. They include:
 - System prompt text

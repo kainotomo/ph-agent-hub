@@ -77,6 +77,20 @@ class Settings(BaseSettings):
     # --- Auto tool selection (Issue #287) ---
     AUTO_SELECT_TOOLS_TOP_K: int = 3
 
+    # --- OAuth (Issue #312) ---
+    GOOGLE_CLIENT_ID: str = ""
+    """Google OAuth client ID for Gmail/Calendar/Tasks access."""
+    GOOGLE_CLIENT_SECRET: str = ""
+    """Google OAuth client secret."""
+    MS_CLIENT_ID: str = ""
+    """Microsoft OAuth client ID for Outlook/Calendar/Tasks access."""
+    MS_CLIENT_SECRET: str = ""
+    """Microsoft OAuth client secret."""
+    API_BASE_URL: str = "http://localhost:8000"
+    """Public-facing base URL of the API (for OAuth callbacks)."""
+    FRONTEND_URL: str = "http://localhost:3000"
+    """Public-facing base URL of the frontend (for OAuth redirect)."""
+
     # --- Licensing (Issue #243) ---
     MAX_FREE_TENANTS: int = 3
     LICENSE_PUBLIC_KEY: str = ""

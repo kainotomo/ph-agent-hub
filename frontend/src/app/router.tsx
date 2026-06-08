@@ -11,6 +11,7 @@ import LoginPage from "../features/auth/LoginPage";
 import ChatPage from "../features/chat/routes/ChatPage";
 import { DemoPage } from "../features/chat/routes/DemoPage";
 import { WidgetPage } from "../features/chat/routes/WidgetPage";
+import { AccountSettingsPage } from "../features/account/AccountSettingsPage";
 import AdminApp from "../features/admin/routes/AdminApp";
 
 export const router = createBrowserRouter([
@@ -36,6 +37,10 @@ export const router = createBrowserRouter([
       {
         path: "/chat/:sessionId",
         element: <ChatPage />,
+      },
+      {
+        path: "/settings",
+        element: <AccountSettingsPage />,
       },
     ],
   },

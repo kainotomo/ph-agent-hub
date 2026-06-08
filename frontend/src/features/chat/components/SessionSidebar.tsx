@@ -39,6 +39,7 @@ import {
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   ReloadOutlined,
+  SettingOutlined,
 } from "@ant-design/icons";
 import { Logo } from "../../../shared/components/Logo";
 import { useNavigate, useParams } from "react-router-dom";
@@ -428,6 +429,14 @@ export function SessionSidebar() {
               {user?.display_name}
             </Text>
           )}
+          <Tooltip title="Settings">
+            <Button
+              type="text"
+              size="small"
+              icon={<SettingOutlined />}
+              onClick={() => navigate("/settings")}
+            />
+          </Tooltip>
           <Tooltip title="Logout">
             <Button
               type="text"

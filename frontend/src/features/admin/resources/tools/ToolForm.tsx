@@ -299,6 +299,7 @@ export function ToolForm({ open, tool, duplicateFrom, onClose }: ToolFormProps) 
               { label: "Slack", value: "slack" },
               { label: "SQL Query", value: "sql_query" },
               { label: "Stock Data", value: "stock_data" },
+              { label: "Tasks", value: "tasks" },
               { label: "Weather", value: "weather" },
               { label: "Web Search", value: "web_search" },
               { label: "Wikipedia", value: "wikipedia" },

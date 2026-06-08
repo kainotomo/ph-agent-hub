@@ -121,6 +121,7 @@ async def _resolve_session_config(
             current_callables=active_tool_callables,
             cleanup_clients=cleanup_clients,
             context_length=context_length,
+            user_id=user_id,
         )
 
     # 5. Determine execution type and name
@@ -1538,6 +1539,7 @@ async def _auto_select_tools(
     current_callables: list,
     cleanup_clients: list,
     context_length: int | None = None,
+    user_id: str | None = None,
 ) -> list:
     """Auto-select tool shortlist for the current user message.
 
@@ -1545,6 +1547,10 @@ async def _auto_select_tools(
     Builds a candidate pool from tenant-approved enabled tools, using
     session-selected and skill-preselected tools as ranking priors, then
     applies a heuristic relevance ranker to produce a Top-K shortlist.
+
+    When ``user_id`` is provided, per-user credentials for personal
+    tools (email, calendar, tasks) are loaded and passed to the
+    tool factories (Issue #312).
 
     Args:
         db: Active DB session.
@@ -1555,6 +1561,7 @@ async def _auto_select_tools(
             (manual selection or skill fallback).
         cleanup_clients: Client list for cleanup registration.
         context_length: Model context length for output cap.
+        user_id: User ID for loading per-user credentials.
 
     Returns:
         Shortlisted list of callables to pass to the agent.
@@ -1691,6 +1698,51 @@ async def _auto_select_tools(
     top_k = getattr(settings, "AUTO_SELECT_TOOLS_TOP_K", 5)
     shortlisted_tools = [t for t, _ in deduped[:top_k]]
 
+    # ── Step 5b: Ensure personal tools with user credentials are always included ──
+    # If the user has connected accounts (email, calendar, tasks), the
+    # corresponding tool must be available even when the current message
+    # doesn't contain intent keywords (Issue #312).
+    if user_id:
+        try:
+            from ..db.orm.user_tool_credentials import UserToolCredential
+            cred_tool_ids = set()
+            for t_type in ("email", "calendar", "tasks"):
+                for t in candidate_tools:
+                    if t.type == t_type:
+                        cred_tool_ids.add(t.id)
+            if cred_tool_ids:
+                cred_result = await db.execute(
+                    select(UserToolCredential.tool_id)
+                    .where(
+                        UserToolCredential.user_id == user_id,
+                        UserToolCredential.tool_id.in_(cred_tool_ids),
+                        UserToolCredential.status == "active",
+                    )
+                    .distinct()
+                )
+                active_cred_tool_ids = {row[0] for row in cred_result.all()}
+                # Prepend tools with active credentials (preserve rank order)
+                kept = []
+                for t in shortlisted_tools:
+                    if t.id in active_cred_tool_ids:
+                        kept.append(t)
+                # Also add any candidate tool with creds not yet in shortlist
+                seen_ids = {t.id for t in shortlisted_tools}
+                for t in candidate_tools:
+                    if t.id in active_cred_tool_ids and t.id not in seen_ids:
+                        kept.append(t)
+                        seen_ids.add(t.id)
+                # Prepend kept tools to the shortlist
+                if kept:
+                    existing = [t for t in shortlisted_tools if t.id not in active_cred_tool_ids]
+                    shortlisted_tools = kept + existing
+                    logger.debug(
+                        "Auto-select: kept %d personal tool(s) with active credentials",
+                        len(kept),
+                    )
+        except Exception:
+            logger.warning("Failed to check credentials for auto-select retention", exc_info=True)
+
     if not shortlisted_tools:
         return current_callables
 
@@ -1704,6 +1756,27 @@ async def _auto_select_tools(
 
     # ── Step 5: Build callables for shortlisted tools ──────────────────
     # Reuse the existing _build_tool_callables dispatch.
+
+    # ── Load per-user credentials for personal tools (Issue #312) ──
+    user_credentials_map: dict[str, list] = {}
+    if user_id:
+        try:
+            from ..db.orm.user_tool_credentials import UserToolCredential
+            tool_ids_for_creds = [t.id for t in shortlisted_tools if t.type in ("email", "calendar", "tasks")]
+            if tool_ids_for_creds:
+                cred_result = await db.execute(
+                    select(UserToolCredential).where(
+                        UserToolCredential.user_id == user_id,
+                        UserToolCredential.tool_id.in_(tool_ids_for_creds),
+                        UserToolCredential.status == "active",
+                    )
+                )
+                creds = list(cred_result.scalars().all())
+                for cred in creds:
+                    user_credentials_map.setdefault(cred.tool_id, []).append(cred)
+        except Exception:
+            logger.warning("Failed to load user credentials in auto-select (user=%s)", user_id, exc_info=True)
+
     callables: list = []
     mcp_by_server: dict[str, list[Tool]] = {}
 
@@ -1716,12 +1789,14 @@ async def _auto_select_tools(
                 tc = await _build_tool_callables(
                     db, tool, tenant_id,
                     session_id=session_id, cleanup_clients=cleanup_clients,
+                    user_credentials=user_credentials_map.get(tool.id),
                 )
                 callables.extend(tc)
         else:
             tc = await _build_tool_callables(
                 db, tool, tenant_id,
                 session_id=session_id, cleanup_clients=cleanup_clients,
+                user_credentials=user_credentials_map.get(tool.id),
             )
             callables.extend(tc)
 
@@ -1738,6 +1813,7 @@ async def _auto_select_tools(
         tc = await _build_tool_callables(
             db, primary, tenant_id,
             session_id=session_id, cleanup_clients=cleanup_clients,
+            user_credentials=user_credentials_map.get(primary.id),
         )
         callables.extend(tc)
         primary.config = orig_config

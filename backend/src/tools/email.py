@@ -328,6 +328,102 @@ def build_email_tools(
 
     # ------------------------------------------------------------------
     @tool
+    async def get_email_body(
+        email_id: str, account_label: str | None = None,
+    ) -> dict:
+        """Get the full body text of a specific email by its ID.
+
+        The ID comes from ``read_emails`` or ``search_emails`` results.
+
+        Args:
+            email_id: The email's unique ID (from read_emails/search_emails).
+            account_label: Which account the email belongs to.
+
+        Returns:
+            Dict with ``id``, ``from``, ``subject``, ``body`` (plain text),
+            and optionally ``error``.
+        """
+        active_cred = _find_credential(user_credentials, account_label)
+        if not active_cred:
+            return {"error": "No matching email account found"}
+
+        cp, cd, tk, _ = _parse_credential(active_cred)
+
+        if cp in ("gmail", "google") and tk.get("access_token"):
+            return await _get_gmail_body(tk["access_token"], email_id)
+        elif cp in ("outlook", "microsoft") and tk.get("access_token"):
+            return await _get_outlook_body(tk["access_token"], email_id)
+        elif cd.get("imap_host"):
+            return await _get_imap_body(
+                cd["imap_host"], int(cd.get("imap_port", 993)),
+                cd.get("username", ""), cd.get("password", ""), email_id,
+            )
+        return {"error": "This account does not support reading email bodies."}
+
+    # ------------------------------------------------------------------
+    @tool
+    async def mark_email_as_read(
+        email_id: str, account_label: str | None = None,
+    ) -> dict:
+        """Mark a specific email as read in the remote inbox.
+
+        Args:
+            email_id: The email's unique ID.
+            account_label: Which account the email is in.
+
+        Returns:
+            Dict with ``status`` and optionally ``error``.
+        """
+        active_cred = _find_credential(user_credentials, account_label)
+        if not active_cred:
+            return {"error": "No matching email account found", "status": "error"}
+
+        cp, cd, tk, _ = _parse_credential(active_cred)
+
+        if cp in ("gmail", "google") and tk.get("access_token"):
+            return await _modify_gmail(tk["access_token"], email_id, remove_labels=["UNREAD"])
+        elif cp in ("outlook", "microsoft") and tk.get("access_token"):
+            return await _mark_outlook_read(tk["access_token"], email_id, is_read=True)
+        elif cd.get("imap_host"):
+            return await _mark_imap_read(
+                cd["imap_host"], int(cd.get("imap_port", 993)),
+                cd.get("username", ""), cd.get("password", ""), email_id, read=True,
+            )
+        return {"error": "This account does not support marking emails as read.", "status": "error"}
+
+    # ------------------------------------------------------------------
+    @tool
+    async def mark_email_as_unread(
+        email_id: str, account_label: str | None = None,
+    ) -> dict:
+        """Mark a specific email as unread in the remote inbox.
+
+        Args:
+            email_id: The email's unique ID.
+            account_label: Which account the email is in.
+
+        Returns:
+            Dict with ``status`` and optionally ``error``.
+        """
+        active_cred = _find_credential(user_credentials, account_label)
+        if not active_cred:
+            return {"error": "No matching email account found", "status": "error"}
+
+        cp, cd, tk, _ = _parse_credential(active_cred)
+
+        if cp in ("gmail", "google") and tk.get("access_token"):
+            return await _modify_gmail(tk["access_token"], email_id, add_labels=["UNREAD"])
+        elif cp in ("outlook", "microsoft") and tk.get("access_token"):
+            return await _mark_outlook_read(tk["access_token"], email_id, is_read=False)
+        elif cd.get("imap_host"):
+            return await _mark_imap_read(
+                cd["imap_host"], int(cd.get("imap_port", 993)),
+                cd.get("username", ""), cd.get("password", ""), email_id, read=False,
+            )
+        return {"error": "This account does not support marking emails as unread.", "status": "error"}
+
+    # ------------------------------------------------------------------
+    @tool
     async def list_email_accounts() -> dict:
         """List all connected email accounts.
 
@@ -346,7 +442,9 @@ def build_email_tools(
 
     tools = [send_email]
     if user_credentials:
-        tools.extend([read_emails, search_emails, list_email_accounts])
+        tools.extend([read_emails, search_emails, get_email_body,
+                       mark_email_as_read, mark_email_as_unread,
+                       list_email_accounts])
     return tools
 
 
@@ -695,3 +793,204 @@ async def _search_imap(host, port, username, password, query, folder="INBOX", ma
         return await asyncio.to_thread(_search)
     except Exception as exc:
         return {"error": f"IMAP search failed: {exc}", "emails": [], "total": 0}
+
+
+# =============================================================================
+# Email body fetch helpers
+# =============================================================================
+
+
+async def _get_imap_body(host, port, username, password, email_id):
+    """Fetch the full plain-text body of an email via IMAP."""
+    import asyncio, imaplib, ssl
+    import email as em
+
+    def _fetch():
+        ctx = ssl.create_default_context()
+        conn = imaplib.IMAP4_SSL(host, port, ssl_context=ctx)
+        conn.login(username, password)
+        conn.select("INBOX")
+
+        typ, md = conn.fetch(email_id.encode(), "(BODY[TEXT])")
+        if typ != "OK" or not isinstance(md[0], tuple):
+            conn.logout()
+            return {"error": "Email not found"}
+
+        raw = md[0][1]
+        # Try to decode
+        body = raw.decode("utf-8", errors="replace") if raw else ""
+        # Also fetch headers for metadata
+        typ2, md2 = conn.fetch(email_id.encode(), "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])")
+        conn.logout()
+
+        result = {"id": email_id, "body": body[:5000]}
+        if typ2 == "OK" and isinstance(md2[0], tuple):
+            msg = em.message_from_bytes(md2[0][1])
+            from email.header import decode_header
+            def _d(s):
+                if not s:
+                    return ""
+                parts = decode_header(s)
+                return " ".join(p.decode(c or "utf-8", "replace") if isinstance(p, bytes) else str(p) for p, c in parts)
+            result["from"] = _d(msg.get("From", ""))
+            result["subject"] = _d(msg.get("Subject", ""))
+            result["date"] = msg.get("Date", "")
+        return result
+
+    try:
+        return await asyncio.to_thread(_fetch)
+    except Exception as exc:
+        return {"error": f"IMAP body fetch failed: {exc}"}
+
+
+async def _mark_imap_read(host, port, username, password, email_id, read=True):
+    """Mark an IMAP email as read (\\Seen) or unread (remove \\Seen)."""
+    import asyncio, imaplib, ssl
+
+    def _mark():
+        ctx = ssl.create_default_context()
+        conn = imaplib.IMAP4_SSL(host, port, ssl_context=ctx)
+        conn.login(username, password)
+        conn.select("INBOX")
+
+        if read:
+            typ, _ = conn.store(email_id.encode(), "+FLAGS", "\\Seen")
+        else:
+            typ, _ = conn.store(email_id.encode(), "-FLAGS", "\\Seen")
+
+        conn.logout()
+        if typ == "OK":
+            return {"status": "ok", "message": f"Marked as {'read' if read else 'unread'}"}
+        return {"error": f"IMAP STORE failed: {typ}", "status": "error"}
+
+    try:
+        return await asyncio.to_thread(_mark)
+    except Exception as exc:
+        return {"error": f"IMAP mark failed: {exc}", "status": "error"}
+
+
+# =============================================================================
+# Gmail API body & modify helpers
+# =============================================================================
+
+
+async def _get_gmail_body(access_token, email_id):
+    """Fetch full email body via Gmail API."""
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            r = await c.get(
+                f"{GMAIL_API_BASE}/messages/{email_id}",
+                params={"format": "full"},
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if r.status_code == 401:
+                return {"error": "Gmail token expired.", "id": email_id}
+            r.raise_for_status()
+            data = r.json()
+
+        # Extract plain-text body
+        payload = data.get("payload", {})
+        body = _extract_gmail_body(payload)
+
+        headers = {h["name"]: h["value"] for h in payload.get("headers", [])}
+        return {
+            "id": email_id,
+            "from": headers.get("From", ""),
+            "subject": headers.get("Subject", ""),
+            "body": body[:5000],
+        }
+    except Exception as exc:
+        return {"error": f"Gmail body fetch failed: {exc}"}
+
+
+def _extract_gmail_body(payload):
+    """Recursively extract plain-text body from Gmail API payload."""
+    if payload.get("mimeType") == "text/plain":
+        data = payload.get("body", {}).get("data", "")
+        if data:
+            import base64
+            return base64.urlsafe_b64decode(data + "===").decode("utf-8", errors="replace")
+    parts = payload.get("parts", [])
+    for part in parts:
+        result = _extract_gmail_body(part)
+        if result:
+            return result
+    return ""
+
+
+async def _modify_gmail(access_token, email_id, add_labels=None, remove_labels=None):
+    """Add or remove labels on a Gmail message (e.g., mark read/unread)."""
+    body = {}
+    if add_labels:
+        body["addLabelIds"] = add_labels
+    if remove_labels:
+        body["removeLabelIds"] = remove_labels
+
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            r = await c.post(
+                f"{GMAIL_API_BASE}/messages/{email_id}/modify",
+                json=body,
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                },
+            )
+            if r.status_code == 401:
+                return {"error": "Gmail token expired.", "status": "error"}
+            if r.status_code == 200:
+                return {"status": "ok"}
+            return {"error": f"Gmail modify failed: HTTP {r.status_code}", "status": "error"}
+    except Exception as exc:
+        return {"error": f"Gmail modify failed: {exc}", "status": "error"}
+
+
+# =============================================================================
+# Outlook body & mark helpers
+# =============================================================================
+
+
+async def _get_outlook_body(access_token, email_id):
+    """Fetch full email body via Microsoft Graph API."""
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            r = await c.get(
+                f"{GRAPH_API_BASE}/messages/{email_id}",
+                params={"$select": "id,from,subject,body,receivedDateTime"},
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if r.status_code == 401:
+                return {"error": "Microsoft token expired.", "id": email_id}
+            r.raise_for_status()
+            data = r.json()
+
+        body_content = data.get("body", {}).get("content", "")
+        return {
+            "id": email_id,
+            "from": data.get("from", {}).get("emailAddress", {}).get("address", ""),
+            "subject": data.get("subject", ""),
+            "body": body_content[:5000] if body_content else "",
+        }
+    except Exception as exc:
+        return {"error": f"Outlook body fetch failed: {exc}"}
+
+
+async def _mark_outlook_read(access_token, email_id, is_read=True):
+    """Mark an Outlook email as read or unread."""
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            r = await c.patch(
+                f"{GRAPH_API_BASE}/messages/{email_id}",
+                json={"isRead": is_read},
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                },
+            )
+            if r.status_code == 401:
+                return {"error": "Microsoft token expired.", "status": "error"}
+            if r.status_code == 200:
+                return {"status": "ok", "message": f"Marked as {'read' if is_read else 'unread'}"}
+            return {"error": f"Graph patch failed: HTTP {r.status_code}", "status": "error"}
+    except Exception as exc:
+        return {"error": f"Outlook mark failed: {exc}", "status": "error"}

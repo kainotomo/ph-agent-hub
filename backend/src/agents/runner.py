@@ -1396,6 +1396,45 @@ async def _resolve_tool_callables(
                         len(tools), skill.title,
                     )
 
+    # ---- Include tools with connected user credentials (Issue #312) ----
+    # If the user has connected accounts (email, calendar, tasks), ensure
+    # the corresponding tools are in the active set so their credentials
+    # can be used — even when auto-select is disabled or the user hasn't
+    # manually added the tool to their session.
+    if user_id and not is_temporary:
+        try:
+            from ..db.orm.user_tool_credentials import UserToolCredential
+
+            # Get all tool types that the user has credentials for
+            cred_result = await db.execute(
+                select(UserToolCredential.tool_id, Tool.type)
+                .join(Tool, Tool.id == UserToolCredential.tool_id)
+                .where(
+                    UserToolCredential.user_id == user_id,
+                    UserToolCredential.status == "active",
+                    Tool.type.in_({"email", "calendar", "tasks"}),
+                    Tool.tenant_id == tenant_id,
+                    Tool.enabled == True,
+                )
+            )
+            cred_rows = cred_result.all()
+            existing_tool_ids = {t.id for t in tools}
+            for cred_tool_id, tool_type in cred_rows:
+                if cred_tool_id not in existing_tool_ids:
+                    # Fetch the full tool record
+                    tool_result = await db.execute(
+                        select(Tool).where(Tool.id == cred_tool_id)
+                    )
+                    cred_tool = tool_result.scalar_one_or_none()
+                    if cred_tool:
+                        tools.append(cred_tool)
+                        existing_tool_ids.add(cred_tool_id)
+        except Exception:
+            logger.warning(
+                "Failed to load credential-linked tools (user=%s)", user_id,
+                exc_info=True,
+            )
+
     # ---- Load per-user credentials for personal tools (Issue #312) ----
     # Credentials are loaded once and passed to the tool factories that
     # support them (email, calendar, tasks). Tools without user credentials

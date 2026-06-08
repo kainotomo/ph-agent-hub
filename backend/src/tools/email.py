@@ -424,6 +424,77 @@ def build_email_tools(
 
     # ------------------------------------------------------------------
     @tool
+    async def list_folders(account_label: str | None = None) -> dict:
+        """List all folders/labels in the connected email account.
+
+        Returns each folder's name. For Gmail accounts, returns labels.
+        For Outlook, returns mail folders.
+
+        Args:
+            account_label: Which account to list folders for.
+
+        Returns:
+            Dict with ``folders`` (list of dicts) and ``total``.
+        """
+        active_cred = _find_credential(user_credentials, account_label)
+        if not active_cred:
+            return {"error": "No matching email account found", "folders": [], "total": 0}
+
+        cp, cd, tk, _ = _parse_credential(active_cred)
+
+        if cp in ("gmail", "google") and tk.get("access_token"):
+            return await _list_gmail_labels(tk["access_token"])
+        elif cp in ("outlook", "microsoft") and tk.get("access_token"):
+            return await _list_outlook_folders(tk["access_token"])
+        elif cd.get("imap_host"):
+            return await _list_imap_folders(
+                cd["imap_host"], int(cd.get("imap_port", 993)),
+                cd.get("username", ""), cd.get("password", ""),
+            )
+        return {"error": "This account does not support folder listing.", "folders": [], "total": 0}
+
+    # ------------------------------------------------------------------
+    @tool
+    async def move_email(
+        email_id: str, folder: str, account_label: str | None = None,
+    ) -> dict:
+        """Move an email to a different folder/label.
+
+        For IMAP accounts, this copies the email to the target folder and
+        removes it from the current folder. For Gmail, it applies/removes
+        labels. For Outlook, it moves to a different mail folder.
+
+        Use ``list_folders`` first to see available folders.
+
+        Args:
+            email_id: The email's unique ID.
+            folder: Target folder name (e.g. "Work", "Archive", "INBOX").
+            account_label: Which account the email is in.
+
+        Returns:
+            Dict with ``status`` and optionally ``error``.
+        """
+        active_cred = _find_credential(user_credentials, account_label)
+        if not active_cred:
+            return {"error": "No matching email account found", "status": "error"}
+
+        cp, cd, tk, _ = _parse_credential(active_cred)
+
+        if cp in ("gmail", "google") and tk.get("access_token"):
+            # Gmail: get current labels, then modify
+            return await _move_gmail(tk["access_token"], email_id, folder)
+        elif cp in ("outlook", "microsoft") and tk.get("access_token"):
+            return await _move_outlook(tk["access_token"], email_id, folder)
+        elif cd.get("imap_host"):
+            return await _move_imap(
+                cd["imap_host"], int(cd.get("imap_port", 993)),
+                cd.get("username", ""), cd.get("password", ""),
+                email_id, folder,
+            )
+        return {"error": "This account does not support moving emails.", "status": "error"}
+
+    # ------------------------------------------------------------------
+    @tool
     async def list_email_accounts() -> dict:
         """List all connected email accounts.
 
@@ -444,6 +515,7 @@ def build_email_tools(
     if user_credentials:
         tools.extend([read_emails, search_emails, get_email_body,
                        mark_email_as_read, mark_email_as_unread,
+                       list_folders, move_email,
                        list_email_accounts])
     return tools
 
@@ -994,3 +1066,185 @@ async def _mark_outlook_read(access_token, email_id, is_read=True):
             return {"error": f"Graph patch failed: HTTP {r.status_code}", "status": "error"}
     except Exception as exc:
         return {"error": f"Outlook mark failed: {exc}", "status": "error"}
+
+
+# =============================================================================
+# Folder listing helpers
+# =============================================================================
+
+
+async def _list_imap_folders(host, port, username, password):
+    """List IMAP folders/mailboxes."""
+    import asyncio, imaplib, ssl
+
+    def _list():
+        ctx = ssl.create_default_context()
+        conn = imaplib.IMAP4_SSL(host, port, ssl_context=ctx)
+        conn.login(username, password)
+        folders = []
+        typ, data = conn.list()
+        if typ == "OK":
+            for item in data:
+                parts = item.decode().split(' "/" ')
+                name = parts[1] if len(parts) == 2 else item.decode().strip()
+                folders.append({"name": name})
+        conn.logout()
+        return {"folders": folders, "total": len(folders)}
+
+    try:
+        return await asyncio.to_thread(_list)
+    except Exception as exc:
+        return {"error": f"IMAP folder list failed: {exc}", "folders": [], "total": 0}
+
+
+async def _list_gmail_labels(access_token):
+    """List Gmail labels."""
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            r = await c.get(
+                f"{GMAIL_API_BASE}/labels",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if r.status_code == 401:
+                return {"error": "Gmail token expired.", "folders": [], "total": 0}
+            r.raise_for_status()
+            data = r.json()
+
+        folders = [
+            {"name": lbl["name"], "type": lbl.get("type", "")}
+            for lbl in data.get("labels", [])
+        ]
+        return {"folders": folders, "total": len(folders)}
+    except Exception as exc:
+        return {"error": f"Gmail labels failed: {exc}", "folders": [], "total": 0}
+
+
+async def _list_outlook_folders(access_token):
+    """List Outlook mail folders."""
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            r = await c.get(
+                f"{GRAPH_API_BASE}/mailFolders",
+                params={"$select": "id,displayName"},
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if r.status_code == 401:
+                return {"error": "Microsoft token expired.", "folders": [], "total": 0}
+            r.raise_for_status()
+            data = r.json()
+
+        folders = [{"name": f["displayName"], "id": f["id"]} for f in data.get("value", [])]
+        return {"folders": folders, "total": len(folders)}
+    except Exception as exc:
+        return {"error": f"Outlook folders failed: {exc}", "folders": [], "total": 0}
+
+
+# =============================================================================
+# Move email helpers
+# =============================================================================
+
+
+async def _move_imap(host, port, username, password, email_id, target_folder):
+    """Move an email to a different IMAP folder via COPY + DELETE."""
+    import asyncio, imaplib, ssl
+
+    def _move():
+        ctx = ssl.create_default_context()
+        conn = imaplib.IMAP4_SSL(host, port, ssl_context=ctx)
+        conn.login(username, password)
+        conn.select("INBOX")
+
+        # Copy to target folder
+        typ_copy, _ = conn.copy(email_id.encode(), target_folder)
+        if typ_copy != "OK":
+            conn.logout()
+            return {"error": f"IMAP COPY failed: folder '{target_folder}' not found?", "status": "error"}
+
+        # Mark as deleted in current folder
+        conn.store(email_id.encode(), "+FLAGS", "\\Deleted")
+        conn.expunge()
+        conn.logout()
+        return {"status": "ok", "message": f"Moved to '{target_folder}'"}
+
+    try:
+        return await asyncio.to_thread(_move)
+    except Exception as exc:
+        return {"error": f"IMAP move failed: {exc}", "status": "error"}
+
+
+async def _move_gmail(access_token, email_id, target_label):
+    """Move a Gmail message by modifying labels (remove INBOX, add target)."""
+    # First get current labels to know what to remove
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            r = await c.get(
+                f"{GMAIL_API_BASE}/messages/{email_id}",
+                params={"format": "metadata"},
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if r.status_code == 401:
+                return {"error": "Gmail token expired.", "status": "error"}
+            r.raise_for_status()
+            data = r.json()
+
+        current_labels = data.get("labelIds", [])
+
+        # If moving to a system label (TRASH, SPAM, etc.), use that directly
+        system_labels = {"INBOX", "TRASH", "SPAM", "SENT", "DRAFT", "STARRED", "UNREAD", "IMPORTANT"}
+        remove_labels = []
+        add_labels = []
+
+        if target_label.upper() in system_labels:
+            # Moving to a system category — remove INBOX, add target
+            if "INBOX" in current_labels and target_label.upper() != "INBOX":
+                remove_labels.append("INBOX")
+            if target_label.upper() not in current_labels:
+                add_labels.append(target_label.upper())
+        else:
+            # Custom label — keep current labels, add the custom one
+            add_labels.append(target_label)
+
+        return await _modify_gmail(access_token, email_id, add_labels=add_labels or None, remove_labels=remove_labels or None)
+
+    except Exception as exc:
+        return {"error": f"Gmail move failed: {exc}", "status": "error"}
+
+
+async def _move_outlook(access_token, email_id, target_folder):
+    """Move an Outlook email via Graph API."""
+    # First look up the folder ID
+    try:
+        folders_result = await _list_outlook_folders(access_token)
+        if "error" in folders_result:
+            return {"error": folders_result["error"], "status": "error"}
+
+        target_id = None
+        for f in folders_result["folders"]:
+            if f["name"].lower() == target_folder.lower():
+                target_id = f["id"]
+                break
+
+        if not target_id:
+            available = ", ".join(f["name"] for f in folders_result["folders"][:15])
+            return {
+                "error": f"Folder '{target_folder}' not found. Available: {available}",
+                "status": "error",
+            }
+
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            r = await c.post(
+                f"{GRAPH_API_BASE}/messages/{email_id}/move",
+                json={"destinationId": target_id},
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                },
+            )
+            if r.status_code == 401:
+                return {"error": "Microsoft token expired.", "status": "error"}
+            if r.status_code in (200, 201):
+                return {"status": "ok", "message": f"Moved to '{target_folder}'"}
+            return {"error": f"Graph move failed: HTTP {r.status_code}", "status": "error"}
+
+    except Exception as exc:
+        return {"error": f"Outlook move failed: {exc}", "status": "error"}

@@ -18,7 +18,7 @@ from sqlalchemy.dialects.mysql import CHAR
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base
-from ..encryption import EncryptedString
+from ...core.encryption import EncryptedString
 from .users import User
 from .tools import Tool
 

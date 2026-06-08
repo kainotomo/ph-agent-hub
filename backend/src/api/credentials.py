@@ -543,7 +543,7 @@ GOOGLE_SCOPES = {
 MICROSOFT_SCOPES = {
     "email_tool": [
         "https://graph.microsoft.com/User.Read",
-        "https://graph.microsoft.com/Mail.Read",
+        "https://graph.microsoft.com/Mail.ReadWrite",
         "https://graph.microsoft.com/Mail.Send",
         "offline_access",
     ],

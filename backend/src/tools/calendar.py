@@ -646,6 +646,211 @@ def build_calendar_tools(
 
     # ------------------------------------------------------------------
     @tool
+    async def delete_event(
+        event_id: str,
+        calendar_label: str | None = None,
+    ) -> dict:
+        """Delete an event from the calendar.
+
+        The event ID comes from ``list_events`` results.
+
+        Args:
+            event_id: The unique ID of the event to delete.
+            calendar_label: Connected account label (optional if only one).
+
+        Returns:
+            Dict with ``status`` and optionally ``error``.
+        """
+        if not event_id:
+            return {"error": "No event ID provided", "status": "error"}
+
+        # Determine which provider to use: user OAuth credentials take priority
+        active_provider = provider
+        active_token = None
+        active_calendar_id = calendar_id
+
+        if user_creds_map:
+            up = user_creds_map.get("provider", "")
+            if up in ("outlook", "microsoft"):
+                active_provider = "microsoft"
+                active_token = user_creds_map.get("access_token", "")
+            elif up in ("gmail", "google"):
+                active_provider = "google"
+                active_token = user_creds_map.get("access_token", "")
+                active_calendar_id = user_creds_map.get("calendar_id", "primary")
+
+        if active_provider == "google":
+            if not active_token:
+                active_token = await _get_google_access_token(credentials)
+            if not active_token or len(active_token) <= 50:
+                return {"error": "Event deletion requires OAuth credentials (API key is read-only).", "status": "error"}
+
+            try:
+                async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                    response = await client.delete(
+                        f"{GOOGLE_CALENDAR_API_BASE}/calendars/{quote(active_calendar_id)}/events/{quote(event_id)}",
+                        headers={"Authorization": f"Bearer {active_token}"},
+                    )
+                    if response.status_code == 401:
+                        return {"error": "Calendar auth failed. Reconnect account.", "status": "error"}
+                    if response.status_code == 404:
+                        return {"error": "Event not found.", "status": "error"}
+                    if response.status_code == 204:
+                        return {"status": "ok", "message": "Event deleted."}
+                    response.raise_for_status()
+                    return {"status": "ok", "message": "Event deleted."}
+            except Exception as exc:
+                logger.error("Failed to delete Google Calendar event: %s", exc)
+                return {"error": f"Failed to delete event: {str(exc)}", "status": "error"}
+
+        elif active_provider == "microsoft":
+            if not active_token:
+                return {"error": "Microsoft Calendar access token not available. Reconnect your account.", "status": "error"}
+
+            try:
+                async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                    response = await client.delete(
+                        f"{GRAPH_API_BASE}/events/{event_id}",
+                        headers={"Authorization": f"Bearer {active_token}"},
+                    )
+                    if response.status_code == 401:
+                        return {"error": "Microsoft token expired. Reconnect your account.", "status": "error"}
+                    if response.status_code == 404:
+                        return {"error": "Event not found.", "status": "error"}
+                    if response.status_code == 204:
+                        return {"status": "ok", "message": "Event deleted."}
+                    response.raise_for_status()
+                    return {"status": "ok", "message": "Event deleted."}
+            except Exception as exc:
+                logger.error("Failed to delete Microsoft Calendar event: %s", exc)
+                return {"error": f"Failed to delete event: {str(exc)}", "status": "error"}
+
+        else:
+            return {"error": f"Calendar provider '{active_provider}' does not support deletion.", "status": "error"}
+
+    # ------------------------------------------------------------------
+    @tool
+    async def update_event(
+        event_id: str,
+        summary: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        description: str | None = None,
+        location: str | None = None,
+        calendar_label: str | None = None,
+    ) -> dict:
+        """Update an existing calendar event (title, time, description, location).
+
+        The event ID comes from ``list_events`` results.
+
+        Args:
+            event_id: The unique ID of the event to update.
+            summary: New title (omit to keep current).
+            start: New start date/time in ISO format.
+            end: New end date/time in ISO format.
+            description: New description.
+            location: New location.
+            calendar_label: Connected account label (optional if only one).
+
+        Returns:
+            Dict with ``status`` and optionally ``error``.
+        """
+        if not event_id:
+            return {"error": "No event ID provided", "status": "error"}
+
+        # Determine which provider to use: user OAuth credentials take priority
+        active_provider = provider
+        active_token = None
+        active_calendar_id = calendar_id
+
+        if user_creds_map:
+            up = user_creds_map.get("provider", "")
+            if up in ("outlook", "microsoft"):
+                active_provider = "microsoft"
+                active_token = user_creds_map.get("access_token", "")
+            elif up in ("gmail", "google"):
+                active_provider = "google"
+                active_token = user_creds_map.get("access_token", "")
+                active_calendar_id = user_creds_map.get("calendar_id", "primary")
+
+        # Build the update body with only the provided fields
+        update_body = {}
+
+        if active_provider == "google":
+            if not active_token:
+                active_token = await _get_google_access_token(credentials)
+            if not active_token or len(active_token) <= 50:
+                return {"error": "Event update requires OAuth credentials (API key is read-only).", "status": "error"}
+
+            if summary is not None:
+                update_body["summary"] = summary
+            if start is not None:
+                update_body["start"] = {"dateTime": _parse_datetime(start), "timeZone": timezone_str}
+            if end is not None:
+                update_body["end"] = {"dateTime": _parse_datetime(end), "timeZone": timezone_str}
+            if description is not None:
+                update_body["description"] = description
+            if location is not None:
+                update_body["location"] = location
+
+            try:
+                async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                    response = await client.patch(
+                        f"{GOOGLE_CALENDAR_API_BASE}/calendars/{quote(active_calendar_id)}/events/{quote(event_id)}",
+                        json=update_body,
+                        headers={"Authorization": f"Bearer {active_token}", "Content-Type": "application/json"},
+                    )
+                    if response.status_code == 401:
+                        return {"error": "Calendar auth failed. Reconnect account.", "status": "error"}
+                    if response.status_code == 404:
+                        return {"error": "Event not found.", "status": "error"}
+                    if response.status_code == 200:
+                        return {"status": "ok", "message": "Event updated."}
+                    response.raise_for_status()
+                    return {"status": "ok", "message": "Event updated."}
+            except Exception as exc:
+                logger.error("Failed to update Google Calendar event: %s", exc)
+                return {"error": f"Failed to update event: {str(exc)}", "status": "error"}
+
+        elif active_provider == "microsoft":
+            if not active_token:
+                return {"error": "Microsoft Calendar access token not available. Reconnect your account.", "status": "error"}
+
+            if summary is not None:
+                update_body["subject"] = summary
+            if start is not None:
+                update_body["start"] = {"dateTime": _parse_datetime(start), "timeZone": timezone_str}
+            if end is not None:
+                update_body["end"] = {"dateTime": _parse_datetime(end), "timeZone": timezone_str}
+            if description is not None:
+                update_body["body"] = {"contentType": "text", "content": description}
+            if location is not None:
+                update_body["location"] = {"displayName": location}
+
+            try:
+                async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                    response = await client.patch(
+                        f"{GRAPH_API_BASE}/events/{event_id}",
+                        json=update_body,
+                        headers={"Authorization": f"Bearer {active_token}", "Content-Type": "application/json"},
+                    )
+                    if response.status_code == 401:
+                        return {"error": "Microsoft token expired. Reconnect your account.", "status": "error"}
+                    if response.status_code == 404:
+                        return {"error": "Event not found.", "status": "error"}
+                    if response.status_code == 200:
+                        return {"status": "ok", "message": "Event updated."}
+                    response.raise_for_status()
+                    return {"status": "ok", "message": "Event updated."}
+            except Exception as exc:
+                logger.error("Failed to update Microsoft Calendar event: %s", exc)
+                return {"error": f"Failed to update event: {str(exc)}", "status": "error"}
+
+        else:
+            return {"error": f"Calendar provider '{active_provider}' does not support updates.", "status": "error"}
+
+    # ------------------------------------------------------------------
+    @tool
     async def list_calendar_accounts() -> dict:
         """List connected calendar accounts available to the agent.
 
@@ -662,7 +867,7 @@ def build_calendar_tools(
         ]
         return {"accounts": accounts, "total": len(accounts)}
 
-    tools = [list_events, create_event, find_free_slots]
+    tools = [list_events, create_event, find_free_slots, delete_event, update_event]
     if user_credentials:
         tools.append(list_calendar_accounts)
     return tools

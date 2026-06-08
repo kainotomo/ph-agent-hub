@@ -249,9 +249,46 @@ def build_tasks_tools(
         ]
         return {"accounts": accounts, "total": len(accounts)}
 
+    # ------------------------------------------------------------------
+    @tool
+    async def delete_task(
+        task_id: str,
+        list_name: str | None = None,
+        account_label: str | None = None,
+    ) -> dict:
+        """Delete a task permanently.
+
+        Args:
+            task_id: ID of the task to delete.
+            list_name: Task list the task belongs to (optional).
+            account_label: Connected account label (optional if only one).
+
+        Returns:
+            Dict with ``status`` and optionally ``error``.
+        """
+        if not task_id:
+            return {"error": "No task ID provided", "status": "error"}
+
+        cred = _find_credential(user_credentials, account_label)
+        if not cred:
+            return _no_account_error("task")
+
+        provider, _, tokens, _ = _parse_credential(cred)
+        access_token = tokens.get("access_token", "")
+
+        if not access_token:
+            return {"error": "Access token not available.", "status": "error"}
+
+        if provider in ("gmail", "google"):
+            return await _delete_google_task(access_token, task_id, list_name)
+        elif provider in ("outlook", "microsoft"):
+            return await _delete_microsoft_task(access_token, task_id, list_name)
+        else:
+            return {"error": f"Provider '{provider}' not supported.", "status": "error"}
+
     tools = []
     if user_credentials:
-        tools = [list_task_lists, list_tasks, create_task, update_task, list_task_accounts]
+        tools = [list_task_lists, list_tasks, create_task, update_task, delete_task, list_task_accounts]
     return tools
 
 
@@ -386,6 +423,24 @@ async def _update_google_task(access_token, task_id, title, completed, due_date,
         return {"error": f"Failed to update task: {exc}", "status": "error"}
 
 
+async def _delete_google_task(access_token, task_id, list_name):
+    task_list_id = await _get_google_task_list_id(access_token, list_name)
+    if not task_list_id:
+        return {"error": "No task list found.", "status": "error"}
+
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            r = await c.delete(
+                f"{GOOGLE_TASKS_API}/lists/{task_list_id}/tasks/{task_id}",
+                headers=_get_headers(access_token),
+            )
+            if r.status_code in (200, 204):
+                return {"status": "ok", "message": "Task deleted."}
+            return {"error": f"Google Tasks error: HTTP {r.status_code}", "status": "error"}
+    except Exception as exc:
+        return {"error": f"Failed to delete task: {exc}", "status": "error"}
+
+
 # =============================================================================
 # Microsoft To Do (Graph API)
 # =============================================================================
@@ -505,3 +560,21 @@ async def _update_microsoft_task(access_token, task_id, title, completed, due_da
             return {"error": f"Graph API error: HTTP {r.status_code}", "status": "error"}
     except Exception as exc:
         return {"error": f"Failed to update task: {exc}", "status": "error"}
+
+
+async def _delete_microsoft_task(access_token, task_id, list_name):
+    list_id = await _get_microsoft_task_list_id(access_token, list_name)
+    if not list_id:
+        return {"error": "No task list found.", "status": "error"}
+
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            r = await c.delete(
+                f"{GRAPH_API_BASE}/todo/lists/{list_id}/tasks/{task_id}",
+                headers=_get_headers(access_token),
+            )
+            if r.status_code in (200, 204):
+                return {"status": "ok", "message": "Task deleted."}
+            return {"error": f"Graph API error: HTTP {r.status_code}", "status": "error"}
+    except Exception as exc:
+        return {"error": f"Failed to delete task: {exc}", "status": "error"}

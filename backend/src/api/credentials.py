@@ -398,11 +398,35 @@ async def google_oauth_callback(
         except Exception:
             pass
 
+    # Resolve tool_id (e.g. "email_tool") to the actual tool UUID from the tools table
+    tool_type = tool_id.replace("_tool", "")
+    result = await db.execute(
+        _select(ToolORM).where(ToolORM.type == tool_type).limit(1)
+    )
+    tool = result.scalars().first()
+    if tool is None:
+        # Create the tool on-the-fly if it doesn't exist (first-time setup)
+        from ..db.orm.tenants import Tenant as TenantORM
+        result = await db.execute(_select(TenantORM).limit(1))
+        tenant = result.scalars().first()
+        if not tenant:
+            raise ValidationError("No tenant found. Run the seed script first.")
+        tool = ToolORM(
+            tenant_id=tenant.id,
+            name=tool_type.capitalize(),
+            type=tool_type,
+            config={},
+            enabled=True,
+            is_public=True,
+        )
+        db.add(tool)
+        await db.flush()
+
     # Create credential entry
     cred = await _svc_create_credential(
         db,
         user_id=user_id,
-        tool_id=tool_id,
+        tool_id=tool.id,
         label=f"Google ({email or 'Gmail'})",
         provider="gmail" if "gmail" in (tokens.get("scope", "") or "") else "google",
         email_address=email or None,
@@ -450,11 +474,35 @@ async def microsoft_oauth_callback(
 
     email = tokens.get("email", "")
 
+    # Resolve tool_id (e.g. "email_tool") to the actual tool UUID from the tools table
+    tool_type = tool_id.replace("_tool", "")
+    result = await db.execute(
+        _select(ToolORM).where(ToolORM.type == tool_type).limit(1)
+    )
+    tool = result.scalars().first()
+    if tool is None:
+        # Create the tool on-the-fly if it doesn't exist (first-time setup)
+        from ..db.orm.tenants import Tenant as TenantORM
+        result = await db.execute(_select(TenantORM).limit(1))
+        tenant = result.scalars().first()
+        if not tenant:
+            raise ValidationError("No tenant found. Run the seed script first.")
+        tool = ToolORM(
+            tenant_id=tenant.id,
+            name=tool_type.capitalize(),
+            type=tool_type,
+            config={},
+            enabled=True,
+            is_public=True,
+        )
+        db.add(tool)
+        await db.flush()
+
     # Create credential entry
     cred = await _svc_create_credential(
         db,
         user_id=user_id,
-        tool_id=tool_id,
+        tool_id=tool.id,
         label=f"Outlook ({email or 'Outlook'})",
         provider="outlook",
         email_address=email or None,

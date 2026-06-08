@@ -283,6 +283,81 @@ async def main() -> None:
         else:
             print(f"[seed] Currency Exchange tool already exists: Currency Exchange (id={currency_tool.id})")
 
+        # 10. Ensure email tool exists (for OAuth email connection)
+        result = await db.execute(
+            select(Tool).where(
+                Tool.tenant_id == tenant.id,
+                Tool.type == "email",
+                Tool.name == "Email",
+            )
+        )
+        email_tool = result.scalars().first()
+
+        if email_tool is None:
+            email_tool = Tool(
+                tenant_id=tenant.id,
+                name="Email",
+                type="email",
+                config={},
+                enabled=True,
+                is_public=True,
+            )
+            db.add(email_tool)
+            await db.flush()
+            print(f"[seed] Created email tool: Email (id={email_tool.id})")
+        else:
+            print(f"[seed] Email tool already exists: Email (id={email_tool.id})")
+
+        # 11. Ensure calendar tool exists (for OAuth calendar connection)
+        result = await db.execute(
+            select(Tool).where(
+                Tool.tenant_id == tenant.id,
+                Tool.type == "calendar",
+                Tool.name == "Calendar",
+            )
+        )
+        calendar_tool = result.scalars().first()
+
+        if calendar_tool is None:
+            calendar_tool = Tool(
+                tenant_id=tenant.id,
+                name="Calendar",
+                type="calendar",
+                config={},
+                enabled=True,
+                is_public=True,
+            )
+            db.add(calendar_tool)
+            await db.flush()
+            print(f"[seed] Created calendar tool: Calendar (id={calendar_tool.id})")
+        else:
+            print(f"[seed] Calendar tool already exists: Calendar (id={calendar_tool.id})")
+
+        # 12. Ensure tasks tool exists (for OAuth tasks connection)
+        result = await db.execute(
+            select(Tool).where(
+                Tool.tenant_id == tenant.id,
+                Tool.type == "tasks",
+                Tool.name == "Tasks",
+            )
+        )
+        tasks_tool = result.scalars().first()
+
+        if tasks_tool is None:
+            tasks_tool = Tool(
+                tenant_id=tenant.id,
+                name="Tasks",
+                type="tasks",
+                config={},
+                enabled=True,
+                is_public=True,
+            )
+            db.add(tasks_tool)
+            await db.flush()
+            print(f"[seed] Created tasks tool: Tasks (id={tasks_tool.id})")
+        else:
+            print(f"[seed] Tasks tool already exists: Tasks (id={tasks_tool.id})")
+
         await db.commit()
 
     print("[seed] Done.")

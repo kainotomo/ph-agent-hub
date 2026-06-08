@@ -64,6 +64,10 @@ markdown
 # Browser automation (Issue #159)
 playwright
 
+# User-scoped email, calendar, tasks (Issue #312)
+aioimaplib
+msal
+
 # Financial / Investor Tools (Issue #158)
 yfinance
 numpy

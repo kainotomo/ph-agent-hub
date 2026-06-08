@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .api.admin import router as admin_router
 from .api.auth import router as auth_router
 from .api.chat import router as chat_router
+from .api.credentials import router as credentials_router
 from .api.demo import router as demo_router
 from .api.memory import router as memory_router
 from .api.models import router as models_router
@@ -107,7 +108,7 @@ async def lifespan(app: FastAPI):
     demo_cleanup_task.cancel()
 
 
-app = FastAPI(title="PH Agent Hub", version="1.17.0", lifespan=lifespan)
+app = FastAPI(title="PH Agent Hub", version="1.18.0", lifespan=lifespan)
 
 # ---------------------------------------------------------------------------
 # Middleware
@@ -147,6 +148,7 @@ app.include_router(templates_router, prefix="/api")
 app.include_router(prompts_router, prefix="/api")
 app.include_router(skills_router, prefix="/api")
 app.include_router(widget_router, prefix="/api")
+app.include_router(credentials_router, prefix="/api")
 app.include_router(demo_router, prefix="/api")
 
 

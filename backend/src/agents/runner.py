@@ -105,9 +105,10 @@ async def _resolve_session_config(
 
     # 4. Resolve active tools
     context_length = getattr(model, "context_length", None)
+    user_id = user.id if user else session_data.get("user_id", "")
     active_tool_callables, cleanup_clients = await _resolve_tool_callables(
         db, session_data, tenant_id, file_ids=file_ids,
-        context_length=context_length,
+        context_length=context_length, user_id=user_id,
     )
 
     # 4b. Auto-select Top-K shortlist if auto_select_tools is enabled
@@ -1321,8 +1322,13 @@ async def _resolve_tool_callables(
     tenant_id: str,
     file_ids: list[str] | None = None,
     context_length: int | None = None,
+    user_id: str | None = None,
 ) -> tuple[list, list]:
     """Resolve active tools into MAF tool callables.
+
+    When a ``user_id`` is provided, per-user credentials for personal
+    tools (email, calendar, tasks) are loaded and passed to the
+    appropriate tool factory (Issue #312).
 
     Returns:
         A tuple of (callables, cleanup_clients) where cleanup_clients is a
@@ -1389,6 +1395,33 @@ async def _resolve_tool_callables(
                         len(tools), skill.title,
                     )
 
+    # ---- Load per-user credentials for personal tools (Issue #312) ----
+    # Credentials are loaded once and passed to the tool factories that
+    # support them (email, calendar, tasks). Tools without user credentials
+    # fall back to tenant-level tool.config.
+    user_credentials_map: dict[str, list] = {}
+    if user_id:
+        try:
+            from ..db.orm.user_tool_credentials import UserToolCredential
+
+            tool_ids_for_creds = [t.id for t in tools if t.type in ("email", "calendar", "tasks")]
+            if tool_ids_for_creds:
+                cred_result = await db.execute(
+                    select(UserToolCredential).where(
+                        UserToolCredential.user_id == user_id,
+                        UserToolCredential.tool_id.in_(tool_ids_for_creds),
+                        UserToolCredential.status == "active",
+                    )
+                )
+                creds = list(cred_result.scalars().all())
+                for cred in creds:
+                    user_credentials_map.setdefault(cred.tool_id, []).append(cred)
+        except Exception:
+            logger.warning(
+                "Failed to load user credentials for tools (user=%s)", user_id,
+                exc_info=True,
+            )
+
     # Build callables for each tool, deduplicating MCP tools by server_id
     # to avoid opening multiple connections to the same server.
     callables: list = []
@@ -1403,12 +1436,14 @@ async def _resolve_tool_callables(
                 tc = await _build_tool_callables(
                     db, tool, tenant_id,
                     session_id=session_id, cleanup_clients=cleanup_clients,
+                    user_credentials=user_credentials_map.get(tool.id),
                 )
                 callables.extend(tc)
         else:
             tc = await _build_tool_callables(
                 db, tool, tenant_id,
                 session_id=session_id, cleanup_clients=cleanup_clients,
+                user_credentials=user_credentials_map.get(tool.id),
             )
             callables.extend(tc)
 
@@ -1584,6 +1619,9 @@ async def _auto_select_tools(
         "sec_filings": ["sec", "filing", "10-k", "10-q", "edgar", "financial"],
         "wikipedia": ["wikipedia", "wiki", "encyclopedia"],
         "currency_exchange": ["currency", "exchange rate", "convert", "usd", "eur"],
+        "email": ["email", "mail", "inbox", "send", "message"],
+        "calendar": ["calendar", "schedule", "meeting", "appointment", "event"],
+        "tasks": ["task", "todo", "to-do", "remind", "deadline"],
         "rag_search": ["rag", "document", "knowledge", "search my"],
     }
 
@@ -1756,8 +1794,16 @@ async def _build_tool_callables(
     tenant_id: str,
     session_id: str = "",
     cleanup_clients: list | None = None,
+    user_credentials: list | None = None,
 ) -> list:
-    """Dispatch on tool.type to the appropriate factory."""
+    """Dispatch on tool.type to the appropriate factory.
+
+    Args:
+        user_credentials: Optional list of ``UserToolCredential`` ORM
+            instances for personal tools (email, calendar, tasks).
+            When provided, the tool factory uses per-user auth instead
+            of the tenant-level ``tool.config`` (Issue #312).
+    """
     if tool.type == "erpnext":
         return await _build_erpnext_callables(db, tool, tenant_id, session_id=session_id, cleanup_clients=cleanup_clients)
     elif tool.type == "membrane":
@@ -1837,7 +1883,16 @@ async def _build_tool_callables(
         return build_github_tools(tool.config or {})
     elif tool.type == "calendar":
         from ..tools.calendar import build_calendar_tools
-        return build_calendar_tools(tool.config or {})
+        return build_calendar_tools(
+            tool.config or {},
+            user_credentials=user_credentials,
+        )
+    elif tool.type == "tasks":
+        from ..tools.tasks import build_tasks_tools
+        return build_tasks_tools(
+            tool.config or {},
+            user_credentials=user_credentials,
+        )
     elif tool.type == "image_generation":
         from ..tools.image_generation import build_image_generation_tools
         return build_image_generation_tools(
@@ -1848,7 +1903,10 @@ async def _build_tool_callables(
         return build_slack_tools(tool.config or {})
     elif tool.type == "email":
         from ..tools.email import build_email_tools
-        return build_email_tools(tool.config or {})
+        return build_email_tools(
+            tool.config or {},
+            user_credentials=user_credentials,
+        )
     elif tool.type == "mcp":
         from ..tools.mcp import build_mcp_tool_callables
         return await build_mcp_tool_callables(

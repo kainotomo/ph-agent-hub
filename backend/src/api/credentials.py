@@ -542,15 +542,18 @@ GOOGLE_SCOPES = {
 
 MICROSOFT_SCOPES = {
     "email_tool": [
+        "https://graph.microsoft.com/User.Read",
         "https://graph.microsoft.com/Mail.Read",
         "https://graph.microsoft.com/Mail.Send",
         "offline_access",
     ],
     "calendar_tool": [
+        "https://graph.microsoft.com/User.Read",
         "https://graph.microsoft.com/Calendars.ReadWrite",
         "offline_access",
     ],
     "tasks_tool": [
+        "https://graph.microsoft.com/User.Read",
         "https://graph.microsoft.com/Tasks.ReadWrite",
         "offline_access",
     ],

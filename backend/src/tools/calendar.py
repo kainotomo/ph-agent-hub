@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 DEFAULT_TIMEOUT: float = 30.0
 GOOGLE_CALENDAR_API_BASE: str = "https://www.googleapis.com/calendar/v3"
+GRAPH_API_BASE: str = "https://graph.microsoft.com/v1.0/me"
 
 
 # ---------------------------------------------------------------------------
@@ -229,9 +230,25 @@ def build_calendar_tools(
             except ValueError:
                 time_max = time_min
 
-        if provider == "google":
-            token = await _get_google_access_token(credentials)
-            if not token:
+        # Determine which provider to use: user OAuth credentials take priority
+        active_provider = provider
+        active_token = None
+        active_calendar_id = calendar_id
+
+        if user_creds_map:
+            up = user_creds_map.get("provider", "")
+            if up in ("outlook", "microsoft"):
+                active_provider = "microsoft"
+                active_token = user_creds_map.get("access_token", "")
+            elif up in ("gmail", "google"):
+                active_provider = "google"
+                active_token = user_creds_map.get("access_token", "")
+                active_calendar_id = user_creds_map.get("calendar_id", "primary")
+
+        if active_provider == "google":
+            if not active_token:
+                active_token = await _get_google_access_token(credentials)
+            if not active_token:
                 return {
                     "error": (
                         "Calendar is not configured. Please set up Google Calendar "
@@ -241,7 +258,7 @@ def build_calendar_tools(
                     "total": 0,
                 }
 
-            headers = {"Authorization": f"Bearer {token}"} if len(token) > 50 else {}
+            headers = {"Authorization": f"Bearer {active_token}"} if len(active_token) > 50 else {}
             params = {
                 "timeMin": time_min,
                 "timeMax": time_max,
@@ -250,13 +267,13 @@ def build_calendar_tools(
                 "orderBy": "startTime",
                 "timeZone": timezone_str,
             }
-            if len(token) <= 50:
-                params["key"] = token  # API key mode
+            if len(active_token) <= 50:
+                params["key"] = active_token  # API key mode
 
             try:
                 async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
                     response = await client.get(
-                        f"{GOOGLE_CALENDAR_API_BASE}/calendars/{quote(calendar_id)}/events",
+                        f"{GOOGLE_CALENDAR_API_BASE}/calendars/{quote(active_calendar_id)}/events",
                         params=params,
                         headers=headers,
                     )
@@ -264,7 +281,7 @@ def build_calendar_tools(
                     if response.status_code == 401:
                         return {"error": "Calendar authentication failed. Check credentials.", "events": [], "total": 0}
                     elif response.status_code == 404:
-                        return {"error": f"Calendar '{calendar_id}' not found.", "events": [], "total": 0}
+                        return {"error": f"Calendar '{active_calendar_id}' not found.", "events": [], "total": 0}
 
                     response.raise_for_status()
                     data = response.json()
@@ -295,8 +312,66 @@ def build_calendar_tools(
                 })
 
             return {"events": events, "total": len(events)}
+
+        elif active_provider == "microsoft":
+            if not active_token:
+                return {
+                    "error": "Microsoft Calendar access token not available. Reconnect your account.",
+                    "events": [],
+                    "total": 0,
+                }
+
+            try:
+                async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                    response = await client.get(
+                        f"{GRAPH_API_BASE}/calendarView",
+                        params={
+                            "startDateTime": time_min,
+                            "endDateTime": time_max,
+                            "$top": min(max_results, 250),
+                            "$orderby": "start/dateTime",
+                        },
+                        headers={
+                            "Authorization": f"Bearer {active_token}",
+                            "Prefer": f"outlook.timezone=\"{timezone_str}\"",
+                        },
+                    )
+
+                    if response.status_code == 401:
+                        return {"error": "Microsoft token expired. Reconnect your account.", "events": [], "total": 0}
+
+                    response.raise_for_status()
+                    data = response.json()
+
+            except Exception as exc:
+                logger.error("Microsoft Graph Calendar API failed: %s", exc)
+                return {"error": f"Calendar API request failed: {str(exc)}", "events": [], "total": 0}
+
+            items = data.get("value", [])
+            events = []
+            for item in items:
+                start_info = item.get("start", {})
+                end_info = item.get("end", {})
+
+                events.append({
+                    "id": item.get("id", ""),
+                    "summary": item.get("subject", "Untitled"),
+                    "description": item.get("bodyPreview", ""),
+                    "location": item.get("location", {}).get("displayName", ""),
+                    "start": start_info.get("dateTime", start_info.get("date", "")),
+                    "end": end_info.get("dateTime", end_info.get("date", "")),
+                    "status": item.get("showAs", ""),
+                    "attendees": [
+                        a.get("emailAddress", {}).get("address", "")
+                        for a in item.get("attendees", [])
+                    ] if item.get("attendees") else [],
+                    "html_link": "",
+                })
+
+            return {"events": events, "total": len(events)}
+
         else:
-            return {"error": f"Calendar provider '{provider}' is not supported yet", "events": [], "total": 0}
+            return {"error": f"Calendar provider '{active_provider}' is not supported yet", "events": [], "total": 0}
 
     # ------------------------------------------------------------------
     @tool
@@ -337,9 +412,25 @@ def build_calendar_tools(
         start_iso = _parse_datetime(start)
         end_iso = _parse_datetime(end)
 
-        if provider == "google":
-            token = await _get_google_access_token(credentials)
-            if not token or len(token) <= 50:
+        # Determine which provider to use: user OAuth credentials take priority
+        active_provider = provider
+        active_token = None
+        active_calendar_id = calendar_id
+
+        if user_creds_map:
+            up = user_creds_map.get("provider", "")
+            if up in ("outlook", "microsoft"):
+                active_provider = "microsoft"
+                active_token = user_creds_map.get("access_token", "")
+            elif up in ("gmail", "google"):
+                active_provider = "google"
+                active_token = user_creds_map.get("access_token", "")
+                active_calendar_id = user_creds_map.get("calendar_id", "primary")
+
+        if active_provider == "google":
+            if not active_token:
+                active_token = await _get_google_access_token(credentials)
+            if not active_token or len(active_token) <= 50:
                 return {
                     "error": (
                         "Calendar event creation requires OAuth or service account "
@@ -348,7 +439,7 @@ def build_calendar_tools(
                 }
 
             headers = {
-                "Authorization": f"Bearer {token}",
+                "Authorization": f"Bearer {active_token}",
                 "Content-Type": "application/json",
             }
 
@@ -373,7 +464,7 @@ def build_calendar_tools(
             try:
                 async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
                     response = await client.post(
-                        f"{GOOGLE_CALENDAR_API_BASE}/calendars/{quote(calendar_id)}/events",
+                        f"{GOOGLE_CALENDAR_API_BASE}/calendars/{quote(active_calendar_id)}/events",
                         json=event_data,
                         headers=headers,
                     )
@@ -398,8 +489,63 @@ def build_calendar_tools(
                 "html_link": data.get("htmlLink", ""),
                 "status": data.get("status", "confirmed"),
             }
+
+        elif active_provider == "microsoft":
+            if not active_token:
+                return {"error": "Microsoft Calendar access token not available. Reconnect your account."}
+
+            event_data = {
+                "subject": summary.strip(),
+                "start": {
+                    "dateTime": start_iso,
+                    "timeZone": timezone_str,
+                },
+                "end": {
+                    "dateTime": end_iso,
+                    "timeZone": timezone_str,
+                },
+            }
+            if description:
+                event_data["body"] = {"contentType": "text", "content": description}
+            if location:
+                event_data["location"] = {"displayName": location}
+            if attendees:
+                event_data["attendees"] = [
+                    {"emailAddress": {"address": a.strip()}} for a in attendees
+                ]
+
+            try:
+                async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                    response = await client.post(
+                        f"{GRAPH_API_BASE}/events",
+                        json=event_data,
+                        headers={
+                            "Authorization": f"Bearer {active_token}",
+                            "Content-Type": "application/json",
+                        },
+                    )
+
+                    if response.status_code == 401:
+                        return {"error": "Microsoft token expired. Reconnect your account."}
+
+                    response.raise_for_status()
+                    data = response.json()
+
+            except Exception as exc:
+                logger.error("Failed to create Microsoft calendar event: %s", exc)
+                return {"error": f"Failed to create event: {str(exc)}"}
+
+            return {
+                "id": data.get("id", ""),
+                "summary": data.get("subject", summary),
+                "start": data.get("start", {}).get("dateTime", start_iso),
+                "end": data.get("end", {}).get("dateTime", end_iso),
+                "html_link": "",
+                "status": "confirmed",
+            }
+
         else:
-            return {"error": f"Calendar provider '{provider}' is not supported yet"}
+            return {"error": f"Calendar provider '{active_provider}' is not supported yet"}
 
     # ------------------------------------------------------------------
     @tool

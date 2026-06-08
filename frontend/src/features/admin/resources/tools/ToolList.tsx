@@ -76,6 +76,10 @@ export function ToolList() {
     mcp: "MCP",
     system: "System",
     general: "General",
+    communication: "Communication",
+    devops: "DevOps",
+    productivity: "Productivity",
+    creative: "Creative",
   };
 
   const CATEGORY_COLORS: Record<string, string> = {
@@ -87,6 +91,10 @@ export function ToolList() {
     mcp: "teal",
     system: "default",
     general: "default",
+    communication: "geekblue",
+    devops: "red",
+    productivity: "gold",
+    creative: "magenta",
   };
 
   const CATEGORY_OPTIONS = Object.entries(CATEGORY_LABELS).map(([value, label]) => ({

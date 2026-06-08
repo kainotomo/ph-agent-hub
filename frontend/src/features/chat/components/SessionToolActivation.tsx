@@ -37,9 +37,13 @@ const CATEGORY_ORDER: Record<string, number> = {
   enterprise: 3,
   utility: 4,
   custom: 5,
-  mcp: 6,
-  system: 7,
-  general: 8,
+  communication: 6,
+  devops: 7,
+  productivity: 8,
+  creative: 9,
+  mcp: 10,
+  system: 11,
+  general: 12,
 };
 
 const CATEGORY_LABELS: Record<string, string> = {
@@ -48,6 +52,10 @@ const CATEGORY_LABELS: Record<string, string> = {
   enterprise: "Enterprise",
   utility: "Utility",
   custom: "Custom",
+  communication: "Communication",
+  devops: "DevOps",
+  productivity: "Productivity",
+  creative: "Creative",
   mcp: "MCP",
   system: "System",
   general: "General",

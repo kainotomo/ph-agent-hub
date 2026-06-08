@@ -482,9 +482,8 @@ async def _list_microsoft_tasks(access_token, list_name, include_completed, limi
     if not list_id:
         return {"error": "No task list found.", "tasks": [], "total": 0}
 
-    params = {"$top": limit, "$select": "id,title,createdDateTime,dueDateTime,status,body"}
-    if not include_completed:
-        params["$filter"] = "status ne 'completed'"
+    # Use minimal query params — $select with complex types can cause 400
+    params = {"$top": limit}
 
     try:
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
@@ -494,6 +493,14 @@ async def _list_microsoft_tasks(access_token, list_name, include_completed, limi
             )
             if r.status_code == 401:
                 return {"error": "Token expired.", "tasks": [], "total": 0}
+            if r.status_code == 400:
+                # Try without any params
+                r = await c.get(
+                    f"{GRAPH_API_BASE}/todo/lists/{list_id}/tasks",
+                    headers=_get_headers(access_token),
+                )
+                if r.status_code == 401:
+                    return {"error": "Token expired.", "tasks": [], "total": 0}
             r.raise_for_status()
             data = r.json()
 
@@ -502,6 +509,10 @@ async def _list_microsoft_tasks(access_token, list_name, include_completed, limi
              "status": t.get("status", "")}
             for t in data.get("value", [])
         ]
+        # Client-side filtering for uncompleted tasks if needed
+        if not include_completed:
+            tasks = [t for t in tasks if t.get("status") != "completed"]
+
         return {"tasks": tasks, "total": len(tasks)}
     except Exception as exc:
         return {"error": f"Failed to list tasks: {exc}", "tasks": [], "total": 0}

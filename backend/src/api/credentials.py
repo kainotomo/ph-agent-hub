@@ -400,19 +400,24 @@ async def google_oauth_callback(
 
     # Resolve tool_id (e.g. "email_tool") to the actual tool UUID from the tools table
     tool_type = tool_id.replace("_tool", "")
+    # Look up the user's tenant so we find/create the tool under the right tenant
+    user_result = await db.execute(
+        _select(UserORM).where(UserORM.id == user_id)
+    )
+    user = user_result.scalars().first()
+    if not user:
+        raise ValidationError(f"User {user_id} not found.")
     result = await db.execute(
-        _select(ToolORM).where(ToolORM.type == tool_type).limit(1)
+        _select(ToolORM).where(
+            ToolORM.type == tool_type,
+            ToolORM.tenant_id == user.tenant_id,
+        ).limit(1)
     )
     tool = result.scalars().first()
     if tool is None:
-        # Create the tool on-the-fly if it doesn't exist (first-time setup)
-        from ..db.orm.tenants import Tenant as TenantORM
-        result = await db.execute(_select(TenantORM).limit(1))
-        tenant = result.scalars().first()
-        if not tenant:
-            raise ValidationError("No tenant found. Run the seed script first.")
+        # Create the tool on-the-fly if it doesn't exist
         tool = ToolORM(
-            tenant_id=tenant.id,
+            tenant_id=user.tenant_id,
             name=tool_type.capitalize(),
             type=tool_type,
             config={},
@@ -476,19 +481,24 @@ async def microsoft_oauth_callback(
 
     # Resolve tool_id (e.g. "email_tool") to the actual tool UUID from the tools table
     tool_type = tool_id.replace("_tool", "")
+    # Look up the user's tenant so we find/create the tool under the right tenant
+    user_result = await db.execute(
+        _select(UserORM).where(UserORM.id == user_id)
+    )
+    user = user_result.scalars().first()
+    if not user:
+        raise ValidationError(f"User {user_id} not found.")
     result = await db.execute(
-        _select(ToolORM).where(ToolORM.type == tool_type).limit(1)
+        _select(ToolORM).where(
+            ToolORM.type == tool_type,
+            ToolORM.tenant_id == user.tenant_id,
+        ).limit(1)
     )
     tool = result.scalars().first()
     if tool is None:
-        # Create the tool on-the-fly if it doesn't exist (first-time setup)
-        from ..db.orm.tenants import Tenant as TenantORM
-        result = await db.execute(_select(TenantORM).limit(1))
-        tenant = result.scalars().first()
-        if not tenant:
-            raise ValidationError("No tenant found. Run the seed script first.")
+        # Create the tool on-the-fly if it doesn't exist
         tool = ToolORM(
-            tenant_id=tenant.id,
+            tenant_id=user.tenant_id,
             name=tool_type.capitalize(),
             type=tool_type,
             config={},
@@ -542,20 +552,29 @@ GOOGLE_SCOPES = {
 
 MICROSOFT_SCOPES = {
     "email_tool": [
+        "openid",
+        "profile",
+        "email",
+        "offline_access",
         "https://graph.microsoft.com/User.Read",
         "https://graph.microsoft.com/Mail.ReadWrite",
         "https://graph.microsoft.com/Mail.Send",
-        "offline_access",
     ],
     "calendar_tool": [
+        "openid",
+        "profile",
+        "email",
+        "offline_access",
         "https://graph.microsoft.com/User.Read",
         "https://graph.microsoft.com/Calendars.ReadWrite",
-        "offline_access",
     ],
     "tasks_tool": [
+        "openid",
+        "profile",
+        "email",
+        "offline_access",
         "https://graph.microsoft.com/User.Read",
         "https://graph.microsoft.com/Tasks.ReadWrite",
-        "offline_access",
     ],
 }
 

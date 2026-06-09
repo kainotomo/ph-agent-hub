@@ -22,6 +22,8 @@ from typing import Any
 import httpx
 from agent_framework import tool
 
+from ._oauth_refresh import refresh_token_if_expired as _refresh_token_if_expired
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -36,36 +38,6 @@ GRAPH_API_BASE: str = "https://graph.microsoft.com/v1.0/me"
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-async def _refresh_token_if_expired(
-    tokens: dict, provider: str, tool_name: str = "Email",
-) -> dict | None:
-    """Try to refresh an OAuth token. Returns updated tokens dict or None."""
-    from ..core.oauth import refresh_oauth_token
-    from ..core.config import settings
-
-    refresh_token = tokens.get("refresh_token", "")
-    if not refresh_token:
-        return None
-
-    if provider in ("gmail", "google"):
-        client_id = settings.GOOGLE_CLIENT_ID
-        client_secret = settings.GOOGLE_CLIENT_SECRET
-    else:
-        client_id = settings.MS_CLIENT_ID
-        client_secret = settings.MS_CLIENT_SECRET
-
-    try:
-        result = await refresh_oauth_token(tokens, provider, client_id, client_secret)
-        if result:
-            tokens["access_token"] = result.get("access_token", tokens.get("access_token", ""))
-            tokens["expires_at"] = result.get("expires_at", tokens.get("expires_at", 0))
-            return tokens
-    except Exception:
-        logger.warning("%s token refresh failed", tool_name, exc_info=True)
-
-    return None
-
 
 def _resolve_credentials(tool_config: dict) -> dict:
     """Resolve and decrypt credentials from config."""

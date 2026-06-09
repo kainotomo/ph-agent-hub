@@ -14,6 +14,8 @@ from typing import Any
 import httpx
 from agent_framework import tool
 
+from ._oauth_refresh import refresh_token_if_expired
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 15.0
@@ -98,9 +100,19 @@ def build_tasks_tools(
             return {"error": "Access token not available. Reconnect account.", "task_lists": [], "total": 0}
 
         if provider in ("gmail", "google"):
-            return await _list_google_task_lists(access_token)
+            result = await _list_google_task_lists(access_token)
+            if "Token expired" in result.get("error", ""):
+                refreshed = await refresh_token_if_expired(tokens, provider, "Tasks", credential_orm=cred, tokens_dict=tokens)
+                if refreshed:
+                    result = await _list_google_task_lists(tokens["access_token"])
+            return result
         elif provider in ("outlook", "microsoft"):
-            return await _list_microsoft_task_lists(access_token)
+            result = await _list_microsoft_task_lists(access_token)
+            if "Token expired" in result.get("error", ""):
+                refreshed = await refresh_token_if_expired(tokens, provider, "Tasks", credential_orm=cred, tokens_dict=tokens)
+                if refreshed:
+                    result = await _list_microsoft_task_lists(tokens["access_token"])
+            return result
         else:
             return {"error": f"Provider '{provider}' not supported for tasks.", "task_lists": [], "total": 0}
 
@@ -138,9 +150,19 @@ def build_tasks_tools(
             return {"error": "Access token not available.", "tasks": [], "total": 0}
 
         if provider in ("gmail", "google"):
-            return await _list_google_tasks(access_token, list_name, include_completed, limit)
+            result = await _list_google_tasks(access_token, list_name, include_completed, limit)
+            if "Token expired" in result.get("error", ""):
+                refreshed = await refresh_token_if_expired(tokens, provider, "Tasks", credential_orm=cred, tokens_dict=tokens)
+                if refreshed:
+                    result = await _list_google_tasks(tokens["access_token"], list_name, include_completed, limit)
+            return result
         elif provider in ("outlook", "microsoft"):
-            return await _list_microsoft_tasks(access_token, list_name, include_completed, limit)
+            result = await _list_microsoft_tasks(access_token, list_name, include_completed, limit)
+            if "Token expired" in result.get("error", ""):
+                refreshed = await refresh_token_if_expired(tokens, provider, "Tasks", credential_orm=cred, tokens_dict=tokens)
+                if refreshed:
+                    result = await _list_microsoft_tasks(tokens["access_token"], list_name, include_completed, limit)
+            return result
         else:
             return {"error": f"Provider '{provider}' not supported.", "tasks": [], "total": 0}
 
@@ -180,9 +202,19 @@ def build_tasks_tools(
             return {"error": "Access token not available.", "status": "error"}
 
         if provider in ("gmail", "google"):
-            return await _create_google_task(access_token, title.strip(), list_name, due_date, notes)
+            result = await _create_google_task(access_token, title.strip(), list_name, due_date, notes)
+            if "Token expired" in result.get("error", ""):
+                refreshed = await refresh_token_if_expired(tokens, provider, "Tasks", credential_orm=cred, tokens_dict=tokens)
+                if refreshed:
+                    result = await _create_google_task(tokens["access_token"], title.strip(), list_name, due_date, notes)
+            return result
         elif provider in ("outlook", "microsoft"):
-            return await _create_microsoft_task(access_token, title.strip(), list_name, due_date, notes)
+            result = await _create_microsoft_task(access_token, title.strip(), list_name, due_date, notes)
+            if "Token expired" in result.get("error", ""):
+                refreshed = await refresh_token_if_expired(tokens, provider, "Tasks", credential_orm=cred, tokens_dict=tokens)
+                if refreshed:
+                    result = await _create_microsoft_task(tokens["access_token"], title.strip(), list_name, due_date, notes)
+            return result
         else:
             return {"error": f"Provider '{provider}' not supported."}
 
@@ -225,9 +257,19 @@ def build_tasks_tools(
             return {"error": "Access token not available.", "status": "error"}
 
         if provider in ("gmail", "google"):
-            return await _update_google_task(access_token, task_id, title, completed, due_date, notes, list_name)
+            result = await _update_google_task(access_token, task_id, title, completed, due_date, notes, list_name)
+            if "Token expired" in result.get("error", ""):
+                refreshed = await refresh_token_if_expired(tokens, provider, "Tasks", credential_orm=cred, tokens_dict=tokens)
+                if refreshed:
+                    result = await _update_google_task(tokens["access_token"], task_id, title, completed, due_date, notes, list_name)
+            return result
         elif provider in ("outlook", "microsoft"):
-            return await _update_microsoft_task(access_token, task_id, title, completed, due_date, notes, list_name)
+            result = await _update_microsoft_task(access_token, task_id, title, completed, due_date, notes, list_name)
+            if "Token expired" in result.get("error", ""):
+                refreshed = await refresh_token_if_expired(tokens, provider, "Tasks", credential_orm=cred, tokens_dict=tokens)
+                if refreshed:
+                    result = await _update_microsoft_task(tokens["access_token"], task_id, title, completed, due_date, notes, list_name)
+            return result
         else:
             return {"error": f"Provider '{provider}' not supported."}
 
@@ -280,9 +322,19 @@ def build_tasks_tools(
             return {"error": "Access token not available.", "status": "error"}
 
         if provider in ("gmail", "google"):
-            return await _delete_google_task(access_token, task_id, list_name)
+            result = await _delete_google_task(access_token, task_id, list_name)
+            if "Token expired" in result.get("error", ""):
+                refreshed = await refresh_token_if_expired(tokens, provider, "Tasks", credential_orm=cred, tokens_dict=tokens)
+                if refreshed:
+                    result = await _delete_google_task(tokens["access_token"], task_id, list_name)
+            return result
         elif provider in ("outlook", "microsoft"):
-            return await _delete_microsoft_task(access_token, task_id, list_name)
+            result = await _delete_microsoft_task(access_token, task_id, list_name)
+            if "Token expired" in result.get("error", ""):
+                refreshed = await refresh_token_if_expired(tokens, provider, "Tasks", credential_orm=cred, tokens_dict=tokens)
+                if refreshed:
+                    result = await _delete_microsoft_task(tokens["access_token"], task_id, list_name)
+            return result
         else:
             return {"error": f"Provider '{provider}' not supported.", "status": "error"}
 
@@ -390,6 +442,8 @@ async def _create_google_task(access_token, title, list_name, due_date, notes):
             if r.status_code in (200, 201):
                 data = r.json()
                 return {"id": data.get("id", ""), "title": title, "status": "created"}
+            if r.status_code == 401:
+                return {"error": "Token expired.", "status": "error"}
             return {"error": f"Google Tasks error: HTTP {r.status_code}", "status": "error"}
     except Exception as exc:
         return {"error": f"Failed to create task: {exc}", "status": "error"}
@@ -418,6 +472,8 @@ async def _update_google_task(access_token, task_id, title, completed, due_date,
             )
             if r.status_code == 200:
                 return {"id": task_id, "status": "updated"}
+            if r.status_code == 401:
+                return {"error": "Token expired.", "status": "error"}
             return {"error": f"Google Tasks error: HTTP {r.status_code}", "status": "error"}
     except Exception as exc:
         return {"error": f"Failed to update task: {exc}", "status": "error"}
@@ -436,6 +492,8 @@ async def _delete_google_task(access_token, task_id, list_name):
             )
             if r.status_code in (200, 204):
                 return {"status": "ok", "message": "Task deleted."}
+            if r.status_code == 401:
+                return {"error": "Token expired.", "status": "error"}
             return {"error": f"Google Tasks error: HTTP {r.status_code}", "status": "error"}
     except Exception as exc:
         return {"error": f"Failed to delete task: {exc}", "status": "error"}
@@ -464,13 +522,15 @@ async def _list_microsoft_task_lists(access_token):
 
 
 async def _get_microsoft_task_list_id(access_token, list_name):
+    result = await _list_microsoft_task_lists(access_token)
+    # Propagate token expiry errors so callers can trigger refresh
+    if result.get("error"):
+        return None
+
     if not list_name:
-        # Use the first available list
-        result = await _list_microsoft_task_lists(access_token)
         lists = result.get("task_lists", [])
         return lists[0]["id"] if lists else ""
 
-    result = await _list_microsoft_task_lists(access_token)
     for tl in result.get("task_lists", []):
         if tl["name"].lower() == list_name.lower():
             return tl["id"]
@@ -479,6 +539,8 @@ async def _get_microsoft_task_list_id(access_token, list_name):
 
 async def _list_microsoft_tasks(access_token, list_name, include_completed, limit):
     list_id = await _get_microsoft_task_list_id(access_token, list_name)
+    if list_id is None:
+        return {"error": "Token expired.", "tasks": [], "total": 0}
     if not list_id:
         return {"error": "No task list found.", "tasks": [], "total": 0}
 
@@ -520,6 +582,8 @@ async def _list_microsoft_tasks(access_token, list_name, include_completed, limi
 
 async def _create_microsoft_task(access_token, title, list_name, due_date, notes):
     list_id = await _get_microsoft_task_list_id(access_token, list_name)
+    if list_id is None:
+        return {"error": "Token expired.", "status": "error"}
     if not list_id:
         return {"error": "No task list found.", "status": "error"}
 
@@ -538,6 +602,8 @@ async def _create_microsoft_task(access_token, title, list_name, due_date, notes
             if r.status_code in (200, 201):
                 data = r.json()
                 return {"id": data.get("id", ""), "title": title, "status": "created"}
+            if r.status_code == 401:
+                return {"error": "Token expired.", "status": "error"}
             return {"error": f"Graph API error: HTTP {r.status_code}", "status": "error"}
     except Exception as exc:
         return {"error": f"Failed to create task: {exc}", "status": "error"}
@@ -545,6 +611,8 @@ async def _create_microsoft_task(access_token, title, list_name, due_date, notes
 
 async def _update_microsoft_task(access_token, task_id, title, completed, due_date, notes, list_name):
     list_id = await _get_microsoft_task_list_id(access_token, list_name)
+    if list_id is None:
+        return {"error": "Token expired.", "status": "error"}
     if not list_id:
         return {"error": "No task list found.", "status": "error"}
 
@@ -568,6 +636,8 @@ async def _update_microsoft_task(access_token, task_id, title, completed, due_da
             )
             if r.status_code == 200:
                 return {"id": task_id, "status": "updated"}
+            if r.status_code == 401:
+                return {"error": "Token expired.", "status": "error"}
             return {"error": f"Graph API error: HTTP {r.status_code}", "status": "error"}
     except Exception as exc:
         return {"error": f"Failed to update task: {exc}", "status": "error"}
@@ -575,6 +645,8 @@ async def _update_microsoft_task(access_token, task_id, title, completed, due_da
 
 async def _delete_microsoft_task(access_token, task_id, list_name):
     list_id = await _get_microsoft_task_list_id(access_token, list_name)
+    if list_id is None:
+        return {"error": "Token expired.", "status": "error"}
     if not list_id:
         return {"error": "No task list found.", "status": "error"}
 
@@ -586,6 +658,8 @@ async def _delete_microsoft_task(access_token, task_id, list_name):
             )
             if r.status_code in (200, 204):
                 return {"status": "ok", "message": "Task deleted."}
+            if r.status_code == 401:
+                return {"error": "Token expired.", "status": "error"}
             return {"error": f"Graph API error: HTTP {r.status_code}", "status": "error"}
     except Exception as exc:
         return {"error": f"Failed to delete task: {exc}", "status": "error"}

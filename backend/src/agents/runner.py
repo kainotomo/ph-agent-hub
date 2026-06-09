@@ -1733,6 +1733,32 @@ async def _auto_select_tools(
             seen_names.add(key)
             deduped.append((tool, score))
 
+    # ── Step 4b: Cap instance-type tools (keep only highest-scored per type) ──
+    # Tool types that produce identically-named internal functions (e.g.,
+    # ERPNext tools all produce get_doc, get_list, ...).  Including more
+    # than one instance of these types causes tool name collisions that
+    # confuse the model and can produce empty response streams.
+    _INSTANCE_TOOL_TYPES = {"erpnext"}
+    capped_types: dict[str, int] = {}
+    type_capped: list[tuple[Tool, float]] = []
+    for tool, score in deduped:
+        tt = tool.type or ""
+        if tt in _INSTANCE_TOOL_TYPES:
+            if tt not in capped_types:
+                capped_types[tt] = 1
+                type_capped.append((tool, score))
+            else:
+                capped_types[tt] += 1
+        else:
+            type_capped.append((tool, score))
+    for tt, dropped in capped_types.items():
+        if dropped > 1:
+            logger.info(
+                "Auto-select: capped %s tools from %d to 1",
+                tt, dropped,
+            )
+    deduped = type_capped
+
     # ── Step 5: Deterministic filter (Top-K) ───────────────────────────
     top_k = getattr(settings, "AUTO_SELECT_TOOLS_TOP_K", 5)
     shortlisted_tools = [t for t, _ in deduped[:top_k]]
@@ -2106,6 +2132,7 @@ async def _build_erpnext_callables(
         api_secret=api_secret,
         httpx_client=erpnext_client,
         file_infos=file_infos,
+        tool_name=tool.name,
     )
 
 
@@ -3115,6 +3142,22 @@ async def _run_agent_stream(
                     "step_index": step_index,
                     "total_steps_so_far": step_index,
                 }, session_id=session_id, message_id=message_id)
+
+                # ── Step limit guard ────────────────────────────────────
+                # Prevent runaway agents that loop indefinitely on tool
+                # results (see agent_memory_crash_analysis.md).
+                if step_index >= settings.AGENT_MAX_STEPS:
+                    logger.warning(
+                        "Agent step limit reached (%d) for session %s — terminating stream",
+                        settings.AGENT_MAX_STEPS, session_id,
+                    )
+                    yield _sse_event("step_limit_reached", {
+                        "step_index": step_index,
+                        "max_steps": settings.AGENT_MAX_STEPS,
+                    }, session_id=session_id, message_id=message_id)
+                    # Drain any remaining partial tool calls from pending
+                    pending_calls.clear()
+                    break
 
     # ---- Token extraction -------------------------------------------------
     # After the stream is exhausted, attempt to collect usage metadata.

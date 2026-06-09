@@ -287,10 +287,21 @@ async def _do_test_connection(
     creds = json.loads(credential.credentials) if credential.credentials else {}
     tokens = json.loads(credential.oauth_tokens) if credential.oauth_tokens else {}
 
+    # Resolve the tool type to pick the right test endpoint
+    tool_type = "email"  # default
+    if db and credential.tool_id:
+        from ..db.orm.tools import Tool
+        tool_result = await db.execute(
+            select(Tool).where(Tool.id == credential.tool_id)
+        )
+        tool = tool_result.scalar_one_or_none()
+        if tool:
+            tool_type = tool.type
+
     if provider == "imap":
         return await _test_imap_connection(creds)
     elif provider in ("gmail", "outlook", "google", "microsoft"):
-        result = await _test_oauth_connection(provider, tokens, creds)
+        result = await _test_oauth_connection(provider, tool_type, tokens)
 
         # If expired and we have a refresh_token, try refreshing
         if result.get("ok") is False and "expired" in result.get("message", "").lower():
@@ -315,7 +326,7 @@ async def _do_test_connection(
                         await db.commit()
 
                     # Retry test with refreshed token
-                    result = await _test_oauth_connection(provider, tokens, creds)
+                    result = await _test_oauth_connection(provider, tool_type, tokens)
 
         return result
     else:
@@ -366,8 +377,8 @@ async def _test_imap_connection(creds: dict) -> dict:
     return await _test_imap_connection_raw(host, port, username, password)
 
 
-async def _test_oauth_connection(provider: str, tokens: dict, creds: dict) -> dict:
-    """Test OAuth connectivity with a lightweight API call."""
+async def _test_oauth_connection(provider: str, tool_type: str, tokens: dict) -> dict:
+    """Test OAuth connectivity with a lightweight API call for the given tool type."""
     try:
         access_token = tokens.get("access_token", "")
         if not access_token:
@@ -376,18 +387,38 @@ async def _test_oauth_connection(provider: str, tokens: dict, creds: dict) -> di
         if provider in ("gmail", "google"):
             import httpx
 
+            # Pick the right test endpoint based on tool type
+            if tool_type == "calendar":
+                test_url = "https://www.googleapis.com/calendar/v3/users/me/calendarList"
+                api_label = "Calendar"
+            elif tool_type == "tasks":
+                test_url = "https://tasks.googleapis.com/tasks/v1/users/@me/lists"
+                api_label = "Tasks"
+            else:
+                test_url = "https://gmail.googleapis.com/gmail/v1/users/me/profile"
+                api_label = "Gmail"
+
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(
-                    "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+                    test_url,
                     headers={"Authorization": f"Bearer {access_token}"},
                 )
                 if resp.status_code == 200:
-                    data = resp.json()
-                    return {"ok": True, "message": f"Connected as {data.get('emailAddress', 'unknown')}"}
+                    if tool_type == "calendar":
+                        data = resp.json()
+                        items = data.get("items", [])
+                        return {"ok": True, "message": f"Connected — {len(items)} calendar(s) found"}
+                    elif tool_type == "tasks":
+                        data = resp.json()
+                        items = data.get("items", [])
+                        return {"ok": True, "message": f"Connected — {len(items)} task list(s) found"}
+                    else:
+                        data = resp.json()
+                        return {"ok": True, "message": f"Connected as {data.get('emailAddress', 'unknown')}"}
                 elif resp.status_code == 401:
                     return {"ok": False, "message": "Token expired. Reconnect the account."}
                 else:
-                    return {"ok": False, "message": f"Gmail API error: HTTP {resp.status_code}"}
+                    return {"ok": False, "message": f"{api_label} API error: HTTP {resp.status_code}"}
 
         elif provider in ("outlook", "microsoft"):
             import httpx

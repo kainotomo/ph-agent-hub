@@ -539,13 +539,22 @@ async def microsoft_oauth_callback(
 
 GOOGLE_SCOPES = {
     "email_tool": [
+        "openid",
+        "email",
+        "profile",
         "https://www.googleapis.com/auth/gmail.modify",
         "https://www.googleapis.com/auth/gmail.send",
     ],
     "calendar_tool": [
+        "openid",
+        "email",
+        "profile",
         "https://www.googleapis.com/auth/calendar",
     ],
     "tasks_tool": [
+        "openid",
+        "email",
+        "profile",
         "https://www.googleapis.com/auth/tasks",
     ],
 }

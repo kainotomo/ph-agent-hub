@@ -190,7 +190,7 @@ async def _detect_timezone(provider: str, access_token: str) -> str | None:
     return None
 
 
-def build_calendar_tools(
+async def build_calendar_tools(
     tool_config: dict | None = None,
     user_credentials: list | None = None,
 ) -> list:

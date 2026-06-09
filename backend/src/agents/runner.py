@@ -1998,7 +1998,7 @@ async def _build_tool_callables(
         return build_github_tools(tool.config or {})
     elif tool.type == "calendar":
         from ..tools.calendar import build_calendar_tools
-        return build_calendar_tools(
+        return await build_calendar_tools(
             tool.config or {},
             user_credentials=user_credentials,
         )

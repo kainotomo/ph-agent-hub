@@ -7,6 +7,7 @@
 # Dependencies: httpx (already installed)
 # =============================================================================
 
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -14,6 +15,8 @@ from urllib.parse import quote
 
 import httpx
 from agent_framework import tool
+
+from ._oauth_refresh import refresh_token_if_expired
 
 logger = logging.getLogger(__name__)
 
@@ -219,10 +222,14 @@ async def build_calendar_tools(
 
     # ---- Resolve user OAuth tokens if available (Issue #312) ----------
     user_creds_map = {}
+    _credential_orm = None  # Reference to ORM object for token persistence
+    _tokens_dict = None     # Reference to the tokens dict for DB persistence
     if user_credentials:
         uc = user_credentials[0]  # Use first available credential
         cp, cd, tk, ce = _parse_credential(uc)
         if tk.get("access_token"):
+            _credential_orm = uc
+            _tokens_dict = tk
             user_creds_map = {
                 "provider": cp,
                 "access_token": tk["access_token"],
@@ -318,6 +325,45 @@ async def build_calendar_tools(
                     )
 
                     if response.status_code == 401:
+                        # Attempt token refresh and retry once
+                        if user_creds_map and user_creds_map.get("refresh_token"):
+                            refreshed = await refresh_token_if_expired(
+                                user_creds_map, user_creds_map["provider"], "Calendar",
+                                credential_orm=_credential_orm, tokens_dict=_tokens_dict,
+                            )
+                            if refreshed:
+                                active_token = user_creds_map["access_token"]
+                                headers = {"Authorization": f"Bearer {active_token}"} if len(active_token) > 50 else {}
+                                if len(active_token) <= 50:
+                                    params["key"] = active_token
+                                async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                                    response = await client.get(
+                                        f"{GOOGLE_CALENDAR_API_BASE}/calendars/{quote(active_calendar_id)}/events",
+                                        params=params,
+                                        headers=headers,
+                                    )
+                                    if response.status_code == 200:
+                                        data = response.json()
+                                        items = data.get("items", [])
+                                        events = []
+                                        for item in items:
+                                            start_info = item.get("start", {})
+                                            end_info = item.get("end", {})
+                                            events.append({
+                                                "id": item.get("id", ""),
+                                                "summary": item.get("summary", "Untitled"),
+                                                "description": item.get("description", ""),
+                                                "location": item.get("location", ""),
+                                                "start": start_info.get("dateTime", start_info.get("date", "")),
+                                                "end": end_info.get("dateTime", end_info.get("date", "")),
+                                                "status": item.get("status", ""),
+                                                "attendees": [
+                                                    a.get("email", "")
+                                                    for a in item.get("attendees", [])
+                                                ] if item.get("attendees") else [],
+                                                "html_link": item.get("htmlLink", ""),
+                                            })
+                                        return {"events": events, "total": len(events)}
                         return {"error": "Calendar authentication failed. Check credentials.", "events": [], "total": 0}
                     elif response.status_code == 404:
                         return {"error": f"Calendar '{active_calendar_id}' not found.", "events": [], "total": 0}
@@ -377,6 +423,50 @@ async def build_calendar_tools(
                     )
 
                     if response.status_code == 401:
+                        # Attempt token refresh and retry once
+                        if user_creds_map and user_creds_map.get("refresh_token"):
+                            refreshed = await refresh_token_if_expired(
+                                user_creds_map, user_creds_map["provider"], "Calendar",
+                                credential_orm=_credential_orm, tokens_dict=_tokens_dict,
+                            )
+                            if refreshed:
+                                active_token = user_creds_map["access_token"]
+                                async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                                    response = await client.get(
+                                        f"{GRAPH_API_BASE}/calendarView",
+                                        params={
+                                            "startDateTime": time_min,
+                                            "endDateTime": time_max,
+                                            "$top": min(max_results, 250),
+                                            "$orderby": "start/dateTime",
+                                        },
+                                        headers={
+                                            "Authorization": f"Bearer {active_token}",
+                                            "Prefer": f"outlook.timezone=\"{timezone_str}\"",
+                                        },
+                                    )
+                                    if response.status_code == 200:
+                                        data = response.json()
+                                        items = data.get("value", [])
+                                        events = []
+                                        for item in items:
+                                            start_info = item.get("start", {})
+                                            end_info = item.get("end", {})
+                                            events.append({
+                                                "id": item.get("id", ""),
+                                                "summary": item.get("subject", "Untitled"),
+                                                "description": item.get("bodyPreview", ""),
+                                                "location": item.get("location", {}).get("displayName", ""),
+                                                "start": start_info.get("dateTime", start_info.get("date", "")),
+                                                "end": end_info.get("dateTime", end_info.get("date", "")),
+                                                "status": item.get("showAs", ""),
+                                                "attendees": [
+                                                    a.get("emailAddress", {}).get("address", "")
+                                                    for a in item.get("attendees", [])
+                                                ] if item.get("attendees") else [],
+                                                "html_link": "",
+                                            })
+                                        return {"events": events, "total": len(events)}
                         return {"error": "Microsoft token expired. Reconnect your account.", "events": [], "total": 0}
 
                     response.raise_for_status()
@@ -509,6 +599,34 @@ async def build_calendar_tools(
                     )
 
                     if response.status_code == 401:
+                        # Attempt token refresh and retry once
+                        if user_creds_map and user_creds_map.get("refresh_token"):
+                            refreshed = await refresh_token_if_expired(
+                                user_creds_map, user_creds_map["provider"], "Calendar",
+                                credential_orm=_credential_orm, tokens_dict=_tokens_dict,
+                            )
+                            if refreshed:
+                                active_token = user_creds_map["access_token"]
+                                headers = {
+                                    "Authorization": f"Bearer {active_token}",
+                                    "Content-Type": "application/json",
+                                }
+                                async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                                    response = await client.post(
+                                        f"{GOOGLE_CALENDAR_API_BASE}/calendars/{quote(active_calendar_id)}/events",
+                                        json=event_data,
+                                        headers=headers,
+                                    )
+                                    if response.status_code == 200 or response.status_code == 201:
+                                        data = response.json()
+                                        return {
+                                            "id": data.get("id", ""),
+                                            "summary": data.get("summary", summary),
+                                            "start": data.get("start", {}).get("dateTime", start_iso),
+                                            "end": data.get("end", {}).get("dateTime", end_iso),
+                                            "html_link": data.get("htmlLink", ""),
+                                            "status": data.get("status", "confirmed"),
+                                        }
                         return {"error": "Calendar authentication failed. Check credentials."}
                     elif response.status_code == 403:
                         return {"error": "Permission denied. The credentials may be read-only."}
@@ -565,6 +683,33 @@ async def build_calendar_tools(
                     )
 
                     if response.status_code == 401:
+                        # Attempt token refresh and retry once
+                        if user_creds_map and user_creds_map.get("refresh_token"):
+                            refreshed = await refresh_token_if_expired(
+                                user_creds_map, user_creds_map["provider"], "Calendar",
+                                credential_orm=_credential_orm, tokens_dict=_tokens_dict,
+                            )
+                            if refreshed:
+                                active_token = user_creds_map["access_token"]
+                                async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                                    response = await client.post(
+                                        f"{GRAPH_API_BASE}/events",
+                                        json=event_data,
+                                        headers={
+                                            "Authorization": f"Bearer {active_token}",
+                                            "Content-Type": "application/json",
+                                        },
+                                    )
+                                    if response.status_code in (200, 201):
+                                        data = response.json()
+                                        return {
+                                            "id": data.get("id", ""),
+                                            "summary": data.get("subject", summary),
+                                            "start": data.get("start", {}).get("dateTime", start_iso),
+                                            "end": data.get("end", {}).get("dateTime", end_iso),
+                                            "html_link": "",
+                                            "status": "confirmed",
+                                        }
                         return {"error": "Microsoft token expired. Reconnect your account."}
 
                     response.raise_for_status()
@@ -731,6 +876,23 @@ async def build_calendar_tools(
                         headers={"Authorization": f"Bearer {active_token}"},
                     )
                     if response.status_code == 401:
+                        # Attempt token refresh and retry once
+                        if user_creds_map and user_creds_map.get("refresh_token"):
+                            refreshed = await refresh_token_if_expired(
+                                user_creds_map, user_creds_map["provider"], "Calendar",
+                                credential_orm=_credential_orm, tokens_dict=_tokens_dict,
+                            )
+                            if refreshed:
+                                active_token = user_creds_map["access_token"]
+                                async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                                    response = await client.delete(
+                                        f"{GOOGLE_CALENDAR_API_BASE}/calendars/{quote(active_calendar_id)}/events/{quote(event_id)}",
+                                        headers={"Authorization": f"Bearer {active_token}"},
+                                    )
+                                    if response.status_code == 204:
+                                        return {"status": "ok", "message": "Event deleted."}
+                                    if response.status_code == 404:
+                                        return {"error": "Event not found.", "status": "error"}
                         return {"error": "Calendar auth failed. Reconnect account.", "status": "error"}
                     if response.status_code == 404:
                         return {"error": "Event not found.", "status": "error"}
@@ -753,6 +915,23 @@ async def build_calendar_tools(
                         headers={"Authorization": f"Bearer {active_token}"},
                     )
                     if response.status_code == 401:
+                        # Attempt token refresh and retry once
+                        if user_creds_map and user_creds_map.get("refresh_token"):
+                            refreshed = await refresh_token_if_expired(
+                                user_creds_map, user_creds_map["provider"], "Calendar",
+                                credential_orm=_credential_orm, tokens_dict=_tokens_dict,
+                            )
+                            if refreshed:
+                                active_token = user_creds_map["access_token"]
+                                async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                                    response = await client.delete(
+                                        f"{GRAPH_API_BASE}/events/{event_id}",
+                                        headers={"Authorization": f"Bearer {active_token}"},
+                                    )
+                                    if response.status_code == 204:
+                                        return {"status": "ok", "message": "Event deleted."}
+                                    if response.status_code == 404:
+                                        return {"error": "Event not found.", "status": "error"}
                         return {"error": "Microsoft token expired. Reconnect your account.", "status": "error"}
                     if response.status_code == 404:
                         return {"error": "Event not found.", "status": "error"}
@@ -840,6 +1019,24 @@ async def build_calendar_tools(
                         headers={"Authorization": f"Bearer {active_token}", "Content-Type": "application/json"},
                     )
                     if response.status_code == 401:
+                        # Attempt token refresh and retry once
+                        if user_creds_map and user_creds_map.get("refresh_token"):
+                            refreshed = await refresh_token_if_expired(
+                                user_creds_map, user_creds_map["provider"], "Calendar",
+                                credential_orm=_credential_orm, tokens_dict=_tokens_dict,
+                            )
+                            if refreshed:
+                                active_token = user_creds_map["access_token"]
+                                async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                                    response = await client.patch(
+                                        f"{GOOGLE_CALENDAR_API_BASE}/calendars/{quote(active_calendar_id)}/events/{quote(event_id)}",
+                                        json=update_body,
+                                        headers={"Authorization": f"Bearer {active_token}", "Content-Type": "application/json"},
+                                    )
+                                    if response.status_code == 200:
+                                        return {"status": "ok", "message": "Event updated."}
+                                    if response.status_code == 404:
+                                        return {"error": "Event not found.", "status": "error"}
                         return {"error": "Calendar auth failed. Reconnect account.", "status": "error"}
                     if response.status_code == 404:
                         return {"error": "Event not found.", "status": "error"}
@@ -874,6 +1071,24 @@ async def build_calendar_tools(
                         headers={"Authorization": f"Bearer {active_token}", "Content-Type": "application/json"},
                     )
                     if response.status_code == 401:
+                        # Attempt token refresh and retry once
+                        if user_creds_map and user_creds_map.get("refresh_token"):
+                            refreshed = await refresh_token_if_expired(
+                                user_creds_map, user_creds_map["provider"], "Calendar",
+                                credential_orm=_credential_orm, tokens_dict=_tokens_dict,
+                            )
+                            if refreshed:
+                                active_token = user_creds_map["access_token"]
+                                async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                                    response = await client.patch(
+                                        f"{GRAPH_API_BASE}/events/{event_id}",
+                                        json=update_body,
+                                        headers={"Authorization": f"Bearer {active_token}", "Content-Type": "application/json"},
+                                    )
+                                    if response.status_code == 200:
+                                        return {"status": "ok", "message": "Event updated."}
+                                    if response.status_code == 404:
+                                        return {"error": "Event not found.", "status": "error"}
                         return {"error": "Microsoft token expired. Reconnect your account.", "status": "error"}
                     if response.status_code == 404:
                         return {"error": "Event not found.", "status": "error"}

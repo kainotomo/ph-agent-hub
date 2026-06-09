@@ -382,7 +382,7 @@ export function SessionSidebar() {
                           type="secondary"
                           style={{ fontSize: 11 }}
                         >
-                          {new Date(item.updated_at).toLocaleDateString()}
+                          {new Date(item.updated_at).toLocaleString()}
                         </Text>
                         {(item.tags || []).length > 0 && (
                           <div style={{ marginTop: 2 }}>

@@ -83,7 +83,7 @@ export function SessionSearch({ onClose }: SessionSearchProps) {
                 description={
                   <Text type="secondary">
                     {item.is_temporary ? "Temporary" : "Permanent"} ·{" "}
-                    {new Date(item.updated_at).toLocaleDateString()}
+                    {new Date(item.updated_at).toLocaleString()}
                   </Text>
                 }
               />

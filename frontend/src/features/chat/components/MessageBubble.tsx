@@ -163,6 +163,11 @@ function MessageBubbleInner({
           <Text type="secondary" style={{ fontSize: 11 }}>
             {isUser ? "You" : isSystem ? "Summary" : "Assistant"}
           </Text>
+          {message.created_at && (
+            <Text type="secondary" style={{ fontSize: 10, color: "#bbb" }}>
+              · {new Date(message.created_at).toLocaleString()}
+            </Text>
+          )}
           {!isUser && (message.model_name || message.model_id) && (
             <Text type="secondary" style={{ fontSize: 10, color: "#bbb" }}>
               · {message.model_name || message.model_id?.slice(0, 8)}

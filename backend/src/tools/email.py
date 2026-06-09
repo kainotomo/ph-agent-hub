@@ -37,6 +37,36 @@ GRAPH_API_BASE: str = "https://graph.microsoft.com/v1.0/me"
 # Helpers
 # ---------------------------------------------------------------------------
 
+async def _refresh_token_if_expired(
+    tokens: dict, provider: str, tool_name: str = "Email",
+) -> dict | None:
+    """Try to refresh an OAuth token. Returns updated tokens dict or None."""
+    from ..core.oauth import refresh_oauth_token
+    from ..core.config import settings
+
+    refresh_token = tokens.get("refresh_token", "")
+    if not refresh_token:
+        return None
+
+    if provider in ("gmail", "google"):
+        client_id = settings.GOOGLE_CLIENT_ID
+        client_secret = settings.GOOGLE_CLIENT_SECRET
+    else:
+        client_id = settings.MS_CLIENT_ID
+        client_secret = settings.MS_CLIENT_SECRET
+
+    try:
+        result = await refresh_oauth_token(tokens, provider, client_id, client_secret)
+        if result:
+            tokens["access_token"] = result.get("access_token", tokens.get("access_token", ""))
+            tokens["expires_at"] = result.get("expires_at", tokens.get("expires_at", 0))
+            return tokens
+    except Exception:
+        logger.warning("%s token refresh failed", tool_name, exc_info=True)
+
+    return None
+
+
 def _resolve_credentials(tool_config: dict) -> dict:
     """Resolve and decrypt credentials from config."""
     from ..core.encryption import decrypt
@@ -194,9 +224,19 @@ def build_email_tools(
         if active_cred:
             cp, cd, tk, ce = _parse_credential(active_cred)
             if cp in ("gmail", "google") and tk.get("access_token"):
-                return await _send_via_gmail_api(to, subject, body, cc, is_html, tk["access_token"])
+                result = await _send_via_gmail_api(to, subject, body, cc, is_html, tk["access_token"])
+                if "expired" in result.get("error", "").lower():
+                    refreshed = await _refresh_token_if_expired(tk, cp, "Gmail")
+                    if refreshed:
+                        result = await _send_via_gmail_api(to, subject, body, cc, is_html, tk["access_token"])
+                return result
             elif cp in ("outlook", "microsoft") and tk.get("access_token"):
-                return await _send_via_graph_api(to, subject, body, cc, is_html, tk["access_token"])
+                result = await _send_via_graph_api(to, subject, body, cc, is_html, tk["access_token"])
+                if "expired" in result.get("error", "").lower():
+                    refreshed = await _refresh_token_if_expired(tk, cp, "Outlook")
+                    if refreshed:
+                        result = await _send_via_graph_api(to, subject, body, cc, is_html, tk["access_token"])
+                return result
             elif cd.get("smtp_host"):
                 sender = ce or cd.get("from_email", from_email)
                 return await _send_via_smtp(
@@ -276,9 +316,19 @@ def build_email_tools(
         cp, cd, tk, _ = _parse_credential(active_cred)
 
         if cp in ("gmail", "google") and tk.get("access_token"):
-            return await _read_gmail_api(tk["access_token"], limit, "is:unread " if unread_only else "")
+            result = await _read_gmail_api(tk["access_token"], limit, "is:unread " if unread_only else "")
+            if "expired" in result.get("error", "").lower():
+                refreshed = await _refresh_token_if_expired(tk, cp, "Gmail")
+                if refreshed:
+                    result = await _read_gmail_api(tk["access_token"], limit, "is:unread " if unread_only else "")
+            return result
         elif cp in ("outlook", "microsoft") and tk.get("access_token"):
-            return await _read_outlook_api(tk["access_token"], limit, unread_only)
+            result = await _read_outlook_api(tk["access_token"], limit, unread_only)
+            if "expired" in result.get("error", "").lower():
+                refreshed = await _refresh_token_if_expired(tk, cp, "Outlook")
+                if refreshed:
+                    result = await _read_outlook_api(tk["access_token"], limit, unread_only)
+            return result
         elif cd.get("imap_host"):
             return await _read_imap(
                 cd["imap_host"], int(cd.get("imap_port", 993)),
@@ -315,9 +365,19 @@ def build_email_tools(
         cp, cd, tk, _ = _parse_credential(active_cred)
 
         if cp in ("gmail", "google") and tk.get("access_token"):
-            return await _read_gmail_api(tk["access_token"], limit, query)
+            result = await _read_gmail_api(tk["access_token"], limit, query)
+            if "expired" in result.get("error", "").lower():
+                refreshed = await _refresh_token_if_expired(tk, cp, "Gmail")
+                if refreshed:
+                    result = await _read_gmail_api(tk["access_token"], limit, query)
+            return result
         elif cp in ("outlook", "microsoft") and tk.get("access_token"):
-            return await _search_outlook_api(tk["access_token"], query, limit)
+            result = await _search_outlook_api(tk["access_token"], query, limit)
+            if "expired" in result.get("error", "").lower():
+                refreshed = await _refresh_token_if_expired(tk, cp, "Outlook")
+                if refreshed:
+                    result = await _search_outlook_api(tk["access_token"], query, limit)
+            return result
         elif cd.get("imap_host"):
             return await _search_imap(
                 cd["imap_host"], int(cd.get("imap_port", 993)),

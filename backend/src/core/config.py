@@ -77,6 +77,11 @@ class Settings(BaseSettings):
     # --- Auto tool selection (Issue #287) ---
     AUTO_SELECT_TOOLS_TOP_K: int = 3
 
+    # --- Agent execution (Issue #317) ---
+    AGENT_MAX_STEPS: int = 15
+    """Maximum number of tool-call steps before the agent loop terminates.
+    Prevents runaway agents that loop indefinitely on tool results."""
+
     # --- OAuth (Issue #312) ---
     GOOGLE_CLIENT_ID: str = ""
     """Google OAuth client ID for Gmail/Calendar/Tasks access."""

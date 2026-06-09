@@ -7,12 +7,38 @@
 
 import json
 import logging
+import re
 from typing import Any
 
 import httpx
 from agent_framework import tool
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_tool_slug(tool_name: str) -> str:
+    """Derive a safe, readable slug from a tool's display name.
+
+    Example: ``"kainotomo.com"`` → ``"kainotomo_com"``
+    """
+    return re.sub(r'[^a-zA-Z0-9]', '_', tool_name.lower()).strip('_')
+
+
+def _make_tool_name(tool_name: str | None, func_name: str) -> str:
+    """Build a globally unique tool name by prefixing with the instance slug.
+
+    When ``tool_name`` is provided, returns ``"erpnext_{slug}__{func_name}"``.
+    Otherwise returns ``func_name`` unchanged (backward compatibility).
+    """
+    if tool_name:
+        slug = _make_tool_slug(tool_name)
+        return f"erpnext_{slug}__{func_name}"
+    return func_name
+
 
 # ---------------------------------------------------------------------------
 # HTTP helpers
@@ -61,6 +87,7 @@ def build_erpnext_tools(
     api_secret: str,
     httpx_client: httpx.AsyncClient,
     file_infos: list[dict] | None = None,
+    tool_name: str | None = None,
 ) -> list:
     """Return a list of MAF @tool-decorated async functions bound to an
     ERPNext instance.
@@ -74,6 +101,9 @@ def build_erpnext_tools(
             ``Authorization`` headers set.
         file_infos: Optional list of FileUpload dicts (storage_key, bucket,
             original_filename, content_type, id) for the ``upload_file`` tool.
+        tool_name: Optional display name of the Tool ORM record. When provided,
+            each tool function is prefixed (e.g. ``erpnext_kainotomo_com__get_doc``)
+            to prevent name collisions when multiple ERPNext instances are active.
 
     Returns:
         A list of callables ready to pass to ``Agent(tools=...)``.
@@ -81,7 +111,7 @@ def build_erpnext_tools(
     auth_header = _build_auth_header(api_key, api_secret)
 
     # ------------------------------------------------------------------
-    @tool
+    @tool(name=_make_tool_name(tool_name, "get_doc"))
     async def get_doc(doctype: str, name: str) -> dict:
         """Retrieve a single ERPNext document by doctype and name.
 
@@ -96,7 +126,7 @@ def build_erpnext_tools(
         return data
 
     # ------------------------------------------------------------------
-    @tool
+    @tool(name=_make_tool_name(tool_name, "get_list"))
     async def get_list(
         doctype: str,
         filters: list | dict | None = None,
@@ -144,7 +174,7 @@ def build_erpnext_tools(
         return results
 
     # ------------------------------------------------------------------
-    @tool
+    @tool(name=_make_tool_name(tool_name, "create_doc"))
     async def create_doc(doctype: str, data: dict) -> dict:
         """Create a new ERPNext document.
 
@@ -159,7 +189,7 @@ def build_erpnext_tools(
         return result
 
     # ------------------------------------------------------------------
-    @tool
+    @tool(name=_make_tool_name(tool_name, "update_doc"))
     async def update_doc(doctype: str, name: str, data: dict) -> dict:
         """Update an existing ERPNext document.
 
@@ -175,7 +205,7 @@ def build_erpnext_tools(
         return result
 
     # ------------------------------------------------------------------
-    @tool
+    @tool(name=_make_tool_name(tool_name, "delete_doc"))
     async def delete_doc(doctype: str, name: str) -> dict:
         """Delete an ERPNext document.
 
@@ -190,7 +220,7 @@ def build_erpnext_tools(
         return {"message": f"Deleted {doctype} {name}"}
 
     # ------------------------------------------------------------------
-    @tool
+    @tool(name=_make_tool_name(tool_name, "submit_doc"))
     async def submit_doc(doctype: str, name: str) -> dict:
         """Submit an ERPNext document (sets docstatus to 1, triggers submit hooks).
 
@@ -205,7 +235,7 @@ def build_erpnext_tools(
         return result
 
     # ------------------------------------------------------------------
-    @tool
+    @tool(name=_make_tool_name(tool_name, "cancel_doc"))
     async def cancel_doc(doctype: str, name: str) -> dict:
         """Cancel an ERPNext document (sets docstatus to 2).
 
@@ -220,7 +250,7 @@ def build_erpnext_tools(
         return result
 
     # ------------------------------------------------------------------
-    @tool
+    @tool(name=_make_tool_name(tool_name, "amend_doc"))
     async def amend_doc(doctype: str, name: str) -> dict:
         """Amend a submitted/cancelled ERPNext document, creating a new draft.
 
@@ -238,7 +268,7 @@ def build_erpnext_tools(
         return result
 
     # ------------------------------------------------------------------
-    @tool
+    @tool(name=_make_tool_name(tool_name, "get_doctype_meta"))
     async def get_doctype_meta(doctype: str) -> list[dict]:
         """Get field definitions for a DocType so the agent knows which
         fields are mandatory, valid Link/Select options, etc.
@@ -264,7 +294,7 @@ def build_erpnext_tools(
         return results
 
     # ------------------------------------------------------------------
-    @tool
+    @tool(name=_make_tool_name(tool_name, "call_method"))
     async def call_method(
         method: str,
         args: dict | None = None,
@@ -307,7 +337,7 @@ def build_erpnext_tools(
         for fi in file_infos:
             _file_lookup[fi["original_filename"].lower()] = fi
 
-        @tool
+        @tool(name=_make_tool_name(tool_name, "upload_file"))
         async def upload_file(
             filename: str,
             doctype: str | None = None,

@@ -58,6 +58,13 @@ async def refresh_token_if_expired(
             tokens["expires_at"] = result.get("expires_at", tokens.get("expires_at", 0))
             logger.info("%s token refreshed successfully", tool_name)
 
+            # Sync refreshed values to tokens_dict when it's a different dict
+            # (e.g., calendar.py uses user_creds_map for `tokens` but
+            #  _tokens_dict from _parse_credential for `tokens_dict`)
+            if tokens_dict is not None and tokens_dict is not tokens:
+                tokens_dict["access_token"] = tokens["access_token"]
+                tokens_dict["expires_at"] = tokens["expires_at"]
+
             # Persist refreshed tokens to the ORM object if available
             if credential_orm is not None and tokens_dict is not None:
                 credential_orm.oauth_tokens = json.dumps(tokens_dict)

@@ -223,9 +223,13 @@ async def delete_user_credentials(
 
 async def test_connection(
     credential: UserToolCredential,
+    db: AsyncSession | None = None,
 ) -> dict:
-    """Test whether a credential can connect to its provider."""
-    return await _do_test_connection(credential)
+    """Test whether a credential can connect to its provider.
+
+    Pass ``db`` to enable automatic token refresh on expiry.
+    """
+    return await _do_test_connection(credential, db=db)
 
 
 async def test_raw_imap_connection(
@@ -266,9 +270,19 @@ async def _unset_default_for_tool(db: AsyncSession, user_id: str, tool_id: str) 
     )
 
 
-async def _do_test_connection(credential: UserToolCredential) -> dict:
-    """Test a stored credential against its provider."""
+async def _do_test_connection(
+    credential: UserToolCredential,
+    db: AsyncSession | None = None,
+) -> dict:
+    """Test a stored credential against its provider.
+
+    If the test returns a 401 (token expired) and a refresh token is
+    available, attempts to auto-refresh the token before retrying.
+    """
     import json
+    from ..core.config import settings
+    from ..core.oauth import refresh_oauth_token
+
     provider = credential.provider
     creds = json.loads(credential.credentials) if credential.credentials else {}
     tokens = json.loads(credential.oauth_tokens) if credential.oauth_tokens else {}
@@ -276,7 +290,34 @@ async def _do_test_connection(credential: UserToolCredential) -> dict:
     if provider == "imap":
         return await _test_imap_connection(creds)
     elif provider in ("gmail", "outlook", "google", "microsoft"):
-        return await _test_oauth_connection(provider, tokens, creds)
+        result = await _test_oauth_connection(provider, tokens, creds)
+
+        # If expired and we have a refresh_token, try refreshing
+        if result.get("ok") is False and "expired" in result.get("message", "").lower():
+            refresh_token = tokens.get("refresh_token", "")
+            if refresh_token:
+                # Get client credentials from settings
+                if provider in ("gmail", "google"):
+                    client_id = settings.GOOGLE_CLIENT_ID
+                    client_secret = settings.GOOGLE_CLIENT_SECRET
+                else:
+                    client_id = settings.MS_CLIENT_ID
+                    client_secret = settings.MS_CLIENT_SECRET
+
+                new_tokens = await refresh_oauth_token(tokens, provider, client_id, client_secret)
+                if new_tokens:
+                    # Update stored tokens with new access_token and expires_at
+                    tokens["access_token"] = new_tokens.get("access_token", tokens.get("access_token", ""))
+                    if "expires_at" in new_tokens:
+                        tokens["expires_at"] = new_tokens["expires_at"]
+                    credential.oauth_tokens = json.dumps(tokens)
+                    if db:
+                        await db.commit()
+
+                    # Retry test with refreshed token
+                    result = await _test_oauth_connection(provider, tokens, creds)
+
+        return result
     else:
         return {"ok": False, "message": f"Unknown provider: {provider}"}
 

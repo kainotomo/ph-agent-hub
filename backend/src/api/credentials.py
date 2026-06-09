@@ -270,7 +270,7 @@ async def test_credential_connection(
     cred = await _svc_get_credential_by_id(
         db, credential_id, user_id=current_user.id
     )
-    result = await _svc_test_connection(cred)
+    result = await _svc_test_connection(cred, db=db)
     return TestConnectionResponse(**result)
 
 

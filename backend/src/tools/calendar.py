@@ -156,6 +156,40 @@ def _parse_datetime(dt_str: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+async def _detect_timezone(provider: str, access_token: str) -> str | None:
+    """Detect the user's timezone from their connected account."""
+    try:
+        if provider in ("outlook", "microsoft"):
+            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                resp = await client.get(
+                    f"{GRAPH_API_BASE}/mailboxSettings",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    tz = data.get("timeZone", "")
+                    if tz:
+                        logger.info("Detected Microsoft timezone: %s", tz)
+                        return tz
+
+        elif provider in ("gmail", "google"):
+            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                resp = await client.get(
+                    "https://www.googleapis.com/calendar/v3/users/me/settings/timezone",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    tz = data.get("value", "")
+                    if tz:
+                        logger.info("Detected Google timezone: %s", tz)
+                        return tz
+    except Exception:
+        logger.warning("Failed to detect timezone for %s", provider, exc_info=True)
+
+    return None
+
+
 def build_calendar_tools(
     tool_config: dict | None = None,
     user_credentials: list | None = None,
@@ -195,6 +229,11 @@ def build_calendar_tools(
                 "refresh_token": tk.get("refresh_token", ""),
                 "calendar_id": config.get("calendar_id", "primary"),
             }
+
+            # Auto-detect timezone from connected account
+            detected_tz = await _detect_timezone(cp, tk["access_token"])
+            if detected_tz:
+                timezone_str = detected_tz
 
     # ------------------------------------------------------------------
     @tool

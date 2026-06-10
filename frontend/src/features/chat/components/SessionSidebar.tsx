@@ -372,7 +372,7 @@ export function SessionSidebar() {
                       }}
                     >
                       {item.is_temporary && "⚡ "}
-                      {item.title}
+                      {item.title && item.title.length <= 2 && item.title !== "New Chat" ? "New Chat" : item.title}
                     </Text>
                   }
                   description={

@@ -67,7 +67,7 @@ def build_memory_tools(
 
             if existing:
                 existing.value = value
-                await db.flush()
+                await db.commit()
                 logger.debug(
                     "save_memory updated key=%r for user=%s", key, user_id
                 )
@@ -87,7 +87,7 @@ def build_memory_tools(
                 source="automatic",
             )
             db.add(memory)
-            await db.flush()
+            await db.commit()
             logger.debug(
                 "save_memory created key=%r for user=%s", key, user_id
             )
@@ -143,7 +143,7 @@ def build_memory_tools(
             await db.execute(
                 delete(Memory).where(Memory.id == existing.id)
             )
-            await db.flush()
+            await db.commit()
             logger.debug(
                 "delete_memory deleted key=%r for user=%s", key, user_id
             )

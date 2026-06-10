@@ -16,7 +16,7 @@ from urllib.parse import quote
 import httpx
 from agent_framework import tool
 
-from ._oauth_refresh import refresh_token_if_expired
+from ._oauth_refresh import ensure_fresh_token, refresh_token_if_expired
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +196,7 @@ async def _detect_timezone(provider: str, access_token: str) -> str | None:
 async def build_calendar_tools(
     tool_config: dict | None = None,
     user_credentials: list | None = None,
+    db: object | None = None,
 ) -> list:
     """Return a list of MAF @tool-decorated async functions for calendar.
 
@@ -210,6 +211,7 @@ async def build_calendar_tools(
             - ``calendar_id`` (str): Calendar ID (default "primary")
             - ``timezone`` (str): Timezone for events (default "UTC")
         user_credentials: List of ``UserToolCredential`` ORM rows.
+        db: Optional async DB session for persisting refreshed tokens.
 
     Returns:
         A list of callables ready to pass to ``Agent(tools=...)``.
@@ -329,7 +331,7 @@ async def build_calendar_tools(
                         if user_creds_map and user_creds_map.get("refresh_token"):
                             refreshed = await refresh_token_if_expired(
                                 user_creds_map, user_creds_map["provider"], "Calendar",
-                                credential_orm=_credential_orm, tokens_dict=_tokens_dict,
+                                credential_orm=_credential_orm, tokens_dict=_tokens_dict, db=db,
                             )
                             if refreshed:
                                 active_token = user_creds_map["access_token"]
@@ -427,7 +429,7 @@ async def build_calendar_tools(
                         if user_creds_map and user_creds_map.get("refresh_token"):
                             refreshed = await refresh_token_if_expired(
                                 user_creds_map, user_creds_map["provider"], "Calendar",
-                                credential_orm=_credential_orm, tokens_dict=_tokens_dict,
+                                credential_orm=_credential_orm, tokens_dict=_tokens_dict, db=db,
                             )
                             if refreshed:
                                 active_token = user_creds_map["access_token"]
@@ -603,7 +605,7 @@ async def build_calendar_tools(
                         if user_creds_map and user_creds_map.get("refresh_token"):
                             refreshed = await refresh_token_if_expired(
                                 user_creds_map, user_creds_map["provider"], "Calendar",
-                                credential_orm=_credential_orm, tokens_dict=_tokens_dict,
+                                credential_orm=_credential_orm, tokens_dict=_tokens_dict, db=db,
                             )
                             if refreshed:
                                 active_token = user_creds_map["access_token"]
@@ -687,7 +689,7 @@ async def build_calendar_tools(
                         if user_creds_map and user_creds_map.get("refresh_token"):
                             refreshed = await refresh_token_if_expired(
                                 user_creds_map, user_creds_map["provider"], "Calendar",
-                                credential_orm=_credential_orm, tokens_dict=_tokens_dict,
+                                credential_orm=_credential_orm, tokens_dict=_tokens_dict, db=db,
                             )
                             if refreshed:
                                 active_token = user_creds_map["access_token"]
@@ -880,7 +882,7 @@ async def build_calendar_tools(
                         if user_creds_map and user_creds_map.get("refresh_token"):
                             refreshed = await refresh_token_if_expired(
                                 user_creds_map, user_creds_map["provider"], "Calendar",
-                                credential_orm=_credential_orm, tokens_dict=_tokens_dict,
+                                credential_orm=_credential_orm, tokens_dict=_tokens_dict, db=db,
                             )
                             if refreshed:
                                 active_token = user_creds_map["access_token"]
@@ -919,7 +921,7 @@ async def build_calendar_tools(
                         if user_creds_map and user_creds_map.get("refresh_token"):
                             refreshed = await refresh_token_if_expired(
                                 user_creds_map, user_creds_map["provider"], "Calendar",
-                                credential_orm=_credential_orm, tokens_dict=_tokens_dict,
+                                credential_orm=_credential_orm, tokens_dict=_tokens_dict, db=db,
                             )
                             if refreshed:
                                 active_token = user_creds_map["access_token"]
@@ -1023,7 +1025,7 @@ async def build_calendar_tools(
                         if user_creds_map and user_creds_map.get("refresh_token"):
                             refreshed = await refresh_token_if_expired(
                                 user_creds_map, user_creds_map["provider"], "Calendar",
-                                credential_orm=_credential_orm, tokens_dict=_tokens_dict,
+                                credential_orm=_credential_orm, tokens_dict=_tokens_dict, db=db,
                             )
                             if refreshed:
                                 active_token = user_creds_map["access_token"]
@@ -1075,7 +1077,7 @@ async def build_calendar_tools(
                         if user_creds_map and user_creds_map.get("refresh_token"):
                             refreshed = await refresh_token_if_expired(
                                 user_creds_map, user_creds_map["provider"], "Calendar",
-                                credential_orm=_credential_orm, tokens_dict=_tokens_dict,
+                                credential_orm=_credential_orm, tokens_dict=_tokens_dict, db=db,
                             )
                             if refreshed:
                                 active_token = user_creds_map["access_token"]

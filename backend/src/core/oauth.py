@@ -160,11 +160,22 @@ async def refresh_microsoft_token(
     client_id: str,
     client_secret: str,
 ) -> dict[str, Any] | None:
-    """Refresh an expired Microsoft access token using msal.
+    """Refresh an expired Microsoft access token.
+
+    Uses MSAL first with the ``.default`` scope so the refreshed token
+    retains all statically configured permissions.  Falls back to a
+    direct HTTP POST to the Microsoft token endpoint if MSAL fails.
+
+    Also captures a new ``refresh_token`` if Microsoft rotates it
+    (common with certain tenant configurations).
 
     Returns:
-        Dict with new access_token, expires_at, or None on failure.
+        Dict with new access_token, expires_at, and optionally
+        refresh_token (if Microsoft issued a new one), or None on failure.
     """
+    MICROSOFT_SCOPE = "https://graph.microsoft.com/.default"
+
+    # --- Attempt 1: MSAL ---
     try:
         from msal import ConfidentialClientApplication
 
@@ -173,18 +184,61 @@ async def refresh_microsoft_token(
             client_credential=client_secret,
         )
 
-        result = app.acquire_token_by_refresh_token(refresh_token, scopes=[])
+        result = app.acquire_token_by_refresh_token(
+            refresh_token,
+            scopes=[MICROSOFT_SCOPE],
+        )
 
-        if "access_token" not in result:
-            logger.warning("Microsoft token refresh failed: %s", result.get("error_description", "unknown"))
-            return None
+        if "access_token" in result:
+            tokens: dict[str, Any] = {
+                "access_token": result["access_token"],
+                "expires_at": int(time.time()) + result.get("expires_in", 3600),
+            }
+            # Microsoft may rotate the refresh token — capture if present
+            new_rt = result.get("refresh_token")
+            if new_rt:
+                tokens["refresh_token"] = new_rt
+            return tokens
 
-        return {
-            "access_token": result["access_token"],
-            "expires_at": int(time.time()) + result.get("expires_in", 3600),
-        }
+        logger.warning(
+            "MSAL refresh failed (%s); trying HTTP fallback",
+            result.get("error_description", "unknown"),
+        )
     except Exception as exc:
-        logger.error("Microsoft token refresh error: %s", exc)
+        logger.warning("MSAL refresh error (%s); trying HTTP fallback", exc)
+
+    # --- Attempt 2: Direct HTTP POST fallback ---
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+            response = await client.post(
+                MICROSOFT_TOKEN_URL,
+                data={
+                    "refresh_token": refresh_token,
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "grant_type": "refresh_token",
+                    "scope": MICROSOFT_SCOPE,
+                },
+            )
+            if response.status_code != 200:
+                logger.warning(
+                    "Microsoft token refresh (HTTP) failed: HTTP %d",
+                    response.status_code,
+                )
+                return None
+
+            data = response.json()
+
+        tokens: dict[str, Any] = {
+            "access_token": data.get("access_token", ""),
+            "expires_at": int(time.time()) + data.get("expires_in", 3600),
+        }
+        new_rt = data.get("refresh_token")
+        if new_rt:
+            tokens["refresh_token"] = new_rt
+        return tokens
+    except Exception as exc:
+        logger.error("Microsoft token refresh (HTTP) error: %s", exc)
         return None
 
 

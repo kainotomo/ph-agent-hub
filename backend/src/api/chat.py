@@ -832,15 +832,45 @@ async def send_message(
     await _require_session_owner(data, current_user)
 
     # ---- Auto-title: if session still has the default title, use the
-    #      first user message as the title (truncated to 60 chars). ----
+    #      first user message as the title.  Set a raw truncated title
+    #      immediately, then fire a background task that calls a cheap
+    #      LLM to generate a proper concise title. -----------------------
     if data.get("title") == "New Chat" and body.content.strip():
-        auto_title = body.content.strip()[:60]
+        # Defensive: ensure content is a string — Pydantic enforces str, but
+        # this belts-and-suspenders against edge cases like raw list content.
+        raw_content = body.content if isinstance(body.content, str) else str(body.content)
+        logger.info(
+            "Auto-title: content type=%s, length=%d, preview=%r",
+            type(body.content).__name__,
+            len(raw_content),
+            raw_content[:80],
+        )
+
+        # 1. Immediate fallback title: first 60 chars of the message
+        fallback_title = raw_content.strip()[:60]
+        logger.info("Auto-title: fallback title=%r", fallback_title)
+
         if data.get("is_temporary"):
-            data["title"] = auto_title
+            data["title"] = fallback_title
             await store_temp_session(session_id, data)
         else:
-            await session_service.update_session(db, session_id, title=auto_title)
-            data["title"] = auto_title
+            await session_service.update_session(db, session_id, title=fallback_title)
+            await db.flush()
+            data["title"] = fallback_title
+
+        # 2. Background task: generate a smarter LLM title
+        tenant_id = data.get("tenant_id", current_user.tenant_id)
+        _session_id = session_id
+        _is_temp = data.get("is_temporary", False)
+        _user_msg = raw_content.strip()
+        asyncio.ensure_future(
+            _generate_title_async(
+                session_id=_session_id,
+                tenant_id=tenant_id,
+                is_temporary=_is_temp,
+                user_message=_user_msg,
+            )
+        )
 
     # ---- Auto-routing: if enabled and no model assigned yet, route
     #      the first user message to the best model in one shot. -------
@@ -938,6 +968,108 @@ async def send_message(
         content=response_text,
         model_id=model_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# Auto-title helpers
+# ---------------------------------------------------------------------------
+
+
+async def _generate_title_async(
+    session_id: str,
+    tenant_id: str,
+    is_temporary: bool,
+    user_message: str,
+) -> None:
+    """Background task: call a cheap LLM to generate a concise session title.
+
+    Sets a raw fallback title immediately; this function improves it.
+    Runs in a background ``asyncio.ensure_future`` so it doesn't block the
+    message send response.
+    """
+    import logging as _logging
+
+    _logger = _logging.getLogger(__name__)
+    try:
+        from ..db.base import AsyncSessionLocal as _AsyncSessionLocal
+        from ..db.orm.models import Model as _ModelORM
+        from ..models.base import get_chat_client as _get_chat_client
+        from agent_framework import Message as _MafMessage
+        from sqlalchemy import select
+
+        # Find a cheap eligible model for title generation
+        async with _AsyncSessionLocal() as _title_db:
+            result = await _title_db.execute(
+                select(_ModelORM).where(
+                    _ModelORM.tenant_id == tenant_id,
+                    _ModelORM.enabled == True,  # noqa: E712
+                    _ModelORM.auto_route_eligible == True,  # noqa: E712
+                ).order_by(_ModelORM.input_price_per_1m.asc())
+            )
+            eligible = list(result.scalars().all())
+
+            if not eligible:
+                _logger.info(
+                    "Auto-title LLM: no eligible model for tenant %s — keeping fallback title",
+                    tenant_id,
+                )
+                return
+
+            classifier = eligible[0]
+            _logger.info(
+                "Auto-title LLM: using model=%s for title generation",
+                classifier.model_id,
+            )
+
+            prompt = (
+                "You are a chat title generator. Generate a very concise title "
+                "(5 words or fewer) for a conversation that starts with this message. "
+                "Respond with ONLY the title, nothing else."
+            )
+            client = _get_chat_client(classifier, thinking_enabled=False)
+            maf_messages = [
+                _MafMessage("system", [prompt]),
+                _MafMessage("user", [user_message]),
+            ]
+            response = await client.get_response(
+                messages=maf_messages,
+                options={"temperature": 0.3, "max_tokens": 32},
+            )
+            # Safe cleanup — DeepSeekThinkingClient doesn't have aclose()
+            if hasattr(client, "aclose"):
+                await client.aclose()
+            elif hasattr(client, "close"):
+                await client.close()
+
+            llm_title = (response.messages[-1].text or "").strip().strip('"').strip("'")
+            if not llm_title or len(llm_title) > 100:
+                _logger.info(
+                    "Auto-title LLM: generated title invalid (%r) — keeping fallback",
+                    llm_title,
+                )
+                return
+
+            _logger.info("Auto-title LLM: generated title=%r", llm_title)
+
+            # Update the session title
+            if is_temporary:
+                from ..core.redis import get_temp_session, store_temp_session
+
+                temp_data = await get_temp_session(session_id)
+                if temp_data is not None:
+                    temp_data["title"] = llm_title
+                    await store_temp_session(session_id, temp_data)
+            else:
+                await session_service.update_session(
+                    _title_db, session_id, title=llm_title
+                )
+                await _title_db.commit()
+
+    except Exception:
+        _logger.exception(
+            "Auto-title LLM: failed to generate title for session %s",
+            session_id,
+        )
 
 
 # ---------------------------------------------------------------------------

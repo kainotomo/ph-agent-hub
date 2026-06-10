@@ -22,6 +22,7 @@ from typing import Any
 import httpx
 from agent_framework import tool
 
+from ._oauth_refresh import ensure_fresh_token as _ensure_fresh_token
 from ._oauth_refresh import refresh_token_if_expired as _refresh_token_if_expired
 
 logger = logging.getLogger(__name__)
@@ -147,6 +148,7 @@ def _parse_credential(cred: Any) -> tuple[str, dict, dict, str | None]:
 def build_email_tools(
     tool_config: dict | None = None,
     user_credentials: list | None = None,
+    db: object | None = None,
 ) -> list:
     """Return a list of MAF @tool-decorated async functions for email.
 
@@ -156,6 +158,7 @@ def build_email_tools(
         tool_config: ``Tool.config`` JSON dict (tenant-level).
         user_credentials: List of ``UserToolCredential`` ORM rows for
             per-user email accounts.
+        db: Optional async DB session for persisting refreshed tokens.
 
     Returns:
         A list of MAF tool callables.
@@ -166,6 +169,13 @@ def build_email_tools(
     from_email: str = creds.get("from_email", "")
     from_name: str = creds.get("from_name", "")
     allowed_recipients: list[str] = config.get("allowed_recipients", [])
+
+    async def _maybe_refresh(tk, cp, active_cred):
+        """Refresh token if expired; persist if db is available."""
+        return await _refresh_token_if_expired(
+            tk, cp, "Email",
+            credential_orm=active_cred, tokens_dict=tk, db=db,
+        )
 
     # ------------------------------------------------------------------
     @tool
@@ -196,16 +206,18 @@ def build_email_tools(
         if active_cred:
             cp, cd, tk, ce = _parse_credential(active_cred)
             if cp in ("gmail", "google") and tk.get("access_token"):
-                result = await _send_via_gmail_api(to, subject, body, cc, is_html, tk["access_token"])
+                await _ensure_fresh_token(tk, cp, "Email", credential_orm=active_cred, tokens_dict=tk, db=db)
+                result = await _send_via_gmail_api(to, subject, body, cc, is_html, tk.get("access_token", ""))
                 if "expired" in result.get("error", "").lower():
-                    refreshed = await _refresh_token_if_expired(tk, cp, "Gmail")
+                    refreshed = await _maybe_refresh(tk, cp, active_cred)
                     if refreshed:
                         result = await _send_via_gmail_api(to, subject, body, cc, is_html, tk["access_token"])
                 return result
             elif cp in ("outlook", "microsoft") and tk.get("access_token"):
-                result = await _send_via_graph_api(to, subject, body, cc, is_html, tk["access_token"])
+                await _ensure_fresh_token(tk, cp, "Email", credential_orm=active_cred, tokens_dict=tk, db=db)
+                result = await _send_via_graph_api(to, subject, body, cc, is_html, tk.get("access_token", ""))
                 if "expired" in result.get("error", "").lower():
-                    refreshed = await _refresh_token_if_expired(tk, cp, "Outlook")
+                    refreshed = await _maybe_refresh(tk, cp, active_cred)
                     if refreshed:
                         result = await _send_via_graph_api(to, subject, body, cc, is_html, tk["access_token"])
                 return result
@@ -288,16 +300,18 @@ def build_email_tools(
         cp, cd, tk, _ = _parse_credential(active_cred)
 
         if cp in ("gmail", "google") and tk.get("access_token"):
-            result = await _read_gmail_api(tk["access_token"], limit, "is:unread " if unread_only else "")
+            await _ensure_fresh_token(tk, cp, "Email", credential_orm=active_cred, tokens_dict=tk, db=db)
+            result = await _read_gmail_api(tk.get("access_token", ""), limit, "is:unread " if unread_only else "")
             if "expired" in result.get("error", "").lower():
-                refreshed = await _refresh_token_if_expired(tk, cp, "Gmail")
+                refreshed = await _maybe_refresh(tk, cp, active_cred)
                 if refreshed:
                     result = await _read_gmail_api(tk["access_token"], limit, "is:unread " if unread_only else "")
             return result
         elif cp in ("outlook", "microsoft") and tk.get("access_token"):
-            result = await _read_outlook_api(tk["access_token"], limit, unread_only)
+            await _ensure_fresh_token(tk, cp, "Email", credential_orm=active_cred, tokens_dict=tk, db=db)
+            result = await _read_outlook_api(tk.get("access_token", ""), limit, unread_only)
             if "expired" in result.get("error", "").lower():
-                refreshed = await _refresh_token_if_expired(tk, cp, "Outlook")
+                refreshed = await _maybe_refresh(tk, cp, active_cred)
                 if refreshed:
                     result = await _read_outlook_api(tk["access_token"], limit, unread_only)
             return result
@@ -337,16 +351,18 @@ def build_email_tools(
         cp, cd, tk, _ = _parse_credential(active_cred)
 
         if cp in ("gmail", "google") and tk.get("access_token"):
-            result = await _read_gmail_api(tk["access_token"], limit, query)
+            await _ensure_fresh_token(tk, cp, "Email", credential_orm=active_cred, tokens_dict=tk, db=db)
+            result = await _read_gmail_api(tk.get("access_token", ""), limit, query)
             if "expired" in result.get("error", "").lower():
-                refreshed = await _refresh_token_if_expired(tk, cp, "Gmail")
+                refreshed = await _maybe_refresh(tk, cp, active_cred)
                 if refreshed:
                     result = await _read_gmail_api(tk["access_token"], limit, query)
             return result
         elif cp in ("outlook", "microsoft") and tk.get("access_token"):
-            result = await _search_outlook_api(tk["access_token"], query, limit)
+            await _ensure_fresh_token(tk, cp, "Email", credential_orm=active_cred, tokens_dict=tk, db=db)
+            result = await _search_outlook_api(tk.get("access_token", ""), query, limit)
             if "expired" in result.get("error", "").lower():
-                refreshed = await _refresh_token_if_expired(tk, cp, "Outlook")
+                refreshed = await _maybe_refresh(tk, cp, active_cred)
                 if refreshed:
                     result = await _search_outlook_api(tk["access_token"], query, limit)
             return result

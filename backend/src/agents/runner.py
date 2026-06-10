@@ -2027,12 +2027,14 @@ async def _build_tool_callables(
         return await build_calendar_tools(
             tool.config or {},
             user_credentials=user_credentials,
+            db=db,
         )
     elif tool.type == "tasks":
         from ..tools.tasks import build_tasks_tools
         return build_tasks_tools(
             tool.config or {},
             user_credentials=user_credentials,
+            db=db,
         )
     elif tool.type == "image_generation":
         from ..tools.image_generation import build_image_generation_tools
@@ -2047,6 +2049,7 @@ async def _build_tool_callables(
         return build_email_tools(
             tool.config or {},
             user_credentials=user_credentials,
+            db=db,
         )
     elif tool.type == "mcp":
         from ..tools.mcp import build_mcp_tool_callables

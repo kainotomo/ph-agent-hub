@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 from agent_framework import tool
 
-from ._oauth_refresh import refresh_token_if_expired
+from ._oauth_refresh import ensure_fresh_token, refresh_token_if_expired
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +61,7 @@ def _parse_credential(cred) -> tuple[str, dict, dict, str | None]:
 def build_tasks_tools(
     tool_config: dict | None = None,
     user_credentials: list | None = None,
+    db: object | None = None,
 ) -> list:
     """Return a list of MAF @tool-decorated async functions for tasks.
 
@@ -69,11 +70,19 @@ def build_tasks_tools(
     Args:
         tool_config: ``Tool.config`` JSON dict (reserved for future use).
         user_credentials: List of ``UserToolCredential`` ORM rows.
+        db: Optional async DB session for persisting refreshed tokens.
 
     Returns:
         A list of MAF tool callables.
     """
     config = tool_config or {}
+
+    async def _maybe_refresh(tokens, provider, cred):
+        """Refresh token if expired; persist if db is available."""
+        return await refresh_token_if_expired(
+            tokens, provider, "Tasks",
+            credential_orm=cred, tokens_dict=tokens, db=db,
+        )
 
     # ------------------------------------------------------------------
     @tool
@@ -99,17 +108,20 @@ def build_tasks_tools(
         if not access_token:
             return {"error": "Access token not available. Reconnect account.", "task_lists": [], "total": 0}
 
+        # Proactive refresh if token is about to expire
+        await ensure_fresh_token(tokens, provider, "Tasks", credential_orm=cred, tokens_dict=tokens, db=db)
+
         if provider in ("gmail", "google"):
-            result = await _list_google_task_lists(access_token)
+            result = await _list_google_task_lists(tokens.get("access_token", ""))
             if "Token expired" in result.get("error", ""):
-                refreshed = await refresh_token_if_expired(tokens, provider, "Tasks", credential_orm=cred, tokens_dict=tokens)
+                refreshed = await _maybe_refresh(tokens, provider, cred)
                 if refreshed:
                     result = await _list_google_task_lists(tokens["access_token"])
             return result
         elif provider in ("outlook", "microsoft"):
-            result = await _list_microsoft_task_lists(access_token)
+            result = await _list_microsoft_task_lists(tokens.get("access_token", ""))
             if "Token expired" in result.get("error", ""):
-                refreshed = await refresh_token_if_expired(tokens, provider, "Tasks", credential_orm=cred, tokens_dict=tokens)
+                refreshed = await _maybe_refresh(tokens, provider, cred)
                 if refreshed:
                     result = await _list_microsoft_task_lists(tokens["access_token"])
             return result
@@ -149,17 +161,20 @@ def build_tasks_tools(
         if not access_token:
             return {"error": "Access token not available.", "tasks": [], "total": 0}
 
+        # Proactive refresh if token is about to expire
+        await ensure_fresh_token(tokens, provider, "Tasks", credential_orm=cred, tokens_dict=tokens, db=db)
+
         if provider in ("gmail", "google"):
-            result = await _list_google_tasks(access_token, list_name, include_completed, limit)
+            result = await _list_google_tasks(tokens.get("access_token", ""), list_name, include_completed, limit)
             if "Token expired" in result.get("error", ""):
-                refreshed = await refresh_token_if_expired(tokens, provider, "Tasks", credential_orm=cred, tokens_dict=tokens)
+                refreshed = await _maybe_refresh(tokens, provider, cred)
                 if refreshed:
                     result = await _list_google_tasks(tokens["access_token"], list_name, include_completed, limit)
             return result
         elif provider in ("outlook", "microsoft"):
-            result = await _list_microsoft_tasks(access_token, list_name, include_completed, limit)
+            result = await _list_microsoft_tasks(tokens.get("access_token", ""), list_name, include_completed, limit)
             if "Token expired" in result.get("error", ""):
-                refreshed = await refresh_token_if_expired(tokens, provider, "Tasks", credential_orm=cred, tokens_dict=tokens)
+                refreshed = await _maybe_refresh(tokens, provider, cred)
                 if refreshed:
                     result = await _list_microsoft_tasks(tokens["access_token"], list_name, include_completed, limit)
             return result
@@ -201,17 +216,20 @@ def build_tasks_tools(
         if not access_token:
             return {"error": "Access token not available.", "status": "error"}
 
+        # Proactive refresh if token is about to expire
+        await ensure_fresh_token(tokens, provider, "Tasks", credential_orm=cred, tokens_dict=tokens, db=db)
+
         if provider in ("gmail", "google"):
-            result = await _create_google_task(access_token, title.strip(), list_name, due_date, notes)
+            result = await _create_google_task(tokens.get("access_token", ""), title.strip(), list_name, due_date, notes)
             if "Token expired" in result.get("error", ""):
-                refreshed = await refresh_token_if_expired(tokens, provider, "Tasks", credential_orm=cred, tokens_dict=tokens)
+                refreshed = await _maybe_refresh(tokens, provider, cred)
                 if refreshed:
                     result = await _create_google_task(tokens["access_token"], title.strip(), list_name, due_date, notes)
             return result
         elif provider in ("outlook", "microsoft"):
-            result = await _create_microsoft_task(access_token, title.strip(), list_name, due_date, notes)
+            result = await _create_microsoft_task(tokens.get("access_token", ""), title.strip(), list_name, due_date, notes)
             if "Token expired" in result.get("error", ""):
-                refreshed = await refresh_token_if_expired(tokens, provider, "Tasks", credential_orm=cred, tokens_dict=tokens)
+                refreshed = await _maybe_refresh(tokens, provider, cred)
                 if refreshed:
                     result = await _create_microsoft_task(tokens["access_token"], title.strip(), list_name, due_date, notes)
             return result
@@ -256,22 +274,23 @@ def build_tasks_tools(
         if not access_token:
             return {"error": "Access token not available.", "status": "error"}
 
+        # Proactive refresh if token is about to expire
+        await ensure_fresh_token(tokens, provider, "Tasks", credential_orm=cred, tokens_dict=tokens, db=db)
+
         if provider in ("gmail", "google"):
-            result = await _update_google_task(access_token, task_id, title, completed, due_date, notes, list_name)
+            result = await _update_google_task(tokens.get("access_token", ""), task_id, title, completed, due_date, notes, list_name)
             if "Token expired" in result.get("error", ""):
-                refreshed = await refresh_token_if_expired(tokens, provider, "Tasks", credential_orm=cred, tokens_dict=tokens)
+                refreshed = await _maybe_refresh(tokens, provider, cred)
                 if refreshed:
                     result = await _update_google_task(tokens["access_token"], task_id, title, completed, due_date, notes, list_name)
             return result
         elif provider in ("outlook", "microsoft"):
-            result = await _update_microsoft_task(access_token, task_id, title, completed, due_date, notes, list_name)
+            result = await _update_microsoft_task(tokens.get("access_token", ""), task_id, title, completed, due_date, notes, list_name)
             if "Token expired" in result.get("error", ""):
-                refreshed = await refresh_token_if_expired(tokens, provider, "Tasks", credential_orm=cred, tokens_dict=tokens)
+                refreshed = await _maybe_refresh(tokens, provider, cred)
                 if refreshed:
                     result = await _update_microsoft_task(tokens["access_token"], task_id, title, completed, due_date, notes, list_name)
             return result
-        else:
-            return {"error": f"Provider '{provider}' not supported."}
 
     # ------------------------------------------------------------------
     @tool
@@ -321,17 +340,20 @@ def build_tasks_tools(
         if not access_token:
             return {"error": "Access token not available.", "status": "error"}
 
+        # Proactive refresh if token is about to expire
+        await ensure_fresh_token(tokens, provider, "Tasks", credential_orm=cred, tokens_dict=tokens, db=db)
+
         if provider in ("gmail", "google"):
-            result = await _delete_google_task(access_token, task_id, list_name)
+            result = await _delete_google_task(tokens.get("access_token", ""), task_id, list_name)
             if "Token expired" in result.get("error", ""):
-                refreshed = await refresh_token_if_expired(tokens, provider, "Tasks", credential_orm=cred, tokens_dict=tokens)
+                refreshed = await _maybe_refresh(tokens, provider, cred)
                 if refreshed:
                     result = await _delete_google_task(tokens["access_token"], task_id, list_name)
             return result
         elif provider in ("outlook", "microsoft"):
-            result = await _delete_microsoft_task(access_token, task_id, list_name)
+            result = await _delete_microsoft_task(tokens.get("access_token", ""), task_id, list_name)
             if "Token expired" in result.get("error", ""):
-                refreshed = await refresh_token_if_expired(tokens, provider, "Tasks", credential_orm=cred, tokens_dict=tokens)
+                refreshed = await _maybe_refresh(tokens, provider, cred)
                 if refreshed:
                     result = await _delete_microsoft_task(tokens["access_token"], task_id, list_name)
             return result

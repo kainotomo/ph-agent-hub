@@ -303,8 +303,16 @@ async def _do_test_connection(
     elif provider in ("gmail", "outlook", "google", "microsoft"):
         result = await _test_oauth_connection(provider, tool_type, tokens)
 
-        # If expired and we have a refresh_token, try refreshing
-        if result.get("ok") is False and "expired" in result.get("message", "").lower():
+        # If expired or permissions error, try refreshing the token
+        should_retry = (
+            result.get("ok") is False
+            and (
+                "expired" in result.get("message", "").lower()
+                or "permissions" in result.get("message", "").lower()
+                or "403" in result.get("message", "")
+            )
+        )
+        if should_retry:
             refresh_token = tokens.get("refresh_token", "")
             if refresh_token:
                 # Get client credentials from settings
@@ -317,10 +325,14 @@ async def _do_test_connection(
 
                 new_tokens = await refresh_oauth_token(tokens, provider, client_id, client_secret)
                 if new_tokens:
-                    # Update stored tokens with new access_token and expires_at
+                    # Update stored tokens
                     tokens["access_token"] = new_tokens.get("access_token", tokens.get("access_token", ""))
                     if "expires_at" in new_tokens:
                         tokens["expires_at"] = new_tokens["expires_at"]
+                    # Persist rotated refresh_token if Microsoft issued one
+                    new_rt = new_tokens.get("refresh_token")
+                    if new_rt:
+                        tokens["refresh_token"] = new_rt
                     credential.oauth_tokens = json.dumps(tokens)
                     if db:
                         await db.commit()
@@ -423,18 +435,41 @@ async def _test_oauth_connection(provider: str, tool_type: str, tokens: dict) ->
         elif provider in ("outlook", "microsoft"):
             import httpx
 
+            # Pick the right test endpoint based on tool type
+            if tool_type == "calendar":
+                test_url = "https://graph.microsoft.com/v1.0/me/events?$top=1"
+                api_label = "Calendar"
+            elif tool_type == "tasks":
+                test_url = "https://graph.microsoft.com/v1.0/me/todo/lists"
+                api_label = "Tasks"
+            else:
+                test_url = "https://graph.microsoft.com/v1.0/me/messages?$top=1"
+                api_label = "Email"
+
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(
-                    "https://graph.microsoft.com/v1.0/me",
+                    test_url,
                     headers={"Authorization": f"Bearer {access_token}"},
                 )
                 if resp.status_code == 200:
                     data = resp.json()
-                    return {"ok": True, "message": f"Connected as {data.get('mail', data.get('userPrincipalName', 'unknown'))}"}
+                    if tool_type == "calendar":
+                        items = data.get("value", [])
+                        return {"ok": True, "message": f"Connected — {len(items)} upcoming event(s) found"}
+                    elif tool_type == "tasks":
+                        items = data.get("value", [])
+                        return {"ok": True, "message": f"Connected — {len(items)} task list(s) found"}
+                    else:
+                        items = data.get("value", [])
+                        user = data.get("from", {})
+                        sender = data.get("from", {}).get("emailAddress", {}).get("address", "") if data.get("from") else ""
+                        return {"ok": True, "message": f"Connected. Found {len(items)} email(s)."}
                 elif resp.status_code == 401:
                     return {"ok": False, "message": "Token expired. Reconnect the account."}
+                elif resp.status_code == 403:
+                    return {"ok": False, "message": f"Token lacks {api_label} permissions (HTTP 403). Try reconnecting the account."}
                 else:
-                    return {"ok": False, "message": f"Microsoft Graph error: HTTP {resp.status_code}"}
+                    return {"ok": False, "message": f"Microsoft Graph ({api_label}) error: HTTP {resp.status_code}"}
 
     except Exception as exc:
         return {"ok": False, "message": f"Connection test failed: {exc}"}

@@ -32,6 +32,7 @@ import {
   PushpinOutlined,
   PushpinFilled,
   DeleteOutlined,
+  DownloadOutlined,
   EditOutlined,
   DownOutlined,
   ThunderboltOutlined,
@@ -40,6 +41,8 @@ import {
   MenuUnfoldOutlined,
   ReloadOutlined,
   SettingOutlined,
+  FileTextOutlined,
+  FileOutlined,
 } from "@ant-design/icons";
 import { Logo } from "../../../shared/components/Logo";
 import { useNavigate, useParams } from "react-router-dom";
@@ -53,6 +56,7 @@ import {
   SessionData,
   addTagToSession,
   removeTagFromSession,
+  exportSession,
 } from "../services/chat";
 import { ContextIndicator } from "./ContextIndicator";
 import { MemoryManager } from "./MemoryManager";
@@ -352,6 +356,41 @@ export function SessionSidebar() {
                       }}
                     />
                   </Tooltip>,
+                  <Dropdown
+                    key="export"
+                    menu={{
+                      items: [
+                        {
+                          key: "json",
+                          icon: <FileTextOutlined />,
+                          label: "Download as JSON",
+                          onClick: (e) => {
+                            e.domEvent.stopPropagation();
+                            exportSession(item.id, "json");
+                          },
+                        },
+                        {
+                          key: "txt",
+                          icon: <FileOutlined />,
+                          label: "Download as Text",
+                          onClick: (e) => {
+                            e.domEvent.stopPropagation();
+                            exportSession(item.id, "txt");
+                          },
+                        },
+                      ],
+                    }}
+                    trigger={["click"]}
+                  >
+                    <Tooltip title="Export">
+                      <Button
+                        type="text"
+                        size="small"
+                        icon={<DownloadOutlined />}
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                    </Tooltip>
+                  </Dropdown>,
                   <Popconfirm
                     key="delete"
                     title="Delete this session?"

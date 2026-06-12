@@ -8,8 +8,10 @@
 import asyncio
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, AsyncIterator
 
 logger = logging.getLogger(__name__)
@@ -25,6 +27,7 @@ from sqlalchemy.orm import selectinload
 
 from ..agents.runner import (
     _msg_get,
+    _extract_message_text,
     run_agent,
     run_agent_stream,
 )
@@ -181,6 +184,11 @@ class FeedbackResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class ExportFormat(str, Enum):
+    JSON = "json"
+    TXT = "txt"
 
 
 class FileUploadResponse(BaseModel):
@@ -2268,6 +2276,200 @@ async def download_upload(
                 f'attachment; filename="{upload.original_filename}"'
             ),
             "Content-Length": str(upload.size_bytes),
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Export helpers
+# ---------------------------------------------------------------------------
+
+
+def _sanitize_filename(title: str) -> str:
+    """Remove unsafe characters from a session title for use as a filename."""
+    safe = re.sub(r'[\\/:*?"<>|]', "_", title)
+    safe = safe.strip().replace(" ", "_") or "conversation"
+    return safe[:200]
+
+
+def _build_export_dict(
+    session_data: dict,
+    messages: list,
+) -> dict:
+    """Build the versioned JSON export payload.
+
+    Designed for round-trip compatibility with a future import feature.
+    Instance-specific IDs (message id, session_id) are deliberately omitted.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+
+    return {
+        "version": 1,
+        "exported_at": now,
+        "application": "ph-agent-hub",
+        "session": {
+            "title": session_data.get("title", ""),
+            "created_at": _fmt_dt(session_data.get("created_at")),
+            "updated_at": _fmt_dt(session_data.get("updated_at")),
+            "is_temporary": session_data.get("is_temporary", False),
+        },
+        "messages": [
+            {
+                "sender": m.get("sender"),
+                "content": m.get("content"),
+                "model_name": m.get("model_name"),
+                "model_provider": m.get("model_provider"),
+                "tool_calls": m.get("tool_calls"),
+                "tokens_in": m.get("tokens_in"),
+                "tokens_out": m.get("tokens_out"),
+                "summarized": m.get("summarized", False),
+                "created_at": _fmt_dt(m.get("created_at")),
+            }
+            for m in messages
+        ],
+    }
+
+
+def _build_export_txt(
+    session_data: dict,
+    messages: list,
+) -> str:
+    """Build a human-readable plain-text conversation transcript."""
+    sep = "=" * 60
+    lines: list[str] = [
+        sep,
+        f"Conversation: {session_data.get('title', 'Untitled')}",
+        f"Exported: {datetime.now(timezone.utc).isoformat()}",
+        sep,
+        "",
+    ]
+
+    for m in messages:
+        sender = m.get("sender", "unknown")
+        summarized = m.get("summarized", False)
+        created = _fmt_dt(m.get("created_at"))
+        model_name = m.get("model_name")
+        model_provider = m.get("model_provider")
+
+        # Build header
+        header = f"[{sender.capitalize()}]"
+        if created:
+            header += f" \u2014 {created}"
+        if sender == "assistant" and model_name:
+            provider = f" ({model_provider})" if model_provider else ""
+            header += f" \u00b7 {model_name}{provider}"
+        lines.append(header)
+
+        if summarized:
+            lines.append("[Summarized \u2014 content compressed into summary]")
+        else:
+            text = _extract_message_text(m.get("content"))
+            if text:
+                lines.append(text)
+
+        # Tool calls rendered inline
+        tool_calls = m.get("tool_calls")
+        if tool_calls and isinstance(tool_calls, list):
+            for tc in tool_calls:
+                if isinstance(tc, dict):
+                    name = tc.get("name") or (
+                        tc.get("function", {}).get("name", "unknown")
+                    )
+                    lines.append(f"[Tool call: {name}]")
+
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _fmt_dt(dt_val: Any) -> str | None:
+    """Format a datetime-like value to ISO string or None."""
+    if dt_val is None:
+        return None
+    if isinstance(dt_val, datetime):
+        return dt_val.isoformat()
+    if isinstance(dt_val, str):
+        return dt_val
+    return str(dt_val)
+
+
+# ---------------------------------------------------------------------------
+# Export endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/session/{session_id}/export",
+)
+async def export_session(
+    session_id: str,
+    format: ExportFormat = ExportFormat.JSON,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(get_current_user),
+):
+    """Export a conversation session as JSON or plain text.
+
+    Supported formats: json (default), txt.
+    The JSON export is versioned for future round-trip import support.
+    """
+    data = await _load_session(db, session_id)
+    await _require_session_owner(data, current_user)
+
+    is_temp = data.get("is_temporary", False)
+
+    # Load messages — dual path (DB / Redis) matching list_messages
+    if is_temp:
+        msgs = await get_temp_messages(session_id)
+    else:
+        result = await db.execute(
+            select(Message)
+            .options(selectinload(Message.model))
+            .where(
+                Message.session_id == session_id,
+                Message.is_deleted == False,  # noqa: E712
+            )
+            .order_by(Message.created_at)
+        )
+        orm_messages = result.scalars().all()
+        msgs = [
+            {
+                "id": m.id,
+                "session_id": m.session_id,
+                "sender": m.sender,
+                "content": m.content,
+                "model_name": m.model.name if m.model else None,
+                "model_provider": m.model.provider if m.model else None,
+                "tool_calls": m.tool_calls,
+                "tokens_in": m.tokens_in,
+                "tokens_out": m.tokens_out,
+                "summarized": m.summarized,
+                "created_at": m.created_at,
+                "updated_at": m.updated_at,
+            }
+            for m in orm_messages
+        ]
+
+    # Build filename from session title
+    title = data.get("title", "conversation")
+    safe_title = _sanitize_filename(title)
+
+    if format == ExportFormat.JSON:
+        payload = _build_export_dict(data, msgs)
+        content_bytes = json.dumps(payload, indent=2, default=str).encode("utf-8")
+        media_type = "application/json"
+        filename = f"{safe_title}.json"
+    else:
+        text = _build_export_txt(data, msgs)
+        content_bytes = text.encode("utf-8")
+        media_type = "text/plain; charset=utf-8"
+        filename = f"{safe_title}.txt"
+
+    return StreamingResponse(
+        content=iter([content_bytes]),
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(len(content_bytes)),
         },
     )
 

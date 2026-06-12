@@ -191,6 +191,11 @@ class ExportFormat(str, Enum):
     TXT = "txt"
 
 
+class ImportResponse(BaseModel):
+    session_id: str
+    message_count: int
+
+
 class FileUploadResponse(BaseModel):
     file_id: str
     original_filename: str
@@ -2394,6 +2399,70 @@ def _fmt_dt(dt_val: Any) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Import helpers
+# ---------------------------------------------------------------------------
+
+
+def _validate_import_payload(payload: dict) -> tuple[str, list[dict]]:
+    """Validate an import JSON payload and extract (title, messages).
+
+    Raises ValidationError on any structural issue.
+    """
+    if not isinstance(payload, dict):
+        raise ValidationError("Import payload must be a JSON object")
+
+    version = payload.get("version")
+    if version != 1:
+        raise ValidationError(
+            f"Unsupported export version {version}. Only version 1 is supported."
+        )
+
+    session = payload.get("session")
+    if not isinstance(session, dict):
+        raise ValidationError("Missing or invalid 'session' block")
+
+    title = session.get("title", "Imported Chat")
+    if not isinstance(title, str) or not title.strip():
+        title = "Imported Chat"
+
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        raise ValidationError("Missing or invalid 'messages' array")
+
+    if not messages:
+        raise ValidationError("No messages to import")
+
+    allowed_senders = {"user", "assistant", "system"}
+    for i, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            raise ValidationError(f"Message at index {i} is not an object")
+        sender = msg.get("sender")
+        if sender not in allowed_senders:
+            raise ValidationError(
+                f"Message at index {i}: invalid sender '{sender}'"
+            )
+
+    return title.strip(), messages
+
+
+def _parse_import_datetime(dt_val: Any) -> datetime:
+    """Parse a datetime value from import payload to a datetime object."""
+    if dt_val is None:
+        return datetime.now(timezone.utc)
+    if isinstance(dt_val, datetime):
+        return dt_val
+    if isinstance(dt_val, str):
+        try:
+            return datetime.fromisoformat(dt_val)
+        except (ValueError, TypeError):
+            logger.warning(
+                "Could not parse datetime '%s', using current time", dt_val
+            )
+            return datetime.now(timezone.utc)
+    return datetime.now(timezone.utc)
+
+
+# ---------------------------------------------------------------------------
 # Export endpoint
 # ---------------------------------------------------------------------------
 
@@ -2471,6 +2540,84 @@ async def export_session(
             "Content-Disposition": f'attachment; filename="{filename}"',
             "Content-Length": str(len(content_bytes)),
         },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Import endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/import",
+    status_code=201,
+    response_model=ImportResponse,
+)
+async def import_session(
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(get_current_user),
+):
+    """Import a conversation from a JSON export file.
+
+    Creates a new permanent session and populates it with the imported
+    messages. The import format matches the ``GET /session/{id}/export``
+    JSON output (version 1). Only ``.json`` files are accepted.
+    """
+    # Validate file type
+    if not file.filename or not file.filename.lower().endswith(".json"):
+        raise ValidationError("Only .json files are supported for import")
+
+    # Read and parse
+    try:
+        raw = await file.read()
+        payload = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValidationError(f"Invalid JSON: {e}")
+
+    # Validate structure
+    title, messages_data = _validate_import_payload(payload)
+
+    # Create a new permanent session
+    session = await session_service.create_session(
+        db=db,
+        tenant_id=current_user.tenant_id,
+        user_id=current_user.id,
+        title=title,
+        is_temporary=False,
+    )
+
+    # Bulk insert messages with new UUIDs
+    msg_count = 0
+    for msg_data in messages_data:
+        created_at = _parse_import_datetime(msg_data.get("created_at"))
+        msg = Message(
+            id=str(uuid.uuid4()),
+            session_id=session.id,
+            sender=msg_data["sender"],
+            content=msg_data.get("content"),
+            tool_calls=msg_data.get("tool_calls"),
+            tokens_in=msg_data.get("tokens_in"),
+            tokens_out=msg_data.get("tokens_out"),
+            summarized=msg_data.get("summarized", False),
+            created_at=created_at,
+            updated_at=created_at,
+        )
+        db.add(msg)
+        msg_count += 1
+
+    await db.commit()
+
+    logger.info(
+        "User %s imported session %s with %d messages",
+        current_user.id,
+        session.id,
+        msg_count,
+    )
+
+    return ImportResponse(
+        session_id=session.id,
+        message_count=msg_count,
     )
 
 

@@ -6,7 +6,7 @@
 // links to MemoryManager, SessionSearch, logout.
 // =============================================================================
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   Alert,
   Layout,
@@ -41,6 +41,7 @@ import {
   MenuUnfoldOutlined,
   ReloadOutlined,
   SettingOutlined,
+  UploadOutlined,
   FileTextOutlined,
   FileOutlined,
 } from "@ant-design/icons";
@@ -57,6 +58,7 @@ import {
   addTagToSession,
   removeTagFromSession,
   exportSession,
+  importSession,
 } from "../services/chat";
 import { ContextIndicator } from "./ContextIndicator";
 import { MemoryManager } from "./MemoryManager";
@@ -77,12 +79,33 @@ export function SessionSidebar() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   React.useEffect(() => {
     const handleResize = () => setIsMobile(window.innerWidth < 768);
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
   }, []);
+
+  const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const result = await importSession(file);
+      message.success(
+        `Imported "${file.name}" with ${result.message_count} messages`,
+      );
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      navigate(`/chat/${result.session_id}`);
+    } catch (err) {
+      message.error(
+        `Import failed: ${err instanceof Error ? err.message : "Unknown error"}`,
+      );
+    } finally {
+      // Reset so the same file can be re-imported
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
 
   const { data: sessions, isLoading, isError, error, refetch } = useQuery({
     queryKey: ["sessions"],
@@ -230,6 +253,21 @@ export function SessionSidebar() {
                   onClick={() => setMemoryOpen(true)}
                 />
               </Tooltip>
+              <Tooltip title="Import">
+                <Button
+                  type="text"
+                  icon={<UploadOutlined />}
+                  size="small"
+                  onClick={() => fileInputRef.current?.click()}
+                />
+              </Tooltip>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".json"
+                style={{ display: "none" }}
+                onChange={handleImport}
+              />
               <Tooltip title="Refresh">
                 <Button
                   type="text"

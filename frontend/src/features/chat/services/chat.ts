@@ -272,6 +272,36 @@ export async function exportSession(
   URL.revokeObjectURL(url);
 }
 
+export async function importSession(
+  file: File,
+): Promise<{ session_id: string; message_count: number }> {
+  const BASE_URL = import.meta.env.VITE_API_URL || "/api";
+  const token = getToken();
+
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const res = await fetch(`${BASE_URL}/chat/import`, {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: formData,
+  });
+
+  if (!res.ok) {
+    let detail = "Import failed";
+    try {
+      const err = await res.json();
+      detail = err.detail || detail;
+    } catch {
+      const text = await res.text();
+      detail = text || detail;
+    }
+    throw new Error(detail);
+  }
+
+  return res.json();
+}
+
 // ---------------------------------------------------------------------------
 // Message Feedback
 // ---------------------------------------------------------------------------

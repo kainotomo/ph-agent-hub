@@ -166,6 +166,7 @@ export function useStream(apiPrefix: string = "chat") {
       content: string,
       fileIds: string[] | undefined,
       temperature: number | undefined,
+      sessionData: Record<string, unknown> | undefined,
       handlers: {
         onToken?: (token: string, messageId: string) => void;
         onToolStart?: (data: ToolStartEvent["data"]) => void;
@@ -208,6 +209,7 @@ export function useStream(apiPrefix: string = "chat") {
               content,
               file_ids: fileIds || [],
               ...(temperature !== undefined ? { temperature } : {}),
+              ...(sessionData ? { session_data: sessionData } : {}),
             }),
           });
           if (!res.ok) {
@@ -250,6 +252,7 @@ export function useStream(apiPrefix: string = "chat") {
               content,
               file_ids: fileIds || [],
               ...(temperature !== undefined ? { temperature } : {}),
+              ...(sessionData ? { session_data: sessionData } : {}),
             }),
             openWhenHidden: true,
             signal: controller.signal,

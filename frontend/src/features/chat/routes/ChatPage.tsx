@@ -5,7 +5,7 @@
 // =============================================================================
 
 import { useParams, useNavigate } from "react-router-dom";
-import { Layout, Empty, Button, Typography, Spin } from "antd";
+import { Layout, Button, Typography, Spin } from "antd";
 import { PlusOutlined, ThunderboltOutlined } from "@ant-design/icons";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { SessionSidebar } from "../components/SessionSidebar";
@@ -24,6 +24,7 @@ export function ChatPage() {
     queryKey: ["session", sessionId],
     queryFn: () => getSession(sessionId!),
     enabled: !!sessionId,
+    retry: false,
   });
 
   const handleSessionUpdate = async (data: Record<string, unknown>) => {
@@ -32,13 +33,10 @@ export function ChatPage() {
     queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
   };
 
-  const handleNewChat = async () => {
-    try {
-      const session = await createSession({ title: "New Chat" });
-      navigate(`/chat/${session.id}`);
-    } catch {
-      // Error creating session
-    }
+  const handleNewChat = () => {
+    // Lazy persistence (Phase 2): client-side UUID, no API call
+    const uuid = crypto.randomUUID();
+    navigate(`/chat/${uuid}`);
   };
 
   const handleNewTemporaryChat = async () => {
@@ -117,16 +115,11 @@ export function ChatPage() {
             onSessionUpdate={handleSessionUpdate}
           />
         ) : (
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "center",
-              alignItems: "center",
-              height: "100%",
-            }}
-          >
-            <Empty description="Session not found" />
-          </div>
+          <ChatWindow
+            sessionId={sessionId!}
+            isPending={true}
+            onSessionUpdate={handleSessionUpdate}
+          />
         )}
       </Content>
     </Layout>

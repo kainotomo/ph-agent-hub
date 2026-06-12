@@ -71,6 +71,9 @@ interface SessionToolActivationProps {
   selectedSkillId?: string;
   autoSelectTools?: boolean;
   onAutoSelectToolsChange?: (v: boolean) => void;
+  isPending?: boolean;
+  pendingActiveToolIds?: string[];
+  onPendingToolToggle?: (toolId: string, checked: boolean) => void;
 }
 
 export function SessionToolActivation({
@@ -80,6 +83,9 @@ export function SessionToolActivation({
   selectedSkillId,
   autoSelectTools = true,
   onAutoSelectToolsChange,
+  isPending = false,
+  pendingActiveToolIds = [],
+  onPendingToolToggle,
 }: SessionToolActivationProps) {
   const queryClient = useQueryClient();
 
@@ -90,11 +96,11 @@ export function SessionToolActivation({
     enabled: open,
   });
 
-  // Active tools for this session
+  // Active tools for this session (skipped when pending — no backend session yet)
   const { data: activeTools, isLoading: loadingActive } = useQuery({
     queryKey: ["session-tools", sessionId],
     queryFn: () => listSessionTools(sessionId),
-    enabled: open,
+    enabled: open && !isPending,
   });
 
   // Always-on tool IDs for this user
@@ -105,7 +111,9 @@ export function SessionToolActivation({
   });
 
   const alwaysOnSet = new Set(alwaysOnIds || []);
-  const activeIds = new Set((activeTools || []).map((t) => t.id));
+  const activeIds = isPending
+    ? new Set(pendingActiveToolIds)
+    : new Set((activeTools || []).map((t) => t.id));
 
   // Fetch the selected skill's tool IDs (for "from skill" badge)
   const { data: allSkills } = useQuery({
@@ -159,7 +167,9 @@ export function SessionToolActivation({
   });
 
   const handleToggle = (toolId: string, checked: boolean) => {
-    if (checked) {
+    if (isPending) {
+      onPendingToolToggle?.(toolId, checked);
+    } else if (checked) {
       addMutation.mutate(toolId);
     } else {
       removeMutation.mutate(toolId);

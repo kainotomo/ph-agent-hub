@@ -120,6 +120,7 @@ class MessageCreate(BaseModel):
     content: str
     file_ids: list[str] | None = None
     temperature: float | None = None
+    session_data: SessionCreate | None = None
 
 
 class MessageResponse(BaseModel):
@@ -192,6 +193,84 @@ class FileUploadResponse(BaseModel):
     """If set, the embedding API was unavailable and TF-IDF fallback was used."""
 
     model_config = {"from_attributes": True}
+
+
+# =============================================================================
+# Lazy session creation (Phase 2 — Issue #329)
+# =============================================================================
+
+
+async def _lazy_create_session(
+    db: AsyncSession,
+    session_id: str,
+    session_data: SessionCreate,
+    current_user: UserORM,
+) -> dict[str, Any]:
+    """Create a permanent session with the given URL *session_id*.
+
+    Called by ``send_message`` when the session doesn't exist yet and the
+    request includes ``session_data`` (first message sent from a pending
+    / lazy frontend session).
+    """
+    # Resolve active tool IDs (mirrors create_session endpoint logic)
+    active_tool_ids = session_data.active_tool_ids
+    if active_tool_ids is None:
+        always_on_ids: set[str] = set()
+        try:
+            pref_result = await db.execute(
+                select(UserToolPreference.tool_id).where(
+                    UserToolPreference.user_id == current_user.id,
+                    UserToolPreference.always_on == True,  # noqa: E712
+                )
+            )
+            always_on_ids = {row[0] for row in pref_result.all()}
+        except Exception:
+            pass
+
+        skill_tool_ids: set[str] = set()
+        if session_data.selected_skill_id:
+            from ..db.orm.skills import SkillAllowedTool
+
+            skill_result = await db.execute(
+                select(SkillAllowedTool.tool_id).where(
+                    SkillAllowedTool.skill_id == session_data.selected_skill_id
+                )
+            )
+            skill_tool_ids = {row[0] for row in skill_result.all()}
+
+        active_tool_ids = list(always_on_ids | skill_tool_ids)
+
+    session = await session_service.create_session(
+        db=db,
+        id=session_id,
+        tenant_id=current_user.tenant_id,
+        user_id=current_user.id,
+        title=session_data.title or "New Chat",
+        is_temporary=False,
+        is_pinned=session_data.is_pinned,
+        selected_template_id=session_data.selected_template_id,
+        selected_skill_id=session_data.selected_skill_id,
+        selected_model_id=session_data.selected_model_id,
+        thinking_enabled=session_data.thinking_enabled,
+        temperature=session_data.temperature,
+        auto_route_enabled=session_data.auto_route_enabled,
+        auto_select_tools=session_data.auto_select_tools,
+    )
+
+    # Activate tools for the new session
+    for tool_id in active_tool_ids:
+        try:
+            await session_service.add_session_tool(
+                db=db,
+                session_id=session.id,
+                tool_id=tool_id,
+                tenant_id=current_user.tenant_id,
+            )
+        except Exception:
+            pass
+
+    await db.refresh(session)
+    return _session_to_dict(session)
 
 
 # =============================================================================
@@ -828,8 +907,21 @@ async def send_message(
     is a Server-Sent Events stream.  Otherwise a plain JSON response is
     returned (Phase 6 backward-compatible path).
     """
-    data = await _load_session(db, session_id)
-    await _require_session_owner(data, current_user)
+    # ---- Lazy session creation (Phase 2 — Issue #329) ------------------
+    # If the session doesn't exist yet and the request includes session
+    # creation data, create it now before processing the first message.
+    try:
+        data = await _load_session(db, session_id)
+        await _require_session_owner(data, current_user)
+    except NotFoundError:
+        if body.session_data is None:
+            raise
+        logger.info(
+            "Lazy-creating session %s on first message", session_id,
+        )
+        data = await _lazy_create_session(
+            db, session_id, body.session_data, current_user,
+        )
 
     # ---- Auto-title: if session still has the default title, use the
     #      first user message as the title.  Set a raw truncated title

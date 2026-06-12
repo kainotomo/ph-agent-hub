@@ -2,7 +2,10 @@
 # PH Agent Hub — Session Service (CRUD + tool activation)
 # =============================================================================
 
+import asyncio
+
 from sqlalchemy import delete, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.exceptions import NotFoundError, ValidationError
@@ -170,18 +173,39 @@ async def update_session(
     session_id: str,
     **fields,
 ) -> Session:
-    """Update a session's fields. Raises NotFoundError if missing."""
-    session = await get_session_by_id(db, session_id)
-    if session is None:
-        raise NotFoundError("Session not found")
+    """Update a session's fields. Raises NotFoundError if missing.
 
-    for key, value in fields.items():
-        if hasattr(session, key):
-            setattr(session, key, value)
+    Retries on MariaDB 1020 ("Record has changed since last read") to
+    handle concurrent updates from background tasks (auto-title, tagging)
+    that may touch the same session row in a separate DB session.
+    """
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            result = await db.execute(
+                select(Session)
+                .where(Session.id == session_id)
+                .with_for_update(skip_locked=True)
+            )
+            session = result.scalar_one_or_none()
+            if session is None:
+                raise NotFoundError("Session not found")
 
-    await db.commit()
-    await db.refresh(session)
-    return session
+            for key, value in fields.items():
+                if hasattr(session, key):
+                    setattr(session, key, value)
+
+            await db.commit()
+            await db.refresh(session)
+            return session
+
+        except OperationalError as exc:
+            if "1020" in str(exc) and attempt < max_retries - 1:
+                await db.rollback()
+                backoff = 0.1 * (attempt + 1)
+                await asyncio.sleep(backoff)
+                continue
+            raise
 
 
 async def delete_session(db: AsyncSession, session_id: str) -> None:

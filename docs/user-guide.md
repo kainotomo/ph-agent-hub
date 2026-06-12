@@ -308,7 +308,59 @@ Hover over an uploaded file in the session and click the delete icon. The file i
 
 ---
 
-## 8. Memory
+## 8. Export & Import
+
+You can export conversations from your session list and import them back later. This is useful for backup, migration between instances, or sharing conversation templates.
+
+### 8.1 Export a Conversation
+
+1. In the session sidebar, hover over the session you want to export
+2. Click the **Download** (↓) icon in the session actions row
+3. Choose a format:
+   - **JSON** — Full structured export including model metadata, token counts, and content blocks. Supports future re-import.
+   - **Plain Text** — Human-readable transcript with timestamps and model attribution.
+
+The file will download automatically. The filename is derived from the session title.
+
+**Exported JSON format** (version 1):
+```json
+{
+  "version": 1,
+  "exported_at": "2026-06-12T16:14:13+00:00",
+  "application": "ph-agent-hub",
+  "session": {
+    "title": "Conversation title",
+    "created_at": "...",
+    "updated_at": "..."
+  },
+  "messages": [
+    {
+      "sender": "user",
+      "content": [{"type": "text", "text": "Hello"}],
+      "model_name": null,
+      "model_provider": null,
+      "created_at": "..."
+    }
+  ]
+}
+```
+
+### 8.2 Import a Conversation
+
+1. In the sidebar header, click the **Import** (↑) button
+2. Select a `.json` file (must be a valid export file from this application)
+3. A new session is created with all imported messages
+4. You're automatically navigated to the new session
+
+**Limitations:**
+- Only `.json` files from this application's export are accepted
+- Only version 1 of the export format is supported
+- Uploaded model references (e.g. which model generated a response) are preserved as metadata but not linked to your current model configurations
+- Attached file contents are not included in the export
+
+---
+
+## 9. Memory
 
 Memory lets the AI remember information across sessions. Think of it as a persistent notepad the AI can reference.
 

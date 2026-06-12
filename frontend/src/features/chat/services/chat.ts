@@ -5,7 +5,7 @@
 // edit/delete/regenerate/feedback, tools, memory, uploads, search.
 // =============================================================================
 
-import api from "../../../services/api";
+import api, { getToken } from "../../../services/api";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -234,6 +234,72 @@ export function updateAssistantMessage(
     method: "PATCH",
     body: { content },
   });
+}
+
+// ---------------------------------------------------------------------------
+// Export / Import
+// ---------------------------------------------------------------------------
+
+export type ExportFormat = "json" | "txt";
+
+export async function exportSession(
+  sessionId: string,
+  format: ExportFormat = "json",
+): Promise<void> {
+  const BASE_URL = import.meta.env.VITE_API_URL || "/api";
+  const token = getToken();
+  const res = await fetch(
+    `${BASE_URL}/chat/session/${sessionId}/export?format=${format}`,
+    {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    },
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || "Export failed");
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const contentDisposition = res.headers.get("Content-Disposition") || "";
+  const filenameMatch = contentDisposition.match(/filename="?(.+?)"?$/);
+  const filename = filenameMatch?.[1] || `conversation.${format}`;
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+export async function importSession(
+  file: File,
+): Promise<{ session_id: string; message_count: number }> {
+  const BASE_URL = import.meta.env.VITE_API_URL || "/api";
+  const token = getToken();
+
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const res = await fetch(`${BASE_URL}/chat/import`, {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: formData,
+  });
+
+  if (!res.ok) {
+    let detail = "Import failed";
+    try {
+      const err = await res.json();
+      detail = err.detail || detail;
+    } catch {
+      const text = await res.text();
+      detail = text || detail;
+    }
+    throw new Error(detail);
+  }
+
+  return res.json();
 }
 
 // ---------------------------------------------------------------------------

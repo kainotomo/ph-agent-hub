@@ -8,8 +8,10 @@
 import asyncio
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, AsyncIterator
 
 logger = logging.getLogger(__name__)
@@ -25,6 +27,7 @@ from sqlalchemy.orm import selectinload
 
 from ..agents.runner import (
     _msg_get,
+    _extract_message_text,
     run_agent,
     run_agent_stream,
 )
@@ -181,6 +184,16 @@ class FeedbackResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class ExportFormat(str, Enum):
+    JSON = "json"
+    TXT = "txt"
+
+
+class ImportResponse(BaseModel):
+    session_id: str
+    message_count: int
 
 
 class FileUploadResponse(BaseModel):
@@ -2269,6 +2282,342 @@ async def download_upload(
             ),
             "Content-Length": str(upload.size_bytes),
         },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Export helpers
+# ---------------------------------------------------------------------------
+
+
+def _sanitize_filename(title: str) -> str:
+    """Remove unsafe characters from a session title for use as a filename."""
+    safe = re.sub(r'[\\/:*?"<>|]', "_", title)
+    safe = safe.strip().replace(" ", "_") or "conversation"
+    return safe[:200]
+
+
+def _build_export_dict(
+    session_data: dict,
+    messages: list,
+) -> dict:
+    """Build the versioned JSON export payload.
+
+    Designed for round-trip compatibility with a future import feature.
+    Instance-specific IDs (message id, session_id) are deliberately omitted.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+
+    return {
+        "version": 1,
+        "exported_at": now,
+        "application": "ph-agent-hub",
+        "session": {
+            "title": session_data.get("title", ""),
+            "created_at": _fmt_dt(session_data.get("created_at")),
+            "updated_at": _fmt_dt(session_data.get("updated_at")),
+            "is_temporary": session_data.get("is_temporary", False),
+        },
+        "messages": [
+            {
+                "sender": m.get("sender"),
+                "content": m.get("content"),
+                "model_name": m.get("model_name"),
+                "model_provider": m.get("model_provider"),
+                "tool_calls": m.get("tool_calls"),
+                "tokens_in": m.get("tokens_in"),
+                "tokens_out": m.get("tokens_out"),
+                "summarized": m.get("summarized", False),
+                "created_at": _fmt_dt(m.get("created_at")),
+            }
+            for m in messages
+        ],
+    }
+
+
+def _build_export_txt(
+    session_data: dict,
+    messages: list,
+) -> str:
+    """Build a human-readable plain-text conversation transcript."""
+    sep = "=" * 60
+    lines: list[str] = [
+        sep,
+        f"Conversation: {session_data.get('title', 'Untitled')}",
+        f"Exported: {datetime.now(timezone.utc).isoformat()}",
+        sep,
+        "",
+    ]
+
+    for m in messages:
+        sender = m.get("sender", "unknown")
+        summarized = m.get("summarized", False)
+        created = _fmt_dt(m.get("created_at"))
+        model_name = m.get("model_name")
+        model_provider = m.get("model_provider")
+
+        # Build header
+        header = f"[{sender.capitalize()}]"
+        if created:
+            header += f" \u2014 {created}"
+        if sender == "assistant" and model_name:
+            provider = f" ({model_provider})" if model_provider else ""
+            header += f" \u00b7 {model_name}{provider}"
+        lines.append(header)
+
+        if summarized:
+            lines.append("[Summarized \u2014 content compressed into summary]")
+        else:
+            text = _extract_message_text(m.get("content"))
+            if text:
+                lines.append(text)
+
+        # Tool calls rendered inline
+        tool_calls = m.get("tool_calls")
+        if tool_calls and isinstance(tool_calls, list):
+            for tc in tool_calls:
+                if isinstance(tc, dict):
+                    name = tc.get("name") or (
+                        tc.get("function", {}).get("name", "unknown")
+                    )
+                    lines.append(f"[Tool call: {name}]")
+
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _fmt_dt(dt_val: Any) -> str | None:
+    """Format a datetime-like value to ISO string or None."""
+    if dt_val is None:
+        return None
+    if isinstance(dt_val, datetime):
+        return dt_val.isoformat()
+    if isinstance(dt_val, str):
+        return dt_val
+    return str(dt_val)
+
+
+# ---------------------------------------------------------------------------
+# Import helpers
+# ---------------------------------------------------------------------------
+
+
+def _validate_import_payload(payload: dict) -> tuple[str, list[dict]]:
+    """Validate an import JSON payload and extract (title, messages).
+
+    Raises ValidationError on any structural issue.
+    """
+    if not isinstance(payload, dict):
+        raise ValidationError("Import payload must be a JSON object")
+
+    version = payload.get("version")
+    if version != 1:
+        raise ValidationError(
+            f"Unsupported export version {version}. Only version 1 is supported."
+        )
+
+    session = payload.get("session")
+    if not isinstance(session, dict):
+        raise ValidationError("Missing or invalid 'session' block")
+
+    title = session.get("title", "Imported Chat")
+    if not isinstance(title, str) or not title.strip():
+        title = "Imported Chat"
+
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        raise ValidationError("Missing or invalid 'messages' array")
+
+    if not messages:
+        raise ValidationError("No messages to import")
+
+    allowed_senders = {"user", "assistant", "system"}
+    for i, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            raise ValidationError(f"Message at index {i} is not an object")
+        sender = msg.get("sender")
+        if sender not in allowed_senders:
+            raise ValidationError(
+                f"Message at index {i}: invalid sender '{sender}'"
+            )
+
+    return title.strip(), messages
+
+
+def _parse_import_datetime(dt_val: Any) -> datetime:
+    """Parse a datetime value from import payload to a datetime object."""
+    if dt_val is None:
+        return datetime.now(timezone.utc)
+    if isinstance(dt_val, datetime):
+        return dt_val
+    if isinstance(dt_val, str):
+        try:
+            return datetime.fromisoformat(dt_val)
+        except (ValueError, TypeError):
+            logger.warning(
+                "Could not parse datetime '%s', using current time", dt_val
+            )
+            return datetime.now(timezone.utc)
+    return datetime.now(timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# Export endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/session/{session_id}/export",
+)
+async def export_session(
+    session_id: str,
+    format: ExportFormat = ExportFormat.JSON,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(get_current_user),
+):
+    """Export a conversation session as JSON or plain text.
+
+    Supported formats: json (default), txt.
+    The JSON export is versioned for future round-trip import support.
+    """
+    data = await _load_session(db, session_id)
+    await _require_session_owner(data, current_user)
+
+    is_temp = data.get("is_temporary", False)
+
+    # Load messages — dual path (DB / Redis) matching list_messages
+    if is_temp:
+        msgs = await get_temp_messages(session_id)
+    else:
+        result = await db.execute(
+            select(Message)
+            .options(selectinload(Message.model))
+            .where(
+                Message.session_id == session_id,
+                Message.is_deleted == False,  # noqa: E712
+            )
+            .order_by(Message.created_at)
+        )
+        orm_messages = result.scalars().all()
+        msgs = [
+            {
+                "id": m.id,
+                "session_id": m.session_id,
+                "sender": m.sender,
+                "content": m.content,
+                "model_name": m.model.name if m.model else None,
+                "model_provider": m.model.provider if m.model else None,
+                "tool_calls": m.tool_calls,
+                "tokens_in": m.tokens_in,
+                "tokens_out": m.tokens_out,
+                "summarized": m.summarized,
+                "created_at": m.created_at,
+                "updated_at": m.updated_at,
+            }
+            for m in orm_messages
+        ]
+
+    # Build filename from session title
+    title = data.get("title", "conversation")
+    safe_title = _sanitize_filename(title)
+
+    if format == ExportFormat.JSON:
+        payload = _build_export_dict(data, msgs)
+        content_bytes = json.dumps(payload, indent=2, default=str).encode("utf-8")
+        media_type = "application/json"
+        filename = f"{safe_title}.json"
+    else:
+        text = _build_export_txt(data, msgs)
+        content_bytes = text.encode("utf-8")
+        media_type = "text/plain; charset=utf-8"
+        filename = f"{safe_title}.txt"
+
+    return StreamingResponse(
+        content=iter([content_bytes]),
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(len(content_bytes)),
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Import endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/import",
+    status_code=201,
+    response_model=ImportResponse,
+)
+async def import_session(
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(get_current_user),
+):
+    """Import a conversation from a JSON export file.
+
+    Creates a new permanent session and populates it with the imported
+    messages. The import format matches the ``GET /session/{id}/export``
+    JSON output (version 1). Only ``.json`` files are accepted.
+    """
+    # Validate file type
+    if not file.filename or not file.filename.lower().endswith(".json"):
+        raise ValidationError("Only .json files are supported for import")
+
+    # Read and parse
+    try:
+        raw = await file.read()
+        payload = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValidationError(f"Invalid JSON: {e}")
+
+    # Validate structure
+    title, messages_data = _validate_import_payload(payload)
+
+    # Create a new permanent session
+    session = await session_service.create_session(
+        db=db,
+        tenant_id=current_user.tenant_id,
+        user_id=current_user.id,
+        title=title,
+        is_temporary=False,
+    )
+
+    # Bulk insert messages with new UUIDs
+    msg_count = 0
+    for msg_data in messages_data:
+        created_at = _parse_import_datetime(msg_data.get("created_at"))
+        msg = Message(
+            id=str(uuid.uuid4()),
+            session_id=session.id,
+            sender=msg_data["sender"],
+            content=msg_data.get("content"),
+            tool_calls=msg_data.get("tool_calls"),
+            tokens_in=msg_data.get("tokens_in"),
+            tokens_out=msg_data.get("tokens_out"),
+            summarized=msg_data.get("summarized", False),
+            created_at=created_at,
+            updated_at=created_at,
+        )
+        db.add(msg)
+        msg_count += 1
+
+    await db.commit()
+
+    logger.info(
+        "User %s imported session %s with %d messages",
+        current_user.id,
+        session.id,
+        msg_count,
+    )
+
+    return ImportResponse(
+        session_id=session.id,
+        message_count=msg_count,
     )
 
 

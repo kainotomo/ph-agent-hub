@@ -86,10 +86,10 @@ export function SessionSidebar() {
   });
 
   const createMutation = useMutation({
-    mutationFn: ({ is_temporary }: { is_temporary?: boolean }) =>
+    mutationFn: () =>
       createSession({
         title: "New Chat",
-        is_temporary: is_temporary ?? false,
+        is_temporary: true,
         auto_route_enabled: true,
       }),
     onSuccess: (data) => {
@@ -156,7 +156,18 @@ export function SessionSidebar() {
   }, [sessionId, sessions]);
 
   const handleNewChat = (temporary = false) => {
-    createMutation.mutate({ is_temporary: temporary });
+    if (temporary) {
+      // Temporary chat: create Redis-backed session immediately
+      createMutation.mutate();
+    } else {
+      // Lazy persistence (Phase 2): generate a client-side UUID and
+      // navigate — the backend session is created on the first message.
+      const uuid = crypto.randomUUID();
+      queryClient.setQueryData(["sessions"], (old: SessionData[] | undefined) =>
+        old || []
+      );
+      navigate(`/chat/${uuid}`);
+    }
   };
 
   const newChatMenuItems: MenuProps["items"] = [

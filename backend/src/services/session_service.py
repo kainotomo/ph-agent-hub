@@ -4,11 +4,14 @@
 
 import asyncio
 
-from sqlalchemy import delete, select
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy import delete, exists, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.exceptions import NotFoundError, ValidationError
+from ..db.orm.messages import Message
 from ..db.orm.sessions import Session, SessionActiveTool
 from ..db.orm.tools import Tool
 from ..db.orm.users import User
@@ -26,6 +29,7 @@ async def create_session(
     tenant_id: str,
     user_id: str,
     title: str,
+    id: str | None = None,
     is_temporary: bool = False,
     is_pinned: bool = False,
     selected_template_id: str | None = None,
@@ -37,6 +41,10 @@ async def create_session(
     auto_select_tools: bool = True,
 ) -> Session:
     """Create a new permanent session.
+
+    When *id* is provided the session will be created with that explicit
+    primary key (used by lazy persistence — ``send_message`` creates the
+    session on first message with the URL session ID).
 
     If auto_route_enabled is True, selected_model_id is intentionally kept
     None — the model will be resolved on the first user message by the
@@ -71,6 +79,8 @@ async def create_session(
         auto_route_enabled=auto_route_enabled,
         auto_select_tools=auto_select_tools,
     )
+    if id is not None:
+        session.id = id
     db.add(session)
     await db.commit()
     await db.refresh(session)
@@ -88,21 +98,116 @@ async def list_sessions_for_user(
     user_id: str,
     tenant_id: str,
 ) -> list[Session]:
-    """Return all permanent sessions for a user in their tenant.
+    """Return permanent sessions for a user in their tenant.
 
-    Temporary sessions are excluded from the list.
+    Temporary sessions are excluded from the list.  Empty sessions (zero
+    messages) older than 1 hour are automatically purged.  Recently
+    created empty sessions (< 1 hour) are preserved so the user can still
+    configure them before sending their first message.
     """
+    # Purge abandoned empty sessions older than 1 hour
+    await _purge_empty_sessions(db, user_id, tenant_id)
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+    has_messages = exists(
+        select(1)
+        .where(
+            Message.session_id == Session.id,
+            Message.is_deleted == False,  # noqa: E712
+        )
+        .correlate(Session)
+    )
+
     stmt = (
         select(Session)
         .where(
             Session.user_id == user_id,
             Session.tenant_id == tenant_id,
             Session.is_temporary == False,  # noqa: E712
+            (
+                has_messages
+                | (Session.created_at >= cutoff)
+            ),
         )
         .order_by(Session.updated_at.desc())
     )
     result = await db.execute(stmt)
     return list(result.scalars().all())
+
+
+async def _purge_empty_sessions(
+    db: AsyncSession,
+    user_id: str,
+    tenant_id: str,
+) -> int:
+    """Hard-delete permanent sessions with zero messages older than 1 hour.
+
+    Returns the number of sessions deleted.  Called automatically by
+    ``list_sessions_for_user()`` — no explicit invocation needed.
+    """
+    from sqlalchemy import delete as sa_delete
+    from ..db.orm.sessions import SessionActiveTool as SAT
+    from ..db.orm.file_uploads import FileUpload
+    from ..db.orm.memory import Memory
+    from ..db.orm.tags import SessionTag
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+
+    has_messages = exists(
+        select(1)
+        .where(
+            Message.session_id == Session.id,
+            Message.is_deleted == False,  # noqa: E712
+        )
+        .correlate(Session)
+    )
+
+    result = await db.execute(
+        select(Session).where(
+            Session.user_id == user_id,
+            Session.tenant_id == tenant_id,
+            Session.is_temporary == False,  # noqa: E712
+            ~has_messages,
+            Session.created_at < cutoff,
+        )
+    )
+    sessions = list(result.scalars().all())
+    if not sessions:
+        return 0
+
+    session_ids = [s.id for s in sessions]
+
+    # 1. Delete file uploads (MinIO objects + DB rows)
+    from ..services import upload_service
+
+    for sid in session_ids:
+        await upload_service.delete_uploads_for_session(db, sid)
+
+    # 2. Delete session-scoped memories
+    await db.execute(
+        sa_delete(Memory).where(Memory.session_id.in_(session_ids))
+    )
+
+    # 3. Delete active tool associations
+    await db.execute(
+        sa_delete(SAT).where(SAT.session_id.in_(session_ids))
+    )
+
+    # 4. Delete session tags
+    await db.execute(
+        sa_delete(SessionTag).where(
+            SessionTag.session_id.in_(session_ids)
+        )
+    )
+
+    # 5. Delete the sessions themselves
+    for s in sessions:
+        db.expire(s, ["tags"])
+        await db.delete(s)
+
+    await db.commit()
+
+    return len(session_ids)
 
 
 async def list_admin_sessions(

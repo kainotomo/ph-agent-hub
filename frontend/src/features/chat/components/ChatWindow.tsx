@@ -73,6 +73,7 @@ interface ChatWindowProps {
   greetingText?: string;
   logoUrl?: string;
   featureFlags?: Record<string, boolean>;
+  isPending?: boolean;
   onSessionUpdate?: (data: Record<string, unknown>) => void;
 }
 
@@ -92,6 +93,7 @@ export function ChatWindow({
   greetingText = "",
   logoUrl = "",
   featureFlags = {},
+  isPending = false,
   onSessionUpdate,
 }: ChatWindowProps) {
   const [inputValue, setInputValue] = useState("");
@@ -109,16 +111,65 @@ export function ChatWindow({
   const [followUpQuestions, setFollowUpQuestions] = useState<string[]>([]);
   const [finalizing, setFinalizing] = useState(false);
 
+  // ---- Pending session local state (Phase 2 — Issue #329) -------------
+  // When the session doesn't exist yet (isPending), we accumulate settings
+  // changes locally and submit them as session_data on the first message.
+  const [pendModelId, setPendModelId] = useState<string | undefined>(undefined);
+  const [pendTemplateId, setPendTemplateId] = useState<string | undefined>(
+    undefined,
+  );
+  const [pendSkillId, setPendSkillId] = useState<string | undefined>(undefined);
+  const [pendAutoRoute, setPendAutoRoute] = useState<boolean>(false);
+  const [pendAutoSelectTools, setPendAutoSelectTools] =
+    useState<boolean>(true);
+  const [pendActiveToolIds, setPendActiveToolIds] = useState<string[]>([]);
+  const [pendingFlag, setPendingFlag] = useState(isPending);
+
+  // When the session gets created (isPending flips), clear pending state.
+  useEffect(() => {
+    if (!isPending) setPendingFlag(false);
+  }, [isPending]);
+
+  // Intercept settings changes when pending — store locally instead of
+  // calling onSessionUpdate (which would 404 since the session doesn't exist).
+  const handleSettingsUpdate = useCallback(
+    (data: Record<string, unknown>) => {
+      if (pendingFlag) {
+        if ("selected_model_id" in data)
+          setPendModelId(data.selected_model_id as string | undefined);
+        if ("selected_template_id" in data)
+          setPendTemplateId(data.selected_template_id as string | undefined);
+        if ("selected_skill_id" in data)
+          setPendSkillId(data.selected_skill_id as string | undefined);
+        if ("auto_route_enabled" in data)
+          setPendAutoRoute(data.auto_route_enabled as boolean);
+        if ("auto_select_tools" in data)
+          setPendAutoSelectTools(data.auto_select_tools as boolean);
+        if ("temperature" in data)
+          setSessionTemperature(data.temperature as number | null);
+        if ("thinking_enabled" in data)
+          setThinkingEnabled(data.thinking_enabled as boolean | null);
+        if ("cross_session_retrieval_enabled" in data)
+          setLocalCrossSessionMemory(
+            data.cross_session_retrieval_enabled as boolean | null,
+          );
+        return;
+      }
+      onSessionUpdate?.(data);
+    },
+    [pendingFlag, onSessionUpdate],
+  );
+
   // Model change handler: "Auto" (__auto__) → null model + auto_route_enabled
   const handleModelChange = useCallback(
     (id: string) => {
       if (id === AUTO_ROUTE_VALUE) {
-        onSessionUpdate?.({ selected_model_id: null, auto_route_enabled: true });
+        handleSettingsUpdate({ selected_model_id: null, auto_route_enabled: true });
       } else {
-        onSessionUpdate?.({ selected_model_id: id, auto_route_enabled: false });
+        handleSettingsUpdate({ selected_model_id: id, auto_route_enabled: false });
       }
     },
-    [onSessionUpdate],
+    [handleSettingsUpdate],
   );
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const prevLoadingRef = useRef(true);
@@ -186,6 +237,7 @@ export function ChatWindow({
 
   const { data: messages, isLoading: loadingMessages } = useQuery({
     queryKey: ["messages", sessionId],
+    enabled: !pendingFlag,
     queryFn: () =>
       demo
         ? getDemoMessages().then((msgs) =>
@@ -249,6 +301,14 @@ export function ChatWindow({
     [modelList, selectedModelId],
   );
   const modelSupportsThinking = selectedModel?.thinking_enabled === true;
+
+  // Auto-select the first available model for pending sessions (no backend
+  // session to provide a default yet — mirrors backend create_session logic).
+  useEffect(() => {
+    if (pendingFlag && modelList && modelList.length > 0 && !pendModelId) {
+      setPendModelId(modelList[0].id);
+    }
+  }, [pendingFlag, modelList, pendModelId]);
 
   // Reset all streaming state when the session changes (mount with new
   // sessionId or fresh mount). This prevents stale streamingContent,
@@ -443,11 +503,27 @@ export function ChatWindow({
     const fileIds = pendingFiles.map((f) => f.file_id);
     setPendingFiles([]);
 
+    // Build session_data for lazy session creation (Phase 2)
+    const sessionData = pendingFlag
+      ? {
+          title: "New Chat",
+          auto_route_enabled: pendAutoRoute,
+          auto_select_tools: pendAutoSelectTools,
+          selected_model_id: pendModelId || null,
+          selected_template_id: pendTemplateId || null,
+          selected_skill_id: pendSkillId || null,
+          thinking_enabled: thinkingEnabled,
+          temperature: sessionTemperature,
+          active_tool_ids: pendActiveToolIds.length > 0 ? pendActiveToolIds : null,
+        }
+      : undefined;
+
     startStream(
       sessionId,
       content,
       fileIds.length > 0 ? fileIds : undefined,
       sessionTemperature ?? undefined,
+      sessionData,
       {
       onToken(token, msgId) {
         setStreamingMessageId(msgId);
@@ -536,7 +612,7 @@ export function ChatWindow({
         }, 3000);
       },
     });
-  }, [inputValue, streaming, sessionId, startStream, queryClient, pendingFiles, editingMsgId]);
+  }, [inputValue, streaming, sessionId, startStream, queryClient, pendingFiles, editingMsgId, pendingFlag, pendModelId, pendTemplateId, pendSkillId, pendAutoRoute, pendAutoSelectTools, pendActiveToolIds, thinkingEnabled, sessionTemperature]);
 
   const handleStop = async () => {
     // Clear the streaming ghost bubble immediately for instant UX.
@@ -839,16 +915,19 @@ export function ChatWindow({
             />
           )}
           <ModelSelector
-            value={autoRouteEnabled && !selectedModelId ? AUTO_ROUTE_VALUE : selectedModelId}
+            value={pendingFlag
+              ? (pendAutoRoute && !pendModelId ? AUTO_ROUTE_VALUE : pendModelId)
+              : (autoRouteEnabled && !selectedModelId ? AUTO_ROUTE_VALUE : selectedModelId)
+            }
             onChange={handleModelChange}
           />
           <TemplateSelector
-            value={selectedTemplateId}
-            onChange={(id) => onSessionUpdate?.({ selected_template_id: id })}
+            value={pendingFlag ? pendTemplateId : selectedTemplateId}
+            onChange={(id) => handleSettingsUpdate({ selected_template_id: id })}
           />
           <SkillSelector
-            value={selectedSkillId}
-            onChange={(id) => onSessionUpdate?.({ selected_skill_id: id })}
+            value={pendingFlag ? pendSkillId : selectedSkillId}
+            onChange={(id) => handleSettingsUpdate({ selected_skill_id: id })}
           />
           <PromptLibrary
             onUse={(resolvedText) => setInputValue(resolvedText)}
@@ -867,7 +946,7 @@ export function ChatWindow({
             title="Cross-session memory"
             onChange={(v) => {
               setLocalCrossSessionMemory(v);
-              onSessionUpdate?.({ cross_session_retrieval_enabled: v });
+              handleSettingsUpdate({ cross_session_retrieval_enabled: v });
             }}
           />
           {modelSupportsThinking && (
@@ -879,7 +958,7 @@ export function ChatWindow({
               title="Thinking Mode"
               onChange={(v) => {
                 setThinkingEnabled(v);
-                onSessionUpdate?.({ thinking_enabled: v });
+                handleSettingsUpdate({ thinking_enabled: v });
               }}
             />
           )}
@@ -895,7 +974,7 @@ export function ChatWindow({
               onChange={(v) => {
                 const val = v as number;
                 setSessionTemperature(val);
-                onSessionUpdate?.({ temperature: val });
+                handleSettingsUpdate({ temperature: val });
               }}
               style={{ width: 80, margin: 0 }}
             />
@@ -913,16 +992,19 @@ export function ChatWindow({
         >
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <ModelSelector
-            value={autoRouteEnabled && !selectedModelId ? AUTO_ROUTE_VALUE : selectedModelId}
+            value={pendingFlag
+              ? (pendAutoRoute && !pendModelId ? AUTO_ROUTE_VALUE : pendModelId)
+              : (autoRouteEnabled && !selectedModelId ? AUTO_ROUTE_VALUE : selectedModelId)
+            }
             onChange={handleModelChange}
           />
           <TemplateSelector
-            value={selectedTemplateId}
-            onChange={(id) => onSessionUpdate?.({ selected_template_id: id })}
+            value={pendingFlag ? pendTemplateId : selectedTemplateId}
+            onChange={(id) => handleSettingsUpdate({ selected_template_id: id })}
           />
           <SkillSelector
-            value={selectedSkillId}
-            onChange={(id) => onSessionUpdate?.({ selected_skill_id: id })}
+            value={pendingFlag ? pendSkillId : selectedSkillId}
+            onChange={(id) => handleSettingsUpdate({ selected_skill_id: id })}
           />
           <PromptLibrary
             onUse={(resolvedText) => setInputValue(resolvedText)}
@@ -954,7 +1036,7 @@ export function ChatWindow({
               title="Thinking Mode"
               onChange={(v) => {
                 setThinkingEnabled(v);
-                onSessionUpdate?.({ thinking_enabled: v });
+                handleSettingsUpdate({ thinking_enabled: v });
               }}
             />
           )}
@@ -966,7 +1048,7 @@ export function ChatWindow({
             title="Cross-session memory"
             onChange={(v) => {
               setLocalCrossSessionMemory(v);
-              onSessionUpdate?.({ cross_session_retrieval_enabled: v });
+              handleSettingsUpdate({ cross_session_retrieval_enabled: v });
             }}
           />
           <div style={{ width: "100%" }}>
@@ -982,7 +1064,7 @@ export function ChatWindow({
                 onChange={(v) => {
                   const val = v as number;
                   setSessionTemperature(val);
-                  onSessionUpdate?.({ temperature: val });
+                  handleSettingsUpdate({ temperature: val });
                 }}
                 marks={{ 0: "0", 1: "1", 2: "2" }}
               />
@@ -1441,7 +1523,16 @@ export function ChatWindow({
           onClose={() => setToolsOpen(false)}
           selectedSkillId={selectedSkillId}
           autoSelectTools={autoSelectTools}
-          onAutoSelectToolsChange={(v) => onSessionUpdate?.({ auto_select_tools: v })}
+          onAutoSelectToolsChange={(v) => handleSettingsUpdate({ auto_select_tools: v })}
+          isPending={pendingFlag}
+          pendingActiveToolIds={pendActiveToolIds}
+          onPendingToolToggle={(toolId, checked) => {
+            setPendActiveToolIds((prev) =>
+              checked
+                ? [...prev, toolId]
+                : prev.filter((id) => id !== toolId)
+            );
+          }}
         />
       )}
     </div>

@@ -6,8 +6,8 @@
 // tool activity display for tool_start/tool_result events.
 // =============================================================================
 
-import React, { useState } from "react";
-import { Typography, Space, Collapse, Tag, Button, Popconfirm, App, Spin, Tooltip, Input, Modal } from "antd";
+import React, { useState, useEffect } from "react";
+import { Typography, Space, Collapse, Tag, Button, Popconfirm, App, Spin, Tooltip, Input } from "antd";
 import {
   UserOutlined,
   RobotOutlined,
@@ -103,6 +103,14 @@ function MessageBubbleInner({
   const [editContent, setEditContent] = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
 
+  // Reset editing state when the message changes (e.g. after Virtuoso remount)
+  useEffect(() => {
+    if (isEditingAssistant) {
+      setIsEditingAssistant(false);
+      setEditContent("");
+    }
+  }, [message.id]);
+
   // Separate text, reasoning, and tool events
   const textItems = contentItems.filter((c) => c.type === "text");
   const reasoningItems = contentItems.filter((c) => c.type === "reasoning");
@@ -138,7 +146,7 @@ function MessageBubbleInner({
         }),
   };
 
-  const { message: messageApi } = App.useApp();
+  const { message: messageApi, modal } = App.useApp();
 
   // Fetch attached files for user messages
   const { data: attachedFiles } = useQuery({
@@ -483,13 +491,20 @@ function MessageBubbleInner({
               onClick={() => {
                 const text = textItems.map((t) => t.text || "").join("\n");
                 if (hasSubsequentMessages) {
-                  Modal.confirm({
+                  modal.confirm({
                     title: "Edit this response?",
                     content:
                       "Editing this response will remove the messages that follow it. Continue?",
                     onOk: () => {
-                      setEditContent(text);
-                      setIsEditingAssistant(true);
+                      try {
+                        setEditContent(text);
+                        setIsEditingAssistant(true);
+                      } catch (err) {
+                        console.error("Failed to enter edit mode:", err);
+                      }
+                    },
+                    onCancel: () => {
+                      // Modal dismissed — no state changes needed
                     },
                   });
                 } else {

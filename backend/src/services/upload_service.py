@@ -434,6 +434,50 @@ async def list_uploads_for_message(
 
 
 # ---------------------------------------------------------------------------
+# Pending upload re-linking (Issue #336)
+# ---------------------------------------------------------------------------
+
+
+async def link_pending_uploads_to_session(
+    db: AsyncSession,
+    session_id: str,
+    user_id: str,
+) -> int:
+    """Re-associate temporary uploads with a now-permanent session.
+
+    When a user uploads files to a pending (lazy) session before sending
+    the first message, the uploads are stored with ``session_id = NULL``
+    and ``is_temporary = True``.  This function links them to the permanent
+    session created by ``_lazy_create_session`` so they remain accessible
+    after promotion.
+
+    Returns the number of uploads re-linked.
+    """
+    result = await db.execute(
+        select(FileUpload).where(
+            FileUpload.user_id == user_id,
+            FileUpload.session_id.is_(None),
+            FileUpload.is_temporary == True,  # noqa: E712
+            FileUpload.storage_key.like(f"%/{session_id}/%"),
+        )
+    )
+    uploads = list(result.scalars().all())
+
+    for upload in uploads:
+        upload.session_id = session_id
+        upload.is_temporary = False
+
+    if uploads:
+        await db.flush()
+        logger.info(
+            "Re-linked %d pending upload(s) to session %s",
+            len(uploads), session_id,
+        )
+
+    return len(uploads)
+
+
+# ---------------------------------------------------------------------------
 # Temporary session cleanup
 # ---------------------------------------------------------------------------
 

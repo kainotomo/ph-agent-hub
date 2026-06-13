@@ -939,6 +939,25 @@ async def send_message(
             db, session_id, body.session_data, current_user,
         )
 
+    # ---- Temp → permanent promotion (Issue #336) -----------------------
+    # If the user uploaded files to a temp session (created by upload_file
+    # when the session didn't exist yet) and then sends a message with
+    # session_data, promote the session to permanent.
+    if data.get("is_temporary") and body.session_data is not None:
+        logger.info(
+            "Promoting temp session %s to permanent on first message",
+            session_id,
+        )
+        data = await _lazy_create_session(
+            db, session_id, body.session_data, current_user,
+        )
+        # Re-link any files uploaded during the pending phase
+        await upload_service.link_pending_uploads_to_session(
+            db, session_id, current_user.id,
+        )
+        # Clean up the stale Redis temp entry
+        await delete_temp_session(session_id)
+
     # ---- Auto-title: if session still has the default title, use the
     #      first user message as the title.  Set a raw truncated title
     #      immediately, then fire a background task that calls a cheap
@@ -2167,9 +2186,40 @@ async def upload_file(
     db: AsyncSession = Depends(get_db),
     current_user: UserORM = Depends(get_current_user),
 ):
-    """Upload a file to a session (stored in MinIO)."""
-    data = await _load_session(db, session_id)
-    await _require_session_owner(data, current_user)
+    """Upload a file to a session (stored in MinIO).
+
+    Supports lazy (pending) sessions: if the session doesn't exist yet
+    (e.g. "New Chat" before the first message), a minimal temporary Redis
+    session is created on-the-fly.  The session will be promoted to
+    permanent when the first message is sent (see ``send_message``).
+    """
+    try:
+        data = await _load_session(db, session_id)
+        await _require_session_owner(data, current_user)
+    except NotFoundError:
+        logger.info(
+            "Lazy-creating temp session %s on file upload", session_id,
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        data = {
+            "id": session_id,
+            "tenant_id": current_user.tenant_id,
+            "user_id": current_user.id,
+            "title": "New Chat",
+            "is_temporary": True,
+            "is_pinned": False,
+            "selected_template_id": None,
+            "selected_skill_id": None,
+            "selected_model_id": None,
+            "auto_route_enabled": False,
+            "auto_select_tools": True,
+            "thinking_enabled": None,
+            "temperature": None,
+            "active_tool_ids": [],
+            "created_at": now,
+            "updated_at": now,
+        }
+        await store_temp_session(session_id, data)
 
     if not file.filename:
         raise ValidationError("File must have a filename")

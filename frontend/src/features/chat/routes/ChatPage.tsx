@@ -5,7 +5,7 @@
 // =============================================================================
 
 import { useParams, useNavigate } from "react-router-dom";
-import { Layout, Button, Typography, Spin } from "antd";
+import { Layout, Button, Typography, Spin, message } from "antd";
 import { PlusOutlined, ThunderboltOutlined } from "@ant-design/icons";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { SessionSidebar } from "../components/SessionSidebar";
@@ -29,8 +29,13 @@ export function ChatPage() {
 
   const handleSessionUpdate = async (data: Record<string, unknown>) => {
     if (!sessionId) return;
-    await updateSession(sessionId, data as Record<string, string | null>);
-    queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+    try {
+      await updateSession(sessionId, data as Record<string, string | null>);
+    } catch {
+      message.error("Failed to update session settings");
+    } finally {
+      queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+    }
   };
 
   const handleNewChat = () => {

@@ -636,6 +636,9 @@ async def update_session(
     new_skill_id = update_fields.get("selected_skill_id") if skill_changed else None
 
     if is_temp:
+        # Capture old values before mutation (for audit)
+        old_auto_select_tools = data.get("auto_select_tools", True)
+
         # Update Redis blob
         data.update(update_fields)
         data["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -685,7 +688,7 @@ async def update_session(
 
         # Audit: auto_select_tools change
         if "auto_select_tools" in update_fields:
-            old_val = data.get("auto_select_tools", True)
+            old_val = old_auto_select_tools
             new_val = update_fields.get("auto_select_tools")
             if old_val != new_val:
                 try:

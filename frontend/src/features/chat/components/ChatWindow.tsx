@@ -1522,7 +1522,7 @@ export function ChatWindow({
           open={toolsOpen}
           onClose={() => setToolsOpen(false)}
           selectedSkillId={selectedSkillId}
-          autoSelectTools={autoSelectTools}
+          autoSelectTools={pendingFlag ? pendAutoSelectTools : autoSelectTools}
           onAutoSelectToolsChange={(v) => handleSettingsUpdate({ auto_select_tools: v })}
           isPending={pendingFlag}
           pendingActiveToolIds={pendActiveToolIds}

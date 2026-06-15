@@ -559,12 +559,281 @@ def build_email_tools(
         ]
         return {"accounts": accounts, "total": len(accounts)}
 
+    # ------------------------------------------------------------------
+    @tool
+    async def forward_email(
+        email_id: str, to: str,
+        body: str | None = None,
+        cc: str | None = None,
+        account_label: str | None = None,
+    ) -> dict:
+        """Forward an existing email to another recipient.
+
+        The original email content (body, formatting, attachments) is
+        preserved. Optionally add a comment prepended to the forwarded
+        content.
+
+        Args:
+            email_id: The email's unique ID (from read_emails/search_emails).
+            to: Recipient email address to forward to.
+            body: Optional comment to prepend before the forwarded content.
+            cc: Optional CC recipient.
+            account_label: Which account the email is in.
+
+        Returns:
+            Dict with ``to``, ``subject``, ``status``, optionally ``error``.
+        """
+        if not email_id:
+            return {"error": "No email ID provided", "status": "error"}
+        if not to or not to.strip():
+            return {"error": "No recipient email provided", "status": "error"}
+
+        active_cred = _find_credential(user_credentials, account_label)
+        if not active_cred:
+            return {"error": "No matching email account found", "status": "error"}
+
+        cp, cd, tk, _ = _parse_credential(active_cred)
+
+        if cp in ("gmail", "google") and tk.get("access_token"):
+            await _ensure_fresh_token(tk, cp, "Email", credential_orm=active_cred, tokens_dict=tk, db=db)
+            result = await _forward_via_gmail_api(tk["access_token"], email_id, to.strip(), body, cc)
+            if "expired" in result.get("error", "").lower():
+                refreshed = await _maybe_refresh(tk, cp, active_cred)
+                if refreshed:
+                    result = await _forward_via_gmail_api(tk["access_token"], email_id, to.strip(), body, cc)
+            return result
+        elif cp in ("outlook", "microsoft") and tk.get("access_token"):
+            await _ensure_fresh_token(tk, cp, "Email", credential_orm=active_cred, tokens_dict=tk, db=db)
+            result = await _forward_via_graph_api(tk["access_token"], email_id, to.strip(), body, cc)
+            if "expired" in result.get("error", "").lower():
+                refreshed = await _maybe_refresh(tk, cp, active_cred)
+                if refreshed:
+                    result = await _forward_via_graph_api(tk["access_token"], email_id, to.strip(), body, cc)
+            return result
+        elif cd.get("imap_host"):
+            return await _forward_via_imap(
+                cd["imap_host"], int(cd.get("imap_port", 993)),
+                cd.get("username", ""), cd.get("password", ""),
+                email_id, to.strip(), body, cc,
+            )
+        return {"error": "This account does not support forwarding.", "status": "error"}
+
+    # ------------------------------------------------------------------
+    @tool
+    async def reply_email(
+        email_id: str, body: str,
+        reply_all: bool = False,
+        account_label: str | None = None,
+    ) -> dict:
+        """Reply to an existing email.
+
+        The reply is threaded to the original message (preserves the
+        conversation chain). Uses In-Reply-To / References headers
+        for SMTP/IMAP, or native threading for Gmail/Outlook.
+
+        Args:
+            email_id: The email's unique ID (from read_emails/search_emails).
+            body: Reply body content (plain text).
+            reply_all: If True, reply to all recipients instead of just sender.
+            account_label: Which account the email is in.
+
+        Returns:
+            Dict with ``status`` and optionally ``error``.
+        """
+        if not email_id:
+            return {"error": "No email ID provided", "status": "error"}
+        if not body or not body.strip():
+            return {"error": "No reply body provided", "status": "error"}
+
+        active_cred = _find_credential(user_credentials, account_label)
+        if not active_cred:
+            return {"error": "No matching email account found", "status": "error"}
+
+        cp, cd, tk, _ = _parse_credential(active_cred)
+
+        if cp in ("gmail", "google") and tk.get("access_token"):
+            await _ensure_fresh_token(tk, cp, "Email", credential_orm=active_cred, tokens_dict=tk, db=db)
+            result = await _reply_via_gmail_api(tk["access_token"], email_id, body.strip(), reply_all)
+            if "expired" in result.get("error", "").lower():
+                refreshed = await _maybe_refresh(tk, cp, active_cred)
+                if refreshed:
+                    result = await _reply_via_gmail_api(tk["access_token"], email_id, body.strip(), reply_all)
+            return result
+        elif cp in ("outlook", "microsoft") and tk.get("access_token"):
+            await _ensure_fresh_token(tk, cp, "Email", credential_orm=active_cred, tokens_dict=tk, db=db)
+            result = await _reply_via_graph_api(tk["access_token"], email_id, body.strip(), reply_all)
+            if "expired" in result.get("error", "").lower():
+                refreshed = await _maybe_refresh(tk, cp, active_cred)
+                if refreshed:
+                    result = await _reply_via_graph_api(tk["access_token"], email_id, body.strip(), reply_all)
+            return result
+        elif cd.get("imap_host"):
+            return await _reply_via_imap(
+                cd["imap_host"], int(cd.get("imap_port", 993)),
+                cd.get("username", ""), cd.get("password", ""),
+                email_id, body.strip(), reply_all,
+            )
+        return {"error": "This account does not support replying.", "status": "error"}
+
+    # ------------------------------------------------------------------
+    @tool
+    async def delete_email(
+        email_id: str,
+        permanent: bool = False,
+        account_label: str | None = None,
+    ) -> dict:
+        """Delete an email, moving it to trash or permanently removing it.
+
+        Args:
+            email_id: The email's unique ID (from read_emails/search_emails).
+            permanent: If False (default), moves to trash/recoverable.
+                       If True, permanently deletes. Use with caution.
+            account_label: Which account the email is in.
+
+        Returns:
+            Dict with ``status`` and optionally ``error``.
+        """
+        if not email_id:
+            return {"error": "No email ID provided", "status": "error"}
+
+        active_cred = _find_credential(user_credentials, account_label)
+        if not active_cred:
+            return {"error": "No matching email account found", "status": "error"}
+
+        cp, cd, tk, _ = _parse_credential(active_cred)
+
+        if cp in ("gmail", "google") and tk.get("access_token"):
+            await _ensure_fresh_token(tk, cp, "Email", credential_orm=active_cred, tokens_dict=tk, db=db)
+            result = await _delete_via_gmail_api(tk["access_token"], email_id, permanent)
+            if "expired" in result.get("error", "").lower():
+                refreshed = await _maybe_refresh(tk, cp, active_cred)
+                if refreshed:
+                    result = await _delete_via_gmail_api(tk["access_token"], email_id, permanent)
+            return result
+        elif cp in ("outlook", "microsoft") and tk.get("access_token"):
+            await _ensure_fresh_token(tk, cp, "Email", credential_orm=active_cred, tokens_dict=tk, db=db)
+            result = await _delete_via_graph_api(tk["access_token"], email_id)
+            if "expired" in result.get("error", "").lower():
+                refreshed = await _maybe_refresh(tk, cp, active_cred)
+                if refreshed:
+                    result = await _delete_via_graph_api(tk["access_token"], email_id)
+            return result
+        elif cd.get("imap_host"):
+            return await _delete_via_imap(
+                cd["imap_host"], int(cd.get("imap_port", 993)),
+                cd.get("username", ""), cd.get("password", ""),
+                email_id, permanent,
+            )
+        return {"error": "This account does not support deleting emails.", "status": "error"}
+
+    # ------------------------------------------------------------------
+    @tool
+    async def get_attachments(
+        email_id: str,
+        account_label: str | None = None,
+    ) -> dict:
+        """List attachments on a specific email.
+
+        Returns metadata (filename, mime type, size) for each attachment.
+        Does NOT download the attachment content.
+
+        Args:
+            email_id: The email's unique ID (from read_emails/search_emails).
+            account_label: Which account the email is in.
+
+        Returns:
+            Dict with ``attachments`` (list of dicts) and ``total``.
+        """
+        if not email_id:
+            return {"error": "No email ID provided", "attachments": [], "total": 0}
+
+        active_cred = _find_credential(user_credentials, account_label)
+        if not active_cred:
+            return {"error": "No matching email account found", "attachments": [], "total": 0}
+
+        cp, cd, tk, _ = _parse_credential(active_cred)
+
+        if cp in ("gmail", "google") and tk.get("access_token"):
+            return await _get_gmail_attachments(tk["access_token"], email_id)
+        elif cp in ("outlook", "microsoft") and tk.get("access_token"):
+            return await _get_outlook_attachments(tk["access_token"], email_id)
+        elif cd.get("imap_host"):
+            return await _get_imap_attachments(
+                cd["imap_host"], int(cd.get("imap_port", 993)),
+                cd.get("username", ""), cd.get("password", ""),
+                email_id,
+            )
+        return {"error": "This account does not support attachment listing.", "attachments": [], "total": 0}
+
+    # ------------------------------------------------------------------
+    @tool
+    async def save_draft(
+        to: str, subject: str, body: str,
+        cc: str | None = None,
+        is_html: bool = False,
+        account_label: str | None = None,
+    ) -> dict:
+        """Save an email as a draft without sending.
+
+        The draft is saved to the Drafts folder and can be sent later.
+
+        Args:
+            to: Recipient email address.
+            subject: Email subject line.
+            body: Email body content.
+            cc: Optional CC recipient.
+            is_html: Set to True if body contains HTML.
+            account_label: Which account to save the draft with.
+
+        Returns:
+            Dict with ``id`` (draft ID), ``status``, optionally ``error``.
+        """
+        if not to or not to.strip():
+            return {"error": "No recipient email provided", "status": "error"}
+        if not subject or not subject.strip():
+            return {"error": "No email subject provided", "status": "error"}
+        if not body or not body.strip():
+            return {"error": "No email body provided", "status": "error"}
+
+        active_cred = _find_credential(user_credentials, account_label)
+        if not active_cred:
+            return {"error": "No matching email account found", "status": "error"}
+
+        cp, cd, tk, ce = _parse_credential(active_cred)
+
+        if cp in ("gmail", "google") and tk.get("access_token"):
+            await _ensure_fresh_token(tk, cp, "Email", credential_orm=active_cred, tokens_dict=tk, db=db)
+            result = await _save_gmail_draft(tk["access_token"], to.strip(), subject.strip(), body, cc, is_html)
+            if "expired" in result.get("error", "").lower():
+                refreshed = await _maybe_refresh(tk, cp, active_cred)
+                if refreshed:
+                    result = await _save_gmail_draft(tk["access_token"], to.strip(), subject.strip(), body, cc, is_html)
+            return result
+        elif cp in ("outlook", "microsoft") and tk.get("access_token"):
+            await _ensure_fresh_token(tk, cp, "Email", credential_orm=active_cred, tokens_dict=tk, db=db)
+            result = await _save_outlook_draft(tk["access_token"], to.strip(), subject.strip(), body, cc, is_html)
+            if "expired" in result.get("error", "").lower():
+                refreshed = await _maybe_refresh(tk, cp, active_cred)
+                if refreshed:
+                    result = await _save_outlook_draft(tk["access_token"], to.strip(), subject.strip(), body, cc, is_html)
+            return result
+        elif cd.get("smtp_host") or cd.get("imap_host"):
+            sender = ce or cd.get("from_email", from_email)
+            return await _save_imap_draft(
+                cd.get("imap_host", ""), int(cd.get("imap_port", 993)),
+                cd.get("username", ""), cd.get("password", ""),
+                to.strip(), subject.strip(), body, sender, cc, is_html,
+            )
+        return {"error": "This account does not support saving drafts.", "status": "error"}
+
     tools = [send_email]
     if user_credentials:
         tools.extend([read_emails, search_emails, get_email_body,
                        mark_email_as_read, mark_email_as_unread,
                        list_folders, move_email,
-                       list_email_accounts])
+                       list_email_accounts,
+                       forward_email, reply_email, delete_email,
+                       get_attachments, save_draft])
     return tools
 
 
@@ -1296,3 +1565,668 @@ async def _move_outlook(access_token, email_id, target_folder):
 
     except Exception as exc:
         return {"error": f"Outlook move failed: {exc}", "status": "error"}
+
+
+# =============================================================================
+# Forward email helpers
+# =============================================================================
+
+
+async def _forward_via_gmail_api(access_token, email_id, to, body=None, cc=None):
+    """Forward an email via Gmail API by fetching raw message and resending."""
+    import base64
+
+    if not access_token:
+        return {"error": "Gmail token expired.", "status": "error"}
+
+    try:
+        # Fetch the original message in raw format
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            r = await c.get(
+                f"{GMAIL_API_BASE}/messages/{email_id}",
+                params={"format": "raw"},
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if r.status_code == 401:
+                return {"error": "Gmail token expired.", "status": "error"}
+            r.raise_for_status()
+            data = r.json()
+
+        # Decode the original raw message
+        raw_bytes = base64.urlsafe_b64decode(data["raw"] + "===")
+        original_msg = raw_bytes.decode("utf-8", errors="replace")
+
+        # Fetch metadata for subject
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            r2 = await c.get(
+                f"{GMAIL_API_BASE}/messages/{email_id}",
+                params={"format": "metadata", "metadataHeaders": "Subject"},
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            r2.raise_for_status()
+            meta = r2.json()
+            headers = {h["name"]: h["value"] for h in meta.get("payload", {}).get("headers", [])}
+            original_subject = headers.get("Subject", "")
+
+        fwd_subject = f"Fwd: {original_subject}" if original_subject and not original_subject.startswith("Fwd:") else original_subject
+
+        # Build new MIME message with original as attachment
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+        from email.mime.message import MIMEMessage
+        import email as em
+
+        msg = MIMEMultipart("mixed")
+        msg["To"] = to
+        msg["Subject"] = fwd_subject
+        if cc:
+            msg["Cc"] = cc
+
+        # Optional comment body
+        if body:
+            msg.attach(MIMEText(body, "plain", "utf-8"))
+
+        # Attach original message
+        orig_parsed = em.message_from_string(original_msg)
+        attachment = MIMEMessage(orig_parsed)
+        attachment.add_header("Content-Disposition", "attachment", filename="Forwarded message.eml")
+        msg.attach(attachment)
+
+        raw_send = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            r3 = await c.post(
+                f"{GMAIL_API_BASE}/messages/send",
+                json={"raw": raw_send},
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if r3.status_code in (200, 201):
+                return {"to": to, "subject": fwd_subject, "status": "ok", "provider": "gmail"}
+            return {"error": f"Gmail forward failed: HTTP {r3.status_code}", "status": "error"}
+
+    except Exception as exc:
+        logger.error("Gmail forward failed: %s", exc)
+        return {"error": f"Gmail forward failed: {exc}", "status": "error"}
+
+
+async def _forward_via_graph_api(access_token, email_id, to, body=None, cc=None):
+    """Forward an email via Microsoft Graph API using the native forward endpoint."""
+    if not access_token:
+        return {"error": "Microsoft token expired.", "status": "error"}
+
+    try:
+        message = {
+            "message": {
+                "toRecipients": [{"emailAddress": {"address": to}}],
+            },
+            "comment": body or "",
+        }
+        if cc:
+            message["message"]["ccRecipients"] = [{"emailAddress": {"address": cc.strip()}}]
+
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            r = await c.post(
+                f"{GRAPH_API_BASE}/messages/{email_id}/forward",
+                json=message,
+                headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+            )
+            if r.status_code == 401:
+                return {"error": "Microsoft token expired.", "status": "error"}
+            if r.status_code in (200, 202):
+                return {"to": to, "status": "ok", "provider": "outlook"}
+            return {"error": f"Graph forward failed: HTTP {r.status_code}", "status": "error"}
+
+    except Exception as exc:
+        logger.error("Graph forward failed: %s", exc)
+        return {"error": f"Graph forward failed: {exc}", "status": "error"}
+
+
+async def _forward_via_imap(host, port, username, password, email_id, to, body=None, cc=None):
+    """Forward an email via IMAP fetch + SMTP send with original as attachment."""
+    import asyncio, imaplib, ssl
+    import email as em
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+    from email.mime.message import MIMEMessage
+
+    if not host or not username or not password:
+        return {"error": "IMAP credentials incomplete", "status": "error"}
+
+    def _forward():
+        ctx = ssl.create_default_context()
+        conn = imaplib.IMAP4_SSL(host, port, ssl_context=ctx)
+        conn.login(username, password)
+        conn.select("INBOX")
+
+        # Fetch full raw message
+        typ, md = conn.fetch(email_id.encode(), "(BODY[])")
+        if typ != "OK" or not isinstance(md[0], tuple):
+            conn.logout()
+            return {"error": "Email not found", "status": "error"}
+
+        raw_bytes = md[0][1]
+        # Parse to get subject
+        orig_msg = em.message_from_bytes(raw_bytes)
+        original_subject = orig_msg.get("Subject", "")
+
+        conn.logout()
+
+        fwd_subject = f"Fwd: {original_subject}" if original_subject and not original_subject.startswith("Fwd:") else original_subject
+
+        # Build forward MIME
+        msg = MIMEMultipart("mixed")
+        msg["To"] = to
+        msg["Subject"] = fwd_subject
+        if cc:
+            msg["Cc"] = cc
+
+        if body:
+            msg.attach(MIMEText(body, "plain", "utf-8"))
+
+        attachment = MIMEMessage(orig_msg)
+        attachment.add_header("Content-Disposition", "attachment", filename="Forwarded message.eml")
+        msg.attach(attachment)
+
+        # Send via SMTP
+        import smtplib
+        try:
+            srv = smtplib.SMTP_SSL(host, port, timeout=DEFAULT_TIMEOUT) if port == 465 else smtplib.SMTP(host, port, timeout=DEFAULT_TIMEOUT)
+            if port != 465:
+                srv.starttls()
+            srv.login(username, password)
+            srv.send_message(msg)
+            srv.quit()
+            return {"to": to, "subject": fwd_subject, "status": "ok", "provider": "imap"}
+        except smtplib.SMTPException as exc:
+            return {"error": f"SMTP forward failed: {exc}", "status": "error"}
+
+    try:
+        return await asyncio.to_thread(_forward)
+    except Exception as exc:
+        return {"error": f"IMAP forward failed: {exc}", "status": "error"}
+
+
+# =============================================================================
+# Reply email helpers
+# =============================================================================
+
+
+async def _reply_via_gmail_api(access_token, email_id, body, reply_all=False):
+    """Reply to an email via Gmail API, preserving thread context."""
+    import base64
+    from email.mime.text import MIMEText as MimeText
+
+    if not access_token:
+        return {"error": "Gmail token expired.", "status": "error"}
+
+    try:
+        # Fetch original message metadata for threading
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            r = await c.get(
+                f"{GMAIL_API_BASE}/messages/{email_id}",
+                params={"format": "metadata", "metadataHeaders": "From,Subject,Message-ID,References"},
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if r.status_code == 401:
+                return {"error": "Gmail token expired.", "status": "error"}
+            r.raise_for_status()
+            data = r.json()
+
+        headers = {h["name"]: h["value"] for h in data.get("payload", {}).get("headers", [])}
+        original_from = headers.get("From", "")
+        original_subject = headers.get("Subject", "")
+        original_msg_id = headers.get("Message-ID", "")
+        original_references = headers.get("References", "")
+
+        # Extract original sender email for To field
+        import email.utils
+        original_sender = email.utils.parseaddr(original_from)[1]
+
+        reply_subject = f"Re: {original_subject}" if original_subject and not original_subject.startswith("Re:") else original_subject
+
+        # Build reply MIME
+        msg = MimeText(body, "plain", "utf-8")
+        msg["To"] = original_sender
+        msg["Subject"] = reply_subject
+        if original_msg_id:
+            msg["In-Reply-To"] = original_msg_id
+            msg["References"] = f"{original_references} {original_msg_id}".strip() if original_references else original_msg_id
+
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            r2 = await c.post(
+                f"{GMAIL_API_BASE}/messages/send",
+                json={"raw": raw, "threadId": data.get("threadId", "")},
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if r2.status_code in (200, 201):
+                return {"status": "ok", "message": "Reply sent.", "provider": "gmail"}
+            return {"error": f"Gmail reply failed: HTTP {r2.status_code}", "status": "error"}
+
+    except Exception as exc:
+        logger.error("Gmail reply failed: %s", exc)
+        return {"error": f"Gmail reply failed: {exc}", "status": "error"}
+
+
+async def _reply_via_graph_api(access_token, email_id, body, reply_all=False):
+    """Reply to an email via Microsoft Graph API."""
+    if not access_token:
+        return {"error": "Microsoft token expired.", "status": "error"}
+
+    endpoint = f"{GRAPH_API_BASE}/messages/{email_id}/replyAll" if reply_all else f"{GRAPH_API_BASE}/messages/{email_id}/reply"
+
+    try:
+        message = {
+            "message": {},
+            "comment": body,
+        }
+
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            r = await c.post(
+                endpoint,
+                json=message,
+                headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+            )
+            if r.status_code == 401:
+                return {"error": "Microsoft token expired.", "status": "error"}
+            if r.status_code in (200, 202):
+                return {"status": "ok", "message": "Reply sent.", "provider": "outlook"}
+            return {"error": f"Graph reply failed: HTTP {r.status_code}", "status": "error"}
+
+    except Exception as exc:
+        logger.error("Graph reply failed: %s", exc)
+        return {"error": f"Graph reply failed: {exc}", "status": "error"}
+
+
+async def _reply_via_imap(host, port, username, password, email_id, body, reply_all=False):
+    """Reply to an email via IMAP fetch + SMTP send with threading headers."""
+    import asyncio, imaplib, ssl
+    import email as em
+    from email.mime.text import MIMEText as MimeText
+    import email.utils
+
+    if not host or not username or not password:
+        return {"error": "IMAP credentials incomplete", "status": "error"}
+
+    def _reply():
+        ctx = ssl.create_default_context()
+        conn = imaplib.IMAP4_SSL(host, port, ssl_context=ctx)
+        conn.login(username, password)
+        conn.select("INBOX")
+
+        # Fetch headers of original
+        typ, md = conn.fetch(email_id.encode(), "(BODY.PEEK[HEADER])")
+        if typ != "OK" or not isinstance(md[0], tuple):
+            conn.logout()
+            return {"error": "Email not found", "status": "error"}
+
+        orig_msg = em.message_from_bytes(md[0][1])
+        conn.logout()
+
+        original_from = orig_msg.get("From", "")
+        original_subject = orig_msg.get("Subject", "")
+        original_msg_id = orig_msg.get("Message-ID", "")
+        original_references = orig_msg.get("References", "")
+        original_to = orig_msg.get("To", "")
+
+        original_sender = email.utils.parseaddr(original_from)[1]
+
+        reply_subject = f"Re: {original_subject}" if original_subject and not original_subject.startswith("Re:") else original_subject
+
+        # Build reply
+        msg = MimeText(body, "plain", "utf-8")
+        if reply_all:
+            # Include all recipients
+            all_to = original_from
+            if original_to:
+                all_to = f"{all_to}, {original_to}"
+            msg["To"] = all_to
+        else:
+            msg["To"] = original_sender
+        msg["Subject"] = reply_subject
+        if original_msg_id:
+            msg["In-Reply-To"] = original_msg_id
+            msg["References"] = f"{original_references} {original_msg_id}".strip() if original_references else original_msg_id
+
+        import smtplib
+        try:
+            srv = smtplib.SMTP_SSL(host, port, timeout=DEFAULT_TIMEOUT) if port == 465 else smtplib.SMTP(host, port, timeout=DEFAULT_TIMEOUT)
+            if port != 465:
+                srv.starttls()
+            srv.login(username, password)
+            srv.send_message(msg)
+            srv.quit()
+            return {"status": "ok", "message": "Reply sent.", "provider": "imap"}
+        except smtplib.SMTPException as exc:
+            return {"error": f"SMTP reply failed: {exc}", "status": "error"}
+
+    try:
+        return await asyncio.to_thread(_reply)
+    except Exception as exc:
+        return {"error": f"IMAP reply failed: {exc}", "status": "error"}
+
+
+# =============================================================================
+# Delete email helpers
+# =============================================================================
+
+
+async def _delete_via_gmail_api(access_token, email_id, permanent=False):
+    """Delete a Gmail message: trash (default) or permanent."""
+    if not access_token:
+        return {"error": "Gmail token expired.", "status": "error"}
+
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            if permanent:
+                r = await c.delete(
+                    f"{GMAIL_API_BASE}/messages/{email_id}",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                )
+            else:
+                r = await c.post(
+                    f"{GMAIL_API_BASE}/messages/{email_id}/trash",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                )
+            if r.status_code == 401:
+                return {"error": "Gmail token expired.", "status": "error"}
+            if r.status_code in (200, 204):
+                action = "permanently deleted" if permanent else "moved to trash"
+                return {"status": "ok", "message": f"Email {action}.", "provider": "gmail"}
+            return {"error": f"Gmail delete failed: HTTP {r.status_code}", "status": "error"}
+    except Exception as exc:
+        logger.error("Gmail delete failed: %s", exc)
+        return {"error": f"Gmail delete failed: {exc}", "status": "error"}
+
+
+async def _delete_via_graph_api(access_token, email_id):
+    """Delete an Outlook message (moves to Deleted Items)."""
+    if not access_token:
+        return {"error": "Microsoft token expired.", "status": "error"}
+
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            r = await c.delete(
+                f"{GRAPH_API_BASE}/messages/{email_id}",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if r.status_code == 401:
+                return {"error": "Microsoft token expired.", "status": "error"}
+            if r.status_code in (200, 204):
+                return {"status": "ok", "message": "Email moved to Deleted Items.", "provider": "outlook"}
+            return {"error": f"Graph delete failed: HTTP {r.status_code}", "status": "error"}
+    except Exception as exc:
+        logger.error("Graph delete failed: %s", exc)
+        return {"error": f"Graph delete failed: {exc}", "status": "error"}
+
+
+async def _delete_via_imap(host, port, username, password, email_id, permanent=False):
+    """Delete an IMAP email: mark \\Deleted (soft) or \\Deleted + EXPUNGE (permanent)."""
+    import asyncio, imaplib, ssl
+
+    def _delete():
+        ctx = ssl.create_default_context()
+        conn = imaplib.IMAP4_SSL(host, port, ssl_context=ctx)
+        conn.login(username, password)
+        conn.select("INBOX")
+
+        # Mark as deleted
+        typ, _ = conn.store(email_id.encode(), "+FLAGS", "\\Deleted")
+        if typ != "OK":
+            conn.logout()
+            return {"error": "IMAP STORE failed", "status": "error"}
+
+        if permanent:
+            conn.expunge()
+
+        conn.logout()
+        action = "permanently deleted" if permanent else "marked as deleted (recoverable)"
+        return {"status": "ok", "message": f"Email {action}.", "provider": "imap"}
+
+    try:
+        return await asyncio.to_thread(_delete)
+    except Exception as exc:
+        return {"error": f"IMAP delete failed: {exc}", "status": "error"}
+
+
+# =============================================================================
+# Attachment listing helpers
+# =============================================================================
+
+
+async def _get_gmail_attachments(access_token, email_id):
+    """List attachments on a Gmail message."""
+    if not access_token:
+        return {"error": "Gmail token expired.", "attachments": [], "total": 0}
+
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            r = await c.get(
+                f"{GMAIL_API_BASE}/messages/{email_id}",
+                params={"format": "full"},
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if r.status_code == 401:
+                return {"error": "Gmail token expired.", "attachments": [], "total": 0}
+            r.raise_for_status()
+            data = r.json()
+
+        attachments = []
+        payload = data.get("payload", {})
+
+        def _find_attachments(part):
+            if part.get("filename"):
+                body = part.get("body", {})
+                attachments.append({
+                    "filename": part.get("filename", ""),
+                    "mime_type": part.get("mimeType", ""),
+                    "size": body.get("size", 0),
+                    "attachment_id": body.get("attachmentId", ""),
+                })
+            for sub in part.get("parts", []):
+                _find_attachments(sub)
+
+        _find_attachments(payload)
+
+        return {"attachments": attachments, "total": len(attachments)}
+
+    except Exception as exc:
+        logger.error("Gmail attachments failed: %s", exc)
+        return {"error": f"Gmail attachments failed: {exc}", "attachments": [], "total": 0}
+
+
+async def _get_outlook_attachments(access_token, email_id):
+    """List attachments on an Outlook message via Graph API."""
+    if not access_token:
+        return {"error": "Microsoft token expired.", "attachments": [], "total": 0}
+
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            r = await c.get(
+                f"{GRAPH_API_BASE}/messages/{email_id}/attachments",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if r.status_code == 401:
+                return {"error": "Microsoft token expired.", "attachments": [], "total": 0}
+            r.raise_for_status()
+            data = r.json()
+
+        attachments = [
+            {
+                "filename": a.get("name", ""),
+                "mime_type": a.get("contentType", ""),
+                "size": a.get("size", 0),
+                "attachment_id": a.get("id", ""),
+            }
+            for a in data.get("value", [])
+        ]
+        return {"attachments": attachments, "total": len(attachments)}
+
+    except Exception as exc:
+        logger.error("Outlook attachments failed: %s", exc)
+        return {"error": f"Outlook attachments failed: {exc}", "attachments": [], "total": 0}
+
+
+async def _get_imap_attachments(host, port, username, password, email_id):
+    """List attachments on an IMAP email by parsing MIME parts."""
+    import asyncio, imaplib, ssl
+    import email as em
+
+    def _fetch():
+        ctx = ssl.create_default_context()
+        conn = imaplib.IMAP4_SSL(host, port, ssl_context=ctx)
+        conn.login(username, password)
+        conn.select("INBOX")
+
+        typ, md = conn.fetch(email_id.encode(), "(BODY[])")
+        if typ != "OK" or not isinstance(md[0], tuple):
+            conn.logout()
+            return {"error": "Email not found", "attachments": [], "total": 0}
+
+        msg = em.message_from_bytes(md[0][1])
+        conn.logout()
+
+        attachments = []
+
+        def _walk(part):
+            if part.get_content_maintype() == "multipart":
+                for sub in part.get_payload():
+                    _walk(sub)
+            elif part.get_filename():
+                attachments.append({
+                    "filename": part.get_filename(),
+                    "mime_type": part.get_content_type(),
+                    "size": len(part.get_payload(decode=True) or b""),
+                })
+
+        _walk(msg)
+        return {"attachments": attachments, "total": len(attachments)}
+
+    try:
+        return await asyncio.to_thread(_fetch)
+    except Exception as exc:
+        return {"error": f"IMAP attachments failed: {exc}", "attachments": [], "total": 0}
+
+
+# =============================================================================
+# Draft save helpers
+# =============================================================================
+
+
+async def _save_gmail_draft(access_token, to, subject, body, cc=None, is_html=False):
+    """Save a draft via Gmail API."""
+    import base64
+    from email.mime.text import MIMEText as MimeText
+
+    if not access_token:
+        return {"error": "Gmail token expired.", "status": "error"}
+
+    try:
+        msg = MimeText(body, "html" if is_html else "plain", "utf-8")
+        msg["To"] = to
+        msg["Subject"] = subject
+        if cc:
+            msg["Cc"] = cc
+
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            r = await c.post(
+                f"{GMAIL_API_BASE}/drafts",
+                json={"message": {"raw": raw}},
+                headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+            )
+            if r.status_code == 401:
+                return {"error": "Gmail token expired.", "status": "error"}
+            if r.status_code in (200, 201):
+                data = r.json()
+                return {"id": data.get("id", ""), "status": "draft_saved", "provider": "gmail"}
+            return {"error": f"Gmail draft save failed: HTTP {r.status_code}", "status": "error"}
+
+    except Exception as exc:
+        logger.error("Gmail draft save failed: %s", exc)
+        return {"error": f"Gmail draft save failed: {exc}", "status": "error"}
+
+
+async def _save_outlook_draft(access_token, to, subject, body, cc=None, is_html=False):
+    """Save a draft via Microsoft Graph API."""
+    if not access_token:
+        return {"error": "Microsoft token expired.", "status": "error"}
+
+    try:
+        message = {
+            "subject": subject,
+            "body": {"contentType": "HTML" if is_html else "Text", "content": body},
+            "toRecipients": [{"emailAddress": {"address": to}}],
+            "isDraft": True,
+        }
+        if cc:
+            message["ccRecipients"] = [{"emailAddress": {"address": cc.strip()}}]
+
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            r = await c.post(
+                f"{GRAPH_API_BASE}/messages",
+                json=message,
+                headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+            )
+            if r.status_code == 401:
+                return {"error": "Microsoft token expired.", "status": "error"}
+            if r.status_code in (200, 201):
+                data = r.json()
+                return {"id": data.get("id", ""), "status": "draft_saved", "provider": "outlook"}
+            return {"error": f"Graph draft save failed: HTTP {r.status_code}", "status": "error"}
+
+    except Exception as exc:
+        logger.error("Graph draft save failed: %s", exc)
+        return {"error": f"Graph draft save failed: {exc}", "status": "error"}
+
+
+async def _save_imap_draft(imap_host, imap_port, username, password, to, subject, body, sender, cc=None, is_html=False):
+    """Save a draft by appending to the IMAP Drafts folder."""
+    import asyncio, imaplib, ssl
+    from email.mime.text import MIMEText as MimeText
+
+    def _save():
+        ctx = ssl.create_default_context()
+        conn = imaplib.IMAP4_SSL(imap_host, imap_port, ssl_context=ctx)
+        conn.login(username, password)
+
+        msg = MimeText(body, "html" if is_html else "plain", "utf-8")
+        msg["To"] = to
+        msg["From"] = sender
+        msg["Subject"] = subject
+        if cc:
+            msg["Cc"] = cc
+
+        # Try to append to Drafts folder
+        drafts_folders = ["Drafts", "Draft", "[Gmail]/Drafts"]
+        saved = False
+        for folder in drafts_folders:
+            try:
+                typ, _ = conn.append(folder, "\\Draft", imaplib.Time2Internaldate(None), msg.as_bytes().encode("utf-8"))
+                if typ == "OK":
+                    saved = True
+                    break
+            except Exception:
+                continue
+
+        if not saved:
+            # Fallback: try INBOX
+            try:
+                typ, _ = conn.append("INBOX", "\\Draft", imaplib.Time2Internaldate(None), msg.as_bytes().encode("utf-8"))
+                if typ == "OK":
+                    saved = True
+            except Exception:
+                pass
+
+        conn.logout()
+
+        if saved:
+            return {"status": "draft_saved", "message": "Draft saved.", "provider": "imap"}
+        return {"error": "Could not save draft to any folder.", "status": "error"}
+
+    try:
+        return await asyncio.to_thread(_save)
+    except Exception as exc:
+        return {"error": f"IMAP draft save failed: {exc}", "status": "error"}

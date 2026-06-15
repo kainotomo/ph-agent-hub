@@ -1123,9 +1123,597 @@ async def build_calendar_tools(
         ]
         return {"accounts": accounts, "total": len(accounts)}
 
+    # ------------------------------------------------------------------
+    @tool
+    async def rsvp_event(
+        event_id: str,
+        response: str,
+        comment: str | None = None,
+        calendar_label: str | None = None,
+    ) -> dict:
+        """Respond to a calendar event invitation.
+
+        Accept, decline, or tentatively accept an event.
+
+        Args:
+            event_id: The event's unique ID (from ``list_events``).
+            response: One of "accepted", "declined", "tentative".
+            comment: Optional reply comment sent to the organizer.
+            calendar_label: Connected account label (optional).
+
+        Returns:
+            Dict with ``status`` and optionally ``error``.
+        """
+        if not event_id:
+            return {"error": "No event ID provided", "status": "error"}
+        if response not in ("accepted", "declined", "tentative"):
+            return {"error": "Response must be 'accepted', 'declined', or 'tentative'", "status": "error"}
+
+        active_provider = provider
+        active_token = None
+        active_calendar_id = calendar_id
+
+        if user_creds_map:
+            up = user_creds_map.get("provider", "")
+            if up in ("outlook", "microsoft"):
+                active_provider = "microsoft"
+                active_token = user_creds_map.get("access_token", "")
+            elif up in ("gmail", "google"):
+                active_provider = "google"
+                active_token = user_creds_map.get("access_token", "")
+                active_calendar_id = user_creds_map.get("calendar_id", "primary")
+
+        if active_provider == "google":
+            if not active_token:
+                active_token = await _get_google_access_token(credentials)
+            if not active_token or len(active_token) <= 50:
+                return {"error": "RSVP requires OAuth credentials (API key is read-only).", "status": "error"}
+
+            # Google: update attendee status via PATCH
+            try:
+                async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                    r = await client.get(
+                        f"{GOOGLE_CALENDAR_API_BASE}/calendars/{quote(active_calendar_id)}/events/{quote(event_id)}",
+                        headers={"Authorization": f"Bearer {active_token}"},
+                    )
+                    if r.status_code == 401:
+                        if user_creds_map and user_creds_map.get("refresh_token"):
+                            refreshed = await refresh_token_if_expired(
+                                user_creds_map, user_creds_map["provider"], "Calendar",
+                                credential_orm=_credential_orm, tokens_dict=_tokens_dict, db=db,
+                            )
+                            if refreshed:
+                                active_token = user_creds_map["access_token"]
+                            else:
+                                return {"error": "Calendar auth failed. Reconnect account.", "status": "error"}
+                        else:
+                            return {"error": "Calendar auth failed. Reconnect account.", "status": "error"}
+                    r.raise_for_status()
+                    event_data = r.json()
+
+                attendees = event_data.get("attendees", [])
+                if not attendees:
+                    return {"error": "No attendees found on this event. It may not be an invitation.", "status": "error"}
+
+                # Update our attendee status
+                my_email = user_creds_map.get("email", user_creds_map.get("calendar_id", ""))
+                updated = False
+                for att in attendees:
+                    if att.get("email", "").lower() == my_email.lower():
+                        att["responseStatus"] = {"accepted": "accepted", "declined": "declined", "tentative": "tentative"}[response]
+                        updated = True
+                        break
+
+                if not updated:
+                    # Try updating first attendee
+                    if attendees:
+                        attendees[0]["responseStatus"] = {"accepted": "accepted", "declined": "declined", "tentative": "tentative"}[response]
+
+                async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                    r2 = await client.patch(
+                        f"{GOOGLE_CALENDAR_API_BASE}/calendars/{quote(active_calendar_id)}/events/{quote(event_id)}",
+                        json={"attendees": attendees},
+                        headers={"Authorization": f"Bearer {active_token}", "Content-Type": "application/json"},
+                    )
+                    if r2.status_code == 200:
+                        return {"status": "ok", "message": f"Event {response}.", "provider": "google"}
+                    return {"error": f"Google RSVP failed: HTTP {r2.status_code}", "status": "error"}
+
+            except Exception as exc:
+                logger.error("Google RSVP failed: %s", exc)
+                return {"error": f"Google RSVP failed: {exc}", "status": "error"}
+
+        elif active_provider == "microsoft":
+            if not active_token:
+                return {"error": "Microsoft access token not available.", "status": "error"}
+
+            endpoint_map = {
+                "accepted": f"{GRAPH_API_BASE}/events/{event_id}/accept",
+                "declined": f"{GRAPH_API_BASE}/events/{event_id}/decline",
+                "tentative": f"{GRAPH_API_BASE}/events/{event_id}/tentativelyAccept",
+            }
+
+            body = {}
+            if comment:
+                body["comment"] = comment
+
+            try:
+                async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                    r = await client.post(
+                        endpoint_map[response],
+                        json=body,
+                        headers={"Authorization": f"Bearer {active_token}", "Content-Type": "application/json"},
+                    )
+                    if r.status_code == 401:
+                        if user_creds_map and user_creds_map.get("refresh_token"):
+                            refreshed = await refresh_token_if_expired(
+                                user_creds_map, user_creds_map["provider"], "Calendar",
+                                credential_orm=_credential_orm, tokens_dict=_tokens_dict, db=db,
+                            )
+                            if refreshed:
+                                active_token = user_creds_map["access_token"]
+                            else:
+                                return {"error": "Microsoft token expired. Reconnect.", "status": "error"}
+                        else:
+                            return {"error": "Microsoft token expired. Reconnect.", "status": "error"}
+                    if r.status_code in (200, 202):
+                        return {"status": "ok", "message": f"Event {response}.", "provider": "outlook"}
+                    return {"error": f"Graph RSVP failed: HTTP {r.status_code}", "status": "error"}
+            except Exception as exc:
+                logger.error("Graph RSVP failed: %s", exc)
+                return {"error": f"Graph RSVP failed: {exc}", "status": "error"}
+        else:
+            return {"error": f"Calendar provider '{active_provider}' does not support RSVP.", "status": "error"}
+
+    # ------------------------------------------------------------------
+    @tool
+    async def search_events(
+        query: str,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        max_results: int = 25,
+        calendar_label: str | None = None,
+    ) -> dict:
+        """Search calendar events by keyword.
+
+        Args:
+            query: Keywords to search for in event titles and descriptions.
+            date_from: Optional start date/time in ISO format.
+            date_to: Optional end date/time in ISO format.
+            max_results: Maximum events to return (default 25, max 100).
+            calendar_label: Connected account label (optional).
+
+        Returns:
+            Dict with ``events`` (list) and ``total``.
+        """
+        if not query or not query.strip():
+            return {"error": "No search query provided", "events": [], "total": 0}
+
+        max_results = max(1, min(max_results, 100))
+
+        active_provider = provider
+        active_token = None
+        active_calendar_id = calendar_id
+
+        if user_creds_map:
+            up = user_creds_map.get("provider", "")
+            if up in ("outlook", "microsoft"):
+                active_provider = "microsoft"
+                active_token = user_creds_map.get("access_token", "")
+            elif up in ("gmail", "google"):
+                active_provider = "google"
+                active_token = user_creds_map.get("access_token", "")
+                active_calendar_id = user_creds_map.get("calendar_id", "primary")
+
+        if active_provider == "google":
+            if not active_token:
+                active_token = await _get_google_access_token(credentials)
+            if not active_token:
+                return {"error": "Calendar not configured.", "events": [], "total": 0}
+
+            headers = {"Authorization": f"Bearer {active_token}"} if len(active_token) > 50 else {}
+            params = {
+                "q": query.strip(),
+                "maxResults": max_results,
+                "singleEvents": "true",
+            }
+            if date_from:
+                params["timeMin"] = _parse_datetime(date_from)
+            if date_to:
+                params["timeMax"] = _parse_datetime(date_to)
+            if len(active_token) <= 50:
+                params["key"] = active_token
+
+            try:
+                async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                    r = await client.get(
+                        f"{GOOGLE_CALENDAR_API_BASE}/calendars/{quote(active_calendar_id)}/events",
+                        params=params, headers=headers,
+                    )
+                    if r.status_code == 401:
+                        return {"error": "Token expired. Reconnect account.", "events": [], "total": 0}
+                    r.raise_for_status()
+                    data = r.json()
+
+                items = data.get("items", [])
+                events = []
+                for item in items:
+                    start_info = item.get("start", {})
+                    end_info = item.get("end", {})
+                    events.append({
+                        "id": item.get("id", ""),
+                        "summary": item.get("summary", "Untitled"),
+                        "description": item.get("description", ""),
+                        "location": item.get("location", ""),
+                        "start": start_info.get("dateTime", start_info.get("date", "")),
+                        "end": end_info.get("dateTime", end_info.get("date", "")),
+                        "status": item.get("status", ""),
+                    })
+                return {"events": events, "total": len(events)}
+            except Exception as exc:
+                logger.error("Google search events failed: %s", exc)
+                return {"error": f"Search failed: {exc}", "events": [], "total": 0}
+
+        elif active_provider == "microsoft":
+            if not active_token:
+                return {"error": "Microsoft access token not available.", "events": [], "total": 0}
+
+            try:
+                params = {
+                    "$top": max_results,
+                    "$search": f'"{query.strip()}"',
+                    "$select": "id,subject,bodyPreview,location,start,end,showAs",
+                }
+
+                async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                    r = await client.get(
+                        f"{GRAPH_API_BASE}/events",
+                        params=params,
+                        headers={"Authorization": f"Bearer {active_token}", "Content-Type": "application/json"},
+                    )
+                    if r.status_code == 401:
+                        return {"error": "Token expired. Reconnect account.", "events": [], "total": 0}
+                    r.raise_for_status()
+                    data = r.json()
+
+                items = data.get("value", [])
+                events = []
+                for item in items:
+                    start_info = item.get("start", {})
+                    end_info = item.get("end", {})
+                    events.append({
+                        "id": item.get("id", ""),
+                        "summary": item.get("subject", "Untitled"),
+                        "description": item.get("bodyPreview", ""),
+                        "location": item.get("location", {}).get("displayName", ""),
+                        "start": start_info.get("dateTime", start_info.get("date", "")),
+                        "end": end_info.get("dateTime", end_info.get("date", "")),
+                        "status": item.get("showAs", ""),
+                    })
+                return {"events": events, "total": len(events)}
+            except Exception as exc:
+                logger.error("Graph search events failed: %s", exc)
+                return {"error": f"Search failed: {exc}", "events": [], "total": 0}
+        else:
+            return {"error": f"Provider '{active_provider}' does not support search.", "events": [], "total": 0}
+
+    # ------------------------------------------------------------------
+    @tool
+    async def list_calendars(account_label: str | None = None) -> dict:
+        """List all available calendars for the connected account.
+
+        For Google, returns the calendar list. For Outlook, returns
+        available calendars. The ``calendar_id`` from this result can
+        be used with other tools that accept an optional calendar_id.
+
+        Args:
+            account_label: Connected account label (optional).
+
+        Returns:
+            Dict with ``calendars`` (list) and ``total``.
+        """
+        active_provider = provider
+        active_token = None
+
+        if user_creds_map:
+            up = user_creds_map.get("provider", "")
+            active_token = user_creds_map.get("access_token", "")
+            if up in ("outlook", "microsoft"):
+                active_provider = "microsoft"
+            elif up in ("gmail", "google"):
+                active_provider = "google"
+
+        if active_provider == "google":
+            if not active_token:
+                active_token = await _get_google_access_token(credentials)
+            if not active_token or len(active_token) <= 50:
+                return {"error": "List calendars requires OAuth credentials.", "calendars": [], "total": 0}
+
+            try:
+                async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                    r = await client.get(
+                        f"{GOOGLE_CALENDAR_API_BASE}/users/me/calendarList",
+                        headers={"Authorization": f"Bearer {active_token}"},
+                    )
+                    if r.status_code == 401:
+                        return {"error": "Token expired. Reconnect account.", "calendars": [], "total": 0}
+                    r.raise_for_status()
+                    data = r.json()
+
+                calendars = [
+                    {
+                        "id": item.get("id", ""),
+                        "summary": item.get("summary", "Untitled"),
+                        "description": item.get("description", ""),
+                        "primary": item.get("primary", False),
+                        "access_role": item.get("accessRole", ""),
+                    }
+                    for item in data.get("items", [])
+                ]
+                return {"calendars": calendars, "total": len(calendars)}
+            except Exception as exc:
+                logger.error("Google list calendars failed: %s", exc)
+                return {"error": f"List calendars failed: {exc}", "calendars": [], "total": 0}
+
+        elif active_provider == "microsoft":
+            if not active_token:
+                return {"error": "Microsoft access token not available.", "calendars": [], "total": 0}
+
+            try:
+                async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                    r = await client.get(
+                        f"{GRAPH_API_BASE}/calendars",
+                        headers={"Authorization": f"Bearer {active_token}"},
+                    )
+                    if r.status_code == 401:
+                        return {"error": "Token expired. Reconnect account.", "calendars": [], "total": 0}
+                    r.raise_for_status()
+                    data = r.json()
+
+                calendars = [
+                    {
+                        "id": item.get("id", ""),
+                        "summary": item.get("name", "Untitled"),
+                        "can_edit": item.get("canEdit", False),
+                    }
+                    for item in data.get("value", [])
+                ]
+                return {"calendars": calendars, "total": len(calendars)}
+            except Exception as exc:
+                logger.error("Graph list calendars failed: %s", exc)
+                return {"error": f"List calendars failed: {exc}", "calendars": [], "total": 0}
+        else:
+            return {"error": f"Provider '{active_provider}' does not support listing calendars.", "calendars": [], "total": 0}
+
+    # ------------------------------------------------------------------
+    @tool
+    async def update_event_attendees(
+        event_id: str,
+        add_attendees: list[str] | None = None,
+        remove_attendees: list[str] | None = None,
+        calendar_label: str | None = None,
+    ) -> dict:
+        """Add or remove attendees from an existing event.
+
+        Args:
+            event_id: The event's unique ID (from ``list_events``).
+            add_attendees: List of email addresses to add.
+            remove_attendees: List of email addresses to remove.
+            calendar_label: Connected account label (optional).
+
+        Returns:
+            Dict with ``status`` and optionally ``error``.
+        """
+        if not event_id:
+            return {"error": "No event ID provided", "status": "error"}
+        if not add_attendees and not remove_attendees:
+            return {"error": "No attendees to add or remove", "status": "error"}
+
+        active_provider = provider
+        active_token = None
+        active_calendar_id = calendar_id
+
+        if user_creds_map:
+            up = user_creds_map.get("provider", "")
+            if up in ("outlook", "microsoft"):
+                active_provider = "microsoft"
+                active_token = user_creds_map.get("access_token", "")
+            elif up in ("gmail", "google"):
+                active_provider = "google"
+                active_token = user_creds_map.get("access_token", "")
+                active_calendar_id = user_creds_map.get("calendar_id", "primary")
+
+        if active_provider == "google":
+            if not active_token:
+                active_token = await _get_google_access_token(credentials)
+            if not active_token or len(active_token) <= 50:
+                return {"error": "Requires OAuth credentials.", "status": "error"}
+
+            try:
+                async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                    r = await client.get(
+                        f"{GOOGLE_CALENDAR_API_BASE}/calendars/{quote(active_calendar_id)}/events/{quote(event_id)}",
+                        headers={"Authorization": f"Bearer {active_token}"},
+                    )
+                    if r.status_code == 401:
+                        return {"error": "Token expired. Reconnect.", "status": "error"}
+                    r.raise_for_status()
+                    event_data = r.json()
+
+                current_attendees = event_data.get("attendees", [])
+                current_emails = {a.get("email", "") for a in current_attendees}
+
+                add_set = set(a.strip() for a in (add_attendees or []))
+                remove_set = set(r.strip() for r in (remove_attendees or []))
+
+                # Keep existing attendees not in remove set, add new ones
+                new_attendees = [
+                    a for a in current_attendees
+                    if a.get("email", "") not in remove_set
+                ]
+                for email in add_set:
+                    if email not in current_emails - remove_set:
+                        new_attendees.append({"email": email})
+
+                async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                    r2 = await client.patch(
+                        f"{GOOGLE_CALENDAR_API_BASE}/calendars/{quote(active_calendar_id)}/events/{quote(event_id)}",
+                        json={"attendees": new_attendees},
+                        headers={"Authorization": f"Bearer {active_token}", "Content-Type": "application/json"},
+                    )
+                    if r2.status_code == 200:
+                        return {"status": "ok", "message": "Attendees updated.", "provider": "google"}
+                    return {"error": f"Google update attendees failed: HTTP {r2.status_code}", "status": "error"}
+
+            except Exception as exc:
+                logger.error("Google update attendees failed: %s", exc)
+                return {"error": f"Update attendees failed: {exc}", "status": "error"}
+
+        elif active_provider == "microsoft":
+            if not active_token:
+                return {"error": "Microsoft access token not available.", "status": "error"}
+
+            try:
+                async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                    r = await client.get(
+                        f"{GRAPH_API_BASE}/events/{event_id}",
+                        headers={"Authorization": f"Bearer {active_token}"},
+                    )
+                    if r.status_code == 401:
+                        return {"error": "Token expired. Reconnect.", "status": "error"}
+                    r.raise_for_status()
+                    event_data = r.json()
+
+                current_attendees = event_data.get("attendees", [])
+                current_emails = {a.get("emailAddress", {}).get("address", "") for a in current_attendees}
+
+                remove_set = set(r.strip() for r in (remove_attendees or []))
+                add_set = set(a.strip() for a in (add_attendees or []))
+
+                new_attendees = [
+                    a for a in current_attendees
+                    if a.get("emailAddress", {}).get("address", "") not in remove_set
+                ]
+                for email in add_set:
+                    if email not in current_emails - remove_set:
+                        new_attendees.append({"emailAddress": {"address": email}})
+
+                async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                    r2 = await client.patch(
+                        f"{GRAPH_API_BASE}/events/{event_id}",
+                        json={"attendees": new_attendees},
+                        headers={"Authorization": f"Bearer {active_token}", "Content-Type": "application/json"},
+                    )
+                    if r2.status_code == 200:
+                        return {"status": "ok", "message": "Attendees updated.", "provider": "outlook"}
+                    return {"error": f"Graph update attendees failed: HTTP {r2.status_code}", "status": "error"}
+
+            except Exception as exc:
+                logger.error("Graph update attendees failed: %s", exc)
+                return {"error": f"Update attendees failed: {exc}", "status": "error"}
+        else:
+            return {"error": f"Provider '{active_provider}' does not support attendee management.", "status": "error"}
+
+    # ------------------------------------------------------------------
+    @tool
+    async def set_event_reminder(
+        event_id: str,
+        minutes_before: int = 15,
+        calendar_label: str | None = None,
+    ) -> dict:
+        """Set a reminder for an existing calendar event.
+
+        Args:
+            event_id: The event's unique ID (from ``list_events``).
+            minutes_before: Minutes before the event to trigger reminder (default 15).
+            calendar_label: Connected account label (optional).
+
+        Returns:
+            Dict with ``status`` and optionally ``error``.
+        """
+        if not event_id:
+            return {"error": "No event ID provided", "status": "error"}
+
+        minutes_before = max(1, min(minutes_before, 10080))  # Max 7 days
+
+        active_provider = provider
+        active_token = None
+        active_calendar_id = calendar_id
+
+        if user_creds_map:
+            up = user_creds_map.get("provider", "")
+            if up in ("outlook", "microsoft"):
+                active_provider = "microsoft"
+                active_token = user_creds_map.get("access_token", "")
+            elif up in ("gmail", "google"):
+                active_provider = "google"
+                active_token = user_creds_map.get("access_token", "")
+                active_calendar_id = user_creds_map.get("calendar_id", "primary")
+
+        if active_provider == "google":
+            if not active_token:
+                active_token = await _get_google_access_token(credentials)
+            if not active_token or len(active_token) <= 50:
+                return {"error": "Requires OAuth credentials.", "status": "error"}
+
+            try:
+                body = {
+                    "reminders": {
+                        "useDefault": False,
+                        "overrides": [
+                            {"method": "popup", "minutes": minutes_before},
+                        ],
+                    },
+                }
+
+                async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                    r = await client.patch(
+                        f"{GOOGLE_CALENDAR_API_BASE}/calendars/{quote(active_calendar_id)}/events/{quote(event_id)}",
+                        json=body,
+                        headers={"Authorization": f"Bearer {active_token}", "Content-Type": "application/json"},
+                    )
+                    if r.status_code == 401:
+                        return {"error": "Token expired. Reconnect.", "status": "error"}
+                    if r.status_code == 200:
+                        return {"status": "ok", "message": f"Reminder set {minutes_before} min before.", "provider": "google"}
+                    return {"error": f"Google set reminder failed: HTTP {r.status_code}", "status": "error"}
+
+            except Exception as exc:
+                logger.error("Google set reminder failed: %s", exc)
+                return {"error": f"Set reminder failed: {exc}", "status": "error"}
+
+        elif active_provider == "microsoft":
+            if not active_token:
+                return {"error": "Microsoft access token not available.", "status": "error"}
+
+            try:
+                body = {"reminderMinutesBeforeStart": minutes_before}
+
+                async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                    r = await client.patch(
+                        f"{GRAPH_API_BASE}/events/{event_id}",
+                        json=body,
+                        headers={"Authorization": f"Bearer {active_token}", "Content-Type": "application/json"},
+                    )
+                    if r.status_code == 401:
+                        return {"error": "Token expired. Reconnect.", "status": "error"}
+                    if r.status_code == 200:
+                        return {"status": "ok", "message": f"Reminder set {minutes_before} min before.", "provider": "outlook"}
+                    return {"error": f"Graph set reminder failed: HTTP {r.status_code}", "status": "error"}
+
+            except Exception as exc:
+                logger.error("Graph set reminder failed: %s", exc)
+                return {"error": f"Set reminder failed: {exc}", "status": "error"}
+        else:
+            return {"error": f"Provider '{active_provider}' does not support reminders.", "status": "error"}
+
     tools = [list_events, create_event, find_free_slots, delete_event, update_event]
     if user_credentials:
-        tools.append(list_calendar_accounts)
+        tools.extend([
+            list_calendar_accounts,
+            rsvp_event, search_events, list_calendars,
+            update_event_attendees, set_event_reminder,
+        ])
     return tools
 
 

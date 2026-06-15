@@ -188,6 +188,7 @@ def build_tasks_tools(
         list_name: str | None = None,
         due_date: str | None = None,
         notes: str | None = None,
+        priority: str | None = None,
         account_label: str | None = None,
     ) -> dict:
         """Create a new task.
@@ -198,6 +199,9 @@ def build_tasks_tools(
             due_date: Due date in ISO format (e.g. "2026-06-15" or
                      "2026-06-15T14:00:00").
             notes: Optional notes or description.
+            priority: Priority level ("high", "normal", "low"). Only
+                     supported by Microsoft To Do natively. On Google
+                     Tasks, priority is stored as a note prefix.
             account_label: Connected account label.
 
         Returns:
@@ -220,18 +224,18 @@ def build_tasks_tools(
         await ensure_fresh_token(tokens, provider, "Tasks", credential_orm=cred, tokens_dict=tokens, db=db)
 
         if provider in ("gmail", "google"):
-            result = await _create_google_task(tokens.get("access_token", ""), title.strip(), list_name, due_date, notes)
+            result = await _create_google_task(tokens.get("access_token", ""), title.strip(), list_name, due_date, notes, priority)
             if "Token expired" in result.get("error", ""):
                 refreshed = await _maybe_refresh(tokens, provider, cred)
                 if refreshed:
-                    result = await _create_google_task(tokens["access_token"], title.strip(), list_name, due_date, notes)
+                    result = await _create_google_task(tokens["access_token"], title.strip(), list_name, due_date, notes, priority)
             return result
         elif provider in ("outlook", "microsoft"):
-            result = await _create_microsoft_task(tokens.get("access_token", ""), title.strip(), list_name, due_date, notes)
+            result = await _create_microsoft_task(tokens.get("access_token", ""), title.strip(), list_name, due_date, notes, priority)
             if "Token expired" in result.get("error", ""):
                 refreshed = await _maybe_refresh(tokens, provider, cred)
                 if refreshed:
-                    result = await _create_microsoft_task(tokens["access_token"], title.strip(), list_name, due_date, notes)
+                    result = await _create_microsoft_task(tokens["access_token"], title.strip(), list_name, due_date, notes, priority)
             return result
         else:
             return {"error": f"Provider '{provider}' not supported."}
@@ -244,6 +248,7 @@ def build_tasks_tools(
         completed: bool | None = None,
         due_date: str | None = None,
         notes: str | None = None,
+        priority: str | None = None,
         list_name: str | None = None,
         account_label: str | None = None,
     ) -> dict:
@@ -255,6 +260,7 @@ def build_tasks_tools(
             completed: Mark as completed (True) or not.
             due_date: New due date in ISO format.
             notes: New notes.
+            priority: Priority level ("high", "normal", "low").
             list_name: Task list the task belongs to.
             account_label: Connected account label.
 
@@ -278,18 +284,18 @@ def build_tasks_tools(
         await ensure_fresh_token(tokens, provider, "Tasks", credential_orm=cred, tokens_dict=tokens, db=db)
 
         if provider in ("gmail", "google"):
-            result = await _update_google_task(tokens.get("access_token", ""), task_id, title, completed, due_date, notes, list_name)
+            result = await _update_google_task(tokens.get("access_token", ""), task_id, title, completed, due_date, notes, priority, list_name)
             if "Token expired" in result.get("error", ""):
                 refreshed = await _maybe_refresh(tokens, provider, cred)
                 if refreshed:
-                    result = await _update_google_task(tokens["access_token"], task_id, title, completed, due_date, notes, list_name)
+                    result = await _update_google_task(tokens["access_token"], task_id, title, completed, due_date, notes, priority, list_name)
             return result
         elif provider in ("outlook", "microsoft"):
-            result = await _update_microsoft_task(tokens.get("access_token", ""), task_id, title, completed, due_date, notes, list_name)
+            result = await _update_microsoft_task(tokens.get("access_token", ""), task_id, title, completed, due_date, notes, priority, list_name)
             if "Token expired" in result.get("error", ""):
                 refreshed = await _maybe_refresh(tokens, provider, cred)
                 if refreshed:
-                    result = await _update_microsoft_task(tokens["access_token"], task_id, title, completed, due_date, notes, list_name)
+                    result = await _update_microsoft_task(tokens["access_token"], task_id, title, completed, due_date, notes, priority, list_name)
             return result
 
     # ------------------------------------------------------------------
@@ -362,7 +368,9 @@ def build_tasks_tools(
 
     tools = []
     if user_credentials:
-        tools = [list_task_lists, list_tasks, create_task, update_task, delete_task, list_task_accounts]
+        tools = [list_task_lists, list_tasks, create_task, update_task, delete_task,
+                 list_task_accounts, move_task, search_tasks,
+                 list_subtasks, create_subtask]
     return tools
 
 
@@ -446,7 +454,7 @@ async def _list_google_tasks(access_token, list_name, include_completed, limit):
         return {"error": f"Failed to list tasks: {exc}", "tasks": [], "total": 0}
 
 
-async def _create_google_task(access_token, title, list_name, due_date, notes):
+async def _create_google_task(access_token, title, list_name, due_date, notes, priority=None):
     task_list_id = await _get_google_task_list_id(access_token, list_name)
 
     body = {"title": title}
@@ -454,6 +462,11 @@ async def _create_google_task(access_token, title, list_name, due_date, notes):
         body["due"] = due_date
     if notes:
         body["notes"] = notes
+    if priority:
+        # Google Tasks has no native priority — store as note prefix
+        prefix = f"[PRIORITY:{priority}] "
+        existing_notes = body.get("notes", "")
+        body["notes"] = prefix + existing_notes if existing_notes else prefix
 
     try:
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
@@ -471,7 +484,7 @@ async def _create_google_task(access_token, title, list_name, due_date, notes):
         return {"error": f"Failed to create task: {exc}", "status": "error"}
 
 
-async def _update_google_task(access_token, task_id, title, completed, due_date, notes, list_name):
+async def _update_google_task(access_token, task_id, title, completed, due_date, notes, priority=None, list_name=None):
     task_list_id = await _get_google_task_list_id(access_token, list_name)
 
     body = {}
@@ -485,6 +498,10 @@ async def _update_google_task(access_token, task_id, title, completed, due_date,
         body["status"] = "completed"
     elif completed is False:
         body["status"] = "needsAction"
+    if priority is not None:
+        prefix = f"[PRIORITY:{priority}] "
+        current_notes = body.get("notes", "")
+        body["notes"] = prefix + current_notes if current_notes else prefix
 
     try:
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
@@ -602,7 +619,7 @@ async def _list_microsoft_tasks(access_token, list_name, include_completed, limi
         return {"error": f"Failed to list tasks: {exc}", "tasks": [], "total": 0}
 
 
-async def _create_microsoft_task(access_token, title, list_name, due_date, notes):
+async def _create_microsoft_task(access_token, title, list_name, due_date, notes, priority=None):
     list_id = await _get_microsoft_task_list_id(access_token, list_name)
     if list_id is None:
         return {"error": "Token expired.", "status": "error"}
@@ -614,6 +631,9 @@ async def _create_microsoft_task(access_token, title, list_name, due_date, notes
         body["dueDateTime"] = {"dateTime": due_date, "timeZone": "UTC"}
     if notes:
         body["body"] = {"content": notes, "contentType": "text"}
+    if priority:
+        importance_map = {"high": "high", "normal": "normal", "low": "low"}
+        body["importance"] = importance_map.get(priority.lower(), "normal")
 
     try:
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
@@ -631,7 +651,7 @@ async def _create_microsoft_task(access_token, title, list_name, due_date, notes
         return {"error": f"Failed to create task: {exc}", "status": "error"}
 
 
-async def _update_microsoft_task(access_token, task_id, title, completed, due_date, notes, list_name):
+async def _update_microsoft_task(access_token, task_id, title, completed, due_date, notes, priority=None, list_name=None):
     list_id = await _get_microsoft_task_list_id(access_token, list_name)
     if list_id is None:
         return {"error": "Token expired.", "status": "error"}
@@ -649,6 +669,9 @@ async def _update_microsoft_task(access_token, task_id, title, completed, due_da
         body["status"] = "completed"
     elif completed is False:
         body["status"] = "notStarted"
+    if priority is not None:
+        importance_map = {"high": "high", "normal": "normal", "low": "low"}
+        body["importance"] = importance_map.get(priority.lower(), "normal")
 
     try:
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
@@ -685,3 +708,261 @@ async def _delete_microsoft_task(access_token, task_id, list_name):
             return {"error": f"Graph API error: HTTP {r.status_code}", "status": "error"}
     except Exception as exc:
         return {"error": f"Failed to delete task: {exc}", "status": "error"}
+
+
+# =============================================================================
+# Task move helpers (copy + delete pattern)
+# =============================================================================
+
+
+async def _move_google_task(access_token, task_id, target_list_name, source_list_name=None):
+    """Move a Google task by copying it to the target list and deleting the original."""
+    source_list_id = await _get_google_task_list_id(access_token, source_list_name)
+    target_list_id = await _get_google_task_list_id(access_token, target_list_name)
+
+    if not source_list_id or not target_list_id:
+        return {"error": "Failed to resolve task lists.", "status": "error"}
+
+    try:
+        # Fetch the original task
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            r = await c.get(
+                f"{GOOGLE_TASKS_API}/lists/{source_list_id}/tasks/{task_id}",
+                headers=_get_headers(access_token),
+            )
+            if r.status_code == 401:
+                return {"error": "Token expired.", "status": "error"}
+            if r.status_code != 200:
+                return {"error": f"Task not found: HTTP {r.status_code}", "status": "error"}
+            data = r.json()
+
+        # Create a copy in the target list
+        copy_body = {
+            "title": data.get("title", ""),
+            "notes": data.get("notes", ""),
+            "due": data.get("due", ""),
+            "status": data.get("status", "needsAction"),
+        }
+
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            r2 = await c.post(
+                f"{GOOGLE_TASKS_API}/lists/{target_list_id}/tasks",
+                json=copy_body,
+                headers={**_get_headers(access_token), "Content-Type": "application/json"},
+            )
+            if r2.status_code not in (200, 201):
+                return {"error": f"Failed to copy task: HTTP {r2.status_code}", "status": "error"}
+            new_data = r2.json()
+
+        # Delete the original
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            await c.delete(
+                f"{GOOGLE_TASKS_API}/lists/{source_list_id}/tasks/{task_id}",
+                headers=_get_headers(access_token),
+            )
+
+        return {"status": "ok", "new_task_id": new_data.get("id", ""), "message": f"Task moved to '{target_list_name}'."}
+
+    except Exception as exc:
+        logger.error("Google move task failed: %s", exc)
+        return {"error": f"Failed to move task: {exc}", "status": "error"}
+
+
+async def _move_microsoft_task(access_token, task_id, target_list_name, source_list_name=None):
+    """Move a Microsoft To Do task by copying and deleting."""
+    source_list_id = await _get_microsoft_task_list_id(access_token, source_list_name)
+    target_list_id = await _get_microsoft_task_list_id(access_token, target_list_name)
+
+    if source_list_id is None or target_list_id is None:
+        return {"error": "Token expired.", "status": "error"}
+    if not source_list_id or not target_list_id:
+        return {"error": "Failed to resolve task lists.", "status": "error"}
+
+    try:
+        # Fetch the original task
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            r = await c.get(
+                f"{GRAPH_API_BASE}/todo/lists/{source_list_id}/tasks/{task_id}",
+                headers=_get_headers(access_token),
+            )
+            if r.status_code == 401:
+                return {"error": "Token expired.", "status": "error"}
+            if r.status_code != 200:
+                return {"error": f"Task not found: HTTP {r.status_code}", "status": "error"}
+            data = r.json()
+
+        # Create copy in target list
+        body = {
+            "title": data.get("title", ""),
+        }
+        due = data.get("dueDateTime")
+        if due:
+            body["dueDateTime"] = due
+        existing_body = data.get("body", {}).get("content", "")
+        if existing_body:
+            body["body"] = {"content": existing_body, "contentType": "text"}
+
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            r2 = await c.post(
+                f"{GRAPH_API_BASE}/todo/lists/{target_list_id}/tasks",
+                json=body,
+                headers={**_get_headers(access_token), "Content-Type": "application/json"},
+            )
+            if r2.status_code not in (200, 201):
+                return {"error": f"Failed to copy task: HTTP {r2.status_code}", "status": "error"}
+            new_data = r2.json()
+
+        # Delete original
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            await c.delete(
+                f"{GRAPH_API_BASE}/todo/lists/{source_list_id}/tasks/{task_id}",
+                headers=_get_headers(access_token),
+            )
+
+        return {"status": "ok", "new_task_id": new_data.get("id", ""), "message": f"Task moved to '{target_list_name}'."}
+
+    except Exception as exc:
+        logger.error("Microsoft move task failed: %s", exc)
+        return {"error": f"Failed to move task: {exc}", "status": "error"}
+
+
+# =============================================================================
+# Task search helpers
+# =============================================================================
+
+
+async def _search_google_tasks(access_token, query, list_name=None, limit=25):
+    """Search Google Tasks by keyword (client-side filtering)."""
+    result = await _list_google_tasks(access_token, list_name, include_completed=True, limit=100)
+    if result.get("error"):
+        return result
+
+    query_lower = query.lower()
+    matched = [
+        t for t in result.get("tasks", [])
+        if query_lower in t.get("title", "").lower()
+        or query_lower in t.get("notes", "").lower()
+    ][:limit]
+
+    return {"tasks": matched, "total": len(matched)}
+
+
+async def _search_microsoft_tasks(access_token, query, list_name=None, limit=25):
+    """Search Microsoft To Do tasks using Graph API $search."""
+    list_id = await _get_microsoft_task_list_id(access_token, list_name)
+    if list_id is None:
+        return {"error": "Token expired.", "tasks": [], "total": 0}
+    if not list_id:
+        # Search across all lists
+        all_results = []
+        lists_result = await _list_microsoft_task_lists(access_token)
+        for tl in lists_result.get("task_lists", []):
+            lid = tl["id"]
+            try:
+                async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+                    params = {"$top": limit, "$search": f'"{query}"'}
+                    r = await c.get(
+                        f"{GRAPH_API_BASE}/todo/lists/{lid}/tasks",
+                        params=params,
+                        headers={**_get_headers(access_token), "Content-Type": "application/json"},
+                    )
+                    if r.status_code == 200:
+                        data = r.json()
+                        for item in data.get("value", []):
+                            all_results.append({
+                                "id": item.get("id", ""),
+                                "title": item.get("title", ""),
+                                "due": item.get("dueDateTime", {}).get("dateTime", "") if item.get("dueDateTime") else "",
+                                "status": item.get("status", ""),
+                            })
+            except Exception:
+                continue
+            if len(all_results) >= limit:
+                break
+        return {"tasks": all_results[:limit], "total": len(all_results[:limit])}
+
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            params = {"$top": limit, "$search": f'"{query}"'}
+            r = await c.get(
+                f"{GRAPH_API_BASE}/todo/lists/{list_id}/tasks",
+                params=params,
+                headers={**_get_headers(access_token), "Content-Type": "application/json"},
+            )
+            if r.status_code == 401:
+                return {"error": "Token expired.", "tasks": [], "total": 0}
+            r.raise_for_status()
+            data = r.json()
+
+        tasks = [
+            {"id": t["id"], "title": t.get("title", ""), "due": t.get("dueDateTime", {}).get("dateTime", "") if t.get("dueDateTime") else "",
+             "status": t.get("status", "")}
+            for t in data.get("value", [])
+        ]
+        return {"tasks": tasks, "total": len(tasks)}
+    except Exception as exc:
+        return {"error": f"Search failed: {exc}", "tasks": [], "total": 0}
+
+
+# =============================================================================
+# Subtask helpers (Google Tasks only)
+# =============================================================================
+
+
+async def _list_google_subtasks(access_token, parent_task_id, list_name=None, include_completed=False):
+    """List subtasks of a Google task by filtering on the `parent` field."""
+    task_list_id = await _get_google_task_list_id(access_token, list_name)
+
+    params = {"maxResults": 100}
+    if not include_completed:
+        params["showCompleted"] = "false"
+        params["showHidden"] = "false"
+
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            r = await c.get(
+                f"{GOOGLE_TASKS_API}/lists/{task_list_id}/tasks",
+                params=params,
+                headers=_get_headers(access_token),
+            )
+            if r.status_code == 401:
+                return {"error": "Token expired.", "subtasks": [], "total": 0}
+            r.raise_for_status()
+            data = r.json()
+
+        subtasks = [
+            {"id": t["id"], "title": t.get("title", ""), "due": t.get("due", ""),
+             "notes": t.get("notes", ""), "status": t.get("status", "")}
+            for t in data.get("items", [])
+            if t.get("parent") == parent_task_id
+        ]
+        return {"subtasks": subtasks, "total": len(subtasks)}
+    except Exception as exc:
+        return {"error": f"Failed to list subtasks: {exc}", "subtasks": [], "total": 0}
+
+
+async def _create_google_subtask(access_token, parent_task_id, title, list_name=None, due_date=None, notes=None):
+    """Create a subtask under a parent Google task."""
+    task_list_id = await _get_google_task_list_id(access_token, list_name)
+
+    body = {"title": title, "parent": parent_task_id}
+    if due_date:
+        body["due"] = due_date
+    if notes:
+        body["notes"] = notes
+
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
+            r = await c.post(
+                f"{GOOGLE_TASKS_API}/lists/{task_list_id}/tasks",
+                json=body,
+                headers={**_get_headers(access_token), "Content-Type": "application/json"},
+            )
+            if r.status_code in (200, 201):
+                data = r.json()
+                return {"id": data.get("id", ""), "title": title, "status": "created"}
+            if r.status_code == 401:
+                return {"error": "Token expired.", "status": "error"}
+            return {"error": f"Google Tasks error: HTTP {r.status_code}", "status": "error"}
+    except Exception as exc:
+        return {"error": f"Failed to create subtask: {exc}", "status": "error"}

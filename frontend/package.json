@@ -1,7 +1,7 @@
 {
   "name": "ph-agent-hub-frontend",
   "private": true,
-  "version": "1.19.2",
+  "version": "1.20.0",
   "type": "module",
   "scripts": {
     "dev": "vite --port 3000 --host",

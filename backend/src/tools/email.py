@@ -133,8 +133,9 @@ def _build_mime_with_attachments(
         body_alt.attach(MT(body, "html", "utf-8"))
     else:
         body_alt.attach(MT(body, "plain", "utf-8"))
+        br_newline = "<br>\n"
         body_alt.attach(MT(
-            f"<html><body><p>{body.replace(chr(10), '<br>\n')}</p></body></html>",
+            f"<html><body><p>{body.replace(chr(10), br_newline)}</p></body></html>",
             "html", "utf-8",
         ))
     msg.attach(body_alt)

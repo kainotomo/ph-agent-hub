@@ -13,6 +13,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from agent_framework import tool
 
+from ..storage.s3 import download_object
+
 logger = logging.getLogger(__name__)
 
 MAX_FILE_CONTENT_CHARS = 50_000
@@ -92,18 +94,23 @@ def build_file_list_tool(
 
     @tool
     async def read_file_content(file_id: str) -> dict[str, Any]:
-        """Return the full extracted text content of a previously uploaded file.
+        """Return the full extracted text content and raw file bytes (base64)
+        of a previously uploaded file.
+
+        The ``content_base64`` field can be passed directly to the
+        ``send_email`` / ``reply_email`` / ``save_draft`` tools'
+        ``attachments`` parameter (as the ``content`` of each attachment
+        dict).
 
         Args:
             file_id: The file ID returned by ``list_uploaded_files()``.
 
         Returns a dict with ``filename``, ``content_type``, ``text`` (the full
-        extracted content), and ``truncated`` (bool, True if the text was
-        truncated to {max_chars} characters).
-
-        If the file is not found or has no extracted text, an error message
-        is returned in the ``error`` field.
+        extracted text), ``content_base64`` (base64-encoded raw file bytes),
+        ``truncated`` (bool), and optionally ``error``.
         """.format(max_chars=MAX_FILE_CONTENT_CHARS)
+        import base64
+
         try:
             UUID(file_id)  # validate format only
         except ValueError:
@@ -120,11 +127,24 @@ def build_file_list_tool(
         if upload is None:
             return {"error": f"File not found: {file_id}"}
 
+        # Try to download raw bytes from storage
+        content_base64 = ""
+        try:
+            raw_bytes = await download_object(upload.bucket, upload.storage_key)
+            content_base64 = base64.b64encode(raw_bytes).decode("ascii")
+        except Exception:
+            logger.warning(
+                "Could not download file %s from storage (bucket=%s, key=%s)",
+                file_id, upload.bucket, upload.storage_key,
+            )
+
         if not upload.extracted_text:
             return {
+                "file_id": upload.id,
                 "filename": upload.original_filename,
                 "content_type": upload.content_type,
                 "text": "",
+                "content_base64": content_base64,
                 "truncated": False,
                 "note": "No text could be extracted from this file.",
             }
@@ -135,14 +155,15 @@ def build_file_list_tool(
             text = text[:MAX_FILE_CONTENT_CHARS]
 
         logger.debug(
-            "read_file_content file_id=%s → %d chars (truncated=%s)",
-            file_id, len(text), truncated,
+            "read_file_content file_id=%s → %d chars (truncated=%s), base64=%d bytes",
+            file_id, len(text), truncated, len(content_base64),
         )
         return {
             "file_id": upload.id,
             "filename": upload.original_filename,
             "content_type": upload.content_type,
             "text": text,
+            "content_base64": content_base64,
             "truncated": truncated,
         }
 

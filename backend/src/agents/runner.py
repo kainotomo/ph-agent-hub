@@ -2814,6 +2814,8 @@ async def run_agent_stream(
                         )
                     except Exception:
                         logger.exception("Failed to write usage log (streaming)")
+                else:
+                    usage_log = None
 
                 # ---- Warn about missing pricing ----------------------------------
                 if usage_log is not None and usage_log.cost is None:

@@ -103,6 +103,71 @@ def _build_email_message(
     return msg
 
 
+def _build_mime_with_attachments(
+    to: str, subject: str, body: str, from_email: str,
+    from_name: str = "", cc: str | None = None, is_html: bool = False,
+    attachments: list[dict] | None = None,
+) -> MIMEMultipart:
+    """Build a multipart/mixed MIME message with body text and optional file attachments.
+
+    ``attachments`` is a list of dicts with keys:
+        - ``filename`` (str): attachment file name
+        - ``content`` (str): base64-encoded file content
+        - ``mime_type`` (str): MIME type of the file
+    """
+    import base64
+    from email.mime.base import MIMEBase
+    from email.mime.multipart import MIMEMultipart as MMM
+    from email.mime.text import MIMEText as MT
+
+    msg = MMM("mixed")
+    msg["Subject"] = subject
+    msg["From"] = f"{from_name} <{from_email}>" if from_name else from_email
+    msg["To"] = to
+    if cc:
+        msg["Cc"] = cc
+
+    # Body part
+    body_alt = MMM("alternative")
+    if is_html:
+        body_alt.attach(MT(body, "html", "utf-8"))
+    else:
+        body_alt.attach(MT(body, "plain", "utf-8"))
+        body_alt.attach(MT(
+            f"<html><body><p>{body.replace(chr(10), '<br>\n')}</p></body></html>",
+            "html", "utf-8",
+        ))
+    msg.attach(body_alt)
+
+    # Attachment parts
+    for att in (attachments or []):
+        part = MIMEBase(*att.get("mime_type", "application/octet-stream").split("/", 1))
+        raw_bytes = base64.b64decode(att.get("content", ""))
+        part.set_payload(raw_bytes)
+        from email import encoders
+        encoders.encode_base64(part)
+        part.add_header("Content-Disposition", "attachment", filename=att.get("filename", "attachment"))
+        msg.attach(part)
+
+    return msg
+
+
+def _build_graph_attachments(attachments: list[dict] | None) -> list[dict]:
+    """Build Graph API ``fileAttachment`` entries from an attachment list."""
+    if not attachments:
+        return []
+
+    result = []
+    for att in attachments:
+        result.append({
+            "@odata.type": "#microsoft.graph.fileAttachment",
+            "name": att.get("filename", "attachment"),
+            "contentType": att.get("mime_type", "application/octet-stream"),
+            "contentBytes": att.get("content", ""),
+        })
+    return result
+
+
 def _find_credential(
     user_credentials: list | None, account_label: str | None = None,
 ) -> Any | None:
@@ -182,6 +247,7 @@ def build_email_tools(
     async def send_email(
         to: str, subject: str, body: str,
         cc: str | None = None, is_html: bool = False,
+        attachments: list[dict] | None = None,
         account_label: str | None = None,
     ) -> dict:
         """Send an email via SMTP, SendGrid, Gmail API, or Outlook API.
@@ -196,6 +262,9 @@ def build_email_tools(
             body: Email body content.
             cc: Optional CC recipient.
             is_html: Set to True if body contains HTML.
+            attachments: Optional list of file attachments. Each entry is
+                        a dict with ``filename``, ``content`` (base64),
+                        and ``mime_type``.
             account_label: Connected account label (required when
                           multiple accounts are configured).
 
@@ -207,19 +276,19 @@ def build_email_tools(
             cp, cd, tk, ce = _parse_credential(active_cred)
             if cp in ("gmail", "google") and tk.get("access_token"):
                 await _ensure_fresh_token(tk, cp, "Email", credential_orm=active_cred, tokens_dict=tk, db=db)
-                result = await _send_via_gmail_api(to, subject, body, cc, is_html, tk.get("access_token", ""))
+                result = await _send_via_gmail_api(to, subject, body, cc, is_html, tk.get("access_token", ""), attachments)
                 if "expired" in result.get("error", "").lower():
                     refreshed = await _maybe_refresh(tk, cp, active_cred)
                     if refreshed:
-                        result = await _send_via_gmail_api(to, subject, body, cc, is_html, tk["access_token"])
+                        result = await _send_via_gmail_api(to, subject, body, cc, is_html, tk["access_token"], attachments)
                 return result
             elif cp in ("outlook", "microsoft") and tk.get("access_token"):
                 await _ensure_fresh_token(tk, cp, "Email", credential_orm=active_cred, tokens_dict=tk, db=db)
-                result = await _send_via_graph_api(to, subject, body, cc, is_html, tk.get("access_token", ""))
+                result = await _send_via_graph_api(to, subject, body, cc, is_html, tk.get("access_token", ""), attachments)
                 if "expired" in result.get("error", "").lower():
                     refreshed = await _maybe_refresh(tk, cp, active_cred)
                     if refreshed:
-                        result = await _send_via_graph_api(to, subject, body, cc, is_html, tk["access_token"])
+                        result = await _send_via_graph_api(to, subject, body, cc, is_html, tk["access_token"], attachments)
                 return result
             elif cd.get("smtp_host"):
                 sender = ce or cd.get("from_email", from_email)
@@ -229,7 +298,7 @@ def build_email_tools(
                     smtp_port=int(cd.get("smtp_port", 587)),
                     smtp_username=cd.get("username", ""),
                     smtp_password=cd.get("password", ""),
-                    cc=cc, is_html=is_html,
+                    cc=cc, is_html=is_html, attachments=attachments,
                 )
 
         # Fallback to tenant config
@@ -254,7 +323,7 @@ def build_email_tools(
                 smtp_port=int(creds.get("smtp_port", 587)),
                 smtp_username=creds.get("smtp_username", ""),
                 smtp_password=creds.get("smtp_password", ""),
-                cc=cc, is_html=is_html,
+                cc=cc, is_html=is_html, attachments=attachments,
             )
         elif provider == "sendgrid":
             return await _send_via_sendgrid(
@@ -623,6 +692,7 @@ def build_email_tools(
     async def reply_email(
         email_id: str, body: str,
         reply_all: bool = False,
+        attachments: list[dict] | None = None,
         account_label: str | None = None,
     ) -> dict:
         """Reply to an existing email.
@@ -635,6 +705,9 @@ def build_email_tools(
             email_id: The email's unique ID (from read_emails/search_emails).
             body: Reply body content (plain text).
             reply_all: If True, reply to all recipients instead of just sender.
+            attachments: Optional list of file attachments. Each entry is
+                        a dict with ``filename``, ``content`` (base64),
+                        and ``mime_type``.
             account_label: Which account the email is in.
 
         Returns:
@@ -653,25 +726,25 @@ def build_email_tools(
 
         if cp in ("gmail", "google") and tk.get("access_token"):
             await _ensure_fresh_token(tk, cp, "Email", credential_orm=active_cred, tokens_dict=tk, db=db)
-            result = await _reply_via_gmail_api(tk["access_token"], email_id, body.strip(), reply_all)
+            result = await _reply_via_gmail_api(tk["access_token"], email_id, body.strip(), reply_all, attachments)
             if "expired" in result.get("error", "").lower():
                 refreshed = await _maybe_refresh(tk, cp, active_cred)
                 if refreshed:
-                    result = await _reply_via_gmail_api(tk["access_token"], email_id, body.strip(), reply_all)
+                    result = await _reply_via_gmail_api(tk["access_token"], email_id, body.strip(), reply_all, attachments)
             return result
         elif cp in ("outlook", "microsoft") and tk.get("access_token"):
             await _ensure_fresh_token(tk, cp, "Email", credential_orm=active_cred, tokens_dict=tk, db=db)
-            result = await _reply_via_graph_api(tk["access_token"], email_id, body.strip(), reply_all)
+            result = await _reply_via_graph_api(tk["access_token"], email_id, body.strip(), reply_all, attachments)
             if "expired" in result.get("error", "").lower():
                 refreshed = await _maybe_refresh(tk, cp, active_cred)
                 if refreshed:
-                    result = await _reply_via_graph_api(tk["access_token"], email_id, body.strip(), reply_all)
+                    result = await _reply_via_graph_api(tk["access_token"], email_id, body.strip(), reply_all, attachments)
             return result
         elif cd.get("imap_host"):
             return await _reply_via_imap(
                 cd["imap_host"], int(cd.get("imap_port", 993)),
                 cd.get("username", ""), cd.get("password", ""),
-                email_id, body.strip(), reply_all,
+                email_id, body.strip(), reply_all, attachments,
             )
         return {"error": "This account does not support replying.", "status": "error"}
 
@@ -771,6 +844,7 @@ def build_email_tools(
         to: str, subject: str, body: str,
         cc: str | None = None,
         is_html: bool = False,
+        attachments: list[dict] | None = None,
         account_label: str | None = None,
     ) -> dict:
         """Save an email as a draft without sending.
@@ -783,6 +857,9 @@ def build_email_tools(
             body: Email body content.
             cc: Optional CC recipient.
             is_html: Set to True if body contains HTML.
+            attachments: Optional list of file attachments. Each entry is
+                        a dict with ``filename``, ``content`` (base64),
+                        and ``mime_type``.
             account_label: Which account to save the draft with.
 
         Returns:
@@ -803,26 +880,26 @@ def build_email_tools(
 
         if cp in ("gmail", "google") and tk.get("access_token"):
             await _ensure_fresh_token(tk, cp, "Email", credential_orm=active_cred, tokens_dict=tk, db=db)
-            result = await _save_gmail_draft(tk["access_token"], to.strip(), subject.strip(), body, cc, is_html)
+            result = await _save_gmail_draft(tk["access_token"], to.strip(), subject.strip(), body, cc, is_html, attachments)
             if "expired" in result.get("error", "").lower():
                 refreshed = await _maybe_refresh(tk, cp, active_cred)
                 if refreshed:
-                    result = await _save_gmail_draft(tk["access_token"], to.strip(), subject.strip(), body, cc, is_html)
+                    result = await _save_gmail_draft(tk["access_token"], to.strip(), subject.strip(), body, cc, is_html, attachments)
             return result
         elif cp in ("outlook", "microsoft") and tk.get("access_token"):
             await _ensure_fresh_token(tk, cp, "Email", credential_orm=active_cred, tokens_dict=tk, db=db)
-            result = await _save_outlook_draft(tk["access_token"], to.strip(), subject.strip(), body, cc, is_html)
+            result = await _save_outlook_draft(tk["access_token"], to.strip(), subject.strip(), body, cc, is_html, attachments)
             if "expired" in result.get("error", "").lower():
                 refreshed = await _maybe_refresh(tk, cp, active_cred)
                 if refreshed:
-                    result = await _save_outlook_draft(tk["access_token"], to.strip(), subject.strip(), body, cc, is_html)
+                    result = await _save_outlook_draft(tk["access_token"], to.strip(), subject.strip(), body, cc, is_html, attachments)
             return result
         elif cd.get("smtp_host") or cd.get("imap_host"):
             sender = ce or cd.get("from_email", from_email)
             return await _save_imap_draft(
                 cd.get("imap_host", ""), int(cd.get("imap_port", 993)),
                 cd.get("username", ""), cd.get("password", ""),
-                to.strip(), subject.strip(), body, sender, cc, is_html,
+                to.strip(), subject.strip(), body, sender, cc, is_html, attachments,
             )
         return {"error": "This account does not support saving drafts.", "status": "error"}
 
@@ -844,7 +921,7 @@ def build_email_tools(
 async def _send_via_smtp(
     to, subject, body, from_email, from_name="",
     smtp_host="", smtp_port=587, smtp_username="", smtp_password="",
-    cc=None, is_html=False,
+    cc=None, is_html=False, attachments=None,
 ):
     import asyncio
     if not smtp_host:
@@ -853,10 +930,17 @@ async def _send_via_smtp(
         return {"error": "Sender email not configured.", "status": "error"}
 
     try:
-        msg = _build_email_message(
-            to, subject, body, from_email, from_name,
-            cc.strip() if cc else None, is_html,
-        )
+        if attachments:
+            msg = _build_mime_with_attachments(
+                to, subject, body, from_email, from_name=from_name,
+                cc=cc.strip() if cc else None, is_html=is_html,
+                attachments=attachments,
+            )
+        else:
+            msg = _build_email_message(
+                to, subject, body, from_email, from_name,
+                cc.strip() if cc else None, is_html,
+            )
 
         def _send():
             if smtp_port == 465:
@@ -918,18 +1002,25 @@ async def _send_via_sendgrid(
 # Gmail API
 # =============================================================================
 
-async def _send_via_gmail_api(to, subject, body, cc=None, is_html=False, access_token=""):
+async def _send_via_gmail_api(to, subject, body, cc=None, is_html=False, access_token="", attachments=None):
     import base64
     from email.mime.text import MIMEText as MimeText
 
     if not access_token:
         return {"error": "Gmail token expired. Reconnect.", "status": "error"}
 
-    msg = MimeText(body, "html" if is_html else "plain", "utf-8")
-    msg["To"] = to
-    msg["Subject"] = subject
-    if cc:
-        msg["Cc"] = cc
+    if attachments:
+        msg = _build_mime_with_attachments(
+            to, subject, body, "", from_name="",
+            cc=cc, is_html=is_html, attachments=attachments,
+        )
+        msg.replace_header("From", "me")
+    else:
+        msg = MimeText(body, "html" if is_html else "plain", "utf-8")
+        msg["To"] = to
+        msg["Subject"] = subject
+        if cc:
+            msg["Cc"] = cc
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
 
     try:
@@ -987,7 +1078,7 @@ async def _read_gmail_api(access_token, max_results=10, query=""):
 # Microsoft Graph API
 # =============================================================================
 
-async def _send_via_graph_api(to, subject, body, cc=None, is_html=False, access_token=""):
+async def _send_via_graph_api(to, subject, body, cc=None, is_html=False, access_token="", attachments=None):
     if not access_token:
         return {"error": "Microsoft token expired.", "status": "error"}
 
@@ -1000,6 +1091,9 @@ async def _send_via_graph_api(to, subject, body, cc=None, is_html=False, access_
     }
     if cc:
         message["message"]["ccRecipients"] = [{"emailAddress": {"address": cc.strip()}}]
+    graph_attachments = _build_graph_attachments(attachments)
+    if graph_attachments:
+        message["message"]["attachments"] = graph_attachments
 
     try:
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
@@ -1716,6 +1810,7 @@ async def _forward_via_imap(host, port, username, password, email_id, to, body=N
         # Build forward MIME
         msg = MIMEMultipart("mixed")
         msg["To"] = to
+        msg["From"] = username
         msg["Subject"] = fwd_subject
         if cc:
             msg["Cc"] = cc
@@ -1751,7 +1846,7 @@ async def _forward_via_imap(host, port, username, password, email_id, to, body=N
 # =============================================================================
 
 
-async def _reply_via_gmail_api(access_token, email_id, body, reply_all=False):
+async def _reply_via_gmail_api(access_token, email_id, body, reply_all=False, attachments=None):
     """Reply to an email via Gmail API, preserving thread context."""
     import base64
     from email.mime.text import MIMEText as MimeText
@@ -1778,19 +1873,27 @@ async def _reply_via_gmail_api(access_token, email_id, body, reply_all=False):
         original_msg_id = headers.get("Message-ID", "")
         original_references = headers.get("References", "")
 
-        # Extract original sender email for To field
         import email.utils
         original_sender = email.utils.parseaddr(original_from)[1]
 
         reply_subject = f"Re: {original_subject}" if original_subject and not original_subject.startswith("Re:") else original_subject
 
-        # Build reply MIME
-        msg = MimeText(body, "plain", "utf-8")
-        msg["To"] = original_sender
-        msg["Subject"] = reply_subject
-        if original_msg_id:
-            msg["In-Reply-To"] = original_msg_id
-            msg["References"] = f"{original_references} {original_msg_id}".strip() if original_references else original_msg_id
+        if attachments:
+            msg = _build_mime_with_attachments(
+                original_sender, reply_subject, body, "",
+                cc=None, is_html=False, attachments=attachments,
+            )
+            msg.replace_header("From", "me")
+            if original_msg_id:
+                msg["In-Reply-To"] = original_msg_id
+                msg["References"] = f"{original_references} {original_msg_id}".strip() if original_references else original_msg_id
+        else:
+            msg = MimeText(body, "plain", "utf-8")
+            msg["To"] = original_sender
+            msg["Subject"] = reply_subject
+            if original_msg_id:
+                msg["In-Reply-To"] = original_msg_id
+                msg["References"] = f"{original_references} {original_msg_id}".strip() if original_references else original_msg_id
 
         raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
 
@@ -1809,7 +1912,7 @@ async def _reply_via_gmail_api(access_token, email_id, body, reply_all=False):
         return {"error": f"Gmail reply failed: {exc}", "status": "error"}
 
 
-async def _reply_via_graph_api(access_token, email_id, body, reply_all=False):
+async def _reply_via_graph_api(access_token, email_id, body, reply_all=False, attachments=None):
     """Reply to an email via Microsoft Graph API."""
     if not access_token:
         return {"error": "Microsoft token expired.", "status": "error"}
@@ -1821,6 +1924,9 @@ async def _reply_via_graph_api(access_token, email_id, body, reply_all=False):
             "message": {},
             "comment": body,
         }
+        graph_attachments = _build_graph_attachments(attachments)
+        if graph_attachments:
+            message["message"]["attachments"] = graph_attachments
 
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
             r = await c.post(
@@ -1839,7 +1945,7 @@ async def _reply_via_graph_api(access_token, email_id, body, reply_all=False):
         return {"error": f"Graph reply failed: {exc}", "status": "error"}
 
 
-async def _reply_via_imap(host, port, username, password, email_id, body, reply_all=False):
+async def _reply_via_imap(host, port, username, password, email_id, body, reply_all=False, attachments=None):
     """Reply to an email via IMAP fetch + SMTP send with threading headers."""
     import asyncio, imaplib, ssl
     import email as em
@@ -1855,7 +1961,6 @@ async def _reply_via_imap(host, port, username, password, email_id, body, reply_
         conn.login(username, password)
         conn.select("INBOX")
 
-        # Fetch headers of original
         typ, md = conn.fetch(email_id.encode(), "(BODY.PEEK[HEADER])")
         if typ != "OK" or not isinstance(md[0], tuple):
             conn.logout()
@@ -1874,20 +1979,37 @@ async def _reply_via_imap(host, port, username, password, email_id, body, reply_
 
         reply_subject = f"Re: {original_subject}" if original_subject and not original_subject.startswith("Re:") else original_subject
 
-        # Build reply
-        msg = MimeText(body, "plain", "utf-8")
-        if reply_all:
-            # Include all recipients
-            all_to = original_from
-            if original_to:
-                all_to = f"{all_to}, {original_to}"
-            msg["To"] = all_to
+        if attachments:
+            if reply_all:
+                all_to = original_from
+                if original_to:
+                    all_to = f"{all_to}, {original_to}"
+                msg = _build_mime_with_attachments(
+                    all_to, reply_subject, body, username,
+                    cc=None, is_html=False, attachments=attachments,
+                )
+            else:
+                msg = _build_mime_with_attachments(
+                    original_sender, reply_subject, body, username,
+                    cc=None, is_html=False, attachments=attachments,
+                )
+            if original_msg_id:
+                msg["In-Reply-To"] = original_msg_id
+                msg["References"] = f"{original_references} {original_msg_id}".strip() if original_references else original_msg_id
         else:
-            msg["To"] = original_sender
-        msg["Subject"] = reply_subject
-        if original_msg_id:
-            msg["In-Reply-To"] = original_msg_id
-            msg["References"] = f"{original_references} {original_msg_id}".strip() if original_references else original_msg_id
+            if reply_all:
+                all_to = original_from
+                if original_to:
+                    all_to = f"{all_to}, {original_to}"
+                msg = MimeText(body, "plain", "utf-8")
+                msg["To"] = all_to
+            else:
+                msg = MimeText(body, "plain", "utf-8")
+                msg["To"] = original_sender
+            msg["Subject"] = reply_subject
+            if original_msg_id:
+                msg["In-Reply-To"] = original_msg_id
+                msg["References"] = f"{original_references} {original_msg_id}".strip() if original_references else original_msg_id
 
         import smtplib
         try:
@@ -2114,7 +2236,7 @@ async def _get_imap_attachments(host, port, username, password, email_id):
 # =============================================================================
 
 
-async def _save_gmail_draft(access_token, to, subject, body, cc=None, is_html=False):
+async def _save_gmail_draft(access_token, to, subject, body, cc=None, is_html=False, attachments=None):
     """Save a draft via Gmail API."""
     import base64
     from email.mime.text import MIMEText as MimeText
@@ -2123,11 +2245,18 @@ async def _save_gmail_draft(access_token, to, subject, body, cc=None, is_html=Fa
         return {"error": "Gmail token expired.", "status": "error"}
 
     try:
-        msg = MimeText(body, "html" if is_html else "plain", "utf-8")
-        msg["To"] = to
-        msg["Subject"] = subject
-        if cc:
-            msg["Cc"] = cc
+        if attachments:
+            msg = _build_mime_with_attachments(
+                to, subject, body, "", from_name="",
+                cc=cc, is_html=is_html, attachments=attachments,
+            )
+            msg.replace_header("From", "me")
+        else:
+            msg = MimeText(body, "html" if is_html else "plain", "utf-8")
+            msg["To"] = to
+            msg["Subject"] = subject
+            if cc:
+                msg["Cc"] = cc
 
         raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
 
@@ -2149,7 +2278,7 @@ async def _save_gmail_draft(access_token, to, subject, body, cc=None, is_html=Fa
         return {"error": f"Gmail draft save failed: {exc}", "status": "error"}
 
 
-async def _save_outlook_draft(access_token, to, subject, body, cc=None, is_html=False):
+async def _save_outlook_draft(access_token, to, subject, body, cc=None, is_html=False, attachments=None):
     """Save a draft via Microsoft Graph API."""
     if not access_token:
         return {"error": "Microsoft token expired.", "status": "error"}
@@ -2163,6 +2292,9 @@ async def _save_outlook_draft(access_token, to, subject, body, cc=None, is_html=
         }
         if cc:
             message["ccRecipients"] = [{"emailAddress": {"address": cc.strip()}}]
+        graph_attachments = _build_graph_attachments(attachments)
+        if graph_attachments:
+            message["attachments"] = graph_attachments
 
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
             r = await c.post(
@@ -2182,7 +2314,7 @@ async def _save_outlook_draft(access_token, to, subject, body, cc=None, is_html=
         return {"error": f"Graph draft save failed: {exc}", "status": "error"}
 
 
-async def _save_imap_draft(imap_host, imap_port, username, password, to, subject, body, sender, cc=None, is_html=False):
+async def _save_imap_draft(imap_host, imap_port, username, password, to, subject, body, sender, cc=None, is_html=False, attachments=None):
     """Save a draft by appending to the IMAP Drafts folder."""
     import asyncio, imaplib, ssl
     from email.mime.text import MIMEText as MimeText
@@ -2192,12 +2324,18 @@ async def _save_imap_draft(imap_host, imap_port, username, password, to, subject
         conn = imaplib.IMAP4_SSL(imap_host, imap_port, ssl_context=ctx)
         conn.login(username, password)
 
-        msg = MimeText(body, "html" if is_html else "plain", "utf-8")
-        msg["To"] = to
-        msg["From"] = sender
-        msg["Subject"] = subject
-        if cc:
-            msg["Cc"] = cc
+        if attachments:
+            msg = _build_mime_with_attachments(
+                to, subject, body, sender,
+                from_name="", cc=cc, is_html=is_html, attachments=attachments,
+            )
+        else:
+            msg = MimeText(body, "html" if is_html else "plain", "utf-8")
+            msg["To"] = to
+            msg["From"] = sender
+            msg["Subject"] = subject
+            if cc:
+                msg["Cc"] = cc
 
         # Try to append to Drafts folder
         drafts_folders = ["Drafts", "Draft", "[Gmail]/Drafts"]

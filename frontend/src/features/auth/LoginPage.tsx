@@ -115,6 +115,7 @@ export function LoginPage() {
                 prefix={<UserOutlined />}
                 placeholder="Email"
                 autoFocus
+                autoComplete="username"
               />
             </Form.Item>
 
@@ -122,7 +123,7 @@ export function LoginPage() {
               name="password"
               rules={[{ required: true, message: "Please enter your password" }]}
             >
-              <Input.Password prefix={<LockOutlined />} placeholder="Password" />
+              <Input.Password prefix={<LockOutlined />} placeholder="Password" autoComplete="current-password" />
             </Form.Item>
 
             <Form.Item style={{ marginBottom: 0 }}>

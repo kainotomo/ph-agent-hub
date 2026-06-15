@@ -112,6 +112,10 @@ export function SessionSidebar() {
     queryFn: listSessions,
   });
 
+  // Only show context indicator when the session actually exists (avoids 404
+  // for lazy-created sessions that haven't been persisted yet).
+  const sessionExists = sessions?.some(s => s.id === sessionId) ?? false;
+
   const createMutation = useMutation({
     mutationFn: () =>
       createSession({
@@ -236,7 +240,7 @@ export function SessionSidebar() {
           <Logo size={28} showText={!collapsed} textColor="#141414" />
           {!collapsed && (
             <Space size={4}>
-              <ContextIndicator sessionId={sessionId} />
+              {sessionExists && <ContextIndicator sessionId={sessionId} />}
               <Tooltip title="Search">
                 <Button
                   type="text"

@@ -369,8 +369,7 @@ def build_tasks_tools(
     tools = []
     if user_credentials:
         tools = [list_task_lists, list_tasks, create_task, update_task, delete_task,
-                 list_task_accounts, move_task, search_tasks,
-                 list_subtasks, create_subtask]
+                 list_task_accounts]
     return tools
 
 

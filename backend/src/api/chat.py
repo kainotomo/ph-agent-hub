@@ -2376,7 +2376,9 @@ async def download_upload(
         media_type=upload.content_type,
         headers={
             "Content-Disposition": (
-                f'attachment; filename="{upload.original_filename}"'
+                upload_service._encode_content_disposition_filename(
+                    upload.original_filename
+                )
             ),
             "Content-Length": str(upload.size_bytes),
         },

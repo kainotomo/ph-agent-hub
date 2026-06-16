@@ -89,6 +89,7 @@ Security tests automatically run on every pull request via GitHub Actions. See `
 | Gap | Fix | Validated By |
 |-----|-----|-------------|
 | OAuth state integrity: state was plaintext, unsigned, non-expiring, replayable | Replaced with Redis-backed nonce store — tamper-evident, 10-min TTL, single-use (Issue #345) | `test_oauth_state.py`, `test_credentials_api.py::TestOAuthStateIntegrity`, `test_abuse_scenarios.py::TestOAuthStateAbuse` |
+| Upload filename sanitization: original filenames used directly in S3 keys and Content-Disposition headers | Added `_sanitize_storage_filename()` for NFKD→ASCII normalization, path traversal prevention, and unsafe-char removal; added `_encode_content_disposition_filename()` for RFC 5987 header encoding (Issue #352) | `test_filename_sanitization.py` (19 unit tests), `test_upload_flow.py` (regression — 11 existing tests pass) |
 
 ### Previously Identified Gaps — Now Fixed
 

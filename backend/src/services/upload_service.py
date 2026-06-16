@@ -8,9 +8,12 @@
 import asyncio
 import logging
 import mimetypes
-import tempfile
 import os
+import re
+import tempfile
+import unicodedata
 import uuid
+from urllib.parse import quote
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -115,6 +118,96 @@ def _resolve_content_type(content_type: str, filename: str) -> str:
     return content_type
 
 
+# ---------------------------------------------------------------------------
+# Filename sanitization utilities
+# ---------------------------------------------------------------------------
+
+
+def _sanitize_storage_filename(original_filename: str) -> str:
+    """Normalize a filename for safe use in S3 storage keys.
+
+    * Normalizes Unicode (NFKD) and encodes to ASCII, replacing non-ASCII
+      characters with underscores.
+    * Removes path separators (``/``, ``\\``), null bytes, and characters
+      unsafe for HTTP headers (``"'\;:*?<>|``).
+    * Collapses consecutive underscores and strips leading/trailing dots,
+      spaces, and underscores.
+    * Truncates to 200 characters, preserving the file extension.
+    * Falls back to ``"file"`` if the result is empty.
+
+    This function is *deterministic* \u2014 the same input always produces
+    the same output.
+    """
+    # 1. Normalize Unicode (NFKD) and encode to ASCII, replacing non-ASCII
+    name = unicodedata.normalize("NFKD", original_filename)
+    name = name.encode("ascii", "replace").decode("ascii")
+
+    # 2. Replace path separators and null bytes
+    name = name.replace("/", "_").replace("\\", "_").replace("\x00", "_")
+
+    # 2a. Collapse consecutive dots (``..`` / ``...`` directory traversal)
+    name = re.sub(r"\.{2,}", "_", name)
+
+    # 3. Remove characters unsafe for S3 keys and HTTP headers
+    name = re.sub(r"[\"\';:*?<>|]", "_", name)
+
+    # 3a. Replace spaces with underscores (safe for S3 keys and URLs)
+    name = name.replace(" ", "_")
+
+    # 4. Collapse consecutive underscores
+    name = re.sub(r"_+", "_", name)
+
+    # 5. Strip leading/trailing underscores and spaces (keep dots — they
+    #    may be part of the file extension like ``.docx``)
+    name = name.strip(" _")
+
+    # 5a. Strip trailing dots only (e.g. ``"file."`` → ``"file"``)
+    name = name.rstrip(".")
+
+    # 6. Fallback
+    if not name:
+        return "file"
+
+    # 7. Truncate to 200 chars, preserving extension when possible
+    if len(name) > 200:
+        base, dot, ext = name.rpartition(".")
+        if dot and len(ext) <= 20:
+            name = base[: 200 - len(ext) - 1] + dot + ext
+        else:
+            name = name[:200]
+
+    return name
+
+
+def _encode_content_disposition_filename(original_filename: str) -> str:
+    """Build a ``Content-Disposition`` header with RFC\u00a05987 encoding.
+
+    For ASCII-only filenames, uses the simple ``filename="..."`` form.
+    For filenames with non-ASCII characters, emits **both**:
+
+    * ``filename`` \u2014 ASCII-sanitized fallback
+    * ``filename*`` \u2014 RFC\u00a05987 ``UTF-8''percent-encoded`` value
+
+    Examples:
+        ``"simple.pdf"``
+        \u2192 ``attachment; filename="simple.pdf"``
+
+        ``"r\u00e9sum\u00e9.pdf"``
+        \u2192 ``attachment; filename="resume.pdf"; filename*=UTF-8''r%C3%A9sum%C3%A9.pdf``
+    """
+    safe_ascii = _sanitize_storage_filename(original_filename)
+
+    # Check if non-ASCII chars exist in original
+    has_non_ascii = any(ord(c) > 127 for c in original_filename)
+
+    if not has_non_ascii:
+        return f'attachment; filename="{safe_ascii}"'
+
+    # RFC 5987: filename*=UTF-8''url-encoded-value
+    encoded = quote(original_filename, safe="")
+    return f'attachment; filename="{safe_ascii}"; filename*=UTF-8\'\'{encoded}'
+
+
 async def create_upload(
     db: AsyncSession,
     session_data: dict,
@@ -190,9 +283,10 @@ async def create_upload(
             uploader_id = admin_user.id
             uploader_tenant_id = session_data.get("tenant_id", "unknown")
     bucket = f"{settings.MINIO_BUCKET_PREFIX}-{uploader_tenant_id}"
+    safe_name = _sanitize_storage_filename(original_filename)
     key = (
         f"uploads/{uploader_id}/{session_data['id']}/"
-        f"{file_id}-{original_filename}"
+        f"{file_id}-{safe_name}"
     )
 
     # 5. Upload to MinIO (use resolved_type for storage accuracy)

@@ -48,7 +48,8 @@ The project uses **pytest** for backend testing. Tests are organized by marker a
 | `test_chat_api.py` | 27 | Session CRUD, message send, file upload, feedback, ownership, tenant isolation |
 | `test_memory_api.py` | 15 | Memory CRUD, pagination, cross-user/tenant isolation |
 | `test_credentials_api.py` | 15 | Credential CRUD, OAuth URLs, ownership, tenant isolation with tenant_id column |
-| `test_upload_flow.py` | 4 | File type/size validation, temp session guard, DeepSeek+image rejection |
+| `test_upload_flow.py` | 11 | File type/size validation, temp session guard, ownership, DeepSeek+image rejection |
+| `test_filename_sanitization.py` | 19 | Filename sanitization utilities — path traversal, special chars, Unicode, RFC 5987 encoding (unit) |
 | `test_concurrency.py` | 8 | Stream cancellation, temp session TTL/races, rate limiter concurrency |
 | `test_regression.py` | 10 | Prompt/credential/chat/memory tenant isolation, temp upload guard |
 | `test_group_service.py` | 3 | Group CRUD idempotency (Issue #348) |

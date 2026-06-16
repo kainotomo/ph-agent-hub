@@ -24,6 +24,7 @@ pytest backend/tests/ -m "not security and not tenant_isolation"
 |--------|-------------|
 | `@pytest.mark.security` | Authentication, authorization, and security boundary tests |
 | `@pytest.mark.tenant_isolation` | Tests verifying cross-tenant data separation |
+| `@pytest.mark.regression` | Tests tied to known bug patterns and fixed issues |
 | `@pytest.mark.unit` | Fast, no external services (pure logic) |
 | `@pytest.mark.integration` | Requires DB/Redis via conftest fixtures |
 | `@pytest.mark.e2e` | Requires full Docker stack (Docker Compose up) |
@@ -42,6 +43,8 @@ pytest backend/tests/ -m "not security and not tenant_isolation"
 | `test_credential_security.py` | integration | Credential ownership enforcement and encryption-at-rest |
 | `test_rate_limiter.py` | integration | Rate limiting on login and other endpoints |
 | `test_abuse_scenarios.py` | integration | Forged tokens, SQL injection, XSS, token replay |
+| `test_regression.py` | integration | Regression tests for fixed tenant-isolation gaps and known bug patterns |
+| `test_concurrency.py` | integration | Stream cancellation, temp session races, rate limiter under concurrent load |
 
 ## Tenant Isolation Model
 
@@ -79,3 +82,21 @@ Security tests automatically run on every pull request via GitHub Actions. See `
 - PKCE support for OAuth flows (no tests yet — feature not implemented)
 - Security headers (X-Frame-Options, CSP) — no enforcement yet
 - Distributed rate limiting (currently in-memory only)
+
+### Previously Identified Gaps — Now Fixed
+
+The following tenant-isolation gaps were identified in an earlier audit and have been fixed and tested:
+
+| Gap | Fix | Validated By |
+|-----|-----|-------------|
+| Prompt `list_prompts()` tenant filter optional | Made `tenant_id` mandatory | `test_regression.py::TestPromptTenantIsolation` |
+| UserToolCredential missing `tenant_id` column | Added column + migration `e9f8d7c6b5a4` | `test_regression.py::TestCredentialTenantIsolation` |
+| Temp session upload 403 guard documented but not enforced | Added `ForbiddenError` in `create_upload()` | `test_regression.py::TestTempSessionUploadGuard` |
+
+Additional gaps that were already fixed before this audit:
+- Prompt API update/delete tenant_id check (present in code)
+- Skill API update/delete tenant_id check (present in code)
+- Group `add_member()` tenant boundary check (present in code)
+- Group `assign_model_to_group()` / `assign_tool_to_group()` tenant check (present in code)
+
+See [testing-guide.md](testing-guide.md) for complete test suite documentation.

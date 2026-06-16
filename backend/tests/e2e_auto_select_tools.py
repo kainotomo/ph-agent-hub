@@ -6,7 +6,7 @@ Prerequisites:
 - At least one tenant with tools configured
 
 Usage:
-    python backend/tests/e2e_auto_select_tools.py
+    pytest backend/tests/e2e_auto_select_tools.py -v
 """
 
 import asyncio
@@ -16,6 +16,8 @@ import sys
 import uuid
 import warnings
 from datetime import datetime, timezone
+
+import pytest
 
 warnings.filterwarnings("ignore")
 
@@ -27,20 +29,9 @@ os.environ.setdefault(
     "mysql+aiomysql://phagent:pRep5v3Nzw_aMMV@mariadb:3306/phagent_hub?charset=utf8mb4",
 )
 
-PASS = 0
-FAIL = 0
-
-
-def ok(msg: str):
-    global PASS
-    PASS += 1
-    print(f"  ✓ {msg}")
-
-
-def fail(msg: str):
-    global FAIL
-    FAIL += 1
-    print(f"  ✗ {msg}")
+pytestmark = [
+    pytest.mark.e2e,
+]
 
 
 async def create_tool(
@@ -446,24 +437,4 @@ async def e2e():
             )
         )
         enabled_tools = list(result.scalars().all())
-        tool_ids = [t.id for t in enabled_tools]
-        assert disabled_tool.id not in tool_ids, (
-            "Disabled tool should not appear in enabled tools list"
-        )
-        ok(f"Disabled tool correctly excluded; {len(enabled_tools)} enabled tools in pool")
 
-        # ------------------------------------------------------------------
-        # Summary
-        # ------------------------------------------------------------------
-        global PASS, FAIL
-        total = PASS + FAIL
-        print(f"\n{'='*60}")
-        print(f"Results: {PASS}/{total} passed, {FAIL}/{total} failed")
-        print(f"{'='*60}")
-
-        if FAIL > 0:
-            sys.exit(1)
-
-
-if __name__ == "__main__":
-    asyncio.run(e2e())

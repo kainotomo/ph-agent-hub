@@ -10,8 +10,12 @@ import uuid
 import httpx
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.exceptions import ForbiddenError
 from src.main import app
+from src.services import upload_service
 
 pytestmark = [
     pytest.mark.integration,
@@ -111,6 +115,43 @@ class TestTempSessionUploadGuard:
 class TestUploadOwnership:
     """Verify upload ownership enforcement."""
 
+    # ------------------------------------------------------------------
+    # Service-layer: get_upload_by_id ownership check
+    # ------------------------------------------------------------------
+
+    async def test_get_upload_by_id_non_owner_raises_forbidden(
+        self,
+        db_session: AsyncSession,
+        sample_file_upload,
+        second_user,
+    ):
+        """Verify get_upload_by_id raises ForbiddenError for non-owner."""
+        with pytest.raises(ForbiddenError, match="You do not own this file upload"):
+            await upload_service.get_upload_by_id(
+                db=db_session,
+                file_id=sample_file_upload.id,
+                user_id=second_user.id,
+            )
+
+    async def test_get_upload_by_id_owner_succeeds(
+        self,
+        db_session: AsyncSession,
+        sample_file_upload,
+        test_user,
+    ):
+        """Verify get_upload_by_id returns the upload for the owner."""
+        upload = await upload_service.get_upload_by_id(
+            db=db_session,
+            file_id=sample_file_upload.id,
+            user_id=test_user.id,
+        )
+        assert upload.id == sample_file_upload.id
+        assert upload.user_id == test_user.id
+
+    # ------------------------------------------------------------------
+    # API-level: upload to other user's session
+    # ------------------------------------------------------------------
+
     async def test_upload_to_other_user_session_forbidden(
         self, async_client, auth_headers, test_user, second_user, test_session
     ):
@@ -123,6 +164,61 @@ class TestUploadOwnership:
             headers=headers,
         )
         assert resp.status_code == 403
+
+    # ------------------------------------------------------------------
+    # API-level: non-owner access to download, presigned URL, and delete
+    # ------------------------------------------------------------------
+
+    async def test_non_owner_cannot_get_presigned_url(
+        self,
+        async_client,
+        auth_headers,
+        test_user,
+        second_user,
+        test_session,
+        sample_file_upload,
+    ):
+        """Verify non-owner cannot get a presigned URL for a file."""
+        headers = auth_headers(second_user)
+        resp = await async_client.get(
+            f"/api/chat/session/{test_session.id}/upload/{sample_file_upload.id}/url",
+            headers=headers,
+        )
+        assert resp.status_code == 403, resp.text
+
+    async def test_non_owner_cannot_download_file(
+        self,
+        async_client,
+        auth_headers,
+        test_user,
+        second_user,
+        test_session,
+        sample_file_upload,
+    ):
+        """Verify non-owner cannot download a file."""
+        headers = auth_headers(second_user)
+        resp = await async_client.get(
+            f"/api/chat/session/{test_session.id}/upload/{sample_file_upload.id}/download",
+            headers=headers,
+        )
+        assert resp.status_code == 403, resp.text
+
+    async def test_non_owner_cannot_delete_file(
+        self,
+        async_client,
+        auth_headers,
+        test_user,
+        second_user,
+        test_session,
+        sample_file_upload,
+    ):
+        """Verify non-owner cannot delete a file."""
+        headers = auth_headers(second_user)
+        resp = await async_client.delete(
+            f"/api/chat/session/{test_session.id}/upload/{sample_file_upload.id}",
+            headers=headers,
+        )
+        assert resp.status_code == 403, resp.text
 
 
 # =============================================================================

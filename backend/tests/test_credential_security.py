@@ -48,6 +48,7 @@ class TestCredentialOwnership:
         credential = await create_credential(
             db_session,
             user_id=test_user.id,
+            tenant_id=test_user.tenant_id,
             tool_id=tool.id,
             label="Test Credential",
             provider="google",
@@ -75,6 +76,7 @@ class TestCredentialOwnership:
         credential = await create_credential(
             db_session,
             user_id=test_user.id,
+            tenant_id=test_user.tenant_id,
             tool_id=tool.id,
             label="User A Credential",
             provider="google",
@@ -107,6 +109,7 @@ class TestCredentialOwnership:
         credential = await create_credential(
             db_session,
             user_id=test_user.id,
+            tenant_id=test_user.tenant_id,
             tool_id=tool.id,
             label="Test Credential",
             provider="google",
@@ -153,6 +156,7 @@ class TestCredentialEncryption:
         credential = await create_credential(
             db_session,
             user_id=test_user.id,
+            tenant_id=test_user.tenant_id,
             tool_id=tool.id,
             label="Encrypted Credential",
             provider="google",

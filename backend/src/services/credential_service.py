@@ -25,6 +25,7 @@ from ..db.orm.user_tool_credentials import UserToolCredential
 async def create_credential(
     db: AsyncSession,
     user_id: str,
+    tenant_id: str,
     tool_id: str,
     label: str,
     provider: str,
@@ -38,6 +39,7 @@ async def create_credential(
     Args:
         db: Active DB session.
         user_id: Who owns this credential.
+        tenant_id: Tenant scope for tenant-isolation filtering.
         tool_id: Which tool this credential is for.
         label: User-defined display name (e.g. "Work Gmail").
         provider: "gmail", "outlook", "imap", "google", or "microsoft".
@@ -58,6 +60,7 @@ async def create_credential(
     credential = UserToolCredential(
         id=str(uuid.uuid4()),
         user_id=user_id,
+        tenant_id=tenant_id,
         tool_id=tool_id,
         label=label,
         provider=provider,
@@ -81,13 +84,16 @@ async def list_credentials(
     db: AsyncSession,
     user_id: str,
     tool_id: str | None = None,
+    tenant_id: str | None = None,
 ) -> list[UserToolCredential]:
-    """List all credential entries for a user, optionally filtered by tool."""
+    """List all credential entries for a user, optionally filtered by tool or tenant."""
     stmt = select(UserToolCredential).where(
         UserToolCredential.user_id == user_id,
     )
     if tool_id:
         stmt = stmt.where(UserToolCredential.tool_id == tool_id)
+    if tenant_id:
+        stmt = stmt.where(UserToolCredential.tenant_id == tenant_id)
 
     stmt = stmt.order_by(UserToolCredential.is_default.desc(), UserToolCredential.created_at.desc())
     result = await db.execute(stmt)
@@ -98,13 +104,16 @@ async def get_credential_by_id(
     db: AsyncSession,
     credential_id: str,
     user_id: str | None = None,
+    tenant_id: str | None = None,
 ) -> UserToolCredential:
-    """Get a single credential by ID. Optionally verify ownership."""
+    """Get a single credential by ID. Optionally verify ownership and tenant."""
     stmt = select(UserToolCredential).where(
         UserToolCredential.id == credential_id,
     )
     if user_id:
         stmt = stmt.where(UserToolCredential.user_id == user_id)
+    if tenant_id:
+        stmt = stmt.where(UserToolCredential.tenant_id == tenant_id)
 
     result = await db.execute(stmt)
     cred = result.scalar_one_or_none()

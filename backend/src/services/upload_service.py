@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 logger = logging.getLogger(__name__)
 
 from ..core.config import settings
-from ..core.exceptions import NotFoundError, ValidationError
+from ..core.exceptions import ForbiddenError, NotFoundError, ValidationError
 from ..db.orm.file_uploads import FileUpload
 from ..db.orm.users import User
 from ..storage import s3
@@ -152,6 +152,14 @@ async def create_upload(
 
     # 3. Determine if this is a temporary session
     is_temp = session_data.get("is_temporary", False)
+
+    # 3a. Reject uploads to temporary sessions (lazy / guest sessions)
+    #     that have not yet been promoted to permanent.
+    if is_temp:
+        raise ForbiddenError(
+            "File uploads are not supported in temporary sessions. "
+            "Please send a message first to create a permanent session."
+        )
 
     # 4. Build storage path (resolve user/tenant from session_data for guests)
     file_id = str(uuid.uuid4())

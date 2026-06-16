@@ -453,6 +453,12 @@ Some tools (Email, Calendar, Tasks) support **per-user credentials** — each us
 3. **Credentials are stored per-user** in the `user_tool_credentials` table, encrypted at rest
 4. **At runtime**, the agent uses each user's credentials automatically — no manual tool activation needed
 
+> **Security note (Issue #345):** The OAuth state parameter is a server-side nonce stored in
+> Redis with a 10-minute TTL. It is single-use (consumed atomically on callback) and
+> tamper-evident — forged or replayed states are rejected. Users must complete the OAuth
+> consent flow within 10 minutes. If the state expires, the callback fails with a clear
+> error and the user must retry.
+
 Tools with connected accounts are **always available** in the agent's tool set, regardless of auto-selection keyword matching.
 
 ### 9.2 Google OAuth Setup

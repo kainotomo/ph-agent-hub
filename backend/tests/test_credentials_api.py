@@ -257,3 +257,159 @@ class TestCredentialTenantIsolation:
             f"/api/credentials/{test_credential.id}", headers=headers_b
         )
         assert resp.status_code == 404
+
+
+# =============================================================================
+# OAuth State Integrity Tests (Issue #345)
+# =============================================================================
+
+
+class TestOAuthStateIntegrity:
+    """Verify OAuth state is integrity-protected via server-side nonce store.
+
+    Tests use the actual OAuth URL endpoints (GET) and mock the callback's
+    external token exchange to verify state validation.
+    """
+
+    @pytest.mark.skipif(
+        True,
+        reason="Requires OAuth env vars (GOOGLE_CLIENT_ID etc.) to be set",
+    )
+    async def test_google_oauth_url_returns_uuid_state(
+        self, async_client, auth_headers, test_user
+    ):
+        """Verify the OAuth URL state is a UUID (not colon-delimited)."""
+        headers = auth_headers(test_user)
+        resp = await async_client.get(
+            "/api/credentials/oauth/google/url?tool_id=email_tool",
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert "state" in data
+        # State should be a UUID v4 — no colons, no embedded user/tool info
+        state = data["state"]
+        assert ":" not in state, f"State should not be colon-delimited: {state}"
+        # Validate UUID format
+        uuid.UUID(state)
+
+    @pytest.mark.skipif(
+        True,
+        reason="Requires OAuth env vars (MS_CLIENT_ID etc.) to be set",
+    )
+    async def test_microsoft_oauth_url_returns_uuid_state(
+        self, async_client, auth_headers, test_user
+    ):
+        """Verify the Microsoft OAuth URL state is a UUID."""
+        headers = auth_headers(test_user)
+        resp = await async_client.get(
+            "/api/credentials/oauth/microsoft/url?tool_id=email_tool",
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert "state" in data
+        state = data["state"]
+        assert ":" not in state, f"State should not be colon-delimited: {state}"
+        uuid.UUID(state)
+
+    async def test_callback_with_valid_state(
+        self, async_client, db_session, test_user, test_tenant, test_tool,
+    ):
+        """Verify callback succeeds with a valid stored nonce."""
+        from unittest.mock import patch
+        from src.core.redis import store_oauth_state
+
+        # Insert a valid nonce into Redis
+        nonce = str(uuid.uuid4())
+        await store_oauth_state(nonce, test_user.id, "email_tool", ttl=300)
+
+        mock_tokens = {
+            "access_token": "ya29.mock-access-token",
+            "refresh_token": "1//mock-refresh-token",
+            "expires_at": 9999999999,
+            "scope": "https://www.googleapis.com/auth/gmail.modify",
+            "token_type": "Bearer",
+            "id_token": "eyJhbGciOiJSUzI1NiJ9.eyJlbWFpbCI6InRlc3RAZXhhbXBsZS5jb20ifQ.signature",
+        }
+
+        with patch(
+            "src.core.oauth.exchange_google_code",
+            return_value=mock_tokens,
+        ):
+            resp = await async_client.get(
+                "/api/credentials/oauth/google/callback",
+                params={"code": "auth-code-123", "state": nonce},
+            )
+        # Should redirect to frontend on success
+        assert resp.status_code == 302, resp.text
+        assert "settings" in resp.headers.get("location", "")
+
+    async def test_callback_with_forged_state_rejected(
+        self, async_client, test_user, test_credential
+    ):
+        """Verify a forged colon-delimited state is rejected."""
+        forged_state = f"{test_user.id}:email_tool:forged"
+        resp = await async_client.get(
+            "/api/credentials/oauth/google/callback",
+            params={"code": "auth-code-456", "state": forged_state},
+        )
+        assert resp.status_code == 422, resp.text
+
+    async def test_callback_with_random_state_rejected(
+        self, async_client,
+    ):
+        """Verify a completely random state (not in Redis) is rejected."""
+        resp = await async_client.get(
+            "/api/credentials/oauth/google/callback",
+            params={"code": "auth-code-789", "state": str(uuid.uuid4())},
+        )
+        assert resp.status_code == 422, resp.text
+
+    async def test_callback_replay_rejected(
+        self, async_client, test_user, test_tenant, test_tool,
+    ):
+        """Verify a state can only be used once (replay attack prevention)."""
+        from unittest.mock import patch
+        from src.core.redis import store_oauth_state
+
+        nonce = str(uuid.uuid4())
+        await store_oauth_state(nonce, test_user.id, "email_tool", ttl=300)
+
+        mock_tokens = {
+            "access_token": "ya29.mock-access-token",
+            "refresh_token": "1//mock-refresh-token",
+            "expires_at": 9999999999,
+            "scope": "https://www.googleapis.com/auth/gmail.modify",
+            "token_type": "Bearer",
+            "id_token": "eyJhbGciOiJSUzI1NiJ9.eyJlbWFpbCI6InRlc3RAZXhhbXBsZS5jb20ifQ.signature",
+        }
+
+        with patch(
+            "src.core.oauth.exchange_google_code",
+            return_value=mock_tokens,
+        ):
+            # First use — should succeed
+            resp1 = await async_client.get(
+                "/api/credentials/oauth/google/callback",
+                params={"code": "auth-code-111", "state": nonce},
+            )
+            assert resp1.status_code == 302, resp1.text
+
+            # Second use — should fail (state already consumed)
+            resp2 = await async_client.get(
+                "/api/credentials/oauth/google/callback",
+                params={"code": "auth-code-222", "state": nonce},
+            )
+            assert resp2.status_code == 422, resp2.text
+
+    async def test_callback_microsoft_with_forged_state_rejected(
+        self, async_client,
+    ):
+        """Verify a forged state on the Microsoft callback is rejected."""
+        forged_state = "fake-user-id:email_tool:forged"
+        resp = await async_client.get(
+            "/api/credentials/oauth/microsoft/callback",
+            params={"code": "auth-code-333", "state": forged_state},
+        )
+        assert resp.status_code == 422, resp.text

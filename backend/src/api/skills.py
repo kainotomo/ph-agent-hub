@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.dependencies import get_current_user, get_db
 from ..core.exceptions import ForbiddenError, NotFoundError
 from ..core.pagination import PaginatedResponse
+from ..core.schemas import collect_update_fields
 from ..db.orm.users import User as UserORM
 from ..services.skill_service import (
     create_skill as _svc_create_skill,
@@ -173,16 +174,7 @@ async def update_skill(
     if skill.tenant_id != current_user.tenant_id:
         raise ForbiddenError("Cannot modify a skill from a different tenant")
 
-    update_kwargs: dict = {}
-    for field in (
-        "title", "description", "execution_type", "maf_target_key",
-        "template_id", "default_prompt_id", "default_model_id", "enabled",
-        "cross_session_retrieval_enabled", "cross_session_max_snippets",
-        "cross_session_min_score",
-    ):
-        val = getattr(body, field, None)
-        if val is not None:
-            update_kwargs[field] = val
+    update_kwargs = collect_update_fields(body)
 
     tool_ids = body.tool_ids
     updated = await _svc_update_skill(db, skill_id, tool_ids=tool_ids, **update_kwargs)

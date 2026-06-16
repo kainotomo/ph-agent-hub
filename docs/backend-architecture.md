@@ -340,6 +340,19 @@ GET /admin/audit
 
 > `GET /admin/audit` is admin-only. Managers can access `/admin/usage` and `/admin/logs` scoped to their own tenant. Audit log entries are read-only — no delete endpoint is exposed.
 
+### **3.19 Update Semantics**
+
+All `PUT` endpoints follow a consistent convention for handling request bodies:
+
+- **Omitted field** — The field is absent from the JSON body. The existing value is **preserved** unchanged.
+- **Explicit `null`** — The field is sent as `{"field_name": null}`. The DB column is **set to NULL** (if nullable).
+
+This is implemented via Pydantic's `model_dump(exclude_unset=True)`, which returns only the fields the caller explicitly provided. The utility function `collect_update_fields(body)` in `backend/src/core/schemas.py` wraps this pattern and is used by all `PUT` endpoints.
+
+**Before this convention** (legacy pattern), `PUT` endpoints used `if val is not None` guards that treated explicit `null` the same as omission, making it impossible for clients to clear nullable fields.
+
+> Use `PATCH` semantics with `PUT`: send only the fields you want to change. See `backend/src/core/schemas.py` for the shared utility.
+
 ---
 
 ## 4. Backend Folder Structure

@@ -137,9 +137,13 @@ class TestMicrosoftOAuth:
     @patch("src.core.oauth.httpx.AsyncClient")
     async def test_exchange_microsoft_code_success(self, mock_httpx):
         """Verify successful Microsoft code exchange returns correct token structure."""
-        # Create a fake ID token with email claim
-        # Generated with: pyjwt.encode({'email': 'user@example.com', 'sub': 'ms-user-id'}, 'test-key')
-        fake_id_token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlbWFpbCI6InVzZXJAZXhhbXBsZS5jb20iLCJzdWIiOiJtcy11c2VyLWlkIn0.HzuiSVzgyQW4G_WhFgF25lWuleD1JpNguG9udNvXoK4"
+        import jwt as pyjwt
+        # Generate a fake ID token dynamically to avoid hardcoded JWT secrets
+        fake_id_token = pyjwt.encode(
+            {"email": "user@example.com", "sub": "ms-user-id"},
+            key="test-key-for-testing-only",
+            algorithm="HS256",
+        )
 
         mock_response = _make_mock_response(200, {
             "access_token": "ms-access-token",

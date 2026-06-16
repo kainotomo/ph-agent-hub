@@ -51,6 +51,7 @@ The project uses **pytest** for backend testing. Tests are organized by marker a
 | `test_upload_flow.py` | 4 | File type/size validation, temp session guard, DeepSeek+image rejection |
 | `test_concurrency.py` | 8 | Stream cancellation, temp session TTL/races, rate limiter concurrency |
 | `test_regression.py` | 10 | Prompt/credential/chat/memory tenant isolation, temp upload guard |
+| `test_group_service.py` | 3 | Group CRUD idempotency (Issue #348) |
 
 ### Security & Isolation Tests
 

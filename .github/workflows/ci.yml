@@ -89,6 +89,8 @@ jobs:
           echo "fernet=$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')" >> $GITHUB_OUTPUT
 
       - name: Run database migrations
+        env:
+          ENCRYPTION_KEY: ${{ steps.gen-key.outputs.fernet }}
         run: |
           cd backend
           alembic upgrade heads

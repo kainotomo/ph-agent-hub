@@ -79,6 +79,19 @@ class TestCreateCredential:
         resp = await async_client.post("/api/credentials", json=payload)
         assert resp.status_code == 401
 
+    async def test_create_credential_cross_tenant_tool_rejected(
+        self, async_client, auth_headers, test_user, second_user, test_tool
+    ):
+        """Verify creating a credential with a tool from another tenant fails."""
+        headers_b = auth_headers(second_user)
+        payload = {
+            "tool_id": test_tool.id,
+            "label": "Cross-Tenant Attempt",
+            "provider": "gmail",
+        }
+        resp = await async_client.post("/api/credentials", json=payload, headers=headers_b)
+        assert resp.status_code == 404
+
 
 class TestListCredentials:
     """Tests for GET /credentials."""

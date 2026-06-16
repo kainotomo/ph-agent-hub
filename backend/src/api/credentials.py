@@ -195,7 +195,10 @@ async def create_credential(
     from sqlalchemy import select as _select
 
     result = await db.execute(
-        _select(ToolORM).where(ToolORM.id == body.tool_id)
+        _select(ToolORM).where(
+            ToolORM.id == body.tool_id,
+            ToolORM.tenant_id == current_user.tenant_id,
+        )
     )
     if not result.scalar_one_or_none():
         raise NotFoundError(f"Tool '{body.tool_id}' not found")

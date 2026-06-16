@@ -10,17 +10,18 @@ import sys
 import uuid
 from datetime import datetime, timezone
 
-# Ensure the backend src is on the path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+# Ensure the backend src is importable (use parent dir + src. prefix so that
+# relative imports in src/db/base.py etc. resolve correctly)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.base import Base, AsyncSessionLocal
-from db.orm.tenants import Tenant
-from db.orm.users import User
-from db.orm.file_uploads import FileUpload
+from src.db.base import Base, AsyncSessionLocal
+from src.db.orm.tenants import Tenant
+from src.db.orm.users import User
+from src.db.orm.file_uploads import FileUpload
 
 
 @pytest.fixture(scope="session")
@@ -67,6 +68,7 @@ async def test_user(db_session: AsyncSession, test_tenant: Tenant) -> User:
         id=str(uuid.uuid4()),
         tenant_id=test_tenant.id,
         email=f"test-{uuid.uuid4().hex[:8]}@example.com",
+        password_hash="pbkdf2:sha256:600000$test-salt$test-hash",
         display_name="Test User",
         role="user",
         is_active=True,

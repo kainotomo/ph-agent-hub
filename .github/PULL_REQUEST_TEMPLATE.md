@@ -25,7 +25,7 @@ Closes #
 <!-- Describe the testing you performed to verify your changes. -->
 
 - [ ] Tested locally with Docker Compose (dev)
-- [ ] Backend tests pass (`pytest backend/tests/`)
+- [ ] Backend tests pass (`pytest backend/tests/ -m "not e2e and not slow"`)
 - [ ] Frontend builds without errors (`npm run build`)
 - [ ] Manual testing completed (describe what you tested)
 

@@ -1,0 +1,29 @@
+# =============================================================================
+# PH Agent Hub — GitGuardian Configuration
+# =============================================================================
+# GitGuardian scans for secrets in every commit. The values below are
+# intentionally hardcoded because they are test-only credentials used in
+# the CI pipeline (GitHub Actions). They have zero production access and
+# are rotated on every CI run since service containers are ephemeral.
+#
+# If you add other test credentials to CI, add them here to avoid noise.
+# NEVER add real production secrets to this file.
+# =============================================================================
+
+version: 2
+
+# Paths to ignore entirely
+paths-ignore:
+  - "**/*.md"                      # Documentation often contains placeholder examples
+  - "infrastructure/env.example"   # Template file, not actual secrets
+  - ".gitguardian.yml"             # This config file itself
+  - ".github/workflows/ci.yml"     # CI test credentials (ephemeral, zero production access)
+
+# Detector-level overrides
+detectors:
+  # Generic Password detector is too broad for CI test values
+  - name: generic_password
+    exclude:
+      paths:
+        - ".github/workflows/ci.yml"
+        - ".github/workflows/**"

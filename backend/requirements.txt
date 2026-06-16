@@ -58,6 +58,13 @@ feedparser
 slowapi
 
 # Document generation (Issue #159)
+
+# =============================================================================
+# Test Dependencies
+# =============================================================================
+pytest>=8.0
+pytest-asyncio>=0.21,<1.0
+pytest-cov>=5.0
 weasyprint
 markdown
 

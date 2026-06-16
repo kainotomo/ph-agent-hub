@@ -7,7 +7,7 @@
 [![Last Commit](https://img.shields.io/github/last-commit/kainotomo/ph-agent-hub)](https://github.com/kainotomo/ph-agent-hub)
 [![Issues](https://img.shields.io/github/issues/kainotomo/ph-agent-hub)](https://github.com/kainotomo/ph-agent-hub/issues)
 [![Docker Pulls](https://img.shields.io/docker/pulls/phalouvas/ph-agent-hub-backend)](https://hub.docker.com/r/phalouvas/ph-agent-hub-backend)
-[![Build](https://img.shields.io/badge/Build-no%20workflow%20configured-lightgrey)](https://github.com/kainotomo/ph-agent-hub/actions)
+[![CI](https://github.com/kainotomo/ph-agent-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/kainotomo/ph-agent-hub/actions/workflows/ci.yml)
 [![Try the Widget](https://img.shields.io/badge/Try%20the%20Widget-Live-brightgreen)](https://kainotomo.com/ph-agent-hub)
 [![Demo Video](https://img.shields.io/badge/📺-Watch%20Demo-red?style=flat-square)](https://youtu.be/iy5mO3nRxH0)
 
@@ -68,6 +68,28 @@ Endpoints after startup:
 - MinIO Console (dev): [http://localhost:9001](http://localhost:9001)
 
 Default login on first run: admin@phagent.local / admin (change immediately).
+
+## Run Tests
+
+With Docker Compose running (MariaDB + Redis on localhost), run the backend test suite:
+
+```bash
+cd backend
+source .venv/bin/activate
+DATABASE_URL="mysql+aiomysql://phagent:${MYSQL_PASSWORD}@127.0.0.1:3306/phagent_hub?charset=utf8mb4" \
+  REDIS_URL="redis://127.0.0.1:6379/0" \
+  JWT_SECRET="test" \
+  ENCRYPTION_KEY="$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')" \
+  pytest tests/ -m "not e2e"
+```
+
+Or from inside the Docker container (no env var setup needed):
+
+```bash
+docker compose exec backend pytest /app/tests/ -m "not e2e"
+```
+
+A CI pipeline runs on every pull request to `main` — see `.github/workflows/ci.yml`.
 
 ## Who It Is For
 

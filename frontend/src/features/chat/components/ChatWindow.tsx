@@ -189,23 +189,6 @@ export function ChatWindow({
     return "";
   });
 
-  // Restore pending files from sessionStorage on mount for pending sessions
-  useEffect(() => {
-    if (isPending) {
-      try {
-        const stored = readDraft(FILES_PREFIX + sessionId);
-        if (stored) {
-          const parsed = JSON.parse(stored) as PendingFile[];
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            setPendingFiles(parsed);
-          }
-        }
-      } catch {
-        // Ignore parse errors
-      }
-    }
-  }, [isPending, sessionId]); // mount only
-
   // Persist inputValue to sessionStorage for pending sessions
   useEffect(() => {
     if (isPending) {
@@ -216,17 +199,6 @@ export function ChatWindow({
       }
     }
   }, [inputValue, isPending, sessionId]);
-
-  // Persist pendingFiles to sessionStorage for pending sessions
-  useEffect(() => {
-    if (isPending) {
-      if (pendingFiles.length > 0) {
-        writeDraft(FILES_PREFIX + sessionId, JSON.stringify(pendingFiles));
-      } else {
-        removeDraft(FILES_PREFIX + sessionId);
-      }
-    }
-  }, [pendingFiles, isPending, sessionId]);
 
   const [streamingContent, setStreamingContent] = useState("");
   const [streamingReasoningContent, setStreamingReasoningContent] = useState("");
@@ -346,6 +318,34 @@ export function ChatWindow({
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const [uploading, setUploading] = useState(false);
   const [showScrollButton, setShowScrollButton] = useState(false);
+
+  // Restore pending files from sessionStorage on mount for pending sessions
+  useEffect(() => {
+    if (isPending) {
+      try {
+        const stored = readDraft(FILES_PREFIX + sessionId);
+        if (stored) {
+          const parsed = JSON.parse(stored) as PendingFile[];
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            setPendingFiles(parsed);
+          }
+        }
+      } catch {
+        // Ignore parse errors
+      }
+    }
+  }, [isPending, sessionId]); // mount only
+
+  // Persist pendingFiles to sessionStorage for pending sessions
+  useEffect(() => {
+    if (isPending) {
+      if (pendingFiles.length > 0) {
+        writeDraft(FILES_PREFIX + sessionId, JSON.stringify(pendingFiles));
+      } else {
+        removeDraft(FILES_PREFIX + sessionId);
+      }
+    }
+  }, [pendingFiles, isPending, sessionId]);
 
   // Optimistic user message — shown immediately on send, replaced by
   // the real persisted message when the response completes or the

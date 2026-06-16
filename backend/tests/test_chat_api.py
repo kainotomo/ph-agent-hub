@@ -193,6 +193,22 @@ class TestUpdateSession:
         )
         assert resp.status_code == 403
 
+    async def test_update_session_genuine_not_found(
+        self, async_client, auth_headers
+    ):
+        """Verify update_session returns 404 for a truly missing session,
+        not a lock-contention false positive."""
+        from src.core.exceptions import NotFoundError
+        from src.db.base import AsyncSessionLocal
+        from src.services import session_service
+
+        async with AsyncSessionLocal() as db:
+            with pytest.raises(NotFoundError):
+                await session_service.update_session(
+                    db, "nonexistent-session-id",
+                    title="Should Not Work",
+                )
+
 
 class TestDeleteSession:
     """Tests for DELETE /chat/session/{session_id}."""

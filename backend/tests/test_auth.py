@@ -6,10 +6,12 @@
 # =============================================================================
 
 import time
+from unittest.mock import patch
 
 import pytest
 from jose import JWTError, jwt as jose_jwt
 
+from src.core.config import settings
 from src.core.config import settings
 from src.core.jwt import (
     create_access_token,
@@ -134,15 +136,19 @@ class TestGuestToken:
         """Verify a regular user JWT is rejected by decode_guest_token."""
         payload = {"sub": "user-123", "tenant_id": "tenant-abc", "role": "user"}
         token = create_access_token(payload)
-        with pytest.raises(JWTError):
-            decode_guest_token(token)
+        # Use a different guest secret so the user token cannot be decoded as guest
+        with patch.object(settings, "EMBED_GUEST_TOKEN_SECRET", "different-guest-secret"):
+            with pytest.raises(JWTError):
+                decode_guest_token(token)
 
     def test_guest_token_cannot_be_used_as_user_token(self):
         """Verify a guest token is rejected by decode_token."""
         payload = {"sub": "embed-123", "tenant_id": "tenant-abc", "type": "guest"}
         token = create_guest_token(payload)
-        with pytest.raises(JWTError):
-            decode_token(token)
+        # Use a different user secret so the guest token cannot be decoded as user
+        with patch.object(settings, "JWT_SECRET", "different-user-secret"):
+            with pytest.raises(JWTError):
+                decode_token(token)
 
 
 class TestDemoToken:

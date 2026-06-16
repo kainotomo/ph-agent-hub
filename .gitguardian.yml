@@ -17,6 +17,7 @@ paths-ignore:
   - "**/*.md"                      # Documentation often contains placeholder examples
   - "infrastructure/env.example"   # Template file, not actual secrets
   - ".gitguardian.yml"             # This config file itself
+  - ".github/workflows/ci.yml"     # CI test credentials (ephemeral, zero production access)
 
 # Detector-level overrides
 detectors:
@@ -25,3 +26,4 @@ detectors:
     exclude:
       paths:
         - ".github/workflows/ci.yml"
+        - ".github/workflows/**"

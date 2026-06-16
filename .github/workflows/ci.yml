@@ -20,20 +20,19 @@ on:
     branches: [main]
 
 env:
-  # ── Database (matches service container config) ──────────────────────────
-  DATABASE_URL: mysql+aiomysql://phagent:ci-test-pw@127.0.0.1:3306/phagent_hub?charset=utf8mb4
+  # ── Database (simple test values — not production secrets) ───────────────
+  DATABASE_URL: mysql+aiomysql://root:root@127.0.0.1:3306/phagent_hub?charset=utf8mb4
   REDIS_URL: redis://localhost:6379/0
 
   # ── MinIO (dummy values — no tests touch MinIO directly) ────────────────
   MINIO_ENDPOINT: localhost:9000
-  MINIO_ACCESS_KEY: ci-minio
-  MINIO_SECRET_KEY: ci-minio-secret
+  MINIO_ACCESS_KEY: minioaccess
+  MINIO_SECRET_KEY: miniosecret
   MINIO_BUCKET_PREFIX: phub-ci
 
-  # ── Auth / Encryption (test-only, not production secrets) ────────────────
-  JWT_SECRET: ci-jwt-secret-for-testing-only
-  ENCRYPTION_KEY: Qra-lUuXz0pk7aAG1BNfW4DG4qzHA6c8-XVS9twUxps=
-  EMBED_GUEST_TOKEN_SECRET: ci-guest-token-secret
+  # ── Auth (test-only) ────────────────────────────────────────────────────
+  JWT_SECRET: testonly
+  EMBED_GUEST_TOKEN_SECRET: testonly
 
   # ── Logging ─────────────────────────────────────────────────────────────
   LOG_LEVEL: WARNING
@@ -50,10 +49,8 @@ jobs:
       mariadb:
         image: mariadb:11
         env:
-          MYSQL_ROOT_PASSWORD: ci-root-pw
+          MYSQL_ROOT_PASSWORD: root
           MYSQL_DATABASE: phagent_hub
-          MYSQL_USER: phagent
-          MYSQL_PASSWORD: ci-test-pw
         ports:
           - 3306:3306
         options: >-
@@ -86,12 +83,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
 
+      - name: Generate Fernet key for encryption module
+        id: gen-key
+        run: |
+          echo "fernet=$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')" >> $GITHUB_OUTPUT
+
       - name: Run database migrations
         run: |
           cd backend
           alembic upgrade heads
 
       - name: Run tests (excluding e2e and slow)
+        env:
+          ENCRYPTION_KEY: ${{ steps.gen-key.outputs.fernet }}
         run: |
           cd backend
           pytest tests/ \

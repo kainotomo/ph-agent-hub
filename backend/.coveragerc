@@ -1,0 +1,19 @@
+# =============================================================================
+# PH Agent Hub — Coverage Configuration
+# =============================================================================
+[run]
+source = src/
+omit =
+    */migrations/*
+    */tests/*
+    */__pycache__/*
+    */__init__.py
+
+[report]
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    def __str__
+    raise NotImplementedError
+    if __name__ == .__main__.:
+    pass

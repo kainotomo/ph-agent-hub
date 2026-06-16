@@ -184,24 +184,56 @@ When in doubt, look at how existing code in the same module is written and match
 
 ### Backend
 
-Tests are in the `backend/tests/` directory and use **pytest**. Run them locally:
+Tests are in the `backend/tests/` directory and use **pytest**. Run them locally with Docker Compose running (MariaDB + Redis available on localhost):
 
 ```bash
 cd backend
 source .venv/bin/activate
-pytest tests/
+
+# Required env vars (use 127.0.0.1, not Docker hostnames, when running from host)
+DATABASE_URL="mysql+aiomysql://phagent:${MYSQL_PASSWORD}@127.0.0.1:3306/phagent_hub?charset=utf8mb4" \
+  REDIS_URL="redis://127.0.0.1:6379/0" \
+  JWT_SECRET="test" \
+  ENCRYPTION_KEY="$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')" \
+  python -m pytest tests/ -m "not e2e"
+```
+
+Or, if you run inside the Docker backend container (no env var hassle):
+
+```bash
+docker compose exec backend pytest /app/tests/ -m "not e2e"
+```
+
+Run a subset by marker:
+
+```bash
+pytest tests/ -m unit                          # pure logic only
+pytest tests/ -m "not e2e and not slow"        # CI-equivalent (default)
+pytest tests/ -v --co                         # verbose with coverage report
 ```
 
 When adding or modifying backend code:
 - Add or update tests for the changed functionality.
-- Ensure existing tests still pass (`pytest tests/`).
-- For API changes, consider adding integration tests.
+- If your code calls an external service (API, embedding provider, MinIO, etc.), **mock it** at the boundary — look at existing `@patch` patterns in `tests/test_rag_service.py`.
+- No real API keys are needed for tests to pass.
+- Ensure existing tests still pass before opening a PR — CI enforces this.
 
 ### Frontend
 
 The frontend currently has no formal test framework configured. When contributing frontend changes:
 - Manually verify the UI works in the dev environment.
-- If you add a test setup (Vitest, Playwright, etc.), document it separately.
+- Ensure the project builds without errors: `npm run build`.
+
+### CI Pipeline
+
+A GitHub Actions workflow runs on every pull request to `main`:
+
+| Job | What it validates |
+|-----|------------------|
+| **Backend Tests** | `pytest tests/ -m "not e2e and not slow"` with coverage |
+| **Frontend Build** | `tsc` type-check + `vite build` |
+
+CI uses MariaDB and Redis as service containers — no Docker Compose or API keys needed. See `.github/workflows/ci.yml` for details.
 
 ---
 

@@ -256,6 +256,32 @@ export function ChatWindow({
     }
   }, [pendingFlag, alwaysOnIds]);
 
+  // ---- Sync skill tools into pending active tools -----------------------
+  // When the user selects a skill in pending mode, fetch the skill's
+  // tool IDs and merge them into pendActiveToolIds so they appear
+  // activated in the UI and get sent with the first message.
+  const prevPendSkillRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!pendingFlag) return;
+    const newSkill = pendSkillId;
+    const oldSkill = prevPendSkillRef.current;
+    if (newSkill && newSkill !== oldSkill) {
+      prevPendSkillRef.current = newSkill;
+      // Fetch the skill's tool IDs
+      api<{ id: string; tool_ids: string[] }[]>("/skills").then((skills) => {
+        const skill = skills.find((s) => s.id === newSkill);
+        if (skill && skill.tool_ids.length > 0) {
+          setPendActiveToolIds((prev) => {
+            const merged = new Set([...prev, ...skill.tool_ids]);
+            return Array.from(merged);
+          });
+        }
+      }).catch(() => {
+        // Silently fail — skill tools are a UX convenience
+      });
+    }
+  }, [pendingFlag, pendSkillId]);
+
   // Intercept settings changes when pending — store locally instead of
   // calling onSessionUpdate (which would 404 since the session doesn't exist).
   const handleSettingsUpdate = useCallback(

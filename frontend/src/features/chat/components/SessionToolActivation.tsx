@@ -111,11 +111,8 @@ export function SessionToolActivation({
   });
 
   const alwaysOnSet = new Set(alwaysOnIds || []);
-  const activeIds = isPending
-    ? new Set([...pendingActiveToolIds, ...(alwaysOnIds || [])])
-    : new Set((activeTools || []).map((t) => t.id));
 
-  // Fetch the selected skill's tool IDs (for "from skill" badge)
+  // Fetch the selected skill's tool IDs
   const { data: allSkills } = useQuery({
     queryKey: ["skills"],
     queryFn: () => api<{ id: string; tool_ids: string[] }[]>("/skills"),
@@ -123,6 +120,10 @@ export function SessionToolActivation({
   });
   const selectedSkill = allSkills?.find((s) => s.id === selectedSkillId);
   const skillToolIds = new Set(selectedSkill?.tool_ids ?? []);
+
+  const activeIds = isPending
+    ? new Set([...pendingActiveToolIds, ...(skillToolIds || [])])
+    : new Set((activeTools || []).map((t) => t.id));
 
   // Group tools by category, excluding hidden categories
   const groupedTools = useMemo(() => {

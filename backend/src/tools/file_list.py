@@ -43,11 +43,18 @@ def build_file_list_tool(
     async def list_uploaded_files() -> list[dict[str, Any]]:
         """List all files uploaded in this conversation session.
 
-        Returns filename, content type, size (KB), a short text preview,
-        and the file_id.  To read the full extracted text of a file, use
-        ``read_file_content(file_id)`` with the file_id returned here.
-        Call this when a user mentions a file and you need its exact name
-        (e.g. for the ERPNext ``upload_file`` tool).
+        Returns ``file_id``, ``filename``, ``content_type``, ``size_kb``,
+        and a short ``preview`` (first 200 characters) for each file.
+
+        If the user asks you to attach a file to an email, use the
+        ``file_id`` directly in ``send_email`` / ``reply_email`` /
+        ``save_draft`` — you do NOT need to call ``read_file_content``
+        first.  The ``preview`` and ``filename`` already tell you what
+        the file contains.
+
+        Call ``read_file_content(file_id)`` only when you need to
+        ANALYZE or SUMMARIZE the file's text content.  For attachments,
+        just pass ``file_ids`` to the email tool.
         """
         if is_temporary and uploaded_file_ids:
             result = await db.execute(
@@ -95,13 +102,16 @@ def build_file_list_tool(
 
     @tool
     async def read_file_content(file_id: str) -> dict[str, Any]:
-        """Return the full extracted text content of a previously uploaded
-        file so you can read its contents.
+        """Read and analyze the full text content of an uploaded file.
 
-        This returns TEXT ONLY — do NOT use it for email attachments.
-        For email attachments, call ``download_file_for_attachment`` instead,
-        which returns the raw file bytes in base64 format suitable for
-        the ``send_email`` / ``reply_email`` / ``save_draft`` tools.
+        Use this ONLY when you need to SUMMARIZE, ANALYZE, or answer
+        questions about a file's content.  This returns the extracted
+        text — it is NOT suitable for email attachments.
+
+        For EMAIL ATTACHMENTS: do NOT call this tool.  Instead, use
+        the ``file_ids`` parameter of ``send_email`` / ``reply_email`` /
+        ``save_draft`` directly.  The ``list_uploaded_files`` preview
+        already tells you enough about the file.
 
         Args:
             file_id: The file ID returned by ``list_uploaded_files()``.
@@ -160,8 +170,15 @@ def build_file_list_tool(
         them as base64 for use as an email attachment.
 
         Use this ONLY when you need to attach a file to an email via
-        ``send_email`` / ``reply_email`` / ``save_draft``.  The returned
+        ``send_email`` / ``reply_email`` / ``save_draft`` and cannot use
+        the ``file_ids`` parameter of those tools directly.  The returned
         ``content_base64`` is the ``content`` field for the attachment dict.
+
+        PREFERRED ALTERNATIVE: Pass ``file_ids`` directly to the email
+        tool (``send_email`` / ``reply_email`` / ``save_draft``) and let
+        it fetch the file bytes internally — no base64 needed in your
+        response.  Use ``download_file_for_attachment`` only when you need
+        to inspect or modify the file content before attaching.
 
         For reading the text contents of a file, use ``read_file_content``
         instead — it's faster and doesn't include the raw binary data.

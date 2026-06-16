@@ -254,12 +254,51 @@ def build_email_tools(
             credential_orm=active_cred, tokens_dict=tk, db=db,
         )
 
+    async def _resolve_file_attachments(
+        file_ids: list[str] | None,
+    ) -> list[dict]:
+        """Resolve uploaded file IDs to email attachment dicts.
+
+        Fetches raw bytes from MinIO storage — avoids passing large
+        base64 payloads through the LLM context.
+        """
+        if not file_ids or not db:
+            return []
+        import base64
+        from sqlalchemy import select as _select
+        from ..db.orm.file_uploads import FileUpload as _FU
+        from ..storage.s3 import download_object as _dl
+
+        fu_result = await db.execute(
+            _select(_FU).where(_FU.id.in_(file_ids))
+        )
+        uploads = list(fu_result.scalars().all())
+
+        resolved: list[dict] = []
+        for upload in uploads:
+            content_base64 = ""
+            try:
+                raw = await _dl(upload.bucket, upload.storage_key)
+                content_base64 = base64.b64encode(raw).decode("ascii")
+            except Exception:
+                logger.warning(
+                    "Could not download file %s for email attachment", upload.id,
+                )
+                continue
+            resolved.append({
+                "filename": upload.original_filename,
+                "content": content_base64,
+                "mime_type": upload.content_type,
+            })
+        return resolved
+
     # ------------------------------------------------------------------
     @tool
     async def send_email(
         to: str, subject: str, body: str,
         cc: str | None = None, is_html: bool = False,
         attachments: list[dict] | None = None,
+        file_ids: list[str] | None = None,
         account_label: str | None = None,
     ) -> dict:
         """Send an email via SMTP, SendGrid, Gmail API, or Outlook API.
@@ -268,39 +307,50 @@ def build_email_tools(
         specifies which account to send from (e.g. "Work Gmail").
         Uses the default account if not specified.
 
+        ATTACHMENTS: You may attach files using EITHER:
+          - ``file_ids``: list of file IDs from ``list_uploaded_files()``
+            (preferred — avoids large base64 data in the conversation).
+          - ``attachments``: list of dicts with ``filename``, ``content``
+            (base64), and ``mime_type`` (from ``download_file_for_attachment``).
+
+        If both are provided, both sets of attachments are included.
+
         Args:
             to: Recipient email address.
             subject: Email subject line.
             body: Email body content.
             cc: Optional CC recipient.
             is_html: Set to True if body contains HTML.
-            attachments: Optional list of file attachments. Each entry is
-                        a dict with ``filename``, ``content`` (base64),
-                        and ``mime_type``.
+            attachments: Optional list of file attachment dicts (base64).
+            file_ids: Optional list of uploaded file IDs to attach directly.
             account_label: Connected account label (required when
                           multiple accounts are configured).
 
         Returns:
             A dict with ``to``, ``subject``, ``status``, optionally ``error``.
         """
+        # Resolve file_ids into attachment dicts, then merge with
+        # any base64 attachments provided directly.
+        file_attachments = await _resolve_file_attachments(file_ids)
+        all_attachments = (attachments or []) + file_attachments
         active_cred = _find_credential(user_credentials, account_label)
         if active_cred:
             cp, cd, tk, ce = _parse_credential(active_cred)
             if cp in ("gmail", "google") and tk.get("access_token"):
                 await _ensure_fresh_token(tk, cp, "Email", credential_orm=active_cred, tokens_dict=tk, db=db)
-                result = await _send_via_gmail_api(to, subject, body, cc, is_html, tk.get("access_token", ""), attachments)
+                result = await _send_via_gmail_api(to, subject, body, cc, is_html, tk.get("access_token", ""), all_attachments)
                 if "expired" in result.get("error", "").lower():
                     refreshed = await _maybe_refresh(tk, cp, active_cred)
                     if refreshed:
-                        result = await _send_via_gmail_api(to, subject, body, cc, is_html, tk["access_token"], attachments)
+                        result = await _send_via_gmail_api(to, subject, body, cc, is_html, tk["access_token"], all_attachments)
                 return result
             elif cp in ("outlook", "microsoft") and tk.get("access_token"):
                 await _ensure_fresh_token(tk, cp, "Email", credential_orm=active_cred, tokens_dict=tk, db=db)
-                result = await _send_via_graph_api(to, subject, body, cc, is_html, tk.get("access_token", ""), attachments)
+                result = await _send_via_graph_api(to, subject, body, cc, is_html, tk.get("access_token", ""), all_attachments)
                 if "expired" in result.get("error", "").lower():
                     refreshed = await _maybe_refresh(tk, cp, active_cred)
                     if refreshed:
-                        result = await _send_via_graph_api(to, subject, body, cc, is_html, tk["access_token"], attachments)
+                        result = await _send_via_graph_api(to, subject, body, cc, is_html, tk["access_token"], all_attachments)
                 return result
             elif cd.get("smtp_host"):
                 sender = ce or cd.get("from_email", from_email)
@@ -310,7 +360,7 @@ def build_email_tools(
                     smtp_port=int(cd.get("smtp_port", 587)),
                     smtp_username=cd.get("username", ""),
                     smtp_password=cd.get("password", ""),
-                    cc=cc, is_html=is_html, attachments=attachments,
+                    cc=cc, is_html=is_html, attachments=all_attachments,
                 )
 
         # Fallback to tenant config
@@ -335,7 +385,7 @@ def build_email_tools(
                 smtp_port=int(creds.get("smtp_port", 587)),
                 smtp_username=creds.get("smtp_username", ""),
                 smtp_password=creds.get("smtp_password", ""),
-                cc=cc, is_html=is_html, attachments=attachments,
+                cc=cc, is_html=is_html, attachments=all_attachments,
             )
         elif provider == "sendgrid":
             return await _send_via_sendgrid(
@@ -705,6 +755,7 @@ def build_email_tools(
         email_id: str, body: str,
         reply_all: bool = False,
         attachments: list[dict] | None = None,
+        file_ids: list[str] | None = None,
         account_label: str | None = None,
     ) -> dict:
         """Reply to an existing email.
@@ -713,13 +764,20 @@ def build_email_tools(
         conversation chain). Uses In-Reply-To / References headers
         for SMTP/IMAP, or native threading for Gmail/Outlook.
 
+        ATTACHMENTS: You may attach files using EITHER:
+          - ``file_ids``: list of file IDs from ``list_uploaded_files()``
+            (preferred — avoids large base64 data in the conversation).
+          - ``attachments``: list of dicts with ``filename``, ``content``
+            (base64), and ``mime_type`` (from ``download_file_for_attachment``).
+
+        If both are provided, both sets of attachments are included.
+
         Args:
             email_id: The email's unique ID (from read_emails/search_emails).
             body: Reply body content (plain text).
             reply_all: If True, reply to all recipients instead of just sender.
-            attachments: Optional list of file attachments. Each entry is
-                        a dict with ``filename``, ``content`` (base64),
-                        and ``mime_type``.
+            attachments: Optional list of file attachment dicts (base64).
+            file_ids: Optional list of uploaded file IDs to attach directly.
             account_label: Which account the email is in.
 
         Returns:
@@ -730,6 +788,9 @@ def build_email_tools(
         if not body or not body.strip():
             return {"error": "No reply body provided", "status": "error"}
 
+        file_attachments = await _resolve_file_attachments(file_ids)
+        all_attachments_reply = (attachments or []) + file_attachments
+
         active_cred = _find_credential(user_credentials, account_label)
         if not active_cred:
             return {"error": "No matching email account found", "status": "error"}
@@ -738,19 +799,19 @@ def build_email_tools(
 
         if cp in ("gmail", "google") and tk.get("access_token"):
             await _ensure_fresh_token(tk, cp, "Email", credential_orm=active_cred, tokens_dict=tk, db=db)
-            result = await _reply_via_gmail_api(tk["access_token"], email_id, body.strip(), reply_all, attachments)
+            result = await _reply_via_gmail_api(tk["access_token"], email_id, body.strip(), reply_all, all_attachments_reply)
             if "expired" in result.get("error", "").lower():
                 refreshed = await _maybe_refresh(tk, cp, active_cred)
                 if refreshed:
-                    result = await _reply_via_gmail_api(tk["access_token"], email_id, body.strip(), reply_all, attachments)
+                    result = await _reply_via_gmail_api(tk["access_token"], email_id, body.strip(), reply_all, all_attachments_reply)
             return result
         elif cp in ("outlook", "microsoft") and tk.get("access_token"):
             await _ensure_fresh_token(tk, cp, "Email", credential_orm=active_cred, tokens_dict=tk, db=db)
-            result = await _reply_via_graph_api(tk["access_token"], email_id, body.strip(), reply_all, attachments)
+            result = await _reply_via_graph_api(tk["access_token"], email_id, body.strip(), reply_all, all_attachments_reply)
             if "expired" in result.get("error", "").lower():
                 refreshed = await _maybe_refresh(tk, cp, active_cred)
                 if refreshed:
-                    result = await _reply_via_graph_api(tk["access_token"], email_id, body.strip(), reply_all, attachments)
+                    result = await _reply_via_graph_api(tk["access_token"], email_id, body.strip(), reply_all, all_attachments_reply)
             return result
         elif cd.get("imap_host"):
             return await _reply_via_imap(
@@ -857,11 +918,20 @@ def build_email_tools(
         cc: str | None = None,
         is_html: bool = False,
         attachments: list[dict] | None = None,
+        file_ids: list[str] | None = None,
         account_label: str | None = None,
     ) -> dict:
         """Save an email as a draft without sending.
 
         The draft is saved to the Drafts folder and can be sent later.
+
+        ATTACHMENTS: You may attach files using EITHER:
+          - ``file_ids``: list of file IDs from ``list_uploaded_files()``
+            (preferred — avoids large base64 data in the conversation).
+          - ``attachments``: list of dicts with ``filename``, ``content``
+            (base64), and ``mime_type`` (from ``download_file_for_attachment``).
+
+        If both are provided, both sets of attachments are included.
 
         Args:
             to: Recipient email address.
@@ -869,9 +939,8 @@ def build_email_tools(
             body: Email body content.
             cc: Optional CC recipient.
             is_html: Set to True if body contains HTML.
-            attachments: Optional list of file attachments. Each entry is
-                        a dict with ``filename``, ``content`` (base64),
-                        and ``mime_type``.
+            attachments: Optional list of file attachment dicts (base64).
+            file_ids: Optional list of uploaded file IDs to attach directly.
             account_label: Which account to save the draft with.
 
         Returns:
@@ -882,6 +951,10 @@ def build_email_tools(
         if not subject or not subject.strip():
             return {"error": "No email subject provided", "status": "error"}
         if not body or not body.strip():
+            return {"error": "No email body provided", "status": "error"}
+
+        file_attachments = await _resolve_file_attachments(file_ids)
+        all_attachments_draft = (attachments or []) + file_attachments
             return {"error": "No email body provided", "status": "error"}
 
         active_cred = _find_credential(user_credentials, account_label)
@@ -896,22 +969,22 @@ def build_email_tools(
             if "expired" in result.get("error", "").lower():
                 refreshed = await _maybe_refresh(tk, cp, active_cred)
                 if refreshed:
-                    result = await _save_gmail_draft(tk["access_token"], to.strip(), subject.strip(), body, cc, is_html, attachments)
+                    result = await _save_gmail_draft(tk["access_token"], to.strip(), subject.strip(), body, cc, is_html, all_attachments_draft)
             return result
         elif cp in ("outlook", "microsoft") and tk.get("access_token"):
             await _ensure_fresh_token(tk, cp, "Email", credential_orm=active_cred, tokens_dict=tk, db=db)
-            result = await _save_outlook_draft(tk["access_token"], to.strip(), subject.strip(), body, cc, is_html, attachments)
+            result = await _save_outlook_draft(tk["access_token"], to.strip(), subject.strip(), body, cc, is_html, all_attachments_draft)
             if "expired" in result.get("error", "").lower():
                 refreshed = await _maybe_refresh(tk, cp, active_cred)
                 if refreshed:
-                    result = await _save_outlook_draft(tk["access_token"], to.strip(), subject.strip(), body, cc, is_html, attachments)
+                    result = await _save_outlook_draft(tk["access_token"], to.strip(), subject.strip(), body, cc, is_html, all_attachments_draft)
             return result
         elif cd.get("smtp_host") or cd.get("imap_host"):
             sender = ce or cd.get("from_email", from_email)
             return await _save_imap_draft(
                 cd.get("imap_host", ""), int(cd.get("imap_port", 993)),
                 cd.get("username", ""), cd.get("password", ""),
-                to.strip(), subject.strip(), body, sender, cc, is_html, attachments,
+                to.strip(), subject.strip(), body, sender, cc, is_html, all_attachments_draft,
             )
         return {"error": "This account does not support saving drafts.", "status": "error"}
 

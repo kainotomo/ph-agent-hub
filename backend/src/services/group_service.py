@@ -127,9 +127,10 @@ async def add_member(
             UserGroupMember.user_id == user_id,
         )
     )
-    if existing.scalar_one_or_none() is not None:
+    member = existing.scalar_one_or_none()
+    if member is not None:
         # Already a member — return existing
-        return existing.scalar_one()
+        return member
 
     member = UserGroupMember(user_id=user_id, group_id=group_id)
     db.add(member)
@@ -208,8 +209,9 @@ async def assign_model_to_group(
             ModelGroup.model_id == model_id,
         )
     )
-    if existing.scalar_one_or_none() is not None:
-        return existing.scalar_one()
+    assignment = existing.scalar_one_or_none()
+    if assignment is not None:
+        return assignment
 
     mg = ModelGroup(model_id=model_id, group_id=group_id)
     db.add(mg)
@@ -288,8 +290,9 @@ async def assign_tool_to_group(
             ToolGroup.tool_id == tool_id,
         )
     )
-    if existing.scalar_one_or_none() is not None:
-        return existing.scalar_one()
+    assignment = existing.scalar_one_or_none()
+    if assignment is not None:
+        return assignment
 
     tg = ToolGroup(tool_id=tool_id, group_id=group_id)
     db.add(tg)

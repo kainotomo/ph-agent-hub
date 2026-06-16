@@ -144,6 +144,9 @@ async def update_skill(
     if skill.user_id != current_user.id:
         raise ForbiddenError("Only the skill owner can modify this skill")
 
+    if skill.tenant_id != current_user.tenant_id:
+        raise ForbiddenError("Cannot modify a skill from a different tenant")
+
     update_kwargs: dict = {}
     for field in (
         "title", "description", "execution_type", "maf_target_key",
@@ -176,5 +179,8 @@ async def delete_skill(
 
     if skill.user_id != current_user.id:
         raise ForbiddenError("Only the skill owner can delete this skill")
+
+    if skill.tenant_id != current_user.tenant_id:
+        raise ForbiddenError("Cannot delete a skill from a different tenant")
 
     await _svc_delete_skill(db, skill_id)

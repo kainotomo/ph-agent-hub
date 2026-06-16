@@ -55,8 +55,12 @@ async def list_prompts(
     db: AsyncSession = Depends(get_db),
     current_user: UserORM = Depends(get_current_user),
 ):
-    """Return all prompts owned by the current user."""
-    prompts = await _svc_list_prompts(db, user_id=current_user.id)
+    """Return all prompts owned by the current user within their tenant."""
+    prompts = await _svc_list_prompts(
+        db,
+        user_id=current_user.id,
+        tenant_id=current_user.tenant_id,
+    )
     return [PromptResponse.model_validate(p) for p in prompts]
 
 
@@ -94,6 +98,9 @@ async def update_prompt(
     if prompt.user_id != current_user.id:
         raise ForbiddenError("Only the prompt owner can modify this prompt")
 
+    if prompt.tenant_id != current_user.tenant_id:
+        raise ForbiddenError("Cannot modify a prompt from a different tenant")
+
     update_kwargs: dict = {}
     if body.title is not None:
         update_kwargs["title"] = body.title
@@ -121,5 +128,8 @@ async def delete_prompt(
 
     if prompt.user_id != current_user.id:
         raise ForbiddenError("Only the prompt owner can delete this prompt")
+
+    if prompt.tenant_id != current_user.tenant_id:
+        raise ForbiddenError("Cannot delete a prompt from a different tenant")
 
     await _svc_delete_prompt(db, prompt_id)

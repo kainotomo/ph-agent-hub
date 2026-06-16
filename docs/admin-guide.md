@@ -91,6 +91,24 @@ A tenant can only be deleted if it has no users. Remove or reassign all users fi
 - Users in Tenant A cannot see or access Tenant B's models, tools, sessions, or data
 - Managers are scoped to their own tenant — they cannot create tenants or see cross-tenant data
 - Admins have full visibility across all tenants
+- Cross-tenant group member addition and model/tool assignment are explicitly blocked
+
+#### Verifying Tenant Isolation
+
+Run the tenant isolation test suite to verify separation is working correctly:
+
+```bash
+pytest backend/tests/ -m tenant_isolation -v
+```
+
+These tests verify:
+- Cross-tenant data access is blocked for sessions, memories, prompts, and skills
+- Cross-tenant group member addition raises `ForbiddenError`
+- Cross-tenant model/tool assignment raises `ForbiddenError`
+- Guest tokens are scoped to their correct tenant
+- Embed configs are isolated per tenant
+
+See [security-testing.md](security-testing.md) for the full test suite documentation.
 
 ### 3.4 Demo Tenant
 

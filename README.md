@@ -91,6 +91,23 @@ docker compose exec backend pytest /app/tests/ -m "not e2e"
 
 A CI pipeline runs on every pull request to `main` — see `.github/workflows/ci.yml`.
 
+### Security & Tenant Isolation Tests
+
+Security-focused tests validate authentication, authorization, tenant isolation, OAuth integrity, and rate limiting:
+
+```bash
+# Run security tests only
+pytest backend/tests/ -m "security" -v
+
+# Run tenant isolation tests only
+pytest backend/tests/ -m "tenant_isolation" -v
+
+# Run both
+pytest backend/tests/ -m "security or tenant_isolation" -v
+```
+
+See [docs/security-testing.md](docs/security-testing.md) for the full test suite reference.
+
 ## Who It Is For
 
 - Teams building tenant-aware AI SaaS or internal multi-business-unit copilots

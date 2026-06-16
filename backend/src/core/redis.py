@@ -201,3 +201,53 @@ async def get_follow_up_questions(session_id: str) -> list[str] | None:
     if raw is None:
         return None
     return json.loads(raw)
+
+
+# ---------------------------------------------------------------------------
+# OAuth state helpers — server-side nonce store for OAuth state integrity
+# (Issue #345).  State values are single-use and auto-expire.
+# ---------------------------------------------------------------------------
+OAUTH_STATE_PREFIX = "oauth_state:"
+OAUTH_STATE_TTL = 600  # 10 minutes
+
+
+async def store_oauth_state(
+    nonce: str,
+    user_id: str,
+    tool_id: str,
+    ttl: int = OAUTH_STATE_TTL,
+) -> None:
+    """Store an OAuth state nonce in Redis with a TTL.
+
+    Args:
+        nonce: A random UUID v4 — the ``state`` parameter sent to the OAuth provider.
+        user_id: The authenticated user who initiated the OAuth flow.
+        tool_id: The tool type being connected (e.g. ``email_tool``).
+        ttl: TTL in seconds (default 600 = 10 minutes).
+    """
+    import json
+    import time
+
+    r = await get_redis()
+    payload = json.dumps({
+        "user_id": user_id,
+        "tool_id": tool_id,
+        "created_at": time.time(),
+    })
+    await r.setex(f"{OAUTH_STATE_PREFIX}{nonce}", ttl, payload)
+
+
+async def get_oauth_state(nonce: str) -> dict | None:
+    """Retrieve and **delete** an OAuth state nonce (atomic get-delete).
+
+    Returns the parsed payload dict on first retrieval, or ``None`` if the
+    key does not exist (unknown, expired, or already consumed — one-time use).
+    """
+    import json
+
+    r = await get_redis()
+    key = f"{OAUTH_STATE_PREFIX}{nonce}"
+    raw = await r.getdel(key)
+    if raw is None:
+        return None
+    return json.loads(raw)

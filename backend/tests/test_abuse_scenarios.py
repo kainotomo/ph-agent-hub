@@ -112,3 +112,99 @@ class TestTokenReplay:
             headers={"Authorization": f"Bearer {expired}"},
         )
         assert response.status_code == 401
+
+
+class TestOAuthStateAbuse:
+    """Verify OAuth state integrity protections against abuse (Issue #345).
+
+    Ensures forged, replayed, SQL-injected, and XSS-injected state values
+    are rejected rather than silently accepted or causing server errors.
+    """
+
+    async def test_sql_injection_in_oauth_state_rejected(
+        self, async_client,
+    ):
+        """Verify SQL injection in the state parameter returns 422, not 500."""
+        payloads = [
+            "' OR '1'='1",
+            "'; DROP TABLE users; --",
+            "' UNION SELECT * FROM users --",
+            "1:email_tool:'; DROP TABLE users; --",
+        ]
+        for payload in payloads:
+            resp = await async_client.get(
+                "/api/credentials/oauth/google/callback",
+                params={"code": "abc", "state": payload},
+            )
+            assert resp.status_code == 422, (
+                f"SQL injection in state '{payload}' returned {resp.status_code}"
+            )
+
+    async def test_xss_in_oauth_state_rejected(
+        self, async_client,
+    ):
+        """Verify XSS in the state parameter returns 422 (not reflected)."""
+        xss_payloads = [
+            "<script>alert('xss')</script>",
+            "<img src=x onerror=alert(1)>",
+            "javascript:alert('xss')",
+        ]
+        for payload in xss_payloads:
+            resp = await async_client.get(
+                "/api/credentials/oauth/google/callback",
+                params={"code": "abc", "state": payload},
+            )
+            assert resp.status_code == 422, (
+                f"XSS in state '{payload}' returned {resp.status_code}"
+            )
+            # Ensure the payload is NOT reflected in the response body
+            body = resp.text
+            assert "<script>" not in body
+            assert "alert" not in body
+
+    async def test_replayed_oauth_state_rejected(
+        self, async_client, test_user, test_tenant, test_tool,
+    ):
+        """Verify a consumed OAuth state cannot be replayed."""
+        from unittest.mock import patch
+        from src.core.redis import store_oauth_state
+
+        nonce = "abuse-replay-nonce"
+        await store_oauth_state(nonce, test_user.id, "email_tool", ttl=300)
+
+        mock_tokens = {
+            "access_token": "ya29.mock",
+            "refresh_token": "1//mock",
+            "expires_at": 9999999999,
+            "scope": "https://www.googleapis.com/auth/gmail.modify",
+            "token_type": "Bearer",
+            "id_token": "header.payload.sig",
+        }
+
+        with patch(
+            "src.core.oauth.exchange_google_code",
+            return_value=mock_tokens,
+        ):
+            # First use — should succeed
+            resp1 = await async_client.get(
+                "/api/credentials/oauth/google/callback",
+                params={"code": "code-1", "state": nonce},
+            )
+            assert resp1.status_code == 302, resp1.text
+
+            # Second use with same state — should be rejected
+            resp2 = await async_client.get(
+                "/api/credentials/oauth/google/callback",
+                params={"code": "code-2", "state": nonce},
+            )
+            assert resp2.status_code == 422, resp2.text
+
+    async def test_empty_oauth_state_rejected(
+        self, async_client,
+    ):
+        """Verify empty/missing state returns 422."""
+        resp = await async_client.get(
+            "/api/credentials/oauth/google/callback",
+            params={"code": "abc"},
+        )
+        assert resp.status_code == 422, resp.text

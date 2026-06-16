@@ -40,6 +40,7 @@ pytest backend/tests/ -m "not security and not tenant_isolation"
 | `test_tenant_isolation_api.py` | integration | API-layer cross-tenant access prevention |
 | `test_embed_isolation.py` | integration | Embed widget guest token tenant binding and config scoping |
 | `test_oauth.py` | unit | Google and Microsoft OAuth code exchange and token refresh |
+| `test_oauth_state.py` | unit | OAuth state nonce store: store/retrieve, one-time use, TTL expiry, concurrent retrieval |
 | `test_credential_security.py` | integration | Credential ownership enforcement and encryption-at-rest |
 | `test_rate_limiter.py` | integration | Rate limiting on login and other endpoints |
 | `test_abuse_scenarios.py` | integration | Forged tokens, SQL injection, XSS, token replay |
@@ -82,6 +83,12 @@ Security tests automatically run on every pull request via GitHub Actions. See `
 - PKCE support for OAuth flows (no tests yet — feature not implemented)
 - Security headers (X-Frame-Options, CSP) — no enforcement yet
 - Distributed rate limiting (currently in-memory only)
+
+## Resolved Gaps
+
+| Gap | Fix | Validated By |
+|-----|-----|-------------|
+| OAuth state integrity: state was plaintext, unsigned, non-expiring, replayable | Replaced with Redis-backed nonce store — tamper-evident, 10-min TTL, single-use (Issue #345) | `test_oauth_state.py`, `test_credentials_api.py::TestOAuthStateIntegrity`, `test_abuse_scenarios.py::TestOAuthStateAbuse` |
 
 ### Previously Identified Gaps — Now Fixed
 

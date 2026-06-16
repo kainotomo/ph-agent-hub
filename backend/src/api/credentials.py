@@ -304,8 +304,11 @@ async def google_oauth_url(
     redirect_uri = f"{settings.API_BASE_URL}/api/credentials/oauth/google/callback"
     scopes = _google_scopes_for_tool(tool_id)
 
+    from ..core.redis import store_oauth_state
+
     import uuid
-    state = f"{current_user.id}:{tool_id}:{uuid.uuid4().hex[:8]}"
+    nonce = str(uuid.uuid4())
+    await store_oauth_state(nonce, current_user.id, tool_id)
 
     params = {
         "client_id": client_id,
@@ -314,13 +317,13 @@ async def google_oauth_url(
         "scope": " ".join(scopes),
         "access_type": "offline",
         "prompt": "consent",
-        "state": state,
+        "state": nonce,
     }
 
     from urllib.parse import urlencode
     url = f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
 
-    return OAuthUrlResponse(url=url, state=state)
+    return OAuthUrlResponse(url=url, state=nonce)
 
 
 @router.get("/oauth/microsoft/url", response_model=OAuthUrlResponse)
@@ -341,8 +344,11 @@ async def microsoft_oauth_url(
     redirect_uri = f"{settings.API_BASE_URL}/api/credentials/oauth/microsoft/callback"
     scopes = _microsoft_scopes_for_tool(tool_id)
 
+    from ..core.redis import store_oauth_state
+
     import uuid
-    state = f"{current_user.id}:{tool_id}:{uuid.uuid4().hex[:8]}"
+    nonce = str(uuid.uuid4())
+    await store_oauth_state(nonce, current_user.id, tool_id)
 
     params = {
         "client_id": client_id,
@@ -350,13 +356,13 @@ async def microsoft_oauth_url(
         "response_type": "code",
         "scope": " ".join(scopes),
         "response_mode": "query",
-        "state": state,
+        "state": nonce,
     }
 
     from urllib.parse import urlencode
     url = f"https://login.microsoftonline.com/common/oauth2/v2.0/authorize?{urlencode(params)}"
 
-    return OAuthUrlResponse(url=url, state=state)
+    return OAuthUrlResponse(url=url, state=nonce)
 
 
 # =============================================================================
@@ -373,11 +379,16 @@ async def google_oauth_callback(
     """Handle Google OAuth redirect. Exchange code for tokens, store credential."""
     from ..core.config import settings
     from ..core.oauth import exchange_google_code
+    from ..core.redis import get_oauth_state
 
-    try:
-        user_id, tool_id = state.split(":")[:2]
-    except (ValueError, IndexError):
-        raise ValidationError("Invalid OAuth state parameter")
+    state_data = await get_oauth_state(state)
+    if state_data is None:
+        raise ValidationError(
+            "Invalid or expired OAuth state. "
+            "Please try connecting your account again."
+        )
+    user_id = state_data["user_id"]
+    tool_id = state_data["tool_id"]
 
     redirect_uri = f"{settings.API_BASE_URL}/api/credentials/oauth/google/callback"
 
@@ -464,11 +475,16 @@ async def microsoft_oauth_callback(
     """Handle Microsoft OAuth redirect. Exchange code for tokens, store credential."""
     from ..core.config import settings
     from ..core.oauth import exchange_microsoft_code
+    from ..core.redis import get_oauth_state
 
-    try:
-        user_id, tool_id = state.split(":")[:2]
-    except (ValueError, IndexError):
-        raise ValidationError("Invalid OAuth state parameter")
+    state_data = await get_oauth_state(state)
+    if state_data is None:
+        raise ValidationError(
+            "Invalid or expired OAuth state. "
+            "Please try connecting your account again."
+        )
+    user_id = state_data["user_id"]
+    tool_id = state_data["tool_id"]
 
     redirect_uri = f"{settings.API_BASE_URL}/api/credentials/oauth/microsoft/callback"
 

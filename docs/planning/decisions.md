@@ -122,3 +122,13 @@ A log of key design decisions made during the design phase, with rationale. Orde
 **Rationale:** For a self-hosted platform where users upload dozens to hundreds of documents (not millions), MariaDB JSON with in-application cosine similarity is fast enough. Loading all embeddings for a tenant (even 10,000 chunks × 256-dim = ~20 MB) and computing similarity in Python completes in milliseconds. This avoids adding Qdrant or another Docker service, saving RAM, disk, and operational complexity. The `embedding_json` column is a drop-in replacement — swapping to a vector DB in the future requires only changing the search backend in `rag_service.py`, with zero changes to the ingestion pipeline or data model.
 **Alternatives considered:** Qdrant (deferred — infrastructure cost not justified by current scale), pgvector (not applicable — MariaDB, not PostgreSQL).
 **Reference:** [data-model.md](../data-model.md) §4.2
+
+---
+
+## D-13 — Server-side OAuth state nonce store (Redis)
+
+**Date:** 2026-06-16
+**Decision:** OAuth state parameters are stored as server-side nonces in Redis using `SETEX` and consumed atomically via `GETDEL`. The nonce is a random UUID v4 — no user/tool information is embedded in the plaintext state parameter. Each nonce has a 10-minute TTL and is single-use (deleted on first callback consumption).
+**Rationale:** The previous state format (`user_id:tool_id:8-char-hex`) was unsigned, non-expiring, and replayable. An attacker could forge or replay state to bind credentials to the wrong user context. A Redis-backed nonce store provides tamper evidence (no embedded info), automatic expiry (TTL), and one-time use (atomic GETDEL) without introducing new cryptographic primitives or infrastructure. The codebase already uses Redis for session storage, rate limiting, and JTI denylist — this follows the same established patterns.
+**Alternatives considered:** Fernet-signed state (replayable within TTL without server-side tracking; still requires server-side nonce to enforce one-time use), local in-memory dict (lost on reload, not shared across workers).
+**Reference:** `backend/src/core/redis.py` (`store_oauth_state`, `get_oauth_state`), [Issue #345](https://github.com/kainotomo/ph-agent-hub/issues/345)

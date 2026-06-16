@@ -112,7 +112,7 @@ export function SessionToolActivation({
 
   const alwaysOnSet = new Set(alwaysOnIds || []);
   const activeIds = isPending
-    ? new Set(pendingActiveToolIds)
+    ? new Set([...pendingActiveToolIds, ...(alwaysOnIds || [])])
     : new Set((activeTools || []).map((t) => t.id));
 
   // Fetch the selected skill's tool IDs (for "from skill" badge)

@@ -29,6 +29,7 @@ import {
   deleteMessage,
   finalizeSession,
   updateAssistantMessage,
+  listAlwaysOnTools,
 } from "../services/chat";
 import { getDemoMessages } from "../services/demo";
 import { getWidgetMessages } from "../services/widget";
@@ -237,6 +238,23 @@ export function ChatWindow({
       removeDraft(FILES_PREFIX + sessionId);
     }
   }, [isPending, sessionId]);
+
+  // ---- Initialize pending active tools with always-on tools -------------
+  // For pending (lazy) sessions, pre-populate the tool activation list
+  // with the user's always-on tools so they appear selected in the UI
+  // before the first message is sent.
+  const { data: alwaysOnIds } = useQuery({
+    queryKey: ["always-on-tools"],
+    queryFn: listAlwaysOnTools,
+    enabled: pendingFlag,
+  });
+  const alwaysOnInitialized = useRef(false);
+  useEffect(() => {
+    if (pendingFlag && alwaysOnIds && alwaysOnIds.length > 0 && !alwaysOnInitialized.current) {
+      setPendActiveToolIds(alwaysOnIds);
+      alwaysOnInitialized.current = true;
+    }
+  }, [pendingFlag, alwaysOnIds]);
 
   // Intercept settings changes when pending — store locally instead of
   // calling onSessionUpdate (which would 404 since the session doesn't exist).

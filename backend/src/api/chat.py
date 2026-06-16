@@ -1324,14 +1324,21 @@ async def _stream_with_heartbeat(
                     break
                 yield event_dict
             else:
-                # Heartbeat — inner task is still running, do NOT cancel it
-                yield {"event": "heartbeat", "data": "{}"}
-                # Wait for the inner task to complete, then yield its result
-                try:
-                    event_dict = await anext_task
-                except StopAsyncIteration:
-                    break
-                yield event_dict
+                # Heartbeat — inner task is still running, do NOT cancel it.
+                # Loop sending heartbeats until the inner task completes
+                # so the connection stays alive even during long tool calls.
+                while True:
+                    yield {"event": "heartbeat", "data": "{}"}
+                    done2, _pending2 = await asyncio.wait(
+                        [anext_task], timeout=interval
+                    )
+                    if done2:
+                        try:
+                            event_dict = await anext_task
+                        except StopAsyncIteration:
+                            return  # break out of outer loop too
+                        yield event_dict
+                        break  # back to outer loop for next event
         except StopAsyncIteration:
             break
 

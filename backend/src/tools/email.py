@@ -965,8 +965,10 @@ async def _send_via_smtp(
             server.send_message(msg)
             server.quit()
 
-        await asyncio.to_thread(_send)
+        await asyncio.wait_for(asyncio.to_thread(_send), timeout=120.0)
         return {"to": to, "subject": subject, "status": "ok", "provider": "smtp"}
+    except asyncio.TimeoutError:
+        return {"error": "SMTP send timed out after 120 seconds (file may be too large).", "status": "error"}
     except smtplib.SMTPAuthenticationError:
         return {"error": "SMTP auth failed.", "status": "error"}
     except smtplib.SMTPException as exc:

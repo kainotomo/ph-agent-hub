@@ -177,6 +177,10 @@ Key variables:
 | `LICENSE_PUBLIC_KEY` | Ed25519 public key for Pro license verification (base64, 32 bytes). Leave empty to disable. |
 | `EMBED_GUEST_TOKEN_SECRET` | Separate JWT secret for guest (widget) tokens. Generate with `python -c "import secrets; print(secrets.token_hex(32))"`. Required for the embeddable chat widget. |
 | `WIDGET_ALLOWED_ORIGINS` | Additional origins allowed to embed the widget in an iframe (CSP `frame-ancestors`). Space-separated, e.g. `https://kainotomo.com`. `'self'` is always included. |
+| `WIDGET_CONFIG_LIMIT` | Per-IP rate limit for `GET /widget/config/{token}` (default: `"30/hour"`) |
+| `WIDGET_MESSAGE_LIMIT` | Per-guest message rate limit for `POST /widget/session/message`, short window (default: `"20/minute"`) |
+| `WIDGET_TOTAL_MESSAGE_LIMIT` | Per-guest total message rate limit for `POST /widget/session/message`, long window (default: `"100/hour"`) |
+| `WIDGET_SESSION_READ_LIMIT` | Per-guest read rate limit for `GET /widget/session`, `GET /widget/session/messages`, and `DELETE /widget/session/stream` (default: `"60/minute"`) |
 
 **Important:** `infrastructure/env` is in `.gitignore` — keep secrets out of version control.
 

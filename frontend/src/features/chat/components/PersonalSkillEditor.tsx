@@ -30,6 +30,14 @@ import api from "../../../services/api";
 const { TextArea } = Input;
 const { Text } = Typography;
 
+interface PaginatedResponse<T> {
+  items: T[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}
+
 interface SkillData {
   id: string;
   tenant_id: string;
@@ -65,7 +73,7 @@ export function PersonalSkillEditor({
 
   const { data: skills, isLoading } = useQuery({
     queryKey: ["skills"],
-    queryFn: () => api<SkillData[]>("/skills"),
+    queryFn: () => api<PaginatedResponse<SkillData>>("/skills"),
     enabled: open,
   });
 
@@ -75,7 +83,7 @@ export function PersonalSkillEditor({
     enabled: open,
   });
 
-  const personalSkills = (skills || []).filter((s) => s.user_id !== null);
+  const personalSkills = (skills?.items || []).filter((s) => s.user_id !== null);
 
   const createMutation = useMutation({
     mutationFn: (data: Record<string, unknown>) =>

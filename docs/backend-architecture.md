@@ -196,7 +196,7 @@ GET  /prompts
 POST /prompts
 PUT  /prompts/:id
 DELETE /prompts/:id
-GET  /skills
+GET  /skills          (supports ?page=&page_size=&search=&sort_by=&sort_dir=)
 POST /skills
 PUT  /skills/:id
 DELETE /skills/:id

@@ -143,6 +143,38 @@ class TestSkillAPIIsolation:
         )
         assert response.status_code == 403
 
+    async def test_cross_tenant_skills_list_pagination_enforces_isolation(
+        self, async_client, db_session, test_tenant, test_user, second_user
+    ):
+        """Paginated skills list only shows skills from the user's tenant."""
+        # Create a skill in tenant A (test_user's tenant)
+        from src.db.orm.skills import Skill
+
+        tenant_a_skill = Skill(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=None,
+            title="Tenant A Shared Skill",
+            execution_type="agent",
+            visibility="tenant",
+        )
+        db_session.add(tenant_a_skill)
+        await db_session.flush()
+
+        # Second user (different tenant) should NOT see tenant A's skill
+        token = create_access_token({
+            "sub": second_user.id,
+            "tenant_id": second_user.tenant_id,
+            "role": second_user.role,
+        })
+        headers = {"Authorization": f"Bearer {token}"}
+
+        response = await async_client.get("/api/skills", headers=headers)
+        assert response.status_code == 200
+        data = response.json()
+        titles = [item["title"] for item in data["items"]]
+        assert "Tenant A Shared Skill" not in titles
+
 
 class TestManagerTenantScoping:
     """Verify manager role is scoped to own tenant."""

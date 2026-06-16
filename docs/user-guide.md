@@ -157,6 +157,8 @@ There are two types of skills:
 
 Tenant skills (created by admins) are available to everyone in your tenant. You can view and select them but cannot edit or delete them.
 
+The skills list supports search and pagination — if you have many skills, use the search box to find specific ones quickly.
+
 ---
 
 ## 6. Tools

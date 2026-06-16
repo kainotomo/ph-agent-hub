@@ -4,18 +4,20 @@
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.dependencies import get_current_user, get_db
 from ..core.exceptions import ForbiddenError, NotFoundError
+from ..core.pagination import PaginatedResponse
 from ..db.orm.users import User as UserORM
 from ..services.skill_service import (
     create_skill as _svc_create_skill,
     delete_skill as _svc_delete_skill,
     get_skill_by_id,
     list_skill_tools as _svc_list_skill_tools,
+    list_skill_tools_batch as _svc_list_skill_tools_batch,
     list_skills as _svc_list_skills,
     update_skill as _svc_update_skill,
 )
@@ -76,26 +78,50 @@ class SkillResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
-@router.get("", response_model=list[SkillResponse])
+@router.get("", response_model=PaginatedResponse[SkillResponse])
 async def list_skills(
+    search: str | None = None,
+    sort_by: str | None = None,
+    sort_dir: str | None = None,
+    page: int = Query(1, ge=1, description="Page number (1-indexed)"),
+    page_size: int = Query(25, ge=1, le=100, description="Items per page"),
     db: AsyncSession = Depends(get_db),
     current_user: UserORM = Depends(get_current_user),
 ):
-    """Return tenant-shared skills + user's own personal skills."""
-    skills, _ = await _svc_list_skills(
+    """Return tenant-shared skills + user's own personal skills.
+
+    Supports pagination (page, page_size), sorting (sort_by, sort_dir),
+    and search (search) parameters.
+    """
+    skills, total = await _svc_list_skills(
         db,
         tenant_id=current_user.tenant_id,
         user_id=current_user.id,
+        search=search,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        page=page,
+        page_size=page_size,
     )
+
+    # Batch-fetch tool mappings for all returned skills
+    skill_ids = [s.id for s in skills]
+    tool_map = await _svc_list_skill_tools_batch(db, skill_ids)
 
     result: list[SkillResponse] = []
     for s in skills:
-        tools = await _svc_list_skill_tools(db, s.id)
         resp = SkillResponse.model_validate(s)
-        resp.tool_ids = [t.tool_id for t in tools]
+        resp.tool_ids = tool_map.get(s.id, [])
         result.append(resp)
 
-    return result
+    total_pages = max(1, -(-total // page_size))
+    return PaginatedResponse(
+        items=result,
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages,
+    )
 
 
 @router.post("", response_model=SkillResponse, status_code=201)

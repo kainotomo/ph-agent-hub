@@ -25,7 +25,7 @@ env:
   REDIS_URL: redis://localhost:6379/0
 
   # ── MinIO (dummy values — no tests touch MinIO directly) ────────────────
-  MINIO_ENDPOINT: localhost:9000
+  MINIO_ENDPOINT: http://localhost:9000
   MINIO_ACCESS_KEY: minioaccess
   MINIO_SECRET_KEY: miniosecret
   MINIO_BUCKET_PREFIX: phub-ci

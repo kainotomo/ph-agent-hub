@@ -31,6 +31,7 @@ This folder contains role-based and architecture-focused documentation for PH Ag
 3. [frontend-architecture.md](frontend-architecture.md)
 4. [agent-framework-integration.md](agent-framework-integration.md)
 5. [security-testing.md](security-testing.md) — security test suite reference
+6. [testing-guide.md](testing-guide.md) — full test suite guide and patterns
 
 ## Full Index
 
@@ -44,4 +45,5 @@ This folder contains role-based and architecture-focused documentation for PH Ag
 - [embed-widget.md](embed-widget.md)
 - [frontend-architecture.md](frontend-architecture.md)
 - [security-testing.md](security-testing.md)
+- [testing-guide.md](testing-guide.md)
 - [user-guide.md](user-guide.md)

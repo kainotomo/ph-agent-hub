@@ -25,7 +25,7 @@ env:
   REDIS_URL: redis://localhost:6379/0
 
   # ── MinIO (dummy values — no tests touch MinIO directly) ────────────────
-  MINIO_ENDPOINT: localhost:9000
+  MINIO_ENDPOINT: http://localhost:9000
   MINIO_ACCESS_KEY: minioaccess
   MINIO_SECRET_KEY: miniosecret
   MINIO_BUCKET_PREFIX: phub-ci
@@ -69,6 +69,20 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
+      minio:
+        image: minio/minio:latest
+        command: server /data
+        env:
+          MINIO_ROOT_USER: minioaccess
+          MINIO_ROOT_PASSWORD: miniosecret
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -95,16 +109,18 @@ jobs:
           cd backend
           alembic upgrade heads
 
-      - name: Run tests (excluding e2e and slow)
+      - name: Run tests (Tier 1 — unit + integration with coverage)
         env:
           ENCRYPTION_KEY: ${{ steps.gen-key.outputs.fernet }}
         run: |
           cd backend
           pytest tests/ \
             -m "not e2e and not slow" \
-            --cov=src \
+            --cov=src/services \
+            --cov=src/api \
             --cov-report=term \
-            --cov-report=xml
+            --cov-report=xml \
+            --cov-fail-under=30
 
       - name: Upload coverage to summary
         if: always()
@@ -121,6 +137,110 @@ jobs:
     name: Security Tests
     runs-on: ubuntu-latest
     needs: [backend-tests]
+
+    services:
+      mariadb:
+        image: mariadb:11
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: phagent_hub
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      minio:
+        image: minio/minio:latest
+        command: server /data
+        env:
+          MINIO_ROOT_USER: minioaccess
+          MINIO_ROOT_PASSWORD: miniosecret
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+
+      - name: Generate Fernet key for encryption module
+        id: gen-key
+        run: |
+          echo "fernet=$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')" >> $GITHUB_OUTPUT
+
+      - name: Run database migrations
+        env:
+          ENCRYPTION_KEY: ${{ steps.gen-key.outputs.fernet }}
+        run: |
+          cd backend
+          alembic upgrade heads
+
+      - name: Run security, isolation, and regression tests (Tier 2)
+        env:
+          ENCRYPTION_KEY: ${{ steps.gen-key.outputs.fernet }}
+        run: |
+          cd backend
+          pytest tests/ -m "security or tenant_isolation or regression" -v
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Frontend: install deps → type-check → build
+  # ──────────────────────────────────────────────────────────────────────────
+  frontend-build:
+    name: Frontend Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install
+        working-directory: frontend
+
+      - name: Type-check and build
+        run: npm run build
+        working-directory: frontend
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # E2E Tests (Tier 3) — runs on merge to main only
+  # Requires full Docker Compose stack (MariaDB + Redis + MinIO)
+  # ──────────────────────────────────────────────────────────────────────────
+  e2e-tests:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     services:
       mariadb:
@@ -172,33 +292,10 @@ jobs:
           cd backend
           alembic upgrade heads
 
-      - name: Run security and tenant isolation tests
+      - name: Run E2E tests (Tier 3)
         env:
           ENCRYPTION_KEY: ${{ steps.gen-key.outputs.fernet }}
+          E2E_DATABASE_URL: mysql+aiomysql://root:root@127.0.0.1:3306/phagent_hub?charset=utf8mb4
         run: |
           cd backend
-          pytest tests/ -m "security or tenant_isolation" -v
-
-  # ──────────────────────────────────────────────────────────────────────────
-  # Frontend: install deps → type-check → build
-  # ──────────────────────────────────────────────────────────────────────────
-  frontend-build:
-    name: Frontend Build
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install dependencies
-        run: npm install
-        working-directory: frontend
-
-      - name: Type-check and build
-        run: npm run build
-        working-directory: frontend
+          pytest tests/ -m "e2e" -v

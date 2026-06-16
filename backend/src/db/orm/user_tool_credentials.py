@@ -29,6 +29,10 @@ class UserToolCredential(Base):
     id: Mapped[str] = mapped_column(
         CHAR(36), primary_key=True, default=lambda: str(uuid.uuid4())
     )
+    tenant_id: Mapped[str] = mapped_column(
+        CHAR(36), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False,
+        comment="Tenant scope for tenant-isolation filtering",
+    )
     user_id: Mapped[str] = mapped_column(
         CHAR(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )

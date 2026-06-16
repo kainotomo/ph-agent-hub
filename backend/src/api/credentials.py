@@ -203,6 +203,7 @@ async def create_credential(
     cred = await _svc_create_credential(
         db,
         user_id=current_user.id,
+        tenant_id=current_user.tenant_id,
         tool_id=body.tool_id,
         label=body.label,
         provider=body.provider,
@@ -431,6 +432,7 @@ async def google_oauth_callback(
     cred = await _svc_create_credential(
         db,
         user_id=user_id,
+        tenant_id=user.tenant_id,
         tool_id=tool.id,
         label=f"Google ({email or 'Gmail'})",
         provider="gmail" if "gmail" in (tokens.get("scope", "") or "") else "google",
@@ -512,6 +514,7 @@ async def microsoft_oauth_callback(
     cred = await _svc_create_credential(
         db,
         user_id=user_id,
+        tenant_id=user.tenant_id,
         tool_id=tool.id,
         label=f"Outlook ({email or 'Outlook'})",
         provider="outlook",

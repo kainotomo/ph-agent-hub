@@ -1,52 +1,81 @@
-"""Quick E2E test for RAG."""
-import asyncio, os, sys, uuid, warnings
-warnings.filterwarnings("ignore")
-sys.path.insert(0, "/app")
-os.environ["DATABASE_URL"] = "mysql+aiomysql://phagent:pRep5v3Nzw_aMMV@mariadb:3306/phagent_hub?charset=utf8mb4"
+"""E2E test for the RAG pipeline (indexing → search → deletion).
 
-async def e2e():
-    from src.db.base import AsyncSessionLocal
-    from src.db.orm.file_uploads import FileUpload
-    from src.db.orm.rag import RAGDocument
-    from src.db.orm.users import User
-    from src.db.orm.tenants import Tenant
-    from src.services.rag_service import index_document, search_documents, delete_document
-    from sqlalchemy import select
-    from unittest.mock import patch
+Prerequisites:
+- Docker stack is running (docker compose up -d)
+- Alembic migrations are up to date
 
-    async with AsyncSessionLocal() as db:
-        t = (await db.execute(select(Tenant).limit(1))).scalar_one()
-        u = (await db.execute(select(User).limit(1))).scalar_one()
-        print(f"1/8 tenant={t.name}")
+Usage:
+    pytest backend/tests/e2e_rag.py -v
+"""
 
-        fid = str(uuid.uuid4())
-        up = FileUpload(id=fid, tenant_id=t.id, user_id=u.id,
-            original_filename="e2e.txt", content_type="text/plain",
-            size_bytes=100, storage_key=f"t/{fid}.txt", bucket=f"phub-{t.id}",
-            extracted_text="Python programming language for AI and data science.")
-        db.add(up)
-        await db.flush()
-        print("2/8 FileUpload created")
+import os
+import uuid
+import warnings
+from unittest.mock import patch
 
-        c = await index_document(db, up)
-        print(f"3/8 Indexed {c} chunks")
+import pytest
 
-        rows = (await db.execute(select(RAGDocument).where(RAGDocument.file_id == fid))).scalars().all()
-        print(f"4/8 DB rows={len(rows)} all_embeddings={all(r.embedding_json for r in rows)}")
+pytestmark = [
+    pytest.mark.e2e,
+]
 
-        async def me(t, **kw): return [[0.1]*256 for _ in t]
-        with patch("src.services.rag_service._get_embeddings", me):
-            r = await search_documents(db, "Python", tenant_id=t.id)
-        print(f"5/8 Search results={len(r)}")
+# Ensure the DB URL points to the Docker stack
+os.environ.setdefault(
+    "DATABASE_URL",
+    "mysql+aiomysql://phagent:pRep5v3Nzw_aMMV@mariadb:3306/phagent_hub?charset=utf8mb4",
+)
 
-        d = await delete_document(db, fid)
-        print(f"6/8 Deleted {d} chunks")
 
-        rem = (await db.execute(select(RAGDocument).where(RAGDocument.file_id == fid))).scalars().all()
-        print(f"7/8 Remaining={len(rem)}")
+@pytest.mark.e2e
+class TestRagE2E:
+    """End-to-end RAG pipeline verification."""
 
-        await db.rollback()
-        print("8/8 Rollback OK")
-    print("PASS")
+    async def test_rag_pipeline(self, e2e_db_session):
+        """Verify full RAG flow: create upload → index → search → delete."""
+        from src.db.base import AsyncSessionLocal
+        from src.db.orm.file_uploads import FileUpload
+        from src.db.orm.rag import RAGDocument
+        from src.db.orm.users import User
+        from src.db.orm.tenants import Tenant
+        from src.services.rag_service import index_document, search_documents, delete_document
+        from sqlalchemy import select
 
-asyncio.run(e2e())
+        async with AsyncSessionLocal() as db:
+            t = (await db.execute(select(Tenant).limit(1))).scalar_one()
+            u = (await db.execute(select(User).limit(1))).scalar_one()
+
+            fid = str(uuid.uuid4())
+            up = FileUpload(
+                id=fid, tenant_id=t.id, user_id=u.id,
+                original_filename="e2e.txt", content_type="text/plain",
+                size_bytes=100, storage_key=f"t/{fid}.txt", bucket=f"phub-{t.id}",
+                extracted_text="Python programming language for AI and data science.",
+            )
+            db.add(up)
+            await db.flush()
+
+            c = await index_document(db, up)
+            assert c > 0, "Should index at least one chunk"
+
+            rows = (await db.execute(
+                select(RAGDocument).where(RAGDocument.file_id == fid)
+            )).scalars().all()
+            assert len(rows) > 0, "RAGDocument rows should exist"
+            assert all(r.embedding_json for r in rows), "All chunks should have embeddings"
+
+            async def me(t, **kw):
+                return [[0.1] * 256 for _ in t]
+
+            with patch("src.services.rag_service._get_embeddings", me):
+                r = await search_documents(db, "Python", tenant_id=t.id)
+            assert len(r) > 0, "Search should return results"
+
+            d = await delete_document(db, fid)
+            assert d > 0, "Should delete chunks"
+
+            rem = (await db.execute(
+                select(RAGDocument).where(RAGDocument.file_id == fid)
+            )).scalars().all()
+            assert len(rem) == 0, "All chunks should be deleted"
+
+            await db.rollback()

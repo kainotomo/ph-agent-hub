@@ -160,6 +160,7 @@ Credentials and OAuth tokens are encrypted at rest via the `EncryptedString` ORM
 
 **Table: user_tool_credentials**
 - id (UUID, PK)
+- tenant_id (UUID, FK → tenants.id, CASCADE) — tenant scope for tenant-isolation filtering (added in migration e9f8d7c6b5a4)
 - user_id (UUID, FK → users.id, CASCADE) — who owns this credential
 - tool_id (UUID, FK → tools.id, CASCADE) — which tool this credential is for
 - label (string, 255, NOT NULL) — user-defined display name (e.g., "Work Gmail")
@@ -175,8 +176,11 @@ Credentials and OAuth tokens are encrypted at rest via the `EncryptedString` ORM
 **Unique constraint:** `(user_id, tool_id, email_address)` — prevents registering the same email for the same tool twice.
 
 **Relationships:**
+- Belongs to a `Tenant` (CASCADE delete) — enables direct tenant-scoped queries
 - Belongs to a `User` (CASCADE delete)
 - Belongs to a `Tool` (CASCADE delete)
+
+**Migration note:** The `tenant_id` column was added via migration `e9f8d7c6b5a4`. Existing rows were backfilled by joining through `users.tenant_id`. The `create_credential()` service function populates `tenant_id` from the creating user's tenant on every new insert.
 
 **Credential resolution at runtime:**
 1. When the agent run resolves tools, it queries `user_tool_credentials` for the current user

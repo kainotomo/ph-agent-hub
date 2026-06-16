@@ -264,3 +264,205 @@ async def override_get_db(db_session: AsyncSession):
     app.dependency_overrides[get_db] = lambda: db_session
     yield
     app.dependency_overrides.pop(get_db, None)
+
+
+# =============================================================================
+# HTTP Client
+# =============================================================================
+
+
+@pytest_asyncio.fixture
+async def async_client(override_get_db: None):
+    """Provide an httpx AsyncClient wired to the FastAPI app via ASGI transport.
+
+    Use with ``auth_headers(test_user)`` to authenticate requests::
+
+        headers = auth_headers(test_user)
+        response = await async_client.get("/memory", headers=headers)
+    """
+    import httpx
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        yield client
+
+
+# =============================================================================
+# Domain Fixtures — Models, Tools, Templates, Prompts, Sessions, Credentials
+# =============================================================================
+
+
+@pytest_asyncio.fixture
+async def test_model(
+    db_session: AsyncSession,
+    test_tenant: Tenant,
+) -> "Model":
+    """Create a minimal enabled model in the test tenant."""
+    from src.db.orm.models import Model
+
+    model = Model(
+        id=str(uuid.uuid4()),
+        tenant_id=test_tenant.id,
+        name="Test Model",
+        model_id="test-model",
+        provider="openai",
+        api_key="test-key",
+        enabled=True,
+        is_public=True,
+        max_tokens=4096,
+        temperature=0.7,
+    )
+    db_session.add(model)
+    await db_session.flush()
+    return model
+
+
+@pytest_asyncio.fixture
+async def test_tool(
+    db_session: AsyncSession,
+    test_tenant: Tenant,
+) -> "Tool":
+    """Create a minimal enabled tool in the test tenant."""
+    from src.db.orm.tools import Tool
+
+    tool = Tool(
+        id=str(uuid.uuid4()),
+        tenant_id=test_tenant.id,
+        name="Test Calculator",
+        type="calculator",
+        category="general",
+        config=None,
+        enabled=True,
+    )
+    db_session.add(tool)
+    await db_session.flush()
+    return tool
+
+
+@pytest_asyncio.fixture
+async def test_template(
+    db_session: AsyncSession,
+    test_tenant: Tenant,
+) -> "Template":
+    """Create a minimal template in the test tenant."""
+    from src.db.orm.templates import Template
+
+    template = Template(
+        id=str(uuid.uuid4()),
+        tenant_id=test_tenant.id,
+        title="Test Template",
+        system_prompt="You are a helpful assistant.",
+        scope="tenant",
+    )
+    db_session.add(template)
+    await db_session.flush()
+    return template
+
+
+@pytest_asyncio.fixture
+async def test_prompt(
+    db_session: AsyncSession,
+    test_tenant: Tenant,
+    test_user: User,
+) -> "Prompt":
+    """Create a prompt owned by the test user."""
+    from src.db.orm.prompts import Prompt
+
+    prompt = Prompt(
+        id=str(uuid.uuid4()),
+        tenant_id=test_tenant.id,
+        user_id=test_user.id,
+        title="Test Prompt",
+        description="A test prompt",
+        content="You are a test assistant.",
+    )
+    db_session.add(prompt)
+    await db_session.flush()
+    return prompt
+
+
+@pytest_asyncio.fixture
+async def test_session(
+    db_session: AsyncSession,
+    test_tenant: Tenant,
+    test_user: User,
+    test_model: "Model",
+) -> "Session":
+    """Create a permanent session owned by the test user."""
+    from src.db.orm.sessions import Session
+
+    session = Session(
+        id=str(uuid.uuid4()),
+        tenant_id=test_tenant.id,
+        user_id=test_user.id,
+        title="Test Session",
+        is_temporary=False,
+        selected_model_id=test_model.id,
+    )
+    db_session.add(session)
+    await db_session.flush()
+    return session
+
+
+@pytest_asyncio.fixture
+async def test_credential(
+    db_session: AsyncSession,
+    test_tenant: Tenant,
+    test_user: User,
+    test_tool: "Tool",
+) -> "UserToolCredential":
+    """Create a credential entry in the test tenant."""
+    from src.db.orm.user_tool_credentials import UserToolCredential
+
+    credential = UserToolCredential(
+        id=str(uuid.uuid4()),
+        user_id=test_user.id,
+        tenant_id=test_tenant.id,
+        tool_id=test_tool.id,
+        label="Test Gmail",
+        provider="gmail",
+        email_address="test@example.com",
+        is_default=True,
+        status="active",
+    )
+    db_session.add(credential)
+    await db_session.flush()
+    return credential
+
+
+# =============================================================================
+# E2E Test Fixture — Real DB (no rollback)
+# =============================================================================
+
+
+@pytest_asyncio.fixture
+async def e2e_db_session():
+    """Create a real DB session for E2E tests (no transaction rollback).
+
+    Used by ``@pytest.mark.e2e`` tests that require actual persistence.
+    Cleans up by dropping test data created during the test.
+
+    Expects ``E2E_DATABASE_URL`` env var (falls back to the Docker Compose
+    default connection string).
+    """
+    import os
+
+    os.environ.setdefault(
+        "DATABASE_URL",
+        "mysql+aiomysql://phagent:pRep5v3Nzw_aMMV@mariadb:3306/phagent_hub?charset=utf8mb4",
+    )
+    # Re-import with updated env var
+    import importlib
+
+    import src.db.base as db_base
+    importlib.reload(db_base)
+    from src.db.base import AsyncSessionLocal
+
+    session = AsyncSessionLocal()
+    try:
+        yield session
+        await session.commit()
+    finally:
+        await session.close()

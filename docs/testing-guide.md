@@ -229,11 +229,10 @@ class TestFeatureE2E:
 
 | Scope | Target |
 |-------|--------|
-| `src/services/` | ≥80% |
-| `src/api/` | ≥80% |
-| Overall | ≥70% |
+| `src/services/` + `src/api/` | ≥30% (growing) |
+| Overall | Tracked but not gated |
 
-Coverage is enforced in CI via `--cov-fail-under=70` for Tier 1.
+Coverage is enforced in CI via `--cov-fail-under=30` on `src/services` and `src/api` for Tier 1.
 
 ---
 

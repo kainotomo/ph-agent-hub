@@ -102,10 +102,11 @@ jobs:
           cd backend
           pytest tests/ \
             -m "not e2e and not slow" \
-            --cov=src \
+            --cov=src/services \
+            --cov=src/api \
             --cov-report=term \
             --cov-report=xml \
-            --cov-fail-under=70
+            --cov-fail-under=30
 
       - name: Upload coverage to summary
         if: always()

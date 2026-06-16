@@ -5,7 +5,7 @@
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..core.exceptions import NotFoundError, ConflictError
+from ..core.exceptions import ForbiddenError, NotFoundError, ConflictError
 from ..db.orm.groups import UserGroup, UserGroupMember, ModelGroup, ToolGroup
 from ..db.orm.models import Model
 from ..db.orm.tools import Tool
@@ -112,8 +112,13 @@ async def add_member(
 
     # Check user exists
     user_result = await db.execute(select(User).where(User.id == user_id))
-    if user_result.scalar_one_or_none() is None:
+    user = user_result.scalar_one_or_none()
+    if user is None:
         raise NotFoundError("User not found")
+
+    # Verify tenant boundary
+    if group.tenant_id != user.tenant_id:
+        raise ForbiddenError("Cannot add a user from a different tenant to this group")
 
     # Check if already a member
     existing = await db.execute(
@@ -188,8 +193,13 @@ async def assign_model_to_group(
 
     # Check model exists
     model_result = await db.execute(select(Model).where(Model.id == model_id))
-    if model_result.scalar_one_or_none() is None:
+    model = model_result.scalar_one_or_none()
+    if model is None:
         raise NotFoundError("Model not found")
+
+    # Verify tenant boundary
+    if group.tenant_id != model.tenant_id:
+        raise ForbiddenError("Cannot assign a model from a different tenant to this group")
 
     # Check if already assigned
     existing = await db.execute(
@@ -263,8 +273,13 @@ async def assign_tool_to_group(
 
     # Check tool exists
     tool_result = await db.execute(select(Tool).where(Tool.id == tool_id))
-    if tool_result.scalar_one_or_none() is None:
+    tool = tool_result.scalar_one_or_none()
+    if tool is None:
         raise NotFoundError("Tool not found")
+
+    # Verify tenant boundary
+    if group.tenant_id != tool.tenant_id:
+        raise ForbiddenError("Cannot assign a tool from a different tenant to this group")
 
     # Check if already assigned
     existing = await db.execute(

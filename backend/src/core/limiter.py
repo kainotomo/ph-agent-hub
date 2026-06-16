@@ -10,4 +10,14 @@ from slowapi.util import get_remote_address
 
 limiter = Limiter(key_func=get_remote_address)
 
-__all__ = ["limiter", "RateLimitExceeded"]
+
+def reset_limiter():
+    """Reset the in-memory rate limiter state.
+
+    Used in tests to prevent rate-limit state from leaking across
+    test cases.
+    """
+    limiter._storage.reset()
+
+
+__all__ = ["limiter", "RateLimitExceeded", "reset_limiter"]

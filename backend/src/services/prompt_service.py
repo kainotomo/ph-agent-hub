@@ -10,10 +10,12 @@ from ..db.orm.prompts import Prompt
 
 
 async def list_prompts(
-    db: AsyncSession, user_id: str
+    db: AsyncSession, user_id: str, tenant_id: str | None = None
 ) -> list[Prompt]:
-    """Return all prompts owned by the user."""
+    """Return all prompts owned by the user, optionally filtered by tenant."""
     stmt = select(Prompt).where(Prompt.user_id == user_id)
+    if tenant_id is not None:
+        stmt = stmt.where(Prompt.tenant_id == tenant_id)
     stmt = stmt.order_by(Prompt.created_at)
     result = await db.execute(stmt)
     return list(result.scalars().all())

@@ -22,6 +22,18 @@ from src.db.base import Base, AsyncSessionLocal
 from src.db.orm.tenants import Tenant
 from src.db.orm.users import User
 from src.db.orm.file_uploads import FileUpload
+from src.core.jwt import create_access_token
+from src.core.dependencies import get_db
+from src.core.limiter import reset_limiter
+from src.main import app
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limiter():
+    """Reset the in-memory rate limiter before each test to prevent
+    rate-limit state from leaking across test cases."""
+    reset_limiter()
+    yield
 
 
 @pytest.fixture(scope="session")
@@ -110,3 +122,145 @@ async def sample_file_upload(
     db_session.add(upload)
     await db_session.flush()
     return upload
+
+
+# =============================================================================
+# Security / Tenant-Isolation Fixtures
+# =============================================================================
+
+
+@pytest_asyncio.fixture
+async def second_tenant(db_session: AsyncSession) -> Tenant:
+    """Create a second test tenant for cross-tenant isolation tests."""
+    tenant = Tenant(
+        id=str(uuid.uuid4()),
+        name=f"Second Tenant {uuid.uuid4().hex[:8]}",
+    )
+    db_session.add(tenant)
+    await db_session.flush()
+    return tenant
+
+
+@pytest_asyncio.fixture
+async def second_user(
+    db_session: AsyncSession,
+    second_tenant: Tenant,
+) -> User:
+    """Create a test user in the second tenant."""
+    user = User(
+        id=str(uuid.uuid4()),
+        tenant_id=second_tenant.id,
+        email=f"second-{uuid.uuid4().hex[:8]}@example.com",
+        password_hash="pbkdf2:sha256:600000$test-salt$test-hash",
+        display_name="Second User",
+        role="user",
+        is_active=True,
+    )
+    db_session.add(user)
+    await db_session.flush()
+    return user
+
+
+@pytest_asyncio.fixture
+async def admin_user(
+    db_session: AsyncSession,
+    test_tenant: Tenant,
+) -> User:
+    """Create an admin user in the test tenant."""
+    user = User(
+        id=str(uuid.uuid4()),
+        tenant_id=test_tenant.id,
+        email=f"admin-{uuid.uuid4().hex[:8]}@example.com",
+        password_hash="pbkdf2:sha256:600000$test-salt$test-hash",
+        display_name="Admin User",
+        role="admin",
+        is_active=True,
+    )
+    db_session.add(user)
+    await db_session.flush()
+    return user
+
+
+@pytest_asyncio.fixture
+async def manager_user(
+    db_session: AsyncSession,
+    test_tenant: Tenant,
+) -> User:
+    """Create a manager user in the test tenant."""
+    user = User(
+        id=str(uuid.uuid4()),
+        tenant_id=test_tenant.id,
+        email=f"manager-{uuid.uuid4().hex[:8]}@example.com",
+        password_hash="pbkdf2:sha256:600000$test-salt$test-hash",
+        display_name="Manager User",
+        role="manager",
+        is_active=True,
+    )
+    db_session.add(user)
+    await db_session.flush()
+    return user
+
+
+@pytest_asyncio.fixture
+async def inactive_user(
+    db_session: AsyncSession,
+    test_tenant: Tenant,
+) -> User:
+    """Create an inactive user for auth tests."""
+    user = User(
+        id=str(uuid.uuid4()),
+        tenant_id=test_tenant.id,
+        email=f"inactive-{uuid.uuid4().hex[:8]}@example.com",
+        password_hash="pbkdf2:sha256:600000$test-salt$test-hash",
+        display_name="Inactive User",
+        role="user",
+        is_active=False,
+    )
+    db_session.add(user)
+    await db_session.flush()
+    return user
+
+
+@pytest.fixture
+def auth_headers() -> callable:
+    """Return a helper that generates Authorization headers for a given user.
+
+    Usage::
+
+        def test_something(auth_headers, test_user):
+            headers = auth_headers(test_user)
+            response = client.get("/api/me", headers=headers)
+    """
+
+    def _make_headers(
+        user: User,
+        extra_claims: dict | None = None,
+    ) -> dict[str, str]:
+        payload = {
+            "sub": user.id,
+            "tenant_id": user.tenant_id,
+            "role": user.role,
+        }
+        if extra_claims:
+            payload.update(extra_claims)
+        token = create_access_token(payload)
+        return {"Authorization": f"Bearer {token}"}
+
+    return _make_headers
+
+
+@pytest_asyncio.fixture
+async def override_get_db(db_session: AsyncSession):
+    """Override the FastAPI ``get_db`` dependency with the test DB session.
+
+    Use this fixture in any test file that makes HTTP requests to endpoints
+    requiring database access (auth, API CRUD, etc.).
+
+    Usage::
+
+        async def test_something(override_get_db, async_client, test_user):
+            response = await async_client.get("/api/auth/me")
+    """
+    app.dependency_overrides[get_db] = lambda: db_session
+    yield
+    app.dependency_overrides.pop(get_db, None)

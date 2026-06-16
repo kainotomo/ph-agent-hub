@@ -40,6 +40,7 @@ The backend provides the following core capabilities:
 - Tenant isolation enforced on every request
 - Per‑tenant model and tool access rules
 - Role claims in JWT used for endpoint-level permission enforcement
+- Security and tenant-isolation behaviour is validated by an automated test suite (see [security-testing.md](security-testing.md))
 
 ### **1.5 Data Storage**
 - Users, roles, tenants (with tenant count gated by license on free tier)

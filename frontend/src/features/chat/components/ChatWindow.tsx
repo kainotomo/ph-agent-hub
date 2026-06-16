@@ -268,8 +268,8 @@ export function ChatWindow({
     if (newSkill && newSkill !== oldSkill) {
       prevPendSkillRef.current = newSkill;
       // Fetch the skill's tool IDs
-      api<{ id: string; tool_ids: string[] }[]>("/skills").then((skills) => {
-        const skill = skills.find((s) => s.id === newSkill);
+      api<{ items: { id: string; tool_ids: string[] }[] }>("/skills").then((skills) => {
+        const skill = skills.items.find((s) => s.id === newSkill);
         if (skill && skill.tool_ids.length > 0) {
           setPendActiveToolIds((prev) => {
             const merged = new Set([...prev, ...skill.tool_ids]);

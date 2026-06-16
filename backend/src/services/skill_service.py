@@ -96,6 +96,27 @@ async def list_skill_tools(
     return list(result.scalars().all())
 
 
+async def list_skill_tools_batch(
+    db: AsyncSession, skill_ids: list[str]
+) -> dict[str, list[str]]:
+    """Batch-fetch tool mappings for multiple skills in one query.
+
+    Returns ``{skill_id: [tool_id, ...]}``.  Skills with no tools will
+    have an empty list.
+    """
+    if not skill_ids:
+        return {}
+    stmt = select(SkillAllowedTool).where(
+        SkillAllowedTool.skill_id.in_(skill_ids)
+    )
+    result = await db.execute(stmt)
+    rows = list(result.scalars().all())
+    mapping: dict[str, list[str]] = {}
+    for row in rows:
+        mapping.setdefault(row.skill_id, []).append(row.tool_id)
+    return mapping
+
+
 async def _get_skill_tool_ids(db: AsyncSession, skill_id: str) -> list[str]:
     """Return just the tool_id list for a skill."""
     tools = await list_skill_tools(db, skill_id)

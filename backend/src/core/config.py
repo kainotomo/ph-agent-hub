@@ -71,6 +71,17 @@ class Settings(BaseSettings):
     # --- Embeddable Widget ---
     EMBED_GUEST_TOKEN_SECRET: str = ""
 
+    # --- Widget Rate Limiting (Issue #349) ---
+    WIDGET_CONFIG_LIMIT: str = "30/hour"
+    """Per-IP rate limit for GET /widget/config/{token} (bootstrap)."""
+    WIDGET_MESSAGE_LIMIT: str = "20/minute"
+    """Per-guest message rate limit for POST /widget/session/message (short window)."""
+    WIDGET_TOTAL_MESSAGE_LIMIT: str = "100/hour"
+    """Per-guest total message rate limit for POST /widget/session/message (long window)."""
+    WIDGET_SESSION_READ_LIMIT: str = "60/minute"
+    """Per-guest read rate limit for GET /widget/session, /widget/session/messages,
+    and DELETE /widget/session/stream."""
+
     # --- Logging ---
     LOG_LEVEL: str = "INFO"
 

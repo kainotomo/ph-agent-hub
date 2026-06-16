@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.dependencies import get_current_user, get_db
 from ..core.exceptions import ForbiddenError, NotFoundError
+from ..core.schemas import collect_update_fields
 from ..db.orm.users import User as UserORM
 from ..services.prompt_service import (
     create_prompt as _svc_create_prompt,
@@ -101,15 +102,7 @@ async def update_prompt(
     if prompt.tenant_id != current_user.tenant_id:
         raise ForbiddenError("Cannot modify a prompt from a different tenant")
 
-    update_kwargs: dict = {}
-    if body.title is not None:
-        update_kwargs["title"] = body.title
-    if body.description is not None:
-        update_kwargs["description"] = body.description
-    if body.content is not None:
-        update_kwargs["content"] = body.content
-    if body.template_id is not None:
-        update_kwargs["template_id"] = body.template_id
+    update_kwargs = collect_update_fields(body)
 
     updated = await _svc_update_prompt(db, prompt_id, **update_kwargs)
     return PromptResponse.model_validate(updated)

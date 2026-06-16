@@ -115,10 +115,10 @@ export function SessionToolActivation({
   // Fetch the selected skill's tool IDs
   const { data: allSkills } = useQuery({
     queryKey: ["skills"],
-    queryFn: () => api<{ id: string; tool_ids: string[] }[]>("/skills"),
+    queryFn: () => api<{ items: { id: string; tool_ids: string[] }[] }>("/skills"),
     enabled: open && !!selectedSkillId,
   });
-  const selectedSkill = allSkills?.find((s) => s.id === selectedSkillId);
+  const selectedSkill = allSkills?.items.find((s) => s.id === selectedSkillId);
   const skillToolIds = new Set(selectedSkill?.tool_ids ?? []);
 
   const activeIds = isPending

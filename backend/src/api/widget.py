@@ -18,9 +18,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
 from ..agents.runner import run_agent_stream
+from ..core.config import settings
 from ..core.dependencies import get_db, get_guest_context, GuestContext
 from ..core.exceptions import ForbiddenError, NotFoundError
 from ..core.jwt import create_guest_token
+from ..core.limiter import get_widget_config_key, get_widget_guest_key, limiter
 from ..core.redis import (
     get_temp_messages,
     get_temp_session,
@@ -88,7 +90,9 @@ class WidgetMessageResponse(BaseModel):
 
 
 @router.get("/config/{token}", response_model=WidgetConfigResponse)
+@limiter.limit(settings.WIDGET_CONFIG_LIMIT, key_func=get_widget_config_key)
 async def get_widget_config(
+    request: Request,
     token: str,
     db: AsyncSession = Depends(get_db),
 ):
@@ -158,7 +162,9 @@ async def get_widget_config(
 
 
 @router.get("/session", response_model=WidgetSessionResponse)
+@limiter.limit(settings.WIDGET_SESSION_READ_LIMIT, key_func=get_widget_guest_key)
 async def get_widget_session(
+    request: Request,
     ctx: GuestContext = Depends(get_guest_context),
 ):
     """Return the current widget session info.
@@ -183,7 +189,9 @@ async def get_widget_session(
 
 
 @router.get("/session/messages", response_model=list[WidgetMessageResponse])
+@limiter.limit(settings.WIDGET_SESSION_READ_LIMIT, key_func=get_widget_guest_key)
 async def list_widget_messages(
+    request: Request,
     ctx: GuestContext = Depends(get_guest_context),
 ):
     """List messages in the current widget session."""
@@ -224,6 +232,8 @@ async def list_widget_messages(
 
 
 @router.post("/session/message")
+@limiter.limit(settings.WIDGET_MESSAGE_LIMIT, key_func=get_widget_guest_key)
+@limiter.limit(settings.WIDGET_TOTAL_MESSAGE_LIMIT, key_func=get_widget_guest_key)
 async def send_widget_message(
     body: WidgetMessageCreate,
     request: Request,
@@ -310,7 +320,9 @@ async def _stream_widget_response(
 
 
 @router.delete("/session/stream")
+@limiter.limit(settings.WIDGET_SESSION_READ_LIMIT, key_func=get_widget_guest_key)
 async def stop_widget_stream(
+    request: Request,
     ctx: GuestContext = Depends(get_guest_context),
 ):
     """Stop the active stream for the current widget session."""

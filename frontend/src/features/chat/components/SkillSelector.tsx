@@ -14,6 +14,14 @@ import { PersonalSkillEditor } from "./PersonalSkillEditor";
 
 const { Text } = Typography;
 
+interface PaginatedResponse<T> {
+  items: T[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}
+
 interface SkillData {
   id: string;
   tenant_id: string;
@@ -47,7 +55,7 @@ export function SkillSelector({
 
   const { data: skills, isLoading } = useQuery({
     queryKey: ["skills"],
-    queryFn: () => api<SkillData[]>("/skills"),
+    queryFn: () => api<PaginatedResponse<SkillData>>("/skills"),
   });
 
   return (
@@ -64,7 +72,7 @@ export function SkillSelector({
             placeholder="Select skill"
             style={{ minWidth: 160 }}
             allowClear
-            options={(skills || []).map((s) => ({
+            options={(skills?.items || []).map((s) => ({
               label: (
                 <Space size={4}>
                   {s.title}

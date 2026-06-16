@@ -7,6 +7,7 @@
 import math
 import os
 import sys
+import uuid
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -223,7 +224,7 @@ class TestSearchDocuments:
         from src.db.orm.file_uploads import FileUpload
 
         upload_a = FileUpload(
-            id="test-upload-a",
+            id=str(uuid.uuid4()),
             tenant_id=test_tenant.id,
             user_id=test_user.id,
             original_filename="doc_a.txt",

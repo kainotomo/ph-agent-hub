@@ -143,7 +143,18 @@ def _build_mime_with_attachments(
     # Attachment parts
     for att in (attachments or []):
         part = MIMEBase(*att.get("mime_type", "application/octet-stream").split("/", 1))
-        raw_bytes = base64.b64decode(att.get("content", ""))
+        raw_content = att.get("content", "") or ""
+        # Validate base64: try decoding; if it fails, treat as plain text
+        # and base64-encode it.  This guards against the model passing
+        # extracted text instead of the content_base64 field.
+        try:
+            raw_bytes = base64.b64decode(raw_content)
+        except Exception:
+            logger.warning(
+                "Attachment '%s' has non-base64 content — re-encoding as plain text",
+                att.get("filename", "attachment"),
+            )
+            raw_bytes = raw_content.encode("utf-8")
         part.set_payload(raw_bytes)
         from email import encoders
         encoders.encode_base64(part)

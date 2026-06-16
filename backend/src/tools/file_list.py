@@ -97,10 +97,12 @@ def build_file_list_tool(
         """Return the full extracted text content and raw file bytes (base64)
         of a previously uploaded file.
 
-        The ``content_base64`` field can be passed directly to the
-        ``send_email`` / ``reply_email`` / ``save_draft`` tools'
-        ``attachments`` parameter (as the ``content`` of each attachment
-        dict).
+        IMPORTANT: For email attachments, you MUST use ``content_base64`` as
+        the ``content`` field in the attachment dict passed to ``send_email`` /
+        ``reply_email`` / ``save_draft``.  Do NOT use the ``text`` field for
+        attachments — ``text`` contains extracted text only and is NOT the
+        original file (for PDFs, images, etc. the ``text`` field is just the
+        text portion and attaching it would corrupt the file).
 
         Args:
             file_id: The file ID returned by ``list_uploaded_files()``.

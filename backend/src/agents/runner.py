@@ -1791,10 +1791,17 @@ async def _auto_select_tools(
                 for t in shortlisted_tools:
                     if t.id in active_cred_tool_ids:
                         kept.append(t)
-                # Also add any candidate tool with creds not yet in shortlist
+                # Also add any candidate tool with creds not yet in shortlist,
+                # but ONLY if the tool is already in selected_tool_ids (user
+                # explicitly activated it).  Avoids re-adding tools the user
+                # explicitly removed from the session (Issue #345).
                 seen_ids = {t.id for t in shortlisted_tools}
                 for t in candidate_tools:
-                    if t.id in active_cred_tool_ids and t.id not in seen_ids:
+                    if (
+                        t.id in active_cred_tool_ids
+                        and t.id not in seen_ids
+                        and t.id in selected_tool_ids
+                    ):
                         kept.append(t)
                         seen_ids.add(t.id)
                 # Prepend kept tools to the shortlist

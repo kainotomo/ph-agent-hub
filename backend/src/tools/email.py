@@ -955,7 +955,6 @@ def build_email_tools(
 
         file_attachments = await _resolve_file_attachments(file_ids)
         all_attachments_draft = (attachments or []) + file_attachments
-            return {"error": "No email body provided", "status": "error"}
 
         active_cred = _find_credential(user_credentials, account_label)
         if not active_cred:

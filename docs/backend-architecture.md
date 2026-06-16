@@ -635,12 +635,12 @@ PH Agent Hub uses **MinIO** as the object storage backend for all file uploads. 
 
 ### 10.3 API Endpoints
 
-| Method | Endpoint | Purpose |
-|---|---|---|
-| `POST` | `/chat/session/:id/upload` | Upload a file (multipart/form-data) |
-| `GET` | `/chat/session/:id/uploads` | List files for a session |
-| `GET` | `/chat/session/:id/upload/:fileId/url` | Get presigned download URL |
-| `DELETE` | `/chat/session/:id/upload/:fileId` | Delete a file |
+| Method | Endpoint | Purpose | Auth |
+|---|---|---|---|
+| `POST` | `/chat/session/:id/upload` | Upload a file (multipart/form-data) | JWT + session owner + temp guard (403) |
+| `GET` | `/chat/session/:id/uploads` | List files for a session | JWT + session owner |
+| `GET` | `/chat/session/:id/upload/:fileId/url` | Get presigned download URL | JWT + session owner + file owner (403) |
+| `DELETE` | `/chat/session/:id/upload/:fileId` | Delete a file | JWT + session owner + file owner (403) |
 
 ### 10.4 Upload Flow
 
@@ -658,13 +658,36 @@ to next message → Backend links message_id after message is persisted
 | Max file size | 100 MB | `UPLOAD_MAX_SIZE_BYTES` |
 | Allowed MIME types | `text/plain`, `text/csv`, `text/markdown`, `application/pdf`, `application/json`, `image/png`, `image/jpeg`, `image/gif`, `image/webp` | `UPLOAD_ALLOWED_TYPES` |
 
-### 10.6 Temporary Session Rules
+### 10.6 Authorization Model
+
+Every file upload endpoint enforces a **two-layer authorization** model:
+
+1. **Session-level** (`_require_session_owner` in `chat.py`): Verifies the JWT's `user_id` matches the session owner and the `tenant_id` matches the session tenant. Returns `403 Forbidden` on mismatch.
+2. **File-level** (`get_upload_by_id` in `upload_service.py`): Verifies the requesting `user_id` matches `file_uploads.user_id`. Returns `403 Forbidden` on mismatch.
+
+Additional guards:
+- **Temporary session guard** (in `create_upload`): File uploads are rejected with `403 Forbidden` for sessions still in temporary (Redis-only) mode.
+- **Tenant isolation**: The `list_uploads` function filters by both `user_id` and `session_id` in the SQL query; admin endpoints rely on the `require_admin` dependency for broader access.
+- **All endpoints** go through JWT authentication first. Unauthenticated requests return `401 Unauthorized`.
+
+Unauthorized access produces a controlled `403` response with a JSON body like:
+```json
+{"detail": "You do not own this session"}
+```
+or
+```json
+{"detail": "You do not own this file upload"}
+```
+
+This model ensures defense-in-depth: even if the session-level check were bypassed, the file-level ownership check would still reject unauthorized access.
+
+### 10.7 Temporary Session Rules
 
 - File uploads are **disabled** for temporary sessions (`403`)
 - The frontend hides the upload button when the session is in temporary mode
 - No file cleanup needed on temp session expiry — uploads were never permitted
 
-### 10.7 File Lifecycle
+### 10.8 File Lifecycle
 
 | Event | Action |
 |---|---|
@@ -673,13 +696,13 @@ to next message → Backend links message_id after message is persisted
 | Tenant deleted | All tenant bucket objects deleted; all rows deleted |
 | Temporary session expires | No cleanup needed — uploads blocked |
 
-### 10.8 Agent Tool Integration
+### 10.9 Agent Tool Integration
 
 When a message includes attached files, the backend extracts content before the agent loop runs:
 - **Text-based files** (PDF, CSV, Markdown, JSON, plain text): extracted and injected into the agent's context window
 - **Images**: passed as multi-modal message content if the selected model supports vision
 
-### 10.9 Environment Variables
+### 10.10 Environment Variables
 
 ```
 MINIO_ENDPOINT=http://minio:9000

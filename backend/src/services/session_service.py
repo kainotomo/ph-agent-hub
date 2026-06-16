@@ -290,7 +290,7 @@ async def update_session(
             result = await db.execute(
                 select(Session)
                 .where(Session.id == session_id)
-                .with_for_update(skip_locked=True)
+                .with_for_update()
             )
             session = result.scalar_one_or_none()
             if session is None:

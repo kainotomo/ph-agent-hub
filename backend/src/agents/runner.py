@@ -1808,6 +1808,38 @@ async def _auto_select_tools(
         except Exception:
             logger.warning("Failed to check credentials for auto-select retention", exc_info=True)
 
+    # ── Step 5c: Forcibly include session-active tools (always-on) ──────
+    # Tools that the user manually activated or set as always-on must
+    # never be dropped by the Top-K filter.  These are non-negotiable.
+    active_ids: set[str] = set()
+    if is_temporary:
+        active_ids.update(session_data.get("active_tool_ids", []))
+    else:
+        try:
+            sa_result = await db.execute(
+                select(SessionActiveTool.tool_id).where(
+                    SessionActiveTool.session_id == session_id
+                )
+            )
+            active_ids.update(row[0] for row in sa_result.all())
+        except Exception:
+            logger.debug("Failed to query session active tools", exc_info=True)
+
+    if active_ids:
+        seen_ids = {t.id for t in shortlisted_tools}
+        kept_active = []
+        for t in candidate_tools:
+            if t.id in active_ids and t.id not in seen_ids:
+                kept_active.append(t)
+                seen_ids.add(t.id)
+        if kept_active:
+            shortlisted_tools = kept_active + shortlisted_tools
+            logger.info(
+                "Auto-select: forcibly retained %d always-on tool(s): %s",
+                len(kept_active),
+                [t.name for t in kept_active],
+            )
+
     if not shortlisted_tools:
         return current_callables
 

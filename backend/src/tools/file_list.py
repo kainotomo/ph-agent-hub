@@ -129,25 +129,37 @@ def build_file_list_tool(
 
         # Try to download raw bytes from storage
         content_base64 = ""
+        download_error: str | None = None
         try:
             raw_bytes = await download_object(upload.bucket, upload.storage_key)
             content_base64 = base64.b64encode(raw_bytes).decode("ascii")
-        except Exception:
+        except Exception as exc:
+            download_error = f"Could not download file from storage: {exc}"
             logger.warning(
-                "Could not download file %s from storage (bucket=%s, key=%s)",
-                file_id, upload.bucket, upload.storage_key,
+                "Could not download file %s from storage (bucket=%s, key=%s): %s",
+                file_id, upload.bucket, upload.storage_key, exc,
             )
 
-        if not upload.extracted_text:
-            return {
-                "file_id": upload.id,
-                "filename": upload.original_filename,
-                "content_type": upload.content_type,
-                "text": "",
-                "content_base64": content_base64,
-                "truncated": False,
-                "note": "No text could be extracted from this file.",
-            }
+        has_text = bool(upload.extracted_text)
+        result: dict = {
+            "file_id": upload.id,
+            "filename": upload.original_filename,
+            "content_type": upload.content_type,
+            "text": upload.extracted_text or "",
+            "content_base64": content_base64,
+            "truncated": False,
+        }
+
+        if not has_text:
+            result["note"] = "No text could be extracted from this file."
+
+        if download_error:
+            result["download_error"] = download_error
+            # Clear content_base64 so email tools don't attach empty data
+            result["content_base64"] = ""
+
+        if not has_text:
+            return result
 
         text = upload.extracted_text
         truncated = len(text) > MAX_FILE_CONTENT_CHARS

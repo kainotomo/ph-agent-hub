@@ -49,6 +49,87 @@ const { Text } = Typography;
 const { useBreakpoint } = Grid;
 
 // ---------------------------------------------------------------------------
+// Draft persistence helpers
+// ---------------------------------------------------------------------------
+
+const DRAFT_PREFIX = "chat-draft:";
+const FILES_PREFIX = "chat-files:";
+const DRAFT_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+/** Purge sessionStorage draft entries older than DRAFT_TTL_MS. */
+function purgeStaleDrafts(): void {
+  try {
+    const now = Date.now();
+    const toRemove: string[] = [];
+    for (let i = 0; i < sessionStorage.length; i++) {
+      const key = sessionStorage.key(i);
+      if (!key) continue;
+      if (key.startsWith(DRAFT_PREFIX) || key.startsWith(FILES_PREFIX)) {
+        const value = sessionStorage.getItem(key);
+        if (!value) {
+          toRemove.push(key);
+        }
+      }
+    }
+    // Also check if a companion "timestamp" key exists and is stale
+    for (let i = 0; i < sessionStorage.length; i++) {
+      const key = sessionStorage.key(i);
+      if (!key) continue;
+      if (key.startsWith(DRAFT_PREFIX) || key.startsWith(FILES_PREFIX)) {
+        const tsKey = key + ":ts";
+        const ts = sessionStorage.getItem(tsKey);
+        if (ts) {
+          const age = now - parseInt(ts, 10);
+          if (age > DRAFT_TTL_MS) {
+            toRemove.push(key);
+            toRemove.push(tsKey);
+          }
+        }
+      }
+    }
+    for (const key of toRemove) {
+      sessionStorage.removeItem(key);
+    }
+  } catch {
+    // Ignore
+  }
+}
+
+/** Write a draft entry with a companion timestamp. */
+function writeDraft(key: string, value: string): void {
+  try {
+    sessionStorage.setItem(key, value);
+    sessionStorage.setItem(key + ":ts", String(Date.now()));
+  } catch {
+    // sessionStorage may be full or unavailable
+  }
+}
+
+/** Read a draft entry. */
+function readDraft(key: string): string | null {
+  try {
+    return sessionStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+/** Remove a draft entry and its companion timestamp. */
+function removeDraft(key: string): void {
+  try {
+    sessionStorage.removeItem(key);
+    sessionStorage.removeItem(key + ":ts");
+  } catch {
+    // Ignore
+  }
+}
+
+// ---- Run stale-draft cleanup once per session -----------------------------
+// Purge on module load to avoid accumulating stale entries across browser
+// sessions.  Idempotent — safe to call on every page mount.
+purgeStaleDrafts();
+
+// ---------------------------------------------------------------------------
 // Pending file info (stored after upload completes)
 // ---------------------------------------------------------------------------
 
@@ -96,7 +177,57 @@ export function ChatWindow({
   isPending = false,
   onSessionUpdate,
 }: ChatWindowProps) {
-  const [inputValue, setInputValue] = useState("");
+  // ---- Draft persistence for pending (lazy) sessions --------------------
+  // When isPending is true, the session doesn't exist on the backend yet,
+  // so draft text and files are stored in sessionStorage to survive
+  // accidental navigation away and back.
+
+  const [inputValue, setInputValue] = useState(() => {
+    if (isPending) {
+      return readDraft(DRAFT_PREFIX + sessionId) || "";
+    }
+    return "";
+  });
+
+  // Restore pending files from sessionStorage on mount for pending sessions
+  useEffect(() => {
+    if (isPending) {
+      try {
+        const stored = readDraft(FILES_PREFIX + sessionId);
+        if (stored) {
+          const parsed = JSON.parse(stored) as PendingFile[];
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            setPendingFiles(parsed);
+          }
+        }
+      } catch {
+        // Ignore parse errors
+      }
+    }
+  }, [isPending, sessionId]); // mount only
+
+  // Persist inputValue to sessionStorage for pending sessions
+  useEffect(() => {
+    if (isPending) {
+      if (inputValue) {
+        writeDraft(DRAFT_PREFIX + sessionId, inputValue);
+      } else {
+        removeDraft(DRAFT_PREFIX + sessionId);
+      }
+    }
+  }, [inputValue, isPending, sessionId]);
+
+  // Persist pendingFiles to sessionStorage for pending sessions
+  useEffect(() => {
+    if (isPending) {
+      if (pendingFiles.length > 0) {
+        writeDraft(FILES_PREFIX + sessionId, JSON.stringify(pendingFiles));
+      } else {
+        removeDraft(FILES_PREFIX + sessionId);
+      }
+    }
+  }, [pendingFiles, isPending, sessionId]);
+
   const [streamingContent, setStreamingContent] = useState("");
   const [streamingReasoningContent, setStreamingReasoningContent] = useState("");
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null);
@@ -125,10 +256,15 @@ export function ChatWindow({
   const [pendActiveToolIds, setPendActiveToolIds] = useState<string[]>([]);
   const [pendingFlag, setPendingFlag] = useState(isPending);
 
-  // When the session gets created (isPending flips), clear pending state.
+  // When the session gets created (isPending flips), clear pending state
+  // and remove the persisted draft from sessionStorage.
   useEffect(() => {
-    if (!isPending) setPendingFlag(false);
-  }, [isPending]);
+    if (!isPending) {
+      setPendingFlag(false);
+      removeDraft(DRAFT_PREFIX + sessionId);
+      removeDraft(FILES_PREFIX + sessionId);
+    }
+  }, [isPending, sessionId]);
 
   // Intercept settings changes when pending — store locally instead of
   // calling onSessionUpdate (which would 404 since the session doesn't exist).

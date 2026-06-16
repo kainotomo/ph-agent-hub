@@ -48,7 +48,7 @@ from ..core.redis import (
     store_temp_session,
 )
 from ..db.orm.messages import Message, MessageFeedback
-from ..db.orm.sessions import Session
+from ..db.orm.sessions import Session, SessionActiveTool
 from ..db.orm.tools import Tool
 from ..db.orm.user_tool_preferences import UserToolPreference
 from ..db.orm.users import User as UserORM
@@ -283,7 +283,7 @@ async def _lazy_create_session(
             pass
 
     await db.refresh(session)
-    return _session_to_dict(session)
+    return _session_to_dict(session, active_tool_ids=active_tool_ids)
 
 
 # =============================================================================
@@ -291,9 +291,18 @@ async def _lazy_create_session(
 # =============================================================================
 
 
-def _session_to_dict(session: Session) -> dict[str, Any]:
-    """Convert a Session ORM object to a plain dict for runner consumption."""
-    return {
+def _session_to_dict(
+    session: Session,
+    active_tool_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """Convert a Session ORM object to a plain dict for runner consumption.
+
+    When *active_tool_ids* is provided, it is included in the output so
+    that ``_resolve_tool_callables`` (which reads ``session_data`` for
+    temporary sessions) can find the active tool IDs directly without an
+    extra DB query.
+    """
+    result = {
         "id": session.id,
         "tenant_id": session.tenant_id,
         "user_id": session.user_id,
@@ -311,6 +320,9 @@ def _session_to_dict(session: Session) -> dict[str, Any]:
         "created_at": session.created_at.isoformat(),
         "updated_at": session.updated_at.isoformat(),
     }
+    if active_tool_ids is not None:
+        result["active_tool_ids"] = active_tool_ids
+    return result
 
 
 async def _load_session(
@@ -323,7 +335,18 @@ async def _load_session(
     # Try DB first
     session = await session_service.get_session_by_id(db, session_id)
     if session is not None:
-        return _session_to_dict(session)
+        # Also load active tool IDs for permanent sessions
+        active_tool_ids: list[str] = []
+        try:
+            sa_result = await db.execute(
+                select(SessionActiveTool.tool_id).where(
+                    SessionActiveTool.session_id == session_id
+                )
+            )
+            active_tool_ids = [row[0] for row in sa_result.all()]
+        except Exception:
+            pass
+        return _session_to_dict(session, active_tool_ids=active_tool_ids)
 
     # Try Redis
     temp = await get_temp_session(session_id)
@@ -1256,8 +1279,12 @@ async def _handle_streaming_message(
                 # Ensure DB connection is cleanly returned to the pool even
                 # when the client disconnects mid-stream (asyncio.CancelledError).
                 try:
-                    await stream_db.rollback()
-                except Exception:
+                    await asyncio.shield(stream_db.rollback())
+                except (asyncio.CancelledError, Exception):
+                    pass
+                try:
+                    await asyncio.shield(stream_db.close())
+                except (asyncio.CancelledError, Exception):
                     pass
 
     # Wrap with heartbeat to keep proxy connections alive
@@ -1685,42 +1712,53 @@ async def _handle_streaming_regenerate(
     file_ids: list[str] | None = None,
 ) -> EventSourceResponse:
     """Assemble and return an SSE EventSourceResponse for a streaming regenerate.
-    
-    Uses the standard run_agent_stream path — the user message already exists
-    in the DB, so a new user+assistant pair is persisted (same as send_message).
+
+    NOTE: FastAPI closes the dependency-injected ``db`` session as soon as
+    this function returns the ``EventSourceResponse`` — well before the
+    streaming generator finishes.  We therefore create a **dedicated**
+    session here so the generator's ``finally`` block can persist the
+    assistant message without hitting ``ResourceClosedError``.
     """
+    from ..db.base import AsyncSessionLocal
+
     message_id = str(uuid.uuid4())
     _file_ids = file_ids or []
 
     async def inner_gen() -> AsyncIterator[dict]:
-        try:
-            async for event_dict in run_agent_stream(
-                session_data=data,
-                user_message=user_text,
-                db=db,
-                current_user=current_user,
-                message_id=message_id,
-                file_ids=_file_ids,
-            ):
-                # Swallow httpx ContextVar cleanup errors at stream end
-                if (
-                    event_dict.get("event") == "error"
-                    and "inner_response_telemetry_captured_fields"
-                    in str(event_dict.get("data", ""))
-                ):
-                    logger.warning(
-                        "Swallowing httpx ContextVar error — tokens already delivered"
-                    )
-                    yield {"event": "message_complete", "data": "{}"}
-                    return
-                yield event_dict
-        finally:
-            # Ensure DB connection is cleanly returned to the pool even
-            # when the client disconnects mid-stream (asyncio.CancelledError).
+        """The inner generator that yields SSE event dicts."""
+        async with AsyncSessionLocal() as stream_db:
             try:
-                await db.rollback()
-            except Exception:
-                pass
+                async for event_dict in run_agent_stream(
+                    session_data=data,
+                    user_message=user_text,
+                    db=stream_db,
+                    current_user=current_user,
+                    message_id=message_id,
+                    file_ids=_file_ids,
+                ):
+                    # Swallow httpx ContextVar cleanup errors at stream end
+                    if (
+                        event_dict.get("event") == "error"
+                        and "inner_response_telemetry_captured_fields"
+                        in str(event_dict.get("data", ""))
+                    ):
+                        logger.warning(
+                            "Swallowing httpx ContextVar error — tokens already delivered"
+                        )
+                        yield {"event": "message_complete", "data": "{}"}
+                        return
+                    yield event_dict
+            finally:
+                # Ensure DB connection is cleanly returned to the pool even
+                # when the client disconnects mid-stream (asyncio.CancelledError).
+                try:
+                    await asyncio.shield(stream_db.rollback())
+                except (asyncio.CancelledError, Exception):
+                    pass
+                try:
+                    await asyncio.shield(stream_db.close())
+                except (asyncio.CancelledError, Exception):
+                    pass
 
     gen = _stream_with_heartbeat(inner_gen(), interval=15)
     return EventSourceResponse(gen, media_type="text/event-stream")

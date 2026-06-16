@@ -451,8 +451,18 @@ async def link_pending_uploads_to_session(
     session created by ``_lazy_create_session`` so they remain accessible
     after promotion.
 
+    Uses two strategies to find matching uploads:
+    1. Primary: ``storage_key`` contains the *session_id* (reliable when
+       the upload was created via ``upload_file`` which uses the URL session ID).
+    2. Fallback: ``is_temporary = True`` + ``session_id IS NULL`` + recent
+       (last 5 min).  Catches edge cases where the storage key pattern
+       doesn't match (e.g. manual DB edits, key format changes).
+
     Returns the number of uploads re-linked.
     """
+    from datetime import datetime, timezone, timedelta
+
+    # Strategy 1: storage_key pattern match
     result = await db.execute(
         select(FileUpload).where(
             FileUpload.user_id == user_id,
@@ -462,6 +472,29 @@ async def link_pending_uploads_to_session(
         )
     )
     uploads = list(result.scalars().all())
+    linked_ids = {u.id for u in uploads}
+
+    # Strategy 2: fallback by recency (uploads created in the last 5 min)
+    recent_cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
+    fallback_result = await db.execute(
+        select(FileUpload).where(
+            FileUpload.user_id == user_id,
+            FileUpload.session_id.is_(None),
+            FileUpload.is_temporary == True,  # noqa: E712
+            FileUpload.created_at >= recent_cutoff,
+            FileUpload.id.notin_(linked_ids) if linked_ids else True,
+        )
+    )
+    fallback_uploads = [
+        u for u in fallback_result.scalars().all()
+        if u.id not in linked_ids
+    ]
+    if fallback_uploads:
+        logger.info(
+            "link_pending_uploads: fallback matched %d additional upload(s) for session %s",
+            len(fallback_uploads), session_id,
+        )
+        uploads.extend(fallback_uploads)
 
     for upload in uploads:
         upload.session_id = session_id

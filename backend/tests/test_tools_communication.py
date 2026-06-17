@@ -1793,6 +1793,269 @@ class TestEmailImapTool:
 
         assert result["total"] == 0
 
+    # ------------------------------------------------------------------
+    # Forward via IMAP — SMTP host/port fix (Bug #1)
+    # ------------------------------------------------------------------
+
+    @pytest.fixture
+    def imap_tools_with_smtp(self):
+        """Build email tools with IMAP credentials that include smtp_host/port."""
+        import json
+        cred = _make_mock_credential(
+            provider="imap", email="user@test.com", label="My IMAP",
+        )
+        cred.credentials = json.dumps({
+            "imap_host": "imap.test.com",
+            "imap_port": 993,
+            "username": "user",
+            "password": "pass",
+            "from_email": "user@test.com",
+            "smtp_host": "smtp.test.com",
+            "smtp_port": 587,
+        })
+        cred.oauth_tokens = json.dumps({})
+        mod = __import__("src.tools.email", fromlist=["build_email_tools"])
+        tools = mod.build_email_tools(tool_config={}, user_credentials=[cred])
+        return {t.name: t for t in tools}
+
+    async def test_imap_forward_uses_smtp_host(self, imap_tools_with_smtp):
+        """IMAP forward: uses smtp_host/smtp_port for SMTP, not imap_host/imap_port."""
+        mock_conn = MagicMock()
+        mock_conn.select = MagicMock(return_value=("OK", [b"1"]))
+        mock_conn.login = MagicMock(return_value=("OK", [b"1"]))
+        mock_conn.fetch = MagicMock(
+            return_value=("OK", [(b"1 (BODY[] {0}", b"From: sender@test.com\r\nSubject: Test\r\n")])
+        )
+        mock_conn.logout = MagicMock()
+
+        mock_smtp = MagicMock()
+        mock_smtp.starttls = MagicMock()
+        mock_smtp.login = MagicMock()
+        mock_smtp.send_message = MagicMock()
+        mock_smtp.quit = MagicMock()
+
+        with (
+            patch("imaplib.IMAP4_SSL", return_value=mock_conn),
+            patch("smtplib.SMTP", return_value=mock_smtp) as smtp_mock,
+        ):
+            result = await imap_tools_with_smtp["forward_email"](
+                email_id="1", to="recipient@test.com",
+            )
+
+        assert result["status"] == "ok"
+        # Verify SMTP was called with smtp_host/smtp_port, NOT imap_host/imap_port
+        smtp_mock.assert_called_once_with("smtp.test.com", 587, timeout=30.0)
+        mock_smtp.starttls.assert_called_once()
+        mock_smtp.login.assert_called_once()
+        mock_smtp.send_message.assert_called_once()
+        mock_smtp.quit.assert_called_once()
+
+    async def test_imap_forward_filename_not_eml(self, imap_tools_with_smtp):
+        """IMAP forward: attachment filename uses .txt not .eml."""
+        mock_conn = MagicMock()
+        mock_conn.select = MagicMock(return_value=("OK", [b"1"]))
+        mock_conn.login = MagicMock(return_value=("OK", [b"1"]))
+        mock_conn.fetch = MagicMock(
+            return_value=("OK", [(b"1 (BODY[] {0}", b"From: sender@test.com\r\nSubject: Test\r\n")])
+        )
+        mock_conn.logout = MagicMock()
+
+        mock_smtp = MagicMock()
+        mock_smtp.starttls = MagicMock()
+        mock_smtp.login = MagicMock()
+        mock_smtp.send_message = MagicMock()
+        mock_smtp.quit = MagicMock()
+
+        with (
+            patch("imaplib.IMAP4_SSL", return_value=mock_conn),
+            patch("smtplib.SMTP", return_value=mock_smtp),
+        ):
+            result = await imap_tools_with_smtp["forward_email"](
+                email_id="1", to="recipient@test.com",
+            )
+
+        assert result["status"] == "ok"
+        # Verify the forwarded message doesn't contain ".eml" in the attachment
+        call_args = mock_smtp.send_message.call_args
+        sent_msg = call_args[0][0]
+        msg_str = sent_msg.as_string()
+        assert ".eml" not in msg_str, "Attached file should not use .eml extension"
+        assert ".txt" in msg_str or "Forwarded message" in msg_str
+
+    async def test_imap_forward_smtp_quit_on_error(self, imap_tools_with_smtp):
+        """IMAP forward: SMTP quit() is called even on send error."""
+        mock_conn = MagicMock()
+        mock_conn.select = MagicMock(return_value=("OK", [b"1"]))
+        mock_conn.login = MagicMock(return_value=("OK", [b"1"]))
+        mock_conn.fetch = MagicMock(
+            return_value=("OK", [(b"1 (BODY[] {0}", b"From: sender@test.com\r\nSubject: Test\r\n")])
+        )
+        mock_conn.logout = MagicMock()
+
+        mock_smtp = MagicMock()
+        mock_smtp.starttls = MagicMock()
+        mock_smtp.login = MagicMock()
+        mock_smtp.send_message = MagicMock(side_effect=smtplib.SMTPException("Send failed"))
+        mock_smtp.quit = MagicMock()
+
+        with (
+            patch("imaplib.IMAP4_SSL", return_value=mock_conn),
+            patch("smtplib.SMTP", return_value=mock_smtp),
+        ):
+            result = await imap_tools_with_smtp["forward_email"](
+                email_id="1", to="recipient@test.com",
+            )
+
+        assert result["status"] == "error"
+        # quit() must be called even on failure
+        mock_smtp.quit.assert_called_once()
+
+    async def test_imap_forward_fallback_to_imap_host(self, imap_tools):
+        """IMAP forward: falls back to imap_host when smtp_host not in credentials."""
+        mock_conn = MagicMock()
+        mock_conn.select = MagicMock(return_value=("OK", [b"1"]))
+        mock_conn.login = MagicMock(return_value=("OK", [b"1"]))
+        mock_conn.fetch = MagicMock(
+            return_value=("OK", [(b"1 (BODY[] {0}", b"From: sender@test.com\r\nSubject: Test\r\n")])
+        )
+        mock_conn.logout = MagicMock()
+
+        mock_smtp = MagicMock()
+        mock_smtp.starttls = MagicMock()
+        mock_smtp.login = MagicMock()
+        mock_smtp.send_message = MagicMock()
+        mock_smtp.quit = MagicMock()
+
+        with (
+            patch("imaplib.IMAP4_SSL", return_value=mock_conn),
+            patch("smtplib.SMTP", return_value=mock_smtp) as smtp_mock,
+        ):
+            result = await imap_tools["forward_email"](
+                email_id="1", to="recipient@test.com",
+            )
+
+        assert result["status"] == "ok"
+        # Without smtp_host, falls back to imap_host but with smtp default port 587
+        smtp_mock.assert_called_once()
+        args, kwargs = smtp_mock.call_args
+        assert args[0] == "imap.test.com"  # fallback to imap_host
+        assert args[1] == 587  # default SMTP port
+
+    # ------------------------------------------------------------------
+    # Reply via IMAP — SMTP host/port fix (Bug #1)
+    # ------------------------------------------------------------------
+
+    async def test_imap_reply_uses_smtp_host(self, imap_tools_with_smtp):
+        """IMAP reply: uses smtp_host/smtp_port for SMTP, not imap_host/imap_port."""
+        mock_conn = MagicMock()
+        mock_conn.select = MagicMock(return_value=("OK", [b"1"]))
+        mock_conn.login = MagicMock(return_value=("OK", [b"1"]))
+        header_bytes = (
+            b"From: sender@test.com\r\n"
+            b"Subject: Original Subject\r\n"
+            b"Message-ID: <orig123@test.com>\r\n"
+            b"To: user@test.com\r\n"
+        )
+        mock_conn.fetch = MagicMock(
+            return_value=("OK", [(b"1 (BODY.PEEK[HEADER] {0}", header_bytes)])
+        )
+        mock_conn.logout = MagicMock()
+
+        mock_smtp = MagicMock()
+        mock_smtp.starttls = MagicMock()
+        mock_smtp.login = MagicMock()
+        mock_smtp.send_message = MagicMock()
+        mock_smtp.quit = MagicMock()
+
+        with (
+            patch("imaplib.IMAP4_SSL", return_value=mock_conn),
+            patch("smtplib.SMTP", return_value=mock_smtp) as smtp_mock,
+        ):
+            result = await imap_tools_with_smtp["reply_email"](
+                email_id="1", body="Reply body",
+            )
+
+        assert result["status"] == "ok"
+        # Verify SMTP was called with smtp_host/smtp_port
+        smtp_mock.assert_called_once_with("smtp.test.com", 587, timeout=30.0)
+        mock_smtp.starttls.assert_called_once()
+        mock_smtp.login.assert_called_once()
+        mock_smtp.send_message.assert_called_once()
+        mock_smtp.quit.assert_called_once()
+
+    async def test_imap_reply_smtp_cleanup_on_auth_failure(self, imap_tools_with_smtp):
+        """IMAP reply: quit() is called even when login fails."""
+        mock_conn = MagicMock()
+        mock_conn.select = MagicMock(return_value=("OK", [b"1"]))
+        mock_conn.login = MagicMock(return_value=("OK", [b"1"]))
+        header_bytes = (
+            b"From: sender@test.com\r\n"
+            b"Subject: Test\r\n"
+            b"Message-ID: <test@test.com>\r\n"
+            b"To: user@test.com\r\n"
+        )
+        mock_conn.fetch = MagicMock(
+            return_value=("OK", [(b"1 (BODY.PEEK[HEADER] {0}", header_bytes)])
+        )
+        mock_conn.logout = MagicMock()
+
+        mock_smtp = MagicMock()
+        mock_smtp.starttls = MagicMock()
+        mock_smtp.login = MagicMock(side_effect=smtplib.SMTPAuthenticationError(535, b"bad pass"))
+        mock_smtp.quit = MagicMock()
+
+        with (
+            patch("imaplib.IMAP4_SSL", return_value=mock_conn),
+            patch("smtplib.SMTP", return_value=mock_smtp),
+        ):
+            result = await imap_tools_with_smtp["reply_email"](
+                email_id="1", body="Reply body",
+            )
+
+        assert result["status"] == "error"
+        assert "auth" in result["error"].lower()
+        # quit() must be called even on auth failure
+        mock_smtp.quit.assert_called_once()
+
+    async def test_imap_reply_with_reply_all(self, imap_tools_with_smtp):
+        """IMAP reply: reply_all works correctly."""
+        mock_conn = MagicMock()
+        mock_conn.select = MagicMock(return_value=("OK", [b"1"]))
+        mock_conn.login = MagicMock(return_value=("OK", [b"1"]))
+        header_bytes = (
+            b"From: sender@test.com\r\n"
+            b"Subject: Original\r\n"
+            b"Message-ID: <orig@test.com>\r\n"
+            b"To: user@test.com, other@test.com\r\n"
+        )
+        mock_conn.fetch = MagicMock(
+            return_value=("OK", [(b"1 (BODY.PEEK[HEADER] {0}", header_bytes)])
+        )
+        mock_conn.logout = MagicMock()
+
+        mock_smtp = MagicMock()
+        mock_smtp.starttls = MagicMock()
+        mock_smtp.login = MagicMock()
+        mock_smtp.send_message = MagicMock()
+        mock_smtp.quit = MagicMock()
+
+        with (
+            patch("imaplib.IMAP4_SSL", return_value=mock_conn),
+            patch("smtplib.SMTP", return_value=mock_smtp),
+        ):
+            result = await imap_tools_with_smtp["reply_email"](
+                email_id="1", body="Reply", reply_all=True,
+            )
+
+        assert result["status"] == "ok"
+        # Verify the message was sent
+        mock_smtp.send_message.assert_called_once()
+        sent_msg = mock_smtp.send_message.call_args[0][0]
+        msg_str = sent_msg.as_string()
+        # reply_all should include both original sender and original To
+        assert "sender@test.com" in msg_str
+        assert "other@test.com" in msg_str
+
 
 # ===================================================================
 # 11. Email — Credential Resolution

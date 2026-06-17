@@ -746,6 +746,7 @@ def build_email_tools(
                 cd["imap_host"], int(cd.get("imap_port", 993)),
                 cd.get("username", ""), cd.get("password", ""),
                 email_id, to.strip(), body, cc,
+                smtp_host=cd.get("smtp_host"), smtp_port=int(cd.get("smtp_port", 587)),
             )
         return {"error": "This account does not support forwarding.", "status": "error"}
 
@@ -817,7 +818,8 @@ def build_email_tools(
             return await _reply_via_imap(
                 cd["imap_host"], int(cd.get("imap_port", 993)),
                 cd.get("username", ""), cd.get("password", ""),
-                email_id, body.strip(), reply_all, attachments,
+                email_id, body.strip(), reply_all, all_attachments_reply,
+                smtp_host=cd.get("smtp_host"), smtp_port=int(cd.get("smtp_port", 587)),
             )
         return {"error": "This account does not support replying.", "status": "error"}
 
@@ -1032,10 +1034,15 @@ async def _send_via_smtp(
             else:
                 server = smtplib.SMTP(smtp_host, smtp_port, timeout=DEFAULT_TIMEOUT)
                 server.starttls()
-            if smtp_username and smtp_password:
-                server.login(smtp_username, smtp_password)
-            server.send_message(msg)
-            server.quit()
+            try:
+                if smtp_username and smtp_password:
+                    server.login(smtp_username, smtp_password)
+                server.send_message(msg)
+            finally:
+                try:
+                    server.quit()
+                except Exception:
+                    pass
 
         await asyncio.wait_for(asyncio.to_thread(_send), timeout=120.0)
         return {"to": to, "subject": subject, "status": "ok", "provider": "smtp"}
@@ -1809,7 +1816,7 @@ async def _forward_via_gmail_api(access_token, email_id, to, body=None, cc=None)
         # Attach original message
         orig_parsed = em.message_from_string(original_msg)
         attachment = MIMEMessage(orig_parsed)
-        attachment.add_header("Content-Disposition", "attachment", filename="Forwarded message.eml")
+        attachment.add_header("Content-Disposition", "attachment", filename="Forwarded message.txt")
         msg.attach(attachment)
 
         raw_send = base64.urlsafe_b64encode(msg.as_bytes()).decode()
@@ -1861,7 +1868,7 @@ async def _forward_via_graph_api(access_token, email_id, to, body=None, cc=None)
         return {"error": f"Graph forward failed: {exc}", "status": "error"}
 
 
-async def _forward_via_imap(host, port, username, password, email_id, to, body=None, cc=None):
+async def _forward_via_imap(host, port, username, password, email_id, to, body=None, cc=None, smtp_host=None, smtp_port=None):
     """Forward an email via IMAP fetch + SMTP send with original as attachment."""
     import asyncio, imaplib, ssl
     import email as em
@@ -1871,6 +1878,9 @@ async def _forward_via_imap(host, port, username, password, email_id, to, body=N
 
     if not host or not username or not password:
         return {"error": "IMAP credentials incomplete", "status": "error"}
+
+    _smtp_host = smtp_host or host
+    _smtp_port = smtp_port or 587
 
     def _forward():
         ctx = ssl.create_default_context()
@@ -1905,24 +1915,34 @@ async def _forward_via_imap(host, port, username, password, email_id, to, body=N
             msg.attach(MIMEText(body, "plain", "utf-8"))
 
         attachment = MIMEMessage(orig_msg)
-        attachment.add_header("Content-Disposition", "attachment", filename="Forwarded message.eml")
+        attachment.add_header("Content-Disposition", "attachment", filename="Forwarded message.txt")
         msg.attach(attachment)
 
         # Send via SMTP
         import smtplib
+        srv = None
         try:
-            srv = smtplib.SMTP_SSL(host, port, timeout=DEFAULT_TIMEOUT) if port == 465 else smtplib.SMTP(host, port, timeout=DEFAULT_TIMEOUT)
-            if port != 465:
+            srv = smtplib.SMTP_SSL(_smtp_host, _smtp_port, timeout=DEFAULT_TIMEOUT) if _smtp_port == 465 else smtplib.SMTP(_smtp_host, _smtp_port, timeout=DEFAULT_TIMEOUT)
+            if _smtp_port != 465:
                 srv.starttls()
             srv.login(username, password)
             srv.send_message(msg)
-            srv.quit()
             return {"to": to, "subject": fwd_subject, "status": "ok", "provider": "imap"}
+        except smtplib.SMTPAuthenticationError:
+            return {"error": "SMTP forward auth failed.", "status": "error"}
         except smtplib.SMTPException as exc:
             return {"error": f"SMTP forward failed: {exc}", "status": "error"}
+        finally:
+            if srv:
+                try:
+                    srv.quit()
+                except Exception:
+                    pass
 
     try:
-        return await asyncio.to_thread(_forward)
+        return await asyncio.wait_for(asyncio.to_thread(_forward), timeout=120.0)
+    except asyncio.TimeoutError:
+        return {"error": "SMTP forward timed out after 120 seconds.", "status": "error"}
     except Exception as exc:
         return {"error": f"IMAP forward failed: {exc}", "status": "error"}
 
@@ -1986,7 +2006,7 @@ async def _reply_via_gmail_api(access_token, email_id, body, reply_all=False, at
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
             r2 = await c.post(
                 f"{GMAIL_API_BASE}/messages/send",
-                json={"raw": raw, "threadId": data.get("threadId", "")},
+                json={"raw": raw, **({"threadId": data["threadId"]} if data.get("threadId") else {})},
                 headers={"Authorization": f"Bearer {access_token}"},
             )
             if r2.status_code in (200, 201):
@@ -2031,7 +2051,7 @@ async def _reply_via_graph_api(access_token, email_id, body, reply_all=False, at
         return {"error": f"Graph reply failed: {exc}", "status": "error"}
 
 
-async def _reply_via_imap(host, port, username, password, email_id, body, reply_all=False, attachments=None):
+async def _reply_via_imap(host, port, username, password, email_id, body, reply_all=False, attachments=None, smtp_host=None, smtp_port=None):
     """Reply to an email via IMAP fetch + SMTP send with threading headers."""
     import asyncio, imaplib, ssl
     import email as em
@@ -2040,6 +2060,9 @@ async def _reply_via_imap(host, port, username, password, email_id, body, reply_
 
     if not host or not username or not password:
         return {"error": "IMAP credentials incomplete", "status": "error"}
+
+    _smtp_host = smtp_host or host
+    _smtp_port = smtp_port or 587
 
     def _reply():
         ctx = ssl.create_default_context()
@@ -2098,19 +2121,29 @@ async def _reply_via_imap(host, port, username, password, email_id, body, reply_
                 msg["References"] = f"{original_references} {original_msg_id}".strip() if original_references else original_msg_id
 
         import smtplib
+        srv = None
         try:
-            srv = smtplib.SMTP_SSL(host, port, timeout=DEFAULT_TIMEOUT) if port == 465 else smtplib.SMTP(host, port, timeout=DEFAULT_TIMEOUT)
-            if port != 465:
+            srv = smtplib.SMTP_SSL(_smtp_host, _smtp_port, timeout=DEFAULT_TIMEOUT) if _smtp_port == 465 else smtplib.SMTP(_smtp_host, _smtp_port, timeout=DEFAULT_TIMEOUT)
+            if _smtp_port != 465:
                 srv.starttls()
             srv.login(username, password)
             srv.send_message(msg)
-            srv.quit()
             return {"status": "ok", "message": "Reply sent.", "provider": "imap"}
+        except smtplib.SMTPAuthenticationError:
+            return {"error": "SMTP reply auth failed.", "status": "error"}
         except smtplib.SMTPException as exc:
             return {"error": f"SMTP reply failed: {exc}", "status": "error"}
+        finally:
+            if srv:
+                try:
+                    srv.quit()
+                except Exception:
+                    pass
 
     try:
-        return await asyncio.to_thread(_reply)
+        return await asyncio.wait_for(asyncio.to_thread(_reply), timeout=120.0)
+    except asyncio.TimeoutError:
+        return {"error": "SMTP reply timed out after 120 seconds.", "status": "error"}
     except Exception as exc:
         return {"error": f"IMAP reply failed: {exc}", "status": "error"}
 

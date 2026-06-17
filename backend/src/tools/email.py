@@ -1154,12 +1154,12 @@ async def _read_gmail_api(access_token, max_results=10, query=""):
             async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
                 d = await c.get(
                     f"{GMAIL_API_BASE}/messages/{ref['id']}",
-                    params={"format": "metadata", "metadataHeaders": "From,Subject,Date"},
+                    params={"format": "metadata", "metadataHeaders": ["From", "Subject", "Date"]},
                     headers={"Authorization": f"Bearer {access_token}"},
                 )
                 if d.status_code != 200:
                     continue
-                h = {h["name"]: h["value"] for h in d.json().get("payload", {}).get("headers", [])}
+                h = _get_gmail_headers(d.json().get("payload", {}))
                 emails.append({"id": ref["id"], "from": h.get("From", ""), "subject": h.get("Subject", ""), "date": h.get("Date", "")})
 
         return {"emails": emails, "total": len(emails)}
@@ -1494,6 +1494,23 @@ def _extract_gmail_body(payload):
     return ""
 
 
+def _get_gmail_headers(payload: dict) -> dict[str, str]:
+    """Extract headers from a Gmail API payload, falling back to nested parts.
+
+    Gmail API places message-level headers at ``payload.headers`` for
+    simple messages, but for multipart messages the headers may live
+    inside ``payload.parts[0].headers``.  This helper tries the top
+    level first, then scans parts.
+    """
+    candidates = [payload]
+    candidates.extend(payload.get("parts", []))
+    for p in candidates:
+        raw = p.get("headers", [])
+        if raw:
+            return {h["name"]: h["value"] for h in raw}
+    return {}
+
+
 async def _modify_gmail(access_token, email_id, add_labels=None, remove_labels=None):
     """Add or remove labels on a Gmail message (e.g., mark read/unread)."""
     body = {}
@@ -1787,12 +1804,12 @@ async def _forward_via_gmail_api(access_token, email_id, to, body=None, cc=None)
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
             r2 = await c.get(
                 f"{GMAIL_API_BASE}/messages/{email_id}",
-                params={"format": "metadata", "metadataHeaders": "Subject"},
+                params={"format": "metadata", "metadataHeaders": ["Subject"]},
                 headers={"Authorization": f"Bearer {access_token}"},
             )
             r2.raise_for_status()
             meta = r2.json()
-            headers = {h["name"]: h["value"] for h in meta.get("payload", {}).get("headers", [])}
+            headers = _get_gmail_headers(meta.get("payload", {}))
             original_subject = headers.get("Subject", "")
 
         fwd_subject = f"Fwd: {original_subject}" if original_subject and not original_subject.startswith("Fwd:") else original_subject
@@ -1965,7 +1982,7 @@ async def _reply_via_gmail_api(access_token, email_id, body, reply_all=False, at
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as c:
             r = await c.get(
                 f"{GMAIL_API_BASE}/messages/{email_id}",
-                params={"format": "metadata", "metadataHeaders": "From,Subject,Message-ID,References"},
+                params={"format": "metadata", "metadataHeaders": ["From", "Subject", "Message-ID", "References"]},
                 headers={"Authorization": f"Bearer {access_token}"},
             )
             if r.status_code == 401:
@@ -1973,7 +1990,7 @@ async def _reply_via_gmail_api(access_token, email_id, body, reply_all=False, at
             r.raise_for_status()
             data = r.json()
 
-        headers = {h["name"]: h["value"] for h in data.get("payload", {}).get("headers", [])}
+        headers = _get_gmail_headers(data.get("payload", {}))
         original_from = headers.get("From", "")
         original_subject = headers.get("Subject", "")
         original_msg_id = headers.get("Message-ID", "")

@@ -623,7 +623,11 @@ PH Agent Hub uses **MinIO** as the object storage backend for all file uploads. 
 
 - All `boto3` calls are contained in `/backend/src/storage/s3.py` — the only module that interacts with MinIO directly
 - One bucket per tenant, created automatically on tenant provisioning: `phhub-tenant-{tenant_id}`
-- Object key format: `uploads/{user_id}/{session_id}/{file_id}-{original_filename}`
+- Object key format: `uploads/{user_id}/{session_id}/{file_id}-{safe_filename}`
+  The filename portion is sanitized via `_sanitize_storage_filename()` in
+  `upload_service.py` — Unicode characters are normalized (NFKD → ASCII),
+  path separators (`/`, `\\`) replaced, and characters unsafe for HTTP
+  headers removed. The original filename is preserved in the DB for display.
 - All objects are private; access is always via presigned URLs (15-minute validity)
 - Migration to Azure Blob Storage would require adding an adapter to `s3.py` only
 
@@ -708,6 +712,16 @@ This model ensures defense-in-depth: even if the session-level check were bypass
 | User account deleted | All files owned by user deleted from MinIO and DB |
 | Tenant deleted | All tenant bucket objects deleted; all rows deleted |
 | Temporary session expires | No cleanup needed — uploads blocked |
+
+### 10.9 Filename Sanitization
+
+User-provided filenames are sanitized at two points in the upload lifecycle:
+
+1. **S3/MinIO storage keys** (`upload_service.py:create_upload`): The `_sanitize_storage_filename()` function normalizes the filename to a safe ASCII-only form for use in object keys. This prevents path traversal (`../`), header injection characters (`"`, `;`), null bytes, and Unicode homoglyph attacks.
+
+2. **Download `Content-Disposition` headers** (`chat.py:download_upload`): The `_encode_content_disposition_filename()` function uses **RFC 5987** encoding for filenames containing non-ASCII characters. The header emits both `filename` (ASCII fallback) and `filename*` (percent-encoded UTF-8), ensuring correct browser handling across all modern clients.
+
+The `original_filename` column in the database is **never modified** — it retains the user's original name for display purposes.
 
 ### 10.9 Agent Tool Integration
 

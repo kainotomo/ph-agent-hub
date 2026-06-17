@@ -53,6 +53,8 @@ The project uses **pytest** for backend testing. Tests are organized by marker a
 | `test_concurrency.py` | 8 | Stream cancellation, temp session TTL/races, rate limiter concurrency |
 | `test_regression.py` | 10 | Prompt/credential/chat/memory tenant isolation, temp upload guard |
 | `test_group_service.py` | 3 | Group CRUD idempotency (Issue #348) |
+| `test_oauth_state_security.py` | 8 | OAuth state edge cases: cross-user binding, tampered payloads, expiry boundaries, concurrent callbacks, Microsoft replay (Issue #354) |
+| `test_upload_auth.py` | 12 | Upload authorization: non-owner access, cross-tenant, path-traversal filenames, size limits, content-type spoofing (Issue #354) |
 
 ### Security & Isolation Tests
 

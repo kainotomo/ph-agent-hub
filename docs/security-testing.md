@@ -46,6 +46,8 @@ pytest backend/tests/ -m "not security and not tenant_isolation"
 | `test_abuse_scenarios.py` | integration | Forged tokens, SQL injection, XSS, token replay |
 | `test_regression.py` | integration | Regression tests for fixed tenant-isolation gaps and known bug patterns |
 | `test_concurrency.py` | integration | Stream cancellation, temp session races, rate limiter under concurrent load |
+| `test_oauth_state_security.py` | unit + integration | OAuth state edge cases: cross-user binding, tampered payloads, expiry boundaries, concurrent callbacks, Microsoft replay (Issue #354) |
+| `test_upload_auth.py` | integration | Upload authorization: non-owner access, cross-tenant, path-traversal filenames, size limits, content-type spoofing (Issue #354) |
 
 ## Tenant Isolation Model
 
@@ -91,6 +93,8 @@ Security tests automatically run on every pull request via GitHub Actions. See `
 | OAuth state integrity: state was plaintext, unsigned, non-expiring, replayable | Replaced with Redis-backed nonce store — tamper-evident, 10-min TTL, single-use (Issue #345) | `test_oauth_state.py`, `test_credentials_api.py::TestOAuthStateIntegrity`, `test_abuse_scenarios.py::TestOAuthStateAbuse` |
 | Upload filename sanitization: original filenames used directly in S3 keys and Content-Disposition headers | Added `_sanitize_storage_filename()` for NFKD→ASCII normalization, path traversal prevention, and unsafe-char removal; added `_encode_content_disposition_filename()` for RFC 5987 header encoding (Issue #352) | `test_filename_sanitization.py` (19 unit tests), `test_upload_flow.py` (regression — 11 existing tests pass) |
 | `create_credential` tool lookup missing tenant filter | Added `ToolORM.tenant_id == current_user.tenant_id` to the tool existence query (Issue #353) | `test_credentials_api.py::TestCreateCredential::test_create_credential_cross_tenant_tool_rejected` |
+| OAuth state edge cases: cross-user binding, malformed payloads, concurrent replay | Tests only — production code documented gaps in `get_oauth_state` type validation (Issue #354) | `test_oauth_state_security.py` |
+| Upload authorization edge cases: non-owner list/delete, cross-tenant, size limit, spoofed MIME | Tests only — production code already protects these paths (Issue #354) | `test_upload_auth.py` |
 
 ### Previously Identified Gaps — Now Fixed
 

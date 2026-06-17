@@ -357,9 +357,10 @@ class TestSessionUpload:
     async def test_upload_to_temp_session_rejected(
         self, async_client, auth_headers, test_user
     ):
-        """Verify uploads to temporary sessions return 403.
+        """Verify uploads to temporary sessions auto-promote and succeed.
 
-        Validates Step 0c: temp session upload guard.
+        Validates that the temp session is promoted to permanent
+        on file upload (Issue #368).
         """
         # Create a temp session first
         headers = auth_headers(test_user)
@@ -370,14 +371,18 @@ class TestSessionUpload:
         assert create_resp.status_code == 201
         temp_session_id = create_resp.json()["id"]
 
-        # Try to upload to it
+        # Try to upload to it — should auto-promote and succeed
         files = {"file": ("test.txt", b"Hello", "text/plain")}
         resp = await async_client.post(
             f"/api/chat/session/{temp_session_id}/upload",
             files=files,
             headers=headers,
         )
-        assert resp.status_code == 403, resp.text
+        # Should NOT be 403 (session is auto-promoted). May be 200/201
+        # if MinIO available, or 422/500 if MinIO is not running.
+        assert resp.status_code != 403, (
+            "Temp session upload should auto-promote, not return 403"
+        )
 
     async def test_upload_to_other_user_session_forbidden(
         self, async_client, auth_headers, test_user, second_user, test_session

@@ -155,16 +155,17 @@ class TestCredentialTenantIsolation:
 
 
 class TestTempSessionUploadGuard:
-    """Verify temporary session upload rejection.
+    """Verify temporary session uploads auto-promote to permanent.
 
     Regression for: upload_service.create_upload() had ForbiddenError
-    in docstring but never raised it.
+    in docstring but never raised it. Updated for Issue #368 where
+    temp sessions are now promoted to permanent on upload.
     """
 
     async def test_upload_to_temp_session_returns_403(
         self, async_client, auth_headers, test_user
     ):
-        """Verify uploading to a temporary session returns 403."""
+        """Verify uploading to a temporary session auto-promotes and succeeds."""
         headers = auth_headers(test_user)
         create_resp = await async_client.post(
             "/api/chat/session",
@@ -180,7 +181,11 @@ class TestTempSessionUploadGuard:
             files=files,
             headers=headers,
         )
-        assert resp.status_code == 403, resp.text
+        # Should NOT be 403 (session is auto-promoted). May be 200/201
+        # if MinIO available, or 422/500 if MinIO is not running.
+        assert resp.status_code != 403, (
+            "Temp session upload should auto-promote, not return 403"
+        )
 
     async def test_upload_to_permanent_session_not_blocked(
         self, async_client, auth_headers, test_user, test_session

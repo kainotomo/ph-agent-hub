@@ -2266,6 +2266,37 @@ async def upload_file(
         }
         await store_temp_session(session_id, data)
 
+    # ---- Temp → permanent promotion (Issue #368) -----------------------
+    # If the session is temporary (either newly lazy-created or loaded
+    # from Redis as “New Chat”), promote it to permanent before
+    # proceeding with the upload.
+    if data.get("is_temporary"):
+        logger.info(
+            "Promoting temp session %s to permanent on file upload",
+            session_id,
+        )
+        session_create = SessionCreate(
+            title=data.get("title", "New Chat"),
+            is_temporary=False,
+            is_pinned=data.get("is_pinned", False),
+            selected_template_id=data.get("selected_template_id"),
+            selected_skill_id=data.get("selected_skill_id"),
+            selected_model_id=data.get("selected_model_id"),
+            active_tool_ids=data.get("active_tool_ids"),
+            thinking_enabled=data.get("thinking_enabled"),
+            temperature=data.get("temperature"),
+            auto_route_enabled=data.get("auto_route_enabled", False),
+            auto_select_tools=data.get("auto_select_tools", True),
+        )
+        data = await _lazy_create_session(
+            db, session_id, session_create, current_user,
+        )
+        # Re-link any files uploaded during the pending phase
+        await upload_service.link_pending_uploads_to_session(
+            db, session_id, current_user.id,
+        )
+        await delete_temp_session(session_id)
+
     if not file.filename:
         raise ValidationError("File must have a filename")
 

@@ -246,8 +246,10 @@ async def create_upload(
     # 3. Determine if this is a temporary session
     is_temp = session_data.get("is_temporary", False)
 
-    # 3a. Reject uploads to temporary sessions (lazy / guest sessions)
-    #     that have not yet been promoted to permanent.
+    # 3a. Temporary sessions are rejected here.  The upload endpoint
+    #     (upload_file in chat.py) promotes temp sessions to permanent
+    #     before calling this function, so this branch should be
+    #     unreachable under normal operation.
     if is_temp:
         raise ForbiddenError(
             "File uploads are not supported in temporary sessions. "

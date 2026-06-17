@@ -1995,6 +1995,7 @@ async def _reply_via_gmail_api(access_token, email_id, body, reply_all=False, at
                 msg["References"] = f"{original_references} {original_msg_id}".strip() if original_references else original_msg_id
         else:
             msg = MimeText(body, "plain", "utf-8")
+            msg["From"] = "me"
             msg["To"] = original_sender
             msg["Subject"] = reply_subject
             if original_msg_id:
@@ -2011,7 +2012,18 @@ async def _reply_via_gmail_api(access_token, email_id, body, reply_all=False, at
             )
             if r2.status_code in (200, 201):
                 return {"status": "ok", "message": "Reply sent.", "provider": "gmail"}
-            return {"error": f"Gmail reply failed: HTTP {r2.status_code}", "status": "error"}
+            # Try to extract Gmail API error details from response body
+            error_detail = ""
+            try:
+                body_data = r2.json()
+                error_detail = body_data.get("error", {}).get("message", "")
+            except Exception:
+                pass
+            msg = f"Gmail reply failed: HTTP {r2.status_code}"
+            if error_detail:
+                msg += f" - {error_detail}"
+            logger.warning(msg)
+            return {"error": msg, "status": "error"}
 
     except Exception as exc:
         logger.error("Gmail reply failed: %s", exc)
@@ -2106,14 +2118,14 @@ async def _reply_via_imap(host, port, username, password, email_id, body, reply_
                 msg["In-Reply-To"] = original_msg_id
                 msg["References"] = f"{original_references} {original_msg_id}".strip() if original_references else original_msg_id
         else:
+            msg = MimeText(body, "plain", "utf-8")
+            msg["From"] = username
             if reply_all:
                 all_to = original_from
                 if original_to:
                     all_to = f"{all_to}, {original_to}"
-                msg = MimeText(body, "plain", "utf-8")
                 msg["To"] = all_to
             else:
-                msg = MimeText(body, "plain", "utf-8")
                 msg["To"] = original_sender
             msg["Subject"] = reply_subject
             if original_msg_id:

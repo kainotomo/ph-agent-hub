@@ -2056,6 +2056,78 @@ class TestEmailImapTool:
         assert "sender@test.com" in msg_str
         assert "other@test.com" in msg_str
 
+    async def test_imap_reply_sets_from_header(self, imap_tools_with_smtp):
+        """IMAP reply: From header is set (no SMTP 501 error)."""
+        mock_conn = MagicMock()
+        mock_conn.select = MagicMock(return_value=("OK", [b"1"]))
+        mock_conn.login = MagicMock(return_value=("OK", [b"1"]))
+        header_bytes = (
+            b"From: sender@test.com\r\n"
+            b"Subject: Original\r\n"
+            b"Message-ID: <orig@test.com>\r\n"
+            b"To: user@test.com\r\n"
+        )
+        mock_conn.fetch = MagicMock(
+            return_value=("OK", [(b"1 (BODY.PEEK[HEADER] {0}", header_bytes)])
+        )
+        mock_conn.logout = MagicMock()
+
+        mock_smtp = MagicMock()
+        mock_smtp.starttls = MagicMock()
+        mock_smtp.login = MagicMock()
+        mock_smtp.send_message = MagicMock()
+        mock_smtp.quit = MagicMock()
+
+        with (
+            patch("imaplib.IMAP4_SSL", return_value=mock_conn),
+            patch("smtplib.SMTP", return_value=mock_smtp),
+        ):
+            result = await imap_tools_with_smtp["reply_email"](
+                email_id="1", body="Reply body",
+            )
+
+        assert result["status"] == "ok"
+        sent_msg = mock_smtp.send_message.call_args[0][0]
+        msg_str = sent_msg.as_string()
+        # From header must be present to avoid SMTP 501
+        assert "From:" in msg_str, "Reply must have a From header"
+        assert "user" in msg_str.split("From:")[1].split("\n")[0]
+
+    async def test_imap_reply_reply_all_sets_from_header(self, imap_tools_with_smtp):
+        """IMAP reply with reply_all: From header is set."""
+        mock_conn = MagicMock()
+        mock_conn.select = MagicMock(return_value=("OK", [b"1"]))
+        mock_conn.login = MagicMock(return_value=("OK", [b"1"]))
+        header_bytes = (
+            b"From: sender@test.com\r\n"
+            b"Subject: Original\r\n"
+            b"Message-ID: <orig@test.com>\r\n"
+            b"To: user@test.com, other@test.com\r\n"
+        )
+        mock_conn.fetch = MagicMock(
+            return_value=("OK", [(b"1 (BODY.PEEK[HEADER] {0}", header_bytes)])
+        )
+        mock_conn.logout = MagicMock()
+
+        mock_smtp = MagicMock()
+        mock_smtp.starttls = MagicMock()
+        mock_smtp.login = MagicMock()
+        mock_smtp.send_message = MagicMock()
+        mock_smtp.quit = MagicMock()
+
+        with (
+            patch("imaplib.IMAP4_SSL", return_value=mock_conn),
+            patch("smtplib.SMTP", return_value=mock_smtp),
+        ):
+            result = await imap_tools_with_smtp["reply_email"](
+                email_id="1", body="Reply all", reply_all=True,
+            )
+
+        assert result["status"] == "ok"
+        sent_msg = mock_smtp.send_message.call_args[0][0]
+        msg_str = sent_msg.as_string()
+        assert "From:" in msg_str, "Reply must have a From header"
+
 
 # ===================================================================
 # 11. Email — Credential Resolution

@@ -205,10 +205,12 @@ class TestUploadInputValidation:
             files=files,
             headers=headers,
         )
-        # Should NOT be 404 (lazy session is created).  May be 200/201
-        # if MinIO available, or 422/500 if MinIO is not running.
-        assert resp.status_code != 404, (
-            "Uploading to a nonexistent ID should create a lazy session, not 404"
+        # Should NOT be 404 (lazy session is created) or 403 (session is
+        # auto-promoted).  May be 200/201 if MinIO available, or 422/500
+        # if MinIO is not running.
+        assert resp.status_code not in (404, 403), (
+            "Uploading to a nonexistent ID should create a lazy session, "
+            "not 404 or 403"
         )
 
     async def test_upload_with_path_traversal_filename(

@@ -81,19 +81,17 @@ def _mock_s3_upload(url: str = "https://fake.minio/presigned/url"):
     - ``upload_object``
     - ``generate_presigned_url`` (returns *url*)
     """
-    from contextlib import ExitStack
-    stack = ExitStack()
-    stack.enter_context(
-        patch("src.storage.s3.ensure_bucket_exists", AsyncMock()),
-    )
-    stack.enter_context(
-        patch("src.storage.s3.upload_object", AsyncMock()),
-    )
-    stack.enter_context(
-        patch("src.storage.s3.generate_presigned_url",
-              AsyncMock(return_value=url)),
-    )
-    return stack
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _patches():
+        with patch("src.storage.s3.ensure_bucket_exists", AsyncMock()), \
+             patch("src.storage.s3.upload_object", AsyncMock()), \
+             patch("src.storage.s3.generate_presigned_url",
+                   AsyncMock(return_value=url)):
+            yield
+
+    return _patches()
 
 
 # ===========================================================================
@@ -284,11 +282,10 @@ print(json.dumps(result))
         )
 
         mock_proc = _make_mock_process(stdout=stdout_bytes)
-        mock_unshare = _make_mock_process(returncode=0)
 
         with patch(
-            "src.tools.code_interpreter.asyncio.create_subprocess_exec",
-            side_effect=[mock_unshare, mock_proc],
+            "src.tools.code_interpreter._run_subprocess",
+            AsyncMock(return_value=(stdout_bytes, b"", 0)),
         ):
             result = await tool(code=code)
 
@@ -304,12 +301,9 @@ print(json.dumps(result))
             images=["iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="],
         )
 
-        mock_proc = _make_mock_process(stdout=stdout_bytes)
-        mock_unshare = _make_mock_process(returncode=0)
-
         with patch(
-            "src.tools.code_interpreter.asyncio.create_subprocess_exec",
-            side_effect=[mock_unshare, mock_proc],
+            "src.tools.code_interpreter._run_subprocess",
+            AsyncMock(return_value=(stdout_bytes, b"", 0)),
         ):
             result = await tool(code=code)
 
@@ -342,17 +336,16 @@ print(json.dumps(result))
         code = "print('hello')"
 
         # Patch _run_subprocess directly to simulate timeout
-        timeout_msg = "Execution timed out after 65 seconds"
+        # stderr must be bytes because source code does .decode() on it
+        timeout_stderr = b"Execution timed out after 65 seconds"
         with patch(
             "src.tools.code_interpreter._run_subprocess",
-            AsyncMock(return_value=(None, timeout_msg, -1)),
-        ), patch(
-            "src.tools.code_interpreter.asyncio.create_subprocess_exec",
+            AsyncMock(return_value=(None, timeout_stderr, -1)),
         ):
             result = await tool(code=code)
 
         assert "error" in result
-        assert "timed out" in result["error"].lower()
+        assert "timed out" in str(result["error"]).lower()
 
     async def test_execute_nonzero_exit(self, tool):
         """Non-zero exit code results in error field."""
@@ -360,11 +353,10 @@ print(json.dumps(result))
         stdout_bytes = self._make_code_result_json(error="Something broke")
 
         mock_proc = _make_mock_process(stdout=stdout_bytes, returncode=1)
-        mock_unshare = _make_mock_process(returncode=0)
 
         with patch(
-            "src.tools.code_interpreter.asyncio.create_subprocess_exec",
-            side_effect=[mock_unshare, mock_proc],
+            "src.tools.code_interpreter._run_subprocess",
+            AsyncMock(return_value=(stdout_bytes, b"", 1)),
         ):
             result = await tool(code=code)
 
@@ -376,15 +368,9 @@ print(json.dumps(result))
         code = "print('fallback')"
         stdout_bytes = self._make_code_result_json(stdout="fallback\n")
 
-        mock_proc = _make_mock_process(stdout=stdout_bytes)
-        mock_unshare = _make_mock_process(
-            stdout=b"unshare failed: Operation not permitted",
-            returncode=1,
-        )
-
         with patch(
-            "src.tools.code_interpreter.asyncio.create_subprocess_exec",
-            side_effect=[mock_unshare, mock_proc],
+            "src.tools.code_interpreter._run_subprocess",
+            AsyncMock(return_value=(stdout_bytes, b"", 0)),
         ):
             result = await tool(code=code)
 
@@ -399,11 +385,10 @@ print(json.dumps(result))
         stdout_bytes = self._make_code_result_json(stdout="fast\n")
 
         mock_proc = _make_mock_process(stdout=stdout_bytes)
-        mock_unshare = _make_mock_process(returncode=0)
 
         with patch(
-            "src.tools.code_interpreter.asyncio.create_subprocess_exec",
-            side_effect=[mock_unshare, mock_proc],
+            "src.tools.code_interpreter._run_subprocess",
+            AsyncMock(return_value=(stdout_bytes, b"", 0)),
         ):
             result = await tool(code=code)
 
@@ -416,11 +401,9 @@ print(json.dumps(result))
         code = "print('online')"
         stdout_bytes = self._make_code_result_json(stdout="online\n")
 
-        mock_proc = _make_mock_process(stdout=stdout_bytes)
-
         with patch(
-            "src.tools.code_interpreter.asyncio.create_subprocess_exec",
-            return_value=mock_proc,
+            "src.tools.code_interpreter._run_subprocess",
+            AsyncMock(return_value=(stdout_bytes, b"", 0)),
         ):
             result = await tool(code=code)
 

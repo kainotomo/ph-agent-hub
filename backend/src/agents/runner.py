@@ -2986,7 +2986,7 @@ def _schedule_post_response_tasks(
                     temperature=temperature,
                 )
                 if questions:
-                    await store_follow_up_questions(session_id, questions)
+                    await store_follow_up_questions(tenant_id, session_id, questions)
             except Exception:
                 logger.exception(
                     "Failed to generate follow-up questions for session %s",

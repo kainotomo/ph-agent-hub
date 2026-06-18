@@ -2778,23 +2778,18 @@ class TestFollowUpQuestions:
             f"/api/chat/session/{test_session.id}/follow-up-questions",
             headers=headers,
         )
-        # Note: this endpoint currently does not validate session ownership.
-        # It returns 200 with questions from Redis or empty list.
-        # If ownership validation is added later, this should be 403.
-        assert resp.status_code in (200, 403)
+        assert resp.status_code == 403
 
     async def test_follow_up_nonexistent_session(
         self, async_client, auth_headers, test_user
     ):
-        """Verify follow-up questions for nonexistent session returns [] or 404."""
+        """Verify follow-up questions for nonexistent session returns 404."""
         headers = auth_headers(test_user)
         resp = await async_client.get(
             f"/api/chat/session/{str(uuid.uuid4())}/follow-up-questions",
             headers=headers,
         )
-        # Since the endpoint goes directly to Redis without session validation,
-        # it returns [] for non-existent sessions
-        assert resp.status_code in (200, 404)
+        assert resp.status_code == 404
 
     async def test_follow_up_requires_auth(
         self, async_client

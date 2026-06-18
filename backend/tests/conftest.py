@@ -615,6 +615,105 @@ async def test_ollama_model(
 
 
 # =============================================================================
+# Admin & Management Service Fixtures — Tenants with balance/groups
+# =============================================================================
+
+
+@pytest_asyncio.fixture
+async def admin_tenant(db_session: AsyncSession) -> Tenant:
+    """Create a tenant with a balance and warning threshold set (for balance/usage tests)."""
+    from decimal import Decimal
+    tenant = Tenant(
+        id=str(uuid.uuid4()),
+        name=f"Admin Tenant {uuid.uuid4().hex[:8]}",
+        balance_euros=Decimal("100.00"),
+        warning_threshold_eur=Decimal("10.00"),
+    )
+    db_session.add(tenant)
+    await db_session.flush()
+    return tenant
+
+
+@pytest_asyncio.fixture
+async def empty_tenant(db_session: AsyncSession) -> Tenant:
+    """Create a bare tenant with no users, models, sessions, or other resources."""
+    tenant = Tenant(
+        id=str(uuid.uuid4()),
+        name=f"Empty Tenant {uuid.uuid4().hex[:8]}",
+    )
+    db_session.add(tenant)
+    await db_session.flush()
+    return tenant
+
+
+@pytest_asyncio.fixture
+async def unlimited_tenant(db_session: AsyncSession) -> Tenant:
+    """Create a tenant with no balance limit (balance_euros=None)."""
+    tenant = Tenant(
+        id=str(uuid.uuid4()),
+        name=f"Unlimited Tenant {uuid.uuid4().hex[:8]}",
+        balance_euros=None,
+    )
+    db_session.add(tenant)
+    await db_session.flush()
+    return tenant
+
+
+@pytest_asyncio.fixture
+async def test_group(
+    db_session: AsyncSession,
+    test_tenant: Tenant,
+) -> "UserGroup":
+    """Create a user group in the test tenant."""
+    from src.db.orm.groups import UserGroup
+
+    group = UserGroup(
+        id=str(uuid.uuid4()),
+        tenant_id=test_tenant.id,
+        name=f"Test Group {uuid.uuid4().hex[:8]}",
+    )
+    db_session.add(group)
+    await db_session.flush()
+    return group
+
+
+@pytest_asyncio.fixture
+async def test_model_group(
+    db_session: AsyncSession,
+    test_group: "UserGroup",
+    test_model: "Model",
+) -> "ModelGroup":
+    """Create a model-to-group assignment."""
+    from src.db.orm.groups import ModelGroup
+
+    mg = ModelGroup(
+        group_id=test_group.id,
+        model_id=test_model.id,
+    )
+    db_session.add(mg)
+    await db_session.flush()
+    return mg
+
+
+@pytest_asyncio.fixture
+async def test_tool_group(
+    db_session: AsyncSession,
+    test_group: "UserGroup",
+    test_tool: "Tool",
+) -> "ToolGroup":
+    """Create a tool-to-group assignment."""
+    from src.db.orm.groups import ToolGroup
+
+    tg = ToolGroup(
+        group_id=test_group.id,
+        tool_id=test_tool.id,
+    )
+    db_session.add(tg)
+    await db_session.flush()
+    return tg
+
+
+# =============================================================================
 # E2E Test Fixture — Real DB (no rollback)
 # =============================================================================
 

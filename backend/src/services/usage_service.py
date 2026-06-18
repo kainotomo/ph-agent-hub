@@ -131,10 +131,6 @@ async def list_usage_logs(
 
     return await paginate(db, stmt, page=page, page_size=page_size)
 
-    stmt = stmt.limit(limit).offset(offset)
-    result = await db.execute(stmt)
-    return list(result.scalars().all())
-
 
 async def get_tenant_aggregates(
     db: AsyncSession,

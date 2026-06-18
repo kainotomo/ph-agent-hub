@@ -79,17 +79,20 @@ async def update_group(
 
 
 async def delete_group(db: AsyncSession, group_id: str) -> None:
-    """Delete a group by ID. Cascades to members and model assignments."""
+    """Delete a group by ID. Cascades to members, model assignments, and tool assignments."""
     group = await get_group_by_id(db, group_id)
     if group is None:
         raise NotFoundError("Group not found")
 
-    # Delete members and model assignments first
+    # Delete members, model assignments, and tool assignments first
     await db.execute(
         delete(UserGroupMember).where(UserGroupMember.group_id == group_id)
     )
     await db.execute(
         delete(ModelGroup).where(ModelGroup.group_id == group_id)
+    )
+    await db.execute(
+        delete(ToolGroup).where(ToolGroup.group_id == group_id)
     )
 
     await db.delete(group)

@@ -36,6 +36,24 @@ def _reset_rate_limiter():
     yield
 
 
+@pytest.fixture(autouse=True)
+def _disable_license_gate(monkeypatch):
+    """Lift the tenant limit for all tests so that pre-existing tenants
+    from earlier test runs never cause a 401 on login.
+
+    The license gate (``get_effective_tenant_limit``) checks how many
+    tenants exist and blocks non-admin users in tenant N+1 when the
+    free-tier limit is hit.  No test in the suite exercises this gate
+    intentionally, so we patch it to return a high ceiling.
+    """
+    import src.services.license_service as ls
+
+    async def _unlimited_limit(db):
+        return 1_000_000
+
+    monkeypatch.setattr(ls, "get_effective_tenant_limit", _unlimited_limit)
+
+
 @pytest.fixture(scope="session")
 def event_loop():
     """Create a single event loop for the test session."""

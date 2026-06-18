@@ -9,7 +9,6 @@
 # no real network requests.
 # =============================================================================
 
-import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
@@ -20,9 +19,17 @@ import pytest
 # ---------------------------------------------------------------------------
 pytestmark = [pytest.mark.unit]
 
+# Override the session-scoped event_loop fixture with function-scoped to prevent
+# contaminating the session loop for other test files.
+@pytest.fixture(scope="function")
+def event_loop():
+    """Create a fresh event loop per test function."""
+    import asyncio
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    yield loop
+    loop.close()
 
-# ===========================================================================
-# Shared mock helpers
 # ===========================================================================
 
 

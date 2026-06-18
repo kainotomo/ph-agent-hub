@@ -23,12 +23,14 @@ pytestmark = [pytest.mark.unit]
 # contaminating the session loop for other test files.
 @pytest.fixture(scope="function")
 def event_loop():
-    """Create a fresh event loop per test function."""
+    """Create a fresh event loop per test function, then restore the session loop."""
     import asyncio
+    saved = asyncio.get_event_loop()
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     yield loop
     loop.close()
+    asyncio.set_event_loop(saved)
 
 # ===========================================================================
 

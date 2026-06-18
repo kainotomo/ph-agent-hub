@@ -1837,6 +1837,7 @@ class FollowUpQuestionsResponse(BaseModel):
 )
 async def get_follow_up_questions(
     session_id: str,
+    db: AsyncSession = Depends(get_db),
     current_user: UserORM = Depends(get_current_user),
 ):
     """Retrieve follow-up questions for a session from Redis.
@@ -1848,7 +1849,10 @@ async def get_follow_up_questions(
     """
     from ..core.redis import get_follow_up_questions as _redis_get_follow_up
 
-    questions = await _redis_get_follow_up(session_id)
+    data = await _load_session(db, session_id)
+    await _require_session_owner(data, current_user)
+
+    questions = await _redis_get_follow_up(current_user.tenant_id, session_id)
     return FollowUpQuestionsResponse(questions=questions or [])
 
 

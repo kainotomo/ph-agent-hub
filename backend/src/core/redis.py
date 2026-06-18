@@ -173,9 +173,9 @@ FOLLOW_UP_PREFIX = "follow_up:"
 
 
 async def store_follow_up_questions(
-    session_id: str, questions: list[str], ttl: int = 60
+    tenant_id: str, session_id: str, questions: list[str], ttl: int = 60
 ) -> None:
-    """Store follow-up questions for a session with a short TTL.
+    """Store follow-up questions for a tenant-scoped session with a short TTL.
 
     The short TTL ensures stale questions don't linger if the user
     navigates away before fetching them.
@@ -183,12 +183,12 @@ async def store_follow_up_questions(
     import json
 
     r = await get_redis()
-    key = f"{FOLLOW_UP_PREFIX}{session_id}"
+    key = f"{FOLLOW_UP_PREFIX}{tenant_id}:{session_id}"
     await r.setex(key, ttl, json.dumps(questions))
 
 
-async def get_follow_up_questions(session_id: str) -> list[str] | None:
-    """Retrieve follow-up questions from Redis.
+async def get_follow_up_questions(tenant_id: str, session_id: str) -> list[str] | None:
+    """Retrieve follow-up questions from Redis, scoped by tenant.
 
     Returns None if the key does not exist (questions not yet generated
     or already expired).
@@ -196,7 +196,7 @@ async def get_follow_up_questions(session_id: str) -> list[str] | None:
     import json
 
     r = await get_redis()
-    key = f"{FOLLOW_UP_PREFIX}{session_id}"
+    key = f"{FOLLOW_UP_PREFIX}{tenant_id}:{session_id}"
     raw = await r.get(key)
     if raw is None:
         return None

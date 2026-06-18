@@ -120,7 +120,11 @@ jobs:
             --cov=src/api \
             --cov-report=term \
             --cov-report=xml \
-            --cov-fail-under=30
+            --cov-fail-under=40
+          # Coverage threshold progression (Issue #381):
+          #   30 → 40  (current step)
+          #   40 → 55  (next target)
+          #   55 → 70  (final target)
 
       - name: Upload coverage to summary
         if: always()

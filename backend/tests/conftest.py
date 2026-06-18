@@ -433,6 +433,170 @@ async def test_credential(
 
 
 # =============================================================================
+# Agent Runner Fixtures — Skills, Sessions, Models
+# =============================================================================
+
+
+@pytest_asyncio.fixture
+async def test_skill(
+    db_session: AsyncSession,
+    test_tenant: Tenant,
+    test_template: "Template",
+) -> "Skill":
+    """Create a minimal skill in the test tenant, linked to the test template."""
+    from src.db.orm.skills import Skill
+
+    skill = Skill(
+        id=str(uuid.uuid4()),
+        tenant_id=test_tenant.id,
+        title="Test Skill",
+        execution_type="agent",
+        template_id=test_template.id,
+        cross_session_retrieval_enabled=False,
+        visibility="tenant",
+    )
+    db_session.add(skill)
+    await db_session.flush()
+    return skill
+
+
+@pytest_asyncio.fixture
+async def test_session_with_skill(
+    db_session: AsyncSession,
+    test_tenant: Tenant,
+    test_user: User,
+    test_model: "Model",
+    test_skill: "Skill",
+    test_tool: "Tool",
+) -> "Session":
+    """Create a permanent session with a skill and an active tool."""
+    from src.db.orm.sessions import Session, SessionActiveTool
+
+    session = Session(
+        id=str(uuid.uuid4()),
+        tenant_id=test_tenant.id,
+        user_id=test_user.id,
+        title="Test Session with Skill",
+        is_temporary=False,
+        selected_model_id=test_model.id,
+        selected_skill_id=test_skill.id,
+        selected_template_id=test_skill.template_id,
+    )
+    db_session.add(session)
+    await db_session.flush()
+
+    # Add an active tool to the session
+    active_tool = SessionActiveTool(
+        session_id=session.id,
+        tool_id=test_tool.id,
+    )
+    db_session.add(active_tool)
+    await db_session.flush()
+    return session
+
+
+@pytest_asyncio.fixture
+async def test_session_temp(
+    db_session: AsyncSession,
+    test_tenant: Tenant,
+    test_user: User,
+) -> "Session":
+    """Create a temporary (Redis-backed) session."""
+    from src.db.orm.sessions import Session
+
+    session = Session(
+        id=str(uuid.uuid4()),
+        tenant_id=test_tenant.id,
+        user_id=test_user.id,
+        title="Test Temp Session",
+        is_temporary=True,
+    )
+    db_session.add(session)
+    await db_session.flush()
+    return session
+
+
+@pytest_asyncio.fixture
+async def test_deepseek_model(
+    db_session: AsyncSession,
+    test_tenant: Tenant,
+) -> "Model":
+    """Create a DeepSeek model with thinking enabled."""
+    from src.db.orm.models import Model
+
+    model = Model(
+        id=str(uuid.uuid4()),
+        tenant_id=test_tenant.id,
+        name="Test DeepSeek",
+        model_id="deepseek-chat",
+        provider="deepseek",
+        api_key="test-ds-key",
+        enabled=True,
+        is_public=True,
+        max_tokens=8192,
+        temperature=0.7,
+        thinking_enabled=True,
+        reasoning_effort="medium",
+        context_length=65536,
+    )
+    db_session.add(model)
+    await db_session.flush()
+    return model
+
+
+@pytest_asyncio.fixture
+async def test_anthropic_model(
+    db_session: AsyncSession,
+    test_tenant: Tenant,
+) -> "Model":
+    """Create an Anthropic model."""
+    from src.db.orm.models import Model
+
+    model = Model(
+        id=str(uuid.uuid4()),
+        tenant_id=test_tenant.id,
+        name="Test Anthropic",
+        model_id="claude-3-haiku",
+        provider="anthropic",
+        api_key="test-anthropic-key",
+        enabled=True,
+        is_public=True,
+        max_tokens=4096,
+        temperature=0.5,
+        context_length=100000,
+    )
+    db_session.add(model)
+    await db_session.flush()
+    return model
+
+
+@pytest_asyncio.fixture
+async def test_ollama_model(
+    db_session: AsyncSession,
+    test_tenant: Tenant,
+) -> "Model":
+    """Create an Ollama model."""
+    from src.db.orm.models import Model
+
+    model = Model(
+        id=str(uuid.uuid4()),
+        tenant_id=test_tenant.id,
+        name="Test Ollama",
+        model_id="llama3",
+        provider="ollama",
+        api_key="ollama",
+        enabled=True,
+        is_public=True,
+        max_tokens=4096,
+        temperature=0.7,
+        context_length=8192,
+    )
+    db_session.add(model)
+    await db_session.flush()
+    return model
+
+
+# =============================================================================
 # E2E Test Fixture — Real DB (no rollback)
 # =============================================================================
 

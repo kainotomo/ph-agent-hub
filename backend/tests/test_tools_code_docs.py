@@ -19,19 +19,6 @@ import pytest
 # ---------------------------------------------------------------------------
 pytestmark = [pytest.mark.unit]
 
-# Override the session-scoped event_loop fixture with function-scoped to prevent
-# contaminating the session loop for other test files.
-@pytest.fixture(scope="function")
-def event_loop():
-    """Create a fresh event loop per test function, then restore the session loop."""
-    import asyncio
-    saved = asyncio.get_event_loop()
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    yield loop
-    loop.close()
-    asyncio.set_event_loop(saved)
-
 # ===========================================================================
 
 
@@ -2208,16 +2195,15 @@ class TestSqlQuery:
     # No connection string / engine failure stub paths
     # ======================================================================
 
-    def test_no_connection_string(self):
+    async def test_no_connection_string(self):
         """Without connection_string, tool returns 'not configured' error."""
         from src.tools.sql_query import build_sql_query_tools
         sql, lst, desc = build_sql_query_tools({})
 
         # All three should return error
-        import asyncio
-        assert asyncio.run(sql(query="SELECT 1"))["error"]
-        assert asyncio.run(lst())["error"]
-        assert asyncio.run(desc(table="t"))["error"]
+        assert (await sql(query="SELECT 1"))["error"]
+        assert (await lst())["error"]
+        assert (await desc(table="t"))["error"]
 
     def test_engine_creation_failure_note(self):
         """Note: engine creation failure path has a Python 3.12 scoping issue

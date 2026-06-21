@@ -73,9 +73,9 @@ vi.mock("react-router-dom", () => ({
 // Mock child components from barrel export
 vi.mock("./", () => ({
   ContextIndicator: () => <div data-testid="context-indicator" />,
-  MemoryManager: ({ open, onClose }: { open: boolean; onClose: () => void }) =>
+  MemoryManager: ({ open }: { open: boolean }) =>
     open ? <div data-testid="memory-manager" /> : null,
-  SessionSearch: ({ onClose }: { onClose: () => void }) => (
+  SessionSearch: () => (
     <div data-testid="session-search" />
   ),
 }));
@@ -218,7 +218,7 @@ describe("SessionSidebar", () => {
   // ── New Chat (lazy UUID) ──────────────────────────────────────────────
 
   it("creates a lazy UUID and navigates on New Chat click", async () => {
-    const randomUUID = vi.spyOn(crypto, "randomUUID").mockReturnValue("lazy-uuid-123");
+    const randomUUID = vi.spyOn(crypto, "randomUUID").mockReturnValue("00000000-0000-0000-0000-000000000000");
     renderSidebar();
     await settle();
 
@@ -229,7 +229,7 @@ describe("SessionSidebar", () => {
     await user.click(newChatBtn);
 
     expect(randomUUID).toHaveBeenCalled();
-    expect(mockNavigate).toHaveBeenCalledWith("/chat/lazy-uuid-123");
+    expect(mockNavigate).toHaveBeenCalledWith("/chat/00000000-0000-0000-0000-000000000000");
 
     randomUUID.mockRestore();
   });

@@ -41,7 +41,7 @@ function sseEvent(
   event: string,
   data: Record<string, unknown>,
 ) {
-  const lastCall = mockFetchEventSource.mock.calls.at(-1);
+  const lastCall = mockFetchEventSource.mock.calls[mockFetchEventSource.mock.calls.length - 1];
   if (!lastCall) throw new Error("fetchEventSource was never called");
   const config = lastCall[1] as {
     onmessage?: (ev: { event: string; data: string }) => void;

@@ -160,7 +160,7 @@ describe("ChatPage", () => {
   // ── New Chat button creates UUID and navigates ─────────────────────────
 
   it("generates a UUID and navigates on New Chat button click", async () => {
-    const randomUUID = vi.spyOn(crypto, "randomUUID").mockReturnValue("lazy-uuid-456");
+    const randomUUID = vi.spyOn(crypto, "randomUUID").mockReturnValue("00000000-0000-0000-0000-000000000000");
     mockSessionId = undefined;
     renderChatPage();
     await settle();
@@ -170,7 +170,7 @@ describe("ChatPage", () => {
     await user.click(newChatBtn);
 
     expect(randomUUID).toHaveBeenCalled();
-    expect(mockNavigate).toHaveBeenCalledWith("/chat/lazy-uuid-456");
+    expect(mockNavigate).toHaveBeenCalledWith("/chat/00000000-0000-0000-0000-000000000000");
 
     randomUUID.mockRestore();
   });

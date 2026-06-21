@@ -484,11 +484,15 @@ export function ChatWindow({
 
   // Auto-select the first available model for pending sessions (no backend
   // session to provide a default yet — mirrors backend create_session logic).
+  // NOTE: Must NOT fire when the user has explicitly chosen "Auto" mode —
+  // that sets pendModelId=null + pendAutoRoute=true.  The check for
+  // !pendAutoRoute prevents re-selecting the first model and overriding
+  // the user's choice (Issue #400).
   useEffect(() => {
-    if (pendingFlag && modelList && modelList.length > 0 && !pendModelId) {
+    if (pendingFlag && modelList && modelList.length > 0 && !pendModelId && !pendAutoRoute) {
       setPendModelId(modelList[0].id);
     }
-  }, [pendingFlag, modelList, pendModelId]);
+  }, [pendingFlag, modelList, pendModelId, pendAutoRoute]);
 
   // Reset all streaming state when the session changes (mount with new
   // sessionId or fresh mount). This prevents stale streamingContent,

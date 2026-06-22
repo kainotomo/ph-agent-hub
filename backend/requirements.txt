@@ -25,6 +25,9 @@ boto3
 # SSE
 sse-starlette
 
+# A2A (Agent-to-Agent) Protocol
+a2a-sdk[http-server]>=1.1.0
+
 # Web Search
 ddgs>=9.0
 

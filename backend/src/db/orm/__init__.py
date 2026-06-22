@@ -12,6 +12,7 @@ from .users import User
 from .models import Model
 from .groups import UserGroup, UserGroupMember, ModelGroup
 from .mcp_servers import McpServer
+from .a2a_servers import A2aServer
 from .tools import Tool
 from .templates import Template
 from .prompts import Prompt
@@ -38,6 +39,7 @@ __all__ = [
     "UserGroupMember",
     "ModelGroup",
     "McpServer",
+    "A2aServer",
     "Tool",
     "Template",
     "Prompt",

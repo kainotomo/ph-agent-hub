@@ -24,6 +24,8 @@ The backend provides the following core capabilities:
 - Provides routing logic for selecting the correct model per request
 
 ### **1.3 Tool Execution**
+- MCP (Model Context Protocol) tools — connect to external MCP servers and sync their tools
+- A2A (Agent-to-Agent) Protocol tools — discover remote A2A agents via Agent Cards and use their skills as tools
 - ERPNext API tools (per‑tenant)
 - Membrane tools
 - Custom tools (Python modules)
@@ -46,6 +48,7 @@ The backend provides the following core capabilities:
 - Users, roles, tenants (with tenant count gated by license on free tier)
 - Models and tool configurations
 - MCP server configurations (encrypted env vars and headers stored at rest)
+- A2A server configurations (encrypted auth tokens and headers stored at rest; cached Agent Cards)
 - Templates, user prompts, and skills (tenant-shared and user-owned)
 - Permanent chat sessions and messages (MariaDB)
 - Temporary chat sessions (Redis with TTL; purged on logout or expiry, convertible to permanent)

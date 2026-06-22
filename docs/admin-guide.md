@@ -442,7 +442,72 @@ From the **MCP Servers** list you can:
 
 ---
 
-## 9. Configuring OAuth for Personal Accounts (Issue #312)
+## 9. Managing A2A Servers
+
+A2A (Agent-to-Agent) Protocol servers let you connect to external AI agents, discover their capabilities via Agent Cards, and use their declared skills as tools in ph-agent-hub. This enables your agents to collaborate with remote agents across different platforms.
+
+### 9.1 A2A Client vs A2A Server
+
+ph-agent-hub implements both sides of the protocol:
+
+| Role | Description |
+|---|---|
+| **A2A Client** | Connect to remote A2A agents, fetch their Agent Card (`/.well-known/agent-card.json`), and sync their skills as Tool records. This works just like MCP server integration. |
+| **A2A Server** | Expose ph-agent-hub agents to the A2A ecosystem. Other A2A-compliant clients can discover your platform via `GET /.well-known/agent-card.json` and execute tasks via `POST /message:send`. Requires `A2A_SERVER_ENABLED=true`. |
+
+### 9.2 Add an External A2A Agent
+
+1. Go to **Admin Area → A2A Servers**
+2. Click **Add A2A Server**
+3. Fill in the fields:
+   - **Server Name** — a label to identify this connection
+   - **Base URL** — the remote agent's base URL, e.g., `https://research-agent.example.com`
+   - **Agent Card Path** — defaults to `/.well-known/agent-card.json` (the IANA-registered well-known URI per A2A spec). Change if the remote agent uses a non-standard path.
+   - **Protocol Binding** — the A2A protocol binding: `HTTP+JSON/REST` (default), `JSON-RPC 2.0`, or `gRPC`
+   - **Authentication Scheme** — how the remote agent expects authentication: `None`, `Bearer Token`, or `API Key`
+   - **Auth Token** — the bearer token or API key (encrypted at rest via Fernet)
+   - **Custom HTTP Headers** — additional headers sent with every request; `KEY=VALUE` per line
+   - **Allowed Skills** — leave empty to allow all skills from this agent, or type specific skill IDs to restrict
+
+4. Click **Test Connection** to verify the agent is reachable — this fetches and validates the Agent Card
+5. Click **OK** to save
+6. Click **Sync Skills** to discover the agent's skills and register them as Tool records
+
+### 9.3 Syncing Skills
+
+When you click **Sync Skills**, the platform:
+1. Fetches the remote agent's Agent Card via the configured path
+2. For each declared skill, creates or updates a Tool record with:
+   - `type`: `a2a`
+   - `name`: `{Server Name}: {skill_name}`
+   - `config.a2a_server_id`: reference to the A2A server config
+   - `config.skill_id`: the skill's original ID on the remote agent
+3. Skills that were previously synced but no longer appear on the Agent Card are soft-deprecated (`enabled = false`)
+
+Synced A2A skills appear in the **Tools** list with type `a2a` and category `Communication`. They can be assigned to groups, added to skills, and activated in sessions just like any other tool.
+
+### 9.4 Managing A2A Servers
+
+From the **A2A Servers** list you can:
+- **Edit** — change the server name, URL, auth settings, or allowed skills filter
+- **Toggle enabled** — disable a server without deleting its configuration or synced tools
+- **Test Connection** — re-fetch and validate the Agent Card at any time
+- **Sync Skills** — refresh the synced tool list (e.g., after a remote agent adds new skills)
+- **Delete** — removes the server configuration AND all its synced tools
+
+> **Note:** Deleting an A2A server also deletes all associated Tool records. To preserve the tools but stop the server, disable it instead.
+
+### 9.5 Security Considerations
+
+- **Secrets at rest**: Auth tokens and custom headers are encrypted using the Fernet key (`ENCRYPTION_KEY`). The admin API returns masked values.
+- **Network access**: The backend container must be able to reach the remote agent's URL.
+- **Agent Card validation**: The connection test fetches and validates the Agent Card against the A2A specification schema. Unreachable or malformed endpoints return descriptive errors.
+
+---
+
+## 10. Configuring OAuth for Personal Accounts (Issue #312)
+
+<!-- existing OAuth section follows -->
 
 Some tools (Email, Calendar, Tasks) support **per-user credentials** — each user connects their own account (Gmail, Outlook, etc.) instead of sharing a single tenant-level configuration.
 

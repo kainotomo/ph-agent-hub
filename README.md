@@ -197,7 +197,8 @@ For deeper architecture detail, see [docs/architecture-overview.md](docs/archite
 ### Platform
 - Multi-tenant authorization and data boundaries
 - Docker-native deployment for dev and production
-- Extensible tools and model adapters
+- Extensible tools, model adapters, and agent integrations
+- **A2A (Agent-to-Agent) Protocol** — Client: discover and use external A2A agents as tools. Server: expose ph-agent-hub agents to the A2A ecosystem via Agent Card and task execution endpoints.
 - Backend services that can be patched and extended safely
 
 ## Folder Structure

@@ -18,7 +18,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = "add_tool_description"
-down_revision: Union[str, None] = "a1b2c3d4e5f6_add_datetime_to_tool_type_enum"
+down_revision: Union[str, None] = "y1z2a3b4c5d6"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

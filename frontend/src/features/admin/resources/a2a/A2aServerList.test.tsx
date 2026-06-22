@@ -148,7 +148,7 @@ describe("A2aServerList", () => {
     expect(screen.getByText("Disabled Agent")).toBeInTheDocument();
   });
 
-  it("shows circuit breaker healthy tag", async () => {
+  it("queries circuit breaker for each server", async () => {
     mockListA2aServers.mockResolvedValue({
       items: [MOCK_SERVERS[0]],
       total: 1,
@@ -161,22 +161,8 @@ describe("A2aServerList", () => {
     renderA2aServerList();
     await settle();
 
-    // After settle, the circuit breaker queries should have been called
+    // Circuit breaker state should have been queried
     expect(mockGetA2aCircuitBreaker).toHaveBeenCalledWith("server-1");
-  });
-
-  it("shows circuit breaker degraded and reset button", async () => {
-    mockListA2aServers.mockResolvedValue({
-      items: [MOCK_SERVERS[0]],
-      total: 1,
-      page: 1,
-      page_size: 25,
-      total_pages: 1,
-    });
-    mockGetA2aCircuitBreaker.mockResolvedValue({ degraded: true });
-
-    renderA2aServerList();
-    await settle();
   });
 
   it("renders create button", async () => {
@@ -191,6 +177,6 @@ describe("A2aServerList", () => {
     renderA2aServerList();
     await settle();
 
-    expect(screen.getByRole("button", { name: /create server/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /add a2a server/i })).toBeInTheDocument();
   });
 });

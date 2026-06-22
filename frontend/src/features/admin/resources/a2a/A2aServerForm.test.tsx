@@ -95,27 +95,32 @@ describe("A2aServerForm", () => {
     renderA2aServerForm({ open: true });
     await settle();
 
-    expect(screen.getByText(/create/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/name/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/url/i)).toBeInTheDocument();
+    expect(screen.getByText(/add a2a server/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/server name/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/base url/i)).toBeInTheDocument();
   });
 
   it("shows resilience configuration fields", async () => {
     renderA2aServerForm({ open: true });
     await settle();
 
+    // Open the advanced/resilience section
+    const summary = screen.getByText(/advanced \/ resilience/i);
+    await userEvent.click(summary);
+    await settle();
+
     // Retry config fields
-    expect(screen.getByLabelText(/max attempts/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/backoff base/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/max retry attempts/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/retry backoff base/i)).toBeInTheDocument();
 
     // Timeout config fields
     expect(screen.getByLabelText(/connect timeout/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/read timeout/i)).toBeInTheDocument();
 
     // Circuit breaker config fields
-    expect(screen.getByLabelText(/threshold/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/window/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/cooldown/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/circuit breaker threshold/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/circuit breaker window/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/circuit breaker cooldown/i)).toBeInTheDocument();
   });
 
   it("renders edit form with pre-filled values", async () => {

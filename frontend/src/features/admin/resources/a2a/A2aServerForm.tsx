@@ -48,6 +48,16 @@ export function A2aServerForm({ open, server, onClose }: A2aServerFormProps) {
             : "",
           allowed_skills: server.allowed_skills || [],
           enabled: server.enabled,
+          // Resilience config
+          retry_max_attempts: server.retry_max_attempts,
+          retry_backoff_base_seconds: server.retry_backoff_base_seconds,
+          retry_backoff_max_seconds: server.retry_backoff_max_seconds,
+          timeout_connect_seconds: server.timeout_connect_seconds,
+          timeout_read_seconds: server.timeout_read_seconds,
+          timeout_stream_seconds: server.timeout_stream_seconds,
+          circuit_breaker_threshold: server.circuit_breaker_threshold,
+          circuit_breaker_window_seconds: server.circuit_breaker_window_seconds,
+          circuit_breaker_cooldown_seconds: server.circuit_breaker_cooldown_seconds,
         });
       } else {
         form.setFieldsValue({
@@ -98,6 +108,16 @@ export function A2aServerForm({ open, server, onClose }: A2aServerFormProps) {
         headers: headers,
         allowed_skills: values.allowed_skills || null,
         enabled: values.enabled,
+        // Resilience config — only include if non-empty
+        ...(values.retry_max_attempts != null && { retry_max_attempts: Number(values.retry_max_attempts) }),
+        ...(values.retry_backoff_base_seconds != null && { retry_backoff_base_seconds: Number(values.retry_backoff_base_seconds) }),
+        ...(values.retry_backoff_max_seconds != null && { retry_backoff_max_seconds: Number(values.retry_backoff_max_seconds) }),
+        ...(values.timeout_connect_seconds != null && { timeout_connect_seconds: Number(values.timeout_connect_seconds) }),
+        ...(values.timeout_read_seconds != null && { timeout_read_seconds: Number(values.timeout_read_seconds) }),
+        ...(values.timeout_stream_seconds != null && { timeout_stream_seconds: Number(values.timeout_stream_seconds) }),
+        ...(values.circuit_breaker_threshold != null && { circuit_breaker_threshold: Number(values.circuit_breaker_threshold) }),
+        ...(values.circuit_breaker_window_seconds != null && { circuit_breaker_window_seconds: Number(values.circuit_breaker_window_seconds) }),
+        ...(values.circuit_breaker_cooldown_seconds != null && { circuit_breaker_cooldown_seconds: Number(values.circuit_breaker_cooldown_seconds) }),
       };
 
       if (isEdit) {
@@ -230,6 +250,82 @@ export function A2aServerForm({ open, server, onClose }: A2aServerFormProps) {
         <Form.Item name="enabled" label="Enabled" valuePropName="checked">
           <Switch />
         </Form.Item>
+
+        {/* ============================================================= */}
+        {/* Advanced / Resilience Configuration (Issue #409)              */}
+        {/* ============================================================= */}
+        <details style={{ marginTop: 16 }}>
+          <summary style={{ cursor: "pointer", fontWeight: 600, color: "#666" }}>
+            Advanced / Resilience
+          </summary>
+          <div style={{ padding: "12px 0" }}>
+            <Form.Item
+              name="retry_max_attempts"
+              label="Max Retry Attempts"
+              tooltip="Number of times to retry on transient errors (e.g., timeout, 5xx). Default: 3"
+            >
+              <Input type="number" min={0} max={20} placeholder="3" />
+            </Form.Item>
+            <Form.Item
+              name="retry_backoff_base_seconds"
+              label="Retry Backoff Base (s)"
+              tooltip="Base seconds for exponential backoff. Formula: base * 2^attempt. Default: 1"
+            >
+              <Input type="number" min={0.1} step={0.1} placeholder="1.0" />
+            </Form.Item>
+            <Form.Item
+              name="retry_backoff_max_seconds"
+              label="Retry Backoff Max (s)"
+              tooltip="Maximum seconds between retries. Default: 60"
+            >
+              <Input type="number" min={1} step={1} placeholder="60" />
+            </Form.Item>
+
+            <Form.Item
+              name="timeout_connect_seconds"
+              label="Connect Timeout (s)"
+              tooltip="HTTP connection timeout in seconds. Default: 30"
+            >
+              <Input type="number" min={1} step={1} placeholder="30" />
+            </Form.Item>
+            <Form.Item
+              name="timeout_read_seconds"
+              label="Read Timeout (s)"
+              tooltip="HTTP read timeout for non-streaming calls. Default: 300"
+            >
+              <Input type="number" min={1} step={5} placeholder="300" />
+            </Form.Item>
+            <Form.Item
+              name="timeout_stream_seconds"
+              label="Stream Timeout (s)"
+              tooltip="HTTP read timeout for streaming calls. Default: 600"
+            >
+              <Input type="number" min={1} step={10} placeholder="600" />
+            </Form.Item>
+
+            <Form.Item
+              name="circuit_breaker_threshold"
+              label="Circuit Breaker Threshold"
+              tooltip="Consecutive failures to trip the circuit breaker. Default: 5"
+            >
+              <Input type="number" min={1} max={100} placeholder="5" />
+            </Form.Item>
+            <Form.Item
+              name="circuit_breaker_window_seconds"
+              label="Circuit Breaker Window (s)"
+              tooltip="Time window to reset the failure count. Default: 60"
+            >
+              <Input type="number" min={1} step={5} placeholder="60" />
+            </Form.Item>
+            <Form.Item
+              name="circuit_breaker_cooldown_seconds"
+              label="Circuit Breaker Cooldown (s)"
+              tooltip="Cooldown period before a probe attempt is allowed. Default: 300"
+            >
+              <Input type="number" min={1} step={10} placeholder="300" />
+            </Form.Item>
+          </div>
+        </details>
       </Form>
     </Modal>
   );

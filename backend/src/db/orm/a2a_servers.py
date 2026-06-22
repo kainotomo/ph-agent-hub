@@ -9,7 +9,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import String, Boolean, DateTime, Enum, ForeignKey, JSON, Text, func, text as sa_text
+from sqlalchemy import String, Boolean, DateTime, Enum, ForeignKey, JSON, Text, Float, Integer, func, text as sa_text
 from sqlalchemy.dialects.mysql import CHAR
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -65,6 +65,49 @@ class A2aServer(Base):
         comment="Null = all skills allowed; list = subset of skill IDs",
     )
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    # --- Retry configuration ---
+    retry_max_attempts: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, server_default=sa_text("3"),
+        comment="Max retry attempts for transient errors (null = use global default)",
+    )
+    retry_backoff_base_seconds: Mapped[float | None] = mapped_column(
+        Float, nullable=True, server_default=sa_text("1.0"),
+        comment="Base seconds for exponential backoff (null = use global default)",
+    )
+    retry_backoff_max_seconds: Mapped[float | None] = mapped_column(
+        Float, nullable=True, server_default=sa_text("60.0"),
+        comment="Max seconds for exponential backoff (null = use global default)",
+    )
+
+    # --- Timeout configuration ---
+    timeout_connect_seconds: Mapped[float | None] = mapped_column(
+        Float, nullable=True, server_default=sa_text("30.0"),
+        comment="HTTP connect timeout in seconds (null = use global default)",
+    )
+    timeout_read_seconds: Mapped[float | None] = mapped_column(
+        Float, nullable=True, server_default=sa_text("300.0"),
+        comment="HTTP read timeout in seconds for non-streaming calls (null = use global default)",
+    )
+    timeout_stream_seconds: Mapped[float | None] = mapped_column(
+        Float, nullable=True, server_default=sa_text("600.0"),
+        comment="HTTP read timeout in seconds for streaming calls (null = use global default)",
+    )
+
+    # --- Circuit breaker configuration ---
+    circuit_breaker_threshold: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, server_default=sa_text("5"),
+        comment="Consecutive failures to trip circuit breaker (null = use global default)",
+    )
+    circuit_breaker_window_seconds: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, server_default=sa_text("60"),
+        comment="Time window in seconds to reset failure count (null = use global default)",
+    )
+    circuit_breaker_cooldown_seconds: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, server_default=sa_text("300"),
+        comment="Cooldown in seconds before probe attempt (null = use global default)",
+    )
+
     # Cached AgentCard JSON (reduces network calls on sync)
     agent_card_cache: Mapped[dict | None] = mapped_column(
         JSON, nullable=True, comment="Cached AgentCard JSON from last discovery"

@@ -39,6 +39,8 @@ import {
   updateA2aServer,
   testA2aServer,
   syncA2aServerTools,
+  getA2aCircuitBreaker,
+  resetA2aCircuitBreaker,
   A2aServerData,
 } from "../../services/admin";
 import { useAdminTable } from "../../hooks/useAdminTable";
@@ -137,6 +139,31 @@ export function A2aServerList() {
     onError: () => message.error("Failed to sync tools"),
   });
 
+  const [circuitStates, setCircuitStates] = useState<
+    Record<string, { degraded: boolean; failures: number; threshold: number }>
+  >({});
+
+  // Load circuit breaker states for all visible servers
+  useEffect(() => {
+    if (!data?.items) return;
+    data.items.forEach((s) => {
+      getA2aCircuitBreaker(s.id).then((state) => {
+        setCircuitStates((prev) => ({ ...prev, [s.id]: state }));
+      }).catch(() => {
+        // Circuit breaker state not available — ignore
+      });
+    });
+  }, [data?.items]);
+
+  const resetCircuitMutation = useMutation({
+    mutationFn: (id: string) => resetA2aCircuitBreaker(id),
+    onSuccess: () => {
+      message.success("Circuit breaker reset");
+      queryClient.invalidateQueries({ queryKey: ["admin-a2a-servers"] });
+    },
+    onError: () => message.error("Failed to reset circuit breaker"),
+  });
+
   const columns = [
     {
       title: "Name",
@@ -198,9 +225,31 @@ export function A2aServerList() {
       ),
     },
     {
+      title: "Circuit",
+      key: "circuit",
+      width: 90,
+      align: "center" as const,
+      render: (_: unknown, record: A2aServerData) => {
+        const state = circuitStates[record.id];
+        if (!state) return <Text type="secondary">—</Text>;
+        if (state.degraded) {
+          return (
+            <Tooltip title={`${state.failures} failure(s), threshold=${state.threshold}`}>
+              <Tag color="red">Degraded</Tag>
+            </Tooltip>
+          );
+        }
+        return (
+          <Tooltip title={`${state.failures} failure(s), threshold=${state.threshold}`}>
+            <Tag color="green">Healthy</Tag>
+          </Tooltip>
+        );
+      },
+    },
+    {
       title: "Actions",
       key: "actions",
-      width: 280,
+      width: 340,
       render: (_: unknown, record: A2aServerData) => (
         <Space size="small">
           <Tooltip title="Edit">
@@ -229,6 +278,22 @@ export function A2aServerList() {
               onClick={() => syncMutation.mutate(record.id)}
             />
           </Tooltip>
+          {circuitStates[record.id]?.degraded && (
+            <Tooltip title="Reset Circuit Breaker">
+              <Button
+                type="link"
+                size="small"
+                icon={<CheckCircleOutlined />}
+                loading={
+                  resetCircuitMutation.isPending &&
+                  resetCircuitMutation.variables === record.id
+                }
+                onClick={() => resetCircuitMutation.mutate(record.id)}
+              >
+                Reset
+              </Button>
+            </Tooltip>
+          )}
           <Popconfirm
             title="Delete A2A server?"
             description="This will also remove all synced tools."

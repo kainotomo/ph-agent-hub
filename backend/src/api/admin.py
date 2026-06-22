@@ -95,6 +95,8 @@ from ..services.a2a_service import (
     decrypt_headers as _a2a_decrypt_headers,
     mask_dict as _a2a_mask_dict,
 )
+from ..services.a2a_circuit_breaker import A2ACircuitBreaker
+from ..db.orm.a2a_call_logs import A2aCallLog
 from ..services.template_service import (
     create_template as _svc_create_template,
     delete_template as _svc_delete_template,
@@ -1559,6 +1561,16 @@ class A2aServerCreate(BaseModel):
     headers: dict | None = None
     allowed_skills: list[str] | None = None
     enabled: bool = True
+    # --- Resilience config (Issue #409) ---
+    retry_max_attempts: int | None = None
+    retry_backoff_base_seconds: float | None = None
+    retry_backoff_max_seconds: float | None = None
+    timeout_connect_seconds: float | None = None
+    timeout_read_seconds: float | None = None
+    timeout_stream_seconds: float | None = None
+    circuit_breaker_threshold: int | None = None
+    circuit_breaker_window_seconds: int | None = None
+    circuit_breaker_cooldown_seconds: int | None = None
 
 
 class A2aServerUpdate(BaseModel):
@@ -1571,6 +1583,16 @@ class A2aServerUpdate(BaseModel):
     headers: dict | None = None
     allowed_skills: list[str] | None = None
     enabled: bool | None = None
+    # --- Resilience config (Issue #409) ---
+    retry_max_attempts: int | None = None
+    retry_backoff_base_seconds: float | None = None
+    retry_backoff_max_seconds: float | None = None
+    timeout_connect_seconds: float | None = None
+    timeout_read_seconds: float | None = None
+    timeout_stream_seconds: float | None = None
+    circuit_breaker_threshold: int | None = None
+    circuit_breaker_window_seconds: int | None = None
+    circuit_breaker_cooldown_seconds: int | None = None
 
 
 class A2aServerResponse(BaseModel):
@@ -1585,6 +1607,16 @@ class A2aServerResponse(BaseModel):
     headers: dict | None = None  # masked
     allowed_skills: list | None = None
     enabled: bool
+    # --- Resilience config (Issue #409) ---
+    retry_max_attempts: int | None = None
+    retry_backoff_base_seconds: float | None = None
+    retry_backoff_max_seconds: float | None = None
+    timeout_connect_seconds: float | None = None
+    timeout_read_seconds: float | None = None
+    timeout_stream_seconds: float | None = None
+    circuit_breaker_threshold: int | None = None
+    circuit_breaker_window_seconds: int | None = None
+    circuit_breaker_cooldown_seconds: int | None = None
     agent_card_cache: dict | None = None
     agent_card_cached_at: datetime | None = None
     created_at: datetime
@@ -1674,6 +1706,15 @@ async def create_a2a_server(
         headers=body.headers,
         allowed_skills=body.allowed_skills,
         enabled=body.enabled,
+        retry_max_attempts=body.retry_max_attempts,
+        retry_backoff_base_seconds=body.retry_backoff_base_seconds,
+        retry_backoff_max_seconds=body.retry_backoff_max_seconds,
+        timeout_connect_seconds=body.timeout_connect_seconds,
+        timeout_read_seconds=body.timeout_read_seconds,
+        timeout_stream_seconds=body.timeout_stream_seconds,
+        circuit_breaker_threshold=body.circuit_breaker_threshold,
+        circuit_breaker_window_seconds=body.circuit_breaker_window_seconds,
+        circuit_breaker_cooldown_seconds=body.circuit_breaker_cooldown_seconds,
     )
     await write_audit_log(
         db,
@@ -1733,7 +1774,12 @@ async def update_a2a_server(
     update_kwargs = {}
     for field in ("name", "url", "agent_card_path", "protocol_binding",
                   "auth_scheme", "auth_token", "headers", "allowed_skills",
-                  "enabled"):
+                  "enabled",
+                  "retry_max_attempts", "retry_backoff_base_seconds",
+                  "retry_backoff_max_seconds", "timeout_connect_seconds",
+                  "timeout_read_seconds", "timeout_stream_seconds",
+                  "circuit_breaker_threshold", "circuit_breaker_window_seconds",
+                  "circuit_breaker_cooldown_seconds"):
         val = getattr(body, field, None)
         if val is not None:
             update_kwargs[field] = val
@@ -1826,6 +1872,139 @@ async def sync_a2a_server_tools(
         ip_address=_get_client_ip(request),
     )
     return result
+
+
+# =============================================================================
+# A2A Circuit Breaker & Call Logs (Issue #409)
+# =============================================================================
+
+
+class A2aCircuitBreakerState(BaseModel):
+    failures: int = 0
+    degraded_at: str | None = None
+    last_failure_at: str | None = None
+    last_probe_at: str | None = None
+    threshold: int
+    window_seconds: int
+    cooldown_seconds: int
+    degraded: bool = False
+
+
+class A2aCallLogResponse(BaseModel):
+    id: str
+    tenant_id: str
+    a2a_server_id: str
+    a2a_server_name: str | None = None
+    skill_id: str | None = None
+    session_id: str | None = None
+    trace_id: str
+    status: str
+    latency_ms: int | None = None
+    retry_count: int = 0
+    error_message: str | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+@router.get(
+    "/a2a-servers/{server_id}/circuit-breaker",
+    response_model=A2aCircuitBreakerState,
+)
+async def get_a2a_circuit_breaker(
+    server_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Get the current circuit breaker state for an A2A server."""
+    server = await _svc_get_a2a_server(db, server_id)
+    if server is None:
+        raise NotFoundError("A2A server not found")
+    if current_user.role == "manager" and server.tenant_id != current_user.tenant_id:
+        raise ForbiddenError("Managers can only view A2A servers in their own tenant")
+
+    from ..core.config import settings
+
+    cb = A2ACircuitBreaker(
+        server_id=server.id,
+        threshold=server.circuit_breaker_threshold or settings.A2A_DEFAULT_CIRCUIT_BREAKER_THRESHOLD,
+        window_seconds=server.circuit_breaker_window_seconds or settings.A2A_DEFAULT_CIRCUIT_BREAKER_WINDOW_SECONDS,
+        cooldown_seconds=server.circuit_breaker_cooldown_seconds or settings.A2A_DEFAULT_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
+    )
+    return await cb.get_state()
+
+
+@router.post(
+    "/a2a-servers/{server_id}/circuit-breaker/reset",
+    status_code=200,
+)
+async def reset_a2a_circuit_breaker(
+    server_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Manually reset the circuit breaker for an A2A server (admin only)."""
+    if current_user.role != "admin":
+        raise ForbiddenError("Only admins can reset the circuit breaker")
+
+    server = await _svc_get_a2a_server(db, server_id)
+    if server is None:
+        raise NotFoundError("A2A server not found")
+
+    from ..core.config import settings
+
+    cb = A2ACircuitBreaker(
+        server_id=server.id,
+        threshold=server.circuit_breaker_threshold or settings.A2A_DEFAULT_CIRCUIT_BREAKER_THRESHOLD,
+        window_seconds=server.circuit_breaker_window_seconds or settings.A2A_DEFAULT_CIRCUIT_BREAKER_WINDOW_SECONDS,
+        cooldown_seconds=server.circuit_breaker_cooldown_seconds or settings.A2A_DEFAULT_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
+    )
+    await cb.reset()
+
+    await write_audit_log(
+        db,
+        actor=current_user,
+        action="a2a_server.circuit_breaker_reset",
+        target_type="a2a_server",
+        target_id=server_id,
+        tenant_id=current_user.tenant_id,
+        ip_address=_get_client_ip(request),
+    )
+    return {"status": "ok", "message": "Circuit breaker reset"}
+
+
+@router.get(
+    "/a2a-call-logs",
+    response_model=PaginatedResponse[A2aCallLogResponse],
+)
+async def list_a2a_call_logs(
+    a2a_server_id: str | None = None,
+    status: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    page: int = 1,
+    page_size: int = 25,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """List A2A call logs. Admin sees all; manager scoped to own tenant."""
+    from ..core.pagination import paginate
+
+    stmt = select(A2aCallLog).order_by(A2aCallLog.created_at.desc())
+
+    if current_user.role == "manager":
+        stmt = stmt.where(A2aCallLog.tenant_id == current_user.tenant_id)
+    if a2a_server_id:
+        stmt = stmt.where(A2aCallLog.a2a_server_id == a2a_server_id)
+    if status:
+        stmt = stmt.where(A2aCallLog.status == status)
+    if date_from:
+        stmt = stmt.where(A2aCallLog.created_at >= date_from)
+    if date_to:
+        stmt = stmt.where(A2aCallLog.created_at <= date_to)
+
+    return await paginate(db, stmt, page=page, page_size=page_size)
 
 
 # =============================================================================

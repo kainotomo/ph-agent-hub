@@ -123,6 +123,27 @@ class Settings(BaseSettings):
     A2A_DOCS_URL: str = ""
     """Documentation URL shown in the Agent Card."""
 
+    # --- A2A Resilience defaults (Issue #409) ---
+    # These are used as fallbacks when per-server config columns are null.
+    A2A_DEFAULT_RETRY_MAX_ATTEMPTS: int = 3
+    """Default max retry attempts for A2A transient errors."""
+    A2A_DEFAULT_RETRY_BACKOFF_BASE_SECONDS: float = 1.0
+    """Default exponential backoff base in seconds."""
+    A2A_DEFAULT_RETRY_BACKOFF_MAX_SECONDS: float = 60.0
+    """Default exponential backoff cap in seconds."""
+    A2A_DEFAULT_TIMEOUT_CONNECT_SECONDS: float = 30.0
+    """Default HTTP connect timeout in seconds."""
+    A2A_DEFAULT_TIMEOUT_READ_SECONDS: float = 300.0
+    """Default HTTP read timeout for non-streaming in seconds."""
+    A2A_DEFAULT_TIMEOUT_STREAM_SECONDS: float = 600.0
+    """Default HTTP read timeout for streaming in seconds."""
+    A2A_DEFAULT_CIRCUIT_BREAKER_THRESHOLD: int = 5
+    """Default consecutive failures to trip circuit breaker."""
+    A2A_DEFAULT_CIRCUIT_BREAKER_WINDOW_SECONDS: int = 60
+    """Default window to reset failure count."""
+    A2A_DEFAULT_CIRCUIT_BREAKER_COOLDOWN_SECONDS: int = 300
+    """Default cooldown before probe attempt."""
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
     def __init__(self, **kwargs):

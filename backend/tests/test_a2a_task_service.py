@@ -388,3 +388,69 @@ class TestStateConstants:
         assert svc.TASK_STATE_INPUT_REQUIRED in svc.SUSPENDED_STATES
         assert svc.TASK_STATE_AUTH_REQUIRED in svc.SUSPENDED_STATES
         assert svc.TASK_STATE_COMPLETED not in svc.SUSPENDED_STATES
+
+
+# =========================================================================
+# AUTH_REQUIRED — Task state transition tests
+# =========================================================================
+
+
+class TestAuthRequiredTransitions:
+    """Verify task state machine handles AUTH_REQUIRED correctly."""
+
+    async def test_can_transition_from_working_to_auth_required(self):
+        """WORKING → AUTH_REQUIRED is a valid transition."""
+        db = _mock_db()
+        task = _mock_task(state=svc.TASK_STATE_WORKING)
+        result_mock = MagicMock()
+        result_mock.scalar_one_or_none.return_value = task
+        db.execute = AsyncMock(return_value=result_mock)
+
+        result = await svc.update_task_state(
+            db, "task-123", svc.TASK_STATE_AUTH_REQUIRED,
+            status_message={
+                "role": "agent",
+                "parts": [
+                    {"text": "Authentication required for google (email)"},
+                    {"data": {"provider": "google", "tool_type": "email"}},
+                ],
+            },
+        )
+        assert result.state == svc.TASK_STATE_AUTH_REQUIRED
+
+    async def test_can_resume_from_auth_required(self):
+        """AUTH_REQUIRED → WORKING → COMPLETED is valid."""
+        db = _mock_db()
+        result_mock = MagicMock()
+
+        # First transition: AUTH_REQUIRED → WORKING
+        task1 = _mock_task(state=svc.TASK_STATE_AUTH_REQUIRED)
+        result_mock.scalar_one_or_none.return_value = task1
+        db.execute = AsyncMock(return_value=result_mock)
+        result = await svc.update_task_state(db, "task-123", svc.TASK_STATE_WORKING)
+        assert result.state == svc.TASK_STATE_WORKING
+
+        # Second transition: WORKING → COMPLETED
+        task2 = _mock_task(state=svc.TASK_STATE_WORKING)
+        result_mock.scalar_one_or_none.return_value = task2
+        db.execute = AsyncMock(return_value=result_mock)
+        result = await svc.update_task_state(db, "task-123", svc.TASK_STATE_COMPLETED)
+        assert result.state == svc.TASK_STATE_COMPLETED
+
+    async def test_can_transition_from_auth_required_to_failed(self):
+        """AUTH_REQUIRED → FAILED is valid (error during resume)."""
+        db = _mock_db()
+        task = _mock_task(state=svc.TASK_STATE_AUTH_REQUIRED)
+        result_mock = MagicMock()
+        result_mock.scalar_one_or_none.return_value = task
+        db.execute = AsyncMock(return_value=result_mock)
+
+        result = await svc.update_task_state(
+            db, "task-123", svc.TASK_STATE_FAILED,
+            status_message={"role": "agent", "parts": [{"text": "error"}]},
+        )
+        assert result.state == svc.TASK_STATE_FAILED
+
+    async def test_auth_required_in_suspended_states(self):
+        """AUTH_REQUIRED is classified as a suspended state."""
+        assert svc.TASK_STATE_AUTH_REQUIRED in svc.SUSPENDED_STATES

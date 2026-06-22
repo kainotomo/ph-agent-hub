@@ -837,12 +837,13 @@ async def run_agent(
             f"Agent execution cancelled for session '{session_id}'"
         )
 
-    # ---- Inject A2A ask_user tool if function_invocation_kwargs present ----
+    # ---- Inject A2A ask_user / request_auth tools if function_invocation_kwargs present ----
     _tools = cfg.active_tool_callables
     if function_invocation_kwargs is not None:
         from ..tools.ask_user import ask_user
-        # Prepend so it's available but doesn't shadow other tools
-        _tools = [ask_user] + list(_tools)
+        from ..tools.request_auth import request_auth
+        # Prepend so they're available but don't shadow other tools
+        _tools = [ask_user, request_auth] + list(_tools)
 
     # ---- 7. Run agent or workflow ----------------------------------------
     raw_response: str

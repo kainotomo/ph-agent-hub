@@ -188,3 +188,122 @@ class TestInputRequiredTransitions:
             status_message={"role": "agent", "parts": [{"text": "error"}]},
         )
         assert result.state == svc.TASK_STATE_FAILED
+
+
+# =========================================================================
+# auth_request — Redis helpers
+# =========================================================================
+
+
+class TestAuthRequestRedisHelpers:
+    """``store_a2a_auth_request``, ``get_a2a_auth_request``, ``clear_a2a_auth_request``."""
+
+    async def test_store_and_get(self, _mock_redis):
+        from src.core.redis import (
+            store_a2a_auth_request,
+            get_a2a_auth_request,
+        )
+
+        auth_info = {
+            "provider": "google",
+            "tool_type": "email",
+            "scopes": ["https://www.googleapis.com/auth/gmail.send"],
+        }
+        import json
+
+        _mock_redis.get.return_value = json.dumps(auth_info)
+        await store_a2a_auth_request("task-123", auth_info)
+        _mock_redis.setex.assert_called_once()
+        args = _mock_redis.setex.call_args[0]
+        assert args[0] == "auth_request:task-123"
+        assert json.loads(args[2]) == auth_info
+        result = await get_a2a_auth_request("task-123")
+        assert result == auth_info
+
+    async def test_get_returns_none_when_not_set(self, _mock_redis):
+        from src.core.redis import get_a2a_auth_request
+
+        _mock_redis.get.return_value = None
+        result = await get_a2a_auth_request("task-nonexistent")
+        assert result is None
+
+    async def test_clear(self, _mock_redis):
+        from src.core.redis import clear_a2a_auth_request
+
+        await clear_a2a_auth_request("task-123")
+        _mock_redis.delete.assert_called_once_with("auth_request:task-123")
+
+
+# =========================================================================
+# request_auth — tool function
+# =========================================================================
+
+
+class TestRequestAuthTool:
+    """The ``request_auth`` @tool function called by the agent."""
+
+    async def test_stores_auth_info_when_task_id_in_context(self, _mock_redis):
+        """Tool stores auth info when context has ``task_id``."""
+        from agent_framework import FunctionInvocationContext
+        from src.tools.request_auth import request_auth
+
+        ctx = MagicMock(spec=FunctionInvocationContext)
+        ctx.kwargs = {"task_id": "task-123"}
+        result = await request_auth(
+            provider="google",
+            tool_type="email",
+            scopes=["https://www.googleapis.com/auth/gmail.send"],
+            reason="I need to send email on your behalf",
+            ctx=ctx,
+        )
+
+        assert "Auth requested" in result
+        assert "google" in result
+        _mock_redis.setex.assert_called_once()
+        args = _mock_redis.setex.call_args[0]
+        assert args[0] == "auth_request:task-123"
+
+    async def test_noop_when_no_context(self, _mock_redis):
+        """Tool does nothing when called without context."""
+        from src.tools.request_auth import request_auth
+
+        result = await request_auth(
+            provider="google",
+            tool_type="email",
+            ctx=None,
+        )
+
+        assert "outside A2A context" in result
+        _mock_redis.setex.assert_not_called()
+
+    async def test_noop_when_no_task_id(self, _mock_redis):
+        """Tool does nothing when ``task_id`` missing from kwargs."""
+        from agent_framework import FunctionInvocationContext
+        from src.tools.request_auth import request_auth
+
+        ctx = MagicMock(spec=FunctionInvocationContext)
+        ctx.kwargs = {}
+        result = await request_auth(
+            provider="microsoft",
+            tool_type="calendar",
+            ctx=ctx,
+        )
+
+        assert "no task_id" in result
+        _mock_redis.setex.assert_not_called()
+
+    async def test_minimal_invocation(self, _mock_redis):
+        """Tool works with only provider and tool_type (no scopes/reason)."""
+        from agent_framework import FunctionInvocationContext
+        from src.tools.request_auth import request_auth
+
+        ctx = MagicMock(spec=FunctionInvocationContext)
+        ctx.kwargs = {"task_id": "task-456"}
+        result = await request_auth(
+            provider="google",
+            tool_type="calendar",
+            ctx=ctx,
+        )
+
+        assert "Auth requested" in result
+        _mock_redis.setex.assert_called_once()

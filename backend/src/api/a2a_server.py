@@ -356,6 +356,56 @@ async def a2a_send_message_stream(
                 }
                 return
 
+            # Check if the agent requested auth via request_auth tool
+            from ..core.redis import get_a2a_auth_request, clear_a2a_auth_request
+            auth_info = await get_a2a_auth_request(task_id)
+            if auth_info:
+                await clear_a2a_auth_request(task_id)
+                provider = auth_info.get("provider", "unknown")
+                tool_type = auth_info.get("tool_type", "unknown")
+                scopes = auth_info.get("scopes")
+                reason = auth_info.get("reason")
+                parts: list[dict] = [
+                    {
+                        "text": (
+                            reason or
+                            f"Authentication required for {provider} ({tool_type})"
+                        ),
+                    },
+                ]
+                data_part: dict[str, object] = {
+                    "provider": provider,
+                    "tool_type": tool_type,
+                }
+                if scopes:
+                    data_part["scopes"] = scopes
+                parts.append({"data": data_part})
+                status_msg = {"role": "agent", "parts": parts}
+                await a2a_tasks.update_task_state(
+                    db, task_id, a2a_tasks.TASK_STATE_AUTH_REQUIRED,
+                    status_message=status_msg,
+                )
+                await db.commit()
+                logger.info(
+                    "Stream task %s transitioned to AUTH_REQUIRED: %s",
+                    task_id, auth_info,
+                )
+                yield {
+                    "event": "message",
+                    "data": json.dumps({
+                        "statusUpdate": {
+                            "taskId": task_id,
+                            "contextId": context_id,
+                            "status": {
+                                "state": a2a_tasks.TASK_STATE_AUTH_REQUIRED,
+                                "message": status_msg,
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                            },
+                        }
+                    }),
+                }
+                return
+
             artifact_id = str(uuid.uuid4())
             artifact = {
                 "artifactId": artifact_id,
@@ -579,6 +629,43 @@ async def _resume_task(
             task = await a2a_tasks.get_task(db, task_id)
             return {"task": a2a_tasks.task_to_dict(task)}
 
+        # Check if the agent requested auth via request_auth tool
+        from ..core.redis import get_a2a_auth_request, clear_a2a_auth_request
+        auth_info = await get_a2a_auth_request(task_id)
+        if auth_info:
+            await clear_a2a_auth_request(task_id)
+            provider = auth_info.get("provider", "unknown")
+            tool_type = auth_info.get("tool_type", "unknown")
+            scopes = auth_info.get("scopes")
+            reason = auth_info.get("reason")
+            parts: list[dict] = [
+                {
+                    "text": (
+                        reason or
+                        f"Authentication required for {provider} ({tool_type})"
+                    ),
+                },
+            ]
+            data_part: dict[str, object] = {
+                "provider": provider,
+                "tool_type": tool_type,
+            }
+            if scopes:
+                data_part["scopes"] = scopes
+            parts.append({"data": data_part})
+            status_msg = {"role": "agent", "parts": parts}
+            await a2a_tasks.update_task_state(
+                db, task_id, a2a_tasks.TASK_STATE_AUTH_REQUIRED,
+                status_message=status_msg,
+            )
+            await db.commit()
+            logger.info(
+                "Resumed task %s transitioned to AUTH_REQUIRED: %s",
+                task_id, auth_info,
+            )
+            task = await a2a_tasks.get_task(db, task_id)
+            return {"task": a2a_tasks.task_to_dict(task)}
+
         artifact_id = str(uuid.uuid4())
         artifact = {
             "artifactId": artifact_id,
@@ -652,6 +739,43 @@ async def _run_task_sync(
             logger.info(
                 "Sync task %s transitioned to INPUT_REQUIRED: %s",
                 task_id, question,
+            )
+            task = await a2a_tasks.get_task(db, task_id)
+            return {"task": a2a_tasks.task_to_dict(task)}
+
+        # Check if the agent requested auth via request_auth tool
+        from ..core.redis import get_a2a_auth_request, clear_a2a_auth_request
+        auth_info = await get_a2a_auth_request(task_id)
+        if auth_info:
+            await clear_a2a_auth_request(task_id)
+            provider = auth_info.get("provider", "unknown")
+            tool_type = auth_info.get("tool_type", "unknown")
+            scopes = auth_info.get("scopes")
+            reason = auth_info.get("reason")
+            parts: list[dict] = [
+                {
+                    "text": (
+                        reason or
+                        f"Authentication required for {provider} ({tool_type})"
+                    ),
+                },
+            ]
+            data_part: dict[str, object] = {
+                "provider": provider,
+                "tool_type": tool_type,
+            }
+            if scopes:
+                data_part["scopes"] = scopes
+            parts.append({"data": data_part})
+            status_msg = {"role": "agent", "parts": parts}
+            await a2a_tasks.update_task_state(
+                db, task_id, a2a_tasks.TASK_STATE_AUTH_REQUIRED,
+                status_message=status_msg,
+            )
+            await db.commit()
+            logger.info(
+                "Sync task %s transitioned to AUTH_REQUIRED: %s",
+                task_id, auth_info,
             )
             task = await a2a_tasks.get_task(db, task_id)
             return {"task": a2a_tasks.task_to_dict(task)}
@@ -755,6 +879,42 @@ async def _process_a2a_task_background(
                     logger.info(
                         "Background task %s transitioned to INPUT_REQUIRED: %s",
                         task_id, question,
+                    )
+                    return
+
+                # Check if the agent requested auth via request_auth tool
+                from ..core.redis import get_a2a_auth_request, clear_a2a_auth_request
+                auth_info = await get_a2a_auth_request(task_id)
+                if auth_info:
+                    await clear_a2a_auth_request(task_id)
+                    provider = auth_info.get("provider", "unknown")
+                    tool_type = auth_info.get("tool_type", "unknown")
+                    scopes = auth_info.get("scopes")
+                    reason = auth_info.get("reason")
+                    parts: list[dict] = [
+                        {
+                            "text": (
+                                reason or
+                                f"Authentication required for {provider} ({tool_type})"
+                            ),
+                        },
+                    ]
+                    data_part: dict[str, object] = {
+                        "provider": provider,
+                        "tool_type": tool_type,
+                    }
+                    if scopes:
+                        data_part["scopes"] = scopes
+                    parts.append({"data": data_part})
+                    status_msg = {"role": "agent", "parts": parts}
+                    await a2a_tasks.update_task_state(
+                        bg_db, task_id, a2a_tasks.TASK_STATE_AUTH_REQUIRED,
+                        status_message=status_msg,
+                    )
+                    await bg_db.commit()
+                    logger.info(
+                        "Background task %s transitioned to AUTH_REQUIRED: %s",
+                        task_id, auth_info,
                     )
                     return
 

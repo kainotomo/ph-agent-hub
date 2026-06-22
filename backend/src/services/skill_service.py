@@ -140,6 +140,7 @@ async def create_skill(
     cross_session_retrieval_enabled: bool = False,
     cross_session_max_snippets: int = 3,
     cross_session_min_score: float = 0.30,
+    a2a_metadata: dict | None = None,
 ) -> Skill:
     """Create a new skill with optional tool associations.
 
@@ -164,6 +165,7 @@ async def create_skill(
         cross_session_retrieval_enabled=cross_session_retrieval_enabled,
         cross_session_max_snippets=cross_session_max_snippets,
         cross_session_min_score=cross_session_min_score,
+        a2a_metadata=a2a_metadata,
     )
     db.add(skill)
     await db.flush()  # Get the skill ID before adding join rows

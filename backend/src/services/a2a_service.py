@@ -255,6 +255,10 @@ async def test_a2a_connection(
                 "id": s.id,
                 "name": s.name,
                 "description": s.description,
+                "inputModes": _safe_list(getattr(s, "input_modes", None) or getattr(s, "inputModes", None)),
+                "outputModes": _safe_list(getattr(s, "output_modes", None) or getattr(s, "outputModes", None)),
+                "examples": _safe_list(getattr(s, "examples", None)),
+                "tags": _safe_list(getattr(s, "tags", None)),
             }
             for s in agent_card.skills
         ] if agent_card.skills else []
@@ -318,6 +322,9 @@ async def sync_a2a_tools(
     discovered_skills = agent_card.skills or []
     discovered_ids = {s.id for s in discovered_skills}
 
+    # Cache the full Agent Card JSON for later use (media type negotiation, etc.)
+    _cache_agent_card(server, agent_card)
+
     # Fetch existing Tool records for this A2A server
     result = await db.execute(
         select(Tool).where(
@@ -341,6 +348,11 @@ async def sync_a2a_tools(
             "skill_id": skill.id,
             "skill_name": skill_name,
             "skill_description": skill.description or "",
+            # A2A protocol metadata (Issue #408)
+            "input_modes": _safe_list(getattr(skill, "input_modes", None) or getattr(skill, "inputModes", None)),
+            "output_modes": _safe_list(getattr(skill, "output_modes", None) or getattr(skill, "outputModes", None)),
+            "examples": _safe_list(getattr(skill, "examples", None)),
+            "tags": _safe_list(getattr(skill, "tags", None)),
         }
 
         if skill.id in existing_tools:
@@ -383,6 +395,39 @@ async def sync_a2a_tools(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _safe_list(value) -> list:
+    """Return *value* as a list, or an empty list if it is None."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _cache_agent_card(server: A2aServer, agent_card) -> None:
+    """Store a JSON-serializable snapshot of the Agent Card in
+    ``server.agent_card_cache`` and update the timestamp."""
+    try:
+        # Try protobuf MessageToDict / to_json first
+        if hasattr(agent_card, "to_json"):
+            server.agent_card_cache = json.loads(agent_card.to_json())
+        elif hasattr(agent_card, "MessageToDict"):
+            from google.protobuf.json_format import MessageToDict
+            server.agent_card_cache = MessageToDict(agent_card)
+        else:
+            # Fallback: build a minimal dict from known fields
+            server.agent_card_cache = {
+                "name": getattr(agent_card, "name", ""),
+                "description": getattr(agent_card, "description", ""),
+                "defaultInputModes": _safe_list(getattr(agent_card, "default_input_modes", None) or getattr(agent_card, "defaultInputModes", None)),
+                "defaultOutputModes": _safe_list(getattr(agent_card, "default_output_modes", None) or getattr(agent_card, "defaultOutputModes", None)),
+            }
+    except Exception:
+        logger.warning("Failed to cache Agent Card for server %s", server.id, exc_info=True)
+        return
+    server.agent_card_cached_at = datetime.now(timezone.utc)
 
 
 def _validate_binding_fields(

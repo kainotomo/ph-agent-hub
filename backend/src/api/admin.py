@@ -2029,6 +2029,7 @@ class AdminSkillCreate(BaseModel):
     cross_session_retrieval_enabled: bool = False
     cross_session_max_snippets: int = 3
     cross_session_min_score: float = 0.30
+    a2a_metadata: dict | None = None
 
 
 class AdminSkillUpdate(BaseModel):
@@ -2047,6 +2048,7 @@ class AdminSkillUpdate(BaseModel):
     cross_session_retrieval_enabled: bool | None = None
     cross_session_max_snippets: int | None = None
     cross_session_min_score: float | None = None
+    a2a_metadata: dict | None = None
 
 
 class AdminSkillResponse(BaseModel):
@@ -2064,6 +2066,7 @@ class AdminSkillResponse(BaseModel):
     enabled: bool
     cross_session_retrieval_enabled: bool
     cross_session_max_snippets: int
+    a2a_metadata: dict | None = None
     cross_session_min_score: float
     created_at: datetime
     updated_at: datetime
@@ -2148,6 +2151,7 @@ async def admin_create_skill(
         cross_session_retrieval_enabled=body.cross_session_retrieval_enabled,
         cross_session_max_snippets=body.cross_session_max_snippets,
         cross_session_min_score=body.cross_session_min_score,
+        a2a_metadata=body.a2a_metadata,
     )
     tools = await _svc_list_skill_tools(db, skill.id)
     resp = AdminSkillResponse.model_validate(skill)
@@ -2185,7 +2189,7 @@ async def admin_update_skill(
         "visibility", "template_id", "default_prompt_id", "default_model_id",
         "enabled",
         "cross_session_retrieval_enabled", "cross_session_max_snippets",
-        "cross_session_min_score",
+        "cross_session_min_score", "a2a_metadata",
     ):
         val = getattr(body, field, None)
         if val is not None:

@@ -823,6 +823,17 @@ async def run_agent(
         except Exception:
             raise
 
+    # ---- Pre-flight cancellation check (A2A task lifecycle, Issue #411) ---
+    # The streaming path checks ``check_stream_cancel`` between each yield.
+    # For the non-streaming path we check once before starting the agent
+    # loop.  Mid-execution cancellation (between tool-call steps) requires
+    # framework-level support in agent_framework.Agent.
+    if await check_stream_cancel(session_id):
+        await clear_stream_cancel(session_id)
+        raise ValidationError(
+            f"Agent execution cancelled for session '{session_id}'"
+        )
+
     # ---- 7. Run agent or workflow ----------------------------------------
     raw_response: str
 

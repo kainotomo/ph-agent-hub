@@ -123,6 +123,12 @@ class Settings(BaseSettings):
     A2A_DOCS_URL: str = ""
     """Documentation URL shown in the Agent Card."""
 
+    # --- A2A Task lifecycle (Issue #411) ---
+    A2A_TASK_TTL_SECONDS: int = 86400
+    """Default TTL for completed/canceled A2A task records (24h)."""
+    A2A_TASK_CANCEL_TTL_SECONDS: int = 120
+    """TTL for Redis cancellation flags (2 min — agent should notice fast)."""
+
     # --- A2A Resilience defaults (Issue #409) ---
     # These are used as fallbacks when per-server config columns are null.
     A2A_DEFAULT_RETRY_MAX_ATTEMPTS: int = 3

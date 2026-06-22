@@ -166,6 +166,57 @@ async def clear_stream_cancel(session_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# A2A task cancellation helpers — bridge A2A task IDs to the existing
+# stream-level cancellation mechanism.
+# ---------------------------------------------------------------------------
+A2A_CANCEL_PREFIX = "a2a:cancel:"
+
+
+async def set_a2a_cancel(
+    task_id: str, session_id: str, ttl: int | None = None
+) -> None:
+    """Set a cancellation flag for an A2A *task_id*.
+
+    Internally writes two Redis keys:
+
+    - ``a2a:cancel:{task_id}`` — maps task ID to session ID (TTL=120 s)
+    - ``stream:cancel:{session_id}`` — the existing flag the agent runner checks
+
+    This lets both the A2A cancel endpoint and the streaming cancellation
+    mechanism work together.
+    """
+    from ..core.config import settings
+
+    r = await get_redis()
+    ttl = ttl if ttl is not None else settings.A2A_TASK_CANCEL_TTL_SECONDS
+    pipe = r.pipeline()
+    pipe.setex(f"{A2A_CANCEL_PREFIX}{task_id}", ttl, session_id)
+    pipe.setex(f"{STREAM_CANCEL_PREFIX}{session_id}", ttl, "1")
+    await pipe.execute()
+
+
+async def check_a2a_cancel(task_id: str) -> str | None:
+    """Return the *session_id* if the A2A *task_id* has been cancelled.
+
+    Returns None if no cancellation flag exists.
+    """
+    r = await get_redis()
+    session_id = await r.get(f"{A2A_CANCEL_PREFIX}{task_id}")
+    return session_id  # None if key does not exist
+
+
+async def clear_a2a_cancel(task_id: str) -> None:
+    """Remove the A2A cancellation flag and its corresponding stream flag."""
+    r = await get_redis()
+    session_id = await r.get(f"{A2A_CANCEL_PREFIX}{task_id}")
+    if session_id:
+        pipe = r.pipeline()
+        pipe.delete(f"{A2A_CANCEL_PREFIX}{task_id}")
+        pipe.delete(f"{STREAM_CANCEL_PREFIX}{session_id}")
+        await pipe.execute()
+
+
+# ---------------------------------------------------------------------------
 # Follow-up questions helpers — stored in Redis so the frontend can fetch
 # them via a lightweight REST endpoint after the SSE stream closes.
 # ---------------------------------------------------------------------------

@@ -1,20 +1,26 @@
 # =============================================================================
 # PH Agent Hub — A2A Server (HTTP+JSON/REST Protocol Binding)
 # =============================================================================
-# Implements the A2A Agent-to-Agent protocol server side per the A2A
-# specification (Section 11 — HTTP+JSON/REST binding).
-#
-# Enables ph-agent-hub agents to be discovered by and interoperate with
-# any A2A-compliant client.
+# Implements the full A2A task lifecycle per the A2A specification
+# (Section 11 — HTTP+JSON/REST binding).
 #
 # Endpoints:
 #   GET  /.well-known/agent-card.json  → AgentCard (agent discovery)
-#   POST /message:send                 → Execute a task (sync)
+#   POST /message:send                 → Execute a task (sync or async)
 #   POST /message:stream               → Execute a task (SSE streaming)
 #   GET  /tasks/{task_id}              → Get task status
 #   POST /tasks/{task_id}:cancel       → Cancel a running task
+#
+# Lifecycle (Issue #411):
+#   - `returnImmediately: true`  spawns background processing, returns
+#     immediately with TASK_STATE_SUBMITTED.  Client polls GET /tasks/{id}.
+#   - `taskId` in request body    resumes a suspended task
+#     (INPUT_REQUIRED / AUTH_REQUIRED) for multi-turn conversations.
+#   - Tasks are persisted in the database (a2a_tasks table).
+#   - Cancellation uses Redis-backed flags bridged to the agent runner.
 # =============================================================================
 
+import asyncio
 import json
 import logging
 import uuid
@@ -26,13 +32,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.config import settings
 from ..core.dependencies import get_db
+from ..core.redis import set_a2a_cancel
+from ..db.base import AsyncSessionLocal
 from ..db.orm.skills import Skill as SkillORM
-from ..db.orm.users import User as UserORM
+from ..services import a2a_task_service as a2a_tasks
+from ..services import session_service
 
 logger = logging.getLogger(__name__)
-
-# In-memory task store for MVP
-_tasks: dict[str, dict] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +75,6 @@ async def get_agent_card(request: Request):
             ).limit(50)
         )
         for skill in result.scalars().all():
-            # Read A2A metadata from the skill's a2a_metadata column (Issue #408)
             a2a_meta = skill.a2a_metadata or {}
             skills.append({
                 "id": str(skill.id),
@@ -85,7 +90,7 @@ async def get_agent_card(request: Request):
 
     agent_card = {
         "name": settings.A2A_ORGANIZATION_NAME,
-        "description": f"PH Agent Hub — AI agent platform with A2A-compatible agent execution",
+        "description": "PH Agent Hub — AI agent platform with A2A-compatible agent execution",
         "supportedInterfaces": [
             {
                 "url": f"{base_url}/message:send",
@@ -127,7 +132,7 @@ async def get_agent_card(request: Request):
 
 
 # ---------------------------------------------------------------------------
-# Message send (sync execution)
+# Request model
 # ---------------------------------------------------------------------------
 
 
@@ -137,85 +142,89 @@ class A2aSendMessageRequest(BaseModel):
     metadata: dict | None = None
 
 
+# ---------------------------------------------------------------------------
+# Message send (sync / async / multi-turn)
+# ---------------------------------------------------------------------------
+
+
 @router.post("/message:send")
 async def a2a_send_message(
     body: A2aSendMessageRequest,
     request: Request,
+    db: AsyncSession = Depends(get_db),
 ):
-    """Execute an A2A task synchronously.
+    """Execute an A2A task.
 
-    Receives a SendMessageRequest, runs it through the agent runner,
-    and returns a Task or Message response per the A2A spec.
+    Behaviour depends on the request fields:
+
+    - ``body.message.taskId`` — Resume a suspended task (INPUT_REQUIRED /
+      AUTH_REQUIRED). The new message is appended to the existing session
+      history and the agent re-executes.
+    - ``body.message.returnImmediately`` — Spawn background processing
+      and return the task ID immediately (TASK_STATE_SUBMITTED). Client
+      polls ``GET /tasks/{id}`` for completion.
+    - Neither — Run synchronously inline (TASK_STATE_WORKING →
+      TASK_STATE_COMPLETED).
     """
-    # Extract user message content from all Part types
     msg = body.message or {}
     parts = msg.get("parts", [])
     text_content = _extract_text_from_parts(parts)
+    return_immediately = msg.get("configuration", {}).get("returnImmediately", False)
+    existing_task_id = msg.get("taskId")
 
-    # Create a task ID
+    # ---- Resume suspended task (multi-turn) --------------------------------
+    if existing_task_id:
+        return await _resume_task(
+            db=db,
+            task_id=existing_task_id,
+            text_content=text_content,
+            body=body,
+        )
+
+    # ---- Create new task --------------------------------------------------
     task_id = str(uuid.uuid4())
     context_id = str(uuid.uuid4())
 
-    # Store initial task state
-    _tasks[task_id] = {
-        "id": task_id,
-        "contextId": context_id,
-        "status": {
-            "state": "TASK_STATE_SUBMITTED",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        },
-        "artifacts": [],
-        "history": [],
-    }
+    # Create a persistent session for this task
+    session = await session_service.create_session(
+        db=db,
+        tenant_id="00000000-0000-0000-0000-000000000000",  # default tenant
+        user_id="a2a-system",
+        title=f"A2A task {task_id[:8]}",
+        is_temporary=False,
+        auto_route_enabled=True,
+    )
 
-    try:
-        # Update task to working
-        _tasks[task_id]["status"] = {
-            "state": "TASK_STATE_WORKING",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
+    # Persist the task record in the DB
+    await a2a_tasks.create_task(
+        db=db,
+        task_id=task_id,
+        context_id=context_id,
+        session_id=session.id,
+        state=a2a_tasks.TASK_STATE_SUBMITTED,
+    )
+    await db.commit()
 
-        # Execute via agent runner
-        response_text = await _run_a2a_agent(text_content)
+    # ---- Async path (returnImmediately) -----------------------------------
+    if return_immediately:
+        # Spawn background processing; the caller polls GET /tasks/{id}
+        asyncio.create_task(_process_a2a_task_background(
+            task_id=task_id,
+            context_id=context_id,
+            session_id=session.id,
+            text_content=text_content,
+        ))
+        task = await a2a_tasks.get_task(db, task_id)
+        return {"task": a2a_tasks.task_to_dict(task)}
 
-        # Create artifacts from response
-        artifact_id = str(uuid.uuid4())
-        artifact = {
-            "artifactId": artifact_id,
-            "name": "Agent Response",
-            "parts": [{"text": response_text}],
-        }
-
-        _tasks[task_id]["status"] = {
-            "state": "TASK_STATE_COMPLETED",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        _tasks[task_id]["artifacts"] = [artifact]
-
-        return {
-            "task": {
-                "id": task_id,
-                "contextId": context_id,
-                "status": _tasks[task_id]["status"],
-                "artifacts": [artifact],
-            }
-        }
-
-    except Exception as exc:
-        logger.error("A2A task execution failed: %s", exc, exc_info=True)
-        _tasks[task_id]["status"] = {
-            "state": "TASK_STATE_FAILED",
-            "message": {"role": "agent", "parts": [{"text": str(exc)}]},
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        return {
-            "task": {
-                "id": task_id,
-                "contextId": context_id,
-                "status": _tasks[task_id]["status"],
-                "artifacts": [],
-            }
-        }
+    # ---- Sync path (run inline) --------------------------------------------
+    return await _run_task_sync(
+        db=db,
+        task_id=task_id,
+        context_id=context_id,
+        session_id=session.id,
+        text_content=text_content,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -227,33 +236,73 @@ async def a2a_send_message(
 async def a2a_send_message_stream(
     body: A2aSendMessageRequest,
     request: Request,
+    db: AsyncSession = Depends(get_db),
 ):
     """Execute an A2A task with SSE streaming.
 
-    Same as /message:send but returns Server-Sent Events for real-time updates.
+    Same as /message:send but returns Server-Sent Events for real-time
+    updates.  Supports ``returnImmediately`` (spawns background, closes
+    stream) and ``taskId`` (resumes suspended task).
     """
     from sse_starlette.sse import EventSourceResponse
 
     msg = body.message or {}
     parts = msg.get("parts", [])
     text_content = _extract_text_from_parts(parts)
+    return_immediately = msg.get("configuration", {}).get("returnImmediately", False)
+    existing_task_id = msg.get("taskId")
 
+    # ---- Resume suspended task (multi-turn) via SSE ------------------------
+    if existing_task_id:
+        # For resumption we use the synchronous path internally and stream
+        # the final result as a single SSE event.
+        result = await _resume_task(
+            db=db, task_id=existing_task_id,
+            text_content=text_content, body=body,
+        )
+        task_data = result.get("task", {})
+        return EventSourceResponse(_single_artifact_stream(task_data))
+
+    # ---- Create new task --------------------------------------------------
     task_id = str(uuid.uuid4())
     context_id = str(uuid.uuid4())
 
-    _tasks[task_id] = {
-        "id": task_id,
-        "contextId": context_id,
-        "status": {
-            "state": "TASK_STATE_SUBMITTED",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        },
-        "artifacts": [],
-        "history": [],
-    }
+    session = await session_service.create_session(
+        db=db,
+        tenant_id="00000000-0000-0000-0000-000000000000",
+        user_id="a2a-system",
+        title=f"A2A task {task_id[:8]}",
+        is_temporary=False,
+        auto_route_enabled=True,
+    )
 
+    await a2a_tasks.create_task(
+        db=db,
+        task_id=task_id,
+        context_id=context_id,
+        session_id=session.id,
+        state=a2a_tasks.TASK_STATE_SUBMITTED,
+    )
+    await db.commit()
+
+    # ---- Async path (returnImmediately) via SSE ---------------------------
+    if return_immediately:
+        asyncio.create_task(_process_a2a_task_background(
+            task_id=task_id,
+            context_id=context_id,
+            session_id=session.id,
+            text_content=text_content,
+        ))
+        return EventSourceResponse(_single_artifact_stream(
+            a2a_tasks.task_to_dict(
+                await a2a_tasks.get_task(db, task_id)
+            )
+        ))
+
+    # ---- Sync streaming path ----------------------------------------------
     async def event_generator():
-        # Send initial task state
+        # Transition to WORKING and yield the initial event
+        await a2a_tasks.update_task_state(db, task_id, a2a_tasks.TASK_STATE_WORKING)
         yield {
             "event": "message",
             "data": json.dumps({
@@ -261,7 +310,7 @@ async def a2a_send_message_stream(
                     "id": task_id,
                     "contextId": context_id,
                     "status": {
-                        "state": "TASK_STATE_WORKING",
+                        "state": a2a_tasks.TASK_STATE_WORKING,
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     },
                 }
@@ -269,12 +318,7 @@ async def a2a_send_message_stream(
         }
 
         try:
-            _tasks[task_id]["status"] = {
-                "state": "TASK_STATE_WORKING",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-
-            response_text = await _run_a2a_agent(text_content)
+            response_text = await _run_a2a_agent(session.id, text_content, db)
 
             artifact_id = str(uuid.uuid4())
             artifact = {
@@ -283,13 +327,10 @@ async def a2a_send_message_stream(
                 "parts": [{"text": response_text}],
             }
 
-            _tasks[task_id]["status"] = {
-                "state": "TASK_STATE_COMPLETED",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-            _tasks[task_id]["artifacts"] = [artifact]
+            await a2a_tasks.add_artifact(db, task_id, artifact)
+            await a2a_tasks.update_task_state(db, task_id, a2a_tasks.TASK_STATE_COMPLETED)
+            await db.commit()
 
-            # Send artifact update
             yield {
                 "event": "message",
                 "data": json.dumps({
@@ -301,7 +342,6 @@ async def a2a_send_message_stream(
                 }),
             }
 
-            # Send completion
             yield {
                 "event": "message",
                 "data": json.dumps({
@@ -309,7 +349,7 @@ async def a2a_send_message_stream(
                         "taskId": task_id,
                         "contextId": context_id,
                         "status": {
-                            "state": "TASK_STATE_COMPLETED",
+                            "state": a2a_tasks.TASK_STATE_COMPLETED,
                             "timestamp": datetime.now(timezone.utc).isoformat(),
                         },
                     }
@@ -318,18 +358,23 @@ async def a2a_send_message_stream(
 
         except Exception as exc:
             logger.error("A2A stream task failed: %s", exc, exc_info=True)
-            _tasks[task_id]["status"] = {
-                "state": "TASK_STATE_FAILED",
-                "message": {"role": "agent", "parts": [{"text": str(exc)}]},
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
+            status_msg = {"role": "agent", "parts": [{"text": str(exc)}]}
+            await a2a_tasks.update_task_state(
+                db, task_id, a2a_tasks.TASK_STATE_FAILED,
+                status_message=status_msg,
+            )
+            await db.commit()
             yield {
                 "event": "message",
                 "data": json.dumps({
                     "statusUpdate": {
                         "taskId": task_id,
                         "contextId": context_id,
-                        "status": _tasks[task_id]["status"],
+                        "status": {
+                            "state": a2a_tasks.TASK_STATE_FAILED,
+                            "message": status_msg,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        },
                     }
                 }),
             }
@@ -343,10 +388,14 @@ async def a2a_send_message_stream(
 
 
 @router.get("/tasks/{task_id}")
-async def a2a_get_task(task_id: str):
+async def a2a_get_task(
+    task_id: str,
+    db: AsyncSession = Depends(get_db),
+):
     """Get the current status and artifacts of an A2A task."""
-    task = _tasks.get(task_id)
-    if task is None:
+    try:
+        task = await a2a_tasks.get_task(db, task_id)
+    except Exception:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={
@@ -361,42 +410,353 @@ async def a2a_get_task(task_id: str):
                 }
             },
         )
-    return {"task": task}
+    return {"task": a2a_tasks.task_to_dict(task)}
 
 
 @router.post("/tasks/{task_id}:cancel")
-async def a2a_cancel_task(task_id: str):
-    """Cancel a running A2A task."""
-    task = _tasks.get(task_id)
-    if task is None:
+async def a2a_cancel_task(
+    task_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Cancel a running A2A task.
+
+    Sets a Redis cancellation flag that the agent runner polls between
+    tool-call steps, then transitions the task to TASK_STATE_CANCELED.
+    """
+    try:
+        task = await a2a_tasks.get_task(db, task_id)
+    except Exception:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Task not found",
+            detail={
+                "error": {
+                    "code": 404,
+                    "message": f"Task '{task_id}' not found",
+                }
+            },
         )
 
-    current_state = task["status"]["state"]
-    terminal_states = {
-        "TASK_STATE_COMPLETED",
-        "TASK_STATE_FAILED",
-        "TASK_STATE_CANCELED",
-        "TASK_STATE_REJECTED",
-    }
-
-    if current_state in terminal_states:
+    if task.state in a2a_tasks.TERMINAL_STATES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Task is already in a terminal state and cannot be canceled",
+            detail={
+                "error": {
+                    "code": 400,
+                    "message": "Task is already in a terminal state and cannot be canceled",
+                }
+            },
         )
 
-    task["status"] = {
-        "state": "TASK_STATE_CANCELED",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-    return {"task": task}
+    # Set Redis cancellation flag (bridges task → session → runner)
+    if task.session_id:
+        await set_a2a_cancel(task_id, task.session_id)
+
+    task = await a2a_tasks.update_task_state(
+        db, task_id, a2a_tasks.TASK_STATE_CANCELED,
+    )
+    await db.commit()
+    return {"task": a2a_tasks.task_to_dict(task)}
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers
+# Internal: task resumption (multi-turn)
+# ---------------------------------------------------------------------------
+
+
+async def _resume_task(
+    db: AsyncSession,
+    task_id: str,
+    text_content: str,
+    body: A2aSendMessageRequest,
+) -> dict:
+    """Resume a suspended task (INPUT_REQUIRED / AUTH_REQUIRED).
+
+    Validates the task state, appends the user's follow-up to session
+    history, re-runs the agent, and returns the completed task dict.
+    """
+    try:
+        task = await a2a_tasks.get_task(db, task_id)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": {
+                    "code": 404,
+                    "message": f"Task '{task_id}' not found",
+                }
+            },
+        )
+
+    if task.state not in a2a_tasks.SUSPENDED_STATES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": {
+                    "code": 400,
+                    "message": (
+                        f"Task '{task_id}' is in state '{task.state}' "
+                        f"and cannot be resumed. Only tasks in "
+                        f"INPUT_REQUIRED or AUTH_REQUIRED can be resumed."
+                    ),
+                }
+            },
+        )
+
+    if not task.session_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": {
+                    "code": 400,
+                    "message": f"Task '{task_id}' has no backing session",
+                }
+            },
+        )
+
+    # Re-run the agent with the follow-up message on the same session
+    try:
+        response_text = await _run_a2a_agent(
+            session_id=task.session_id,
+            text_content=text_content,
+            db=db,
+        )
+
+        artifact_id = str(uuid.uuid4())
+        artifact = {
+            "artifactId": artifact_id,
+            "name": "Agent Response",
+            "parts": [{"text": response_text}],
+        }
+
+        await a2a_tasks.add_artifact(db, task_id, artifact)
+        await a2a_tasks.update_task_state(
+            db, task_id, a2a_tasks.TASK_STATE_COMPLETED,
+        )
+        await db.commit()
+
+        task = await a2a_tasks.get_task(db, task_id)
+        return {"task": a2a_tasks.task_to_dict(task)}
+
+    except Exception as exc:
+        logger.error("A2A task resumption failed: %s", exc, exc_info=True)
+        status_msg = {"role": "agent", "parts": [{"text": str(exc)}]}
+        await a2a_tasks.update_task_state(
+            db, task_id, a2a_tasks.TASK_STATE_FAILED,
+            status_message=status_msg,
+        )
+        await db.commit()
+        return {
+            "task": a2a_tasks.task_to_dict(
+                await a2a_tasks.get_task(db, task_id)
+            )
+        }
+
+
+# ---------------------------------------------------------------------------
+# Internal: sync task execution
+# ---------------------------------------------------------------------------
+
+
+async def _run_task_sync(
+    db: AsyncSession,
+    task_id: str,
+    context_id: str,
+    session_id: str,
+    text_content: str,
+) -> dict:
+    """Run an A2A task synchronously and return the result dict.
+
+    Transitions: SUBMITTED → WORKING → COMPLETED (or FAILED).
+    """
+    try:
+        await a2a_tasks.update_task_state(db, task_id, a2a_tasks.TASK_STATE_WORKING)
+        await db.commit()
+
+        response_text = await _run_a2a_agent(session_id, text_content, db)
+
+        artifact_id = str(uuid.uuid4())
+        artifact = {
+            "artifactId": artifact_id,
+            "name": "Agent Response",
+            "parts": [{"text": response_text}],
+        }
+
+        await a2a_tasks.add_artifact(db, task_id, artifact)
+        await a2a_tasks.update_task_state(db, task_id, a2a_tasks.TASK_STATE_COMPLETED)
+        await db.commit()
+
+        task = await a2a_tasks.get_task(db, task_id)
+        return {"task": a2a_tasks.task_to_dict(task)}
+
+    except Exception as exc:
+        logger.error("A2A sync task failed: %s", exc, exc_info=True)
+        status_msg = {"role": "agent", "parts": [{"text": str(exc)}]}
+        await a2a_tasks.update_task_state(
+            db, task_id, a2a_tasks.TASK_STATE_FAILED,
+            status_message=status_msg,
+        )
+        await db.commit()
+        return {
+            "task": a2a_tasks.task_to_dict(
+                await a2a_tasks.get_task(db, task_id)
+            )
+        }
+
+
+# ---------------------------------------------------------------------------
+# Internal: background task processing (returnImmediately)
+# ---------------------------------------------------------------------------
+
+
+async def _process_a2a_task_background(
+    task_id: str,
+    context_id: str,
+    session_id: str,
+    text_content: str,
+) -> None:
+    """Run the agent in the background for an A2A task.
+
+    Opens its own DB session (``AsyncSessionLocal``) so it is independent
+    of the request-scoped session.  Transitions:
+
+        SUBMITTED → WORKING → COMPLETED (or FAILED)
+
+    Checks the Redis cancellation flag before starting execution and
+    before committing results.  For mid-stream cancellation during
+    agent execution, the runner's ``check_stream_cancel()`` is used.
+    """
+    try:
+        async with AsyncSessionLocal() as bg_db:
+            # Check cancellation before starting work
+            from ..core.redis import check_a2a_cancel
+            if await check_a2a_cancel(task_id):
+                logger.info("Background task %s cancelled before execution", task_id)
+                await a2a_tasks.update_task_state(
+                    bg_db, task_id, a2a_tasks.TASK_STATE_CANCELED,
+                )
+                await bg_db.commit()
+                return
+
+            try:
+                await a2a_tasks.update_task_state(
+                    bg_db, task_id, a2a_tasks.TASK_STATE_WORKING,
+                )
+                await bg_db.commit()
+
+                # Check cancellation again before running agent
+                if await check_a2a_cancel(task_id):
+                    logger.info("Background task %s cancelled before agent run", task_id)
+                    await a2a_tasks.update_task_state(
+                        bg_db, task_id, a2a_tasks.TASK_STATE_CANCELED,
+                    )
+                    await bg_db.commit()
+                    return
+
+                response_text = await _run_a2a_agent(
+                    session_id, text_content, bg_db,
+                )
+
+                artifact_id = str(uuid.uuid4())
+                artifact = {
+                    "artifactId": artifact_id,
+                    "name": "Agent Response",
+                    "parts": [{"text": response_text}],
+                }
+
+                await a2a_tasks.add_artifact(bg_db, task_id, artifact)
+                await a2a_tasks.update_task_state(
+                    bg_db, task_id, a2a_tasks.TASK_STATE_COMPLETED,
+                )
+                await bg_db.commit()
+
+                logger.info(
+                    "Background task %s completed successfully", task_id,
+                )
+
+            except Exception as exc:
+                logger.error(
+                    "Background task %s failed: %s", task_id, exc,
+                    exc_info=True,
+                )
+                status_msg = {"role": "agent", "parts": [{"text": str(exc)}]}
+                await a2a_tasks.update_task_state(
+                    bg_db, task_id, a2a_tasks.TASK_STATE_FAILED,
+                    status_message=status_msg,
+                )
+                await bg_db.commit()
+    except Exception as outer_exc:
+        # This should never happen — last-resort logging
+        logger.critical(
+            "Fatal error in background task %s: %s",
+            task_id, outer_exc, exc_info=True,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Internal: agent execution
+# ---------------------------------------------------------------------------
+
+
+async def _run_a2a_agent(
+    session_id: str,
+    text_content: str,
+    db: AsyncSession,
+) -> str:
+    """Run the ph-agent-hub agent on an existing session and return text.
+
+    Resolves the session_data from the DB, calls the agent runner,
+    and returns the assistant response text.
+    """
+    from ..agents.runner import run_agent
+
+    # Load session_data from DB
+    session = await session_service.get_session_by_id(db, session_id)
+    if session is None:
+        raise ValueError(f"Session '{session_id}' not found")
+
+    # Build session_data dict the runner expects
+    session_data = {
+        "id": session.id,
+        "tenant_id": session.tenant_id,
+        "user_id": "a2a-system",
+        "selected_model_id": session.selected_model_id,
+        "selected_skill_id": session.selected_skill_id,
+        "selected_template_id": session.selected_template_id,
+        "is_temporary": session.is_temporary,
+        "auto_route_enabled": session.auto_route_enabled,
+        "auto_select_tools": session.auto_select_tools,
+        "thinking_enabled": session.thinking_enabled,
+        "temperature": session.temperature,
+        "cross_session_retrieval_enabled": session.cross_session_retrieval_enabled,
+    }
+
+    result_text, _ = await run_agent(
+        session_data=session_data,
+        user_message=text_content,
+        db=db,
+        current_user=None,  # A2A guest
+    )
+    return result_text
+
+
+# ---------------------------------------------------------------------------
+# Internal: SSE helper
+# ---------------------------------------------------------------------------
+
+
+async def _single_artifact_stream(task_data: dict):
+    """Yield a single SSE ``message`` event for a completed task.
+
+    Used by the ``returnImmediately`` path of ``/message:stream``.
+    """
+    yield {
+        "event": "message",
+        "data": json.dumps({"task": task_data}),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Internal: part extraction
 # ---------------------------------------------------------------------------
 
 
@@ -423,30 +783,7 @@ def _extract_text_from_parts(parts: list[dict]) -> str:
         elif "raw" in part and part["raw"]:
             filename = part.get("filename", "")
             raw_val = part["raw"]
-            # raw is base64-encoded in JSON
             size = len(raw_val) if isinstance(raw_val, str) else 0
             label = f"[binary: {filename}]" if filename else "[binary]"
             chunks.append(f"{label} (base64, {size} chars)")
     return "\n".join(chunks)
-
-
-async def _run_a2a_agent(text_content: str) -> str:
-    """Run the ph-agent-hub agent with the given text and return the response.
-
-    For MVP, this creates a temporary session and runs the agent
-    synchronously. In the future, this will support full async task
-    lifecycle with proper session management and auth.
-    """
-    # Use a simple direct agent call for MVP
-    from ..agents.runner import run_agent
-
-    result_text, _ = await run_agent(
-        message_text=text_content,
-        user_id="a2a-system",
-        tenant_id=None,  # Will use default/sample tenant
-        session_id=None,  # Creates a temporary session
-        is_temporary=True,
-        is_demo=False,
-        is_guest=True,
-    )
-    return result_text

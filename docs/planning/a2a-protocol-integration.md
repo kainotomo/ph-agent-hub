@@ -36,13 +36,15 @@ binding (Section 11 of the spec) for task execution, streaming, and management.
 | Tool integration | Each skill → `Tool` record (type="a2a") | Identical to MCP pattern; uses existing tool registry, auto-select, session activation |
 | Auth (Client) | Fernet-encrypted tokens in DB | Same security model as MCP servers |
 | Auth (Server) | Reuse existing JWT tokens | No new credential system needed |
-| Server task store | In-memory dict (MVP) | Sufficient for initial release |
+| Server task store | DB-backed (`a2a_tasks` table) | Persists across restarts; enables polling, multi-turn, cancellation |
 | Agent Card path | Configurable per server, default `/.well-known/agent-card.json` | Spec-compliant default per IANA registration (Section 14.3) |
 
 ## Deferred to Follow-up (Issue #406)
 
-1. **Task lifecycle adapter**: Async execution, `input-required`/`auth-required`
-   states, persistent task store, cancellation
+1. ~~**Task lifecycle adapter**: Async execution, `input-required`/`auth-required`
+   states, persistent task store, cancellation~~ ✅ **Implemented in Issue #411**
+   — `a2a_tasks` table, `returnImmediately` async execution, `taskId` multi-turn
+   resumption, Redis-backed cancellation, all 8 task states.
 2. **Tool fidelity**: Structured I/O modes, examples in prompts, Part type support
 3. **Resilience**: Retry with backoff, circuit breaker, version negotiation,
    observability

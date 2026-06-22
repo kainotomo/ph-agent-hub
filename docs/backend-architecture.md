@@ -360,6 +360,40 @@ This is implemented via Pydantic's `model_dump(exclude_unset=True)`, which retur
 
 > Use `PATCH` semantics with `PUT`: send only the fields you want to change. See `backend/src/core/schemas.py` for the shared utility.
 
+### **3.20 A2A Server** *(A2A Protocol — Inbound)*
+
+The A2A server implements the inbound side of the Agent-to-Agent protocol (Google A2A Spec §11 — HTTP+JSON/REST binding). It exposes ph-agent-hub agents as A2A-compatible agents that external clients can discover and invoke. These endpoints are served on the A2A binding path (not under `/api/`) and are only enabled when `A2A_SERVER_ENABLED=true`.
+
+```
+GET    /.well-known/agent-card.json         # Agent discovery (AgentCard per A2A §8)
+POST   /message:send                        # Execute a task (sync or async)
+POST   /message:stream                      # Execute a task (SSE streaming)
+GET    /tasks/{task_id}                     # Poll task status
+POST   /tasks/{task_id}:cancel              # Cancel a running task
+```
+
+**Task lifecycle** (Issue #411):
+- **`returnImmediately: true`** — Spawns background agent execution and returns immediately with `TASK_STATE_SUBMITTED`. The client polls `GET /tasks/{id}` until completion.
+- **`taskId` in request** — Resumes a suspended task (`TASK_STATE_INPUT_REQUIRED` or `TASK_STATE_AUTH_REQUIRED`) for multi-turn conversations. The follow-up message is appended to the existing session history.
+- **Cancellation** — `POST /tasks/{id}:cancel` sets Redis-backed cancellation flags, transitions the task to `TASK_STATE_CANCELED`, and the agent runner aborts.
+- **Persistence** — Tasks are stored in the `a2a_tasks` database table (ORM: `A2aTask`). Tasks survive server restarts.
+
+Task states:
+```
+SUBMITTED → WORKING → COMPLETED
+                    → FAILED
+                    → CANCELED
+                    → INPUT_REQUIRED → (resume) → WORKING → COMPLETED
+                    → AUTH_REQUIRED  → (resume) → WORKING → COMPLETED
+```
+
+Key files:
+- `api/a2a_server.py` — All 5 endpoints + background task processor
+- `services/a2a_task_service.py` — CRUD + state management for `A2aTask`
+- `services/a2a_service.py` — A2A server configuration CRUD (outbound admin)
+- `core/redis.py` — A2A cancellation flags (`set_a2a_cancel`, `check_a2a_cancel`)
+- `db/orm/a2a_tasks.py` — `A2aTask` ORM model
+
 ---
 
 ## 4. Backend Folder Structure

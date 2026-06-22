@@ -30,10 +30,12 @@ from .balance_transactions import BalanceTransaction
 from .audit_logs import AuditLog
 from .app_settings import AppSetting
 from .a2a_call_logs import A2aCallLog
+from .a2a_tasks import A2aTask
 from .embed_configs import EmbedConfig
 
 __all__ = [
     "A2aCallLog",
+    "A2aTask",
     "Tenant",
     "User",
     "Model",

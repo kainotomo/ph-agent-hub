@@ -211,6 +211,9 @@ async def delete_a2a_server(
     if server is None:
         raise NotFoundError("A2A server not found")
 
+    # Clean up OAuth2 refresh lock if present
+    _oauth2_refresh_locks.pop(server_id, None)
+
     # Delete associated Tool records with type="a2a" pointing to this server
     result = await db.execute(
         select(Tool).where(
@@ -242,6 +245,19 @@ def decrypt_auth_token(server: A2aServer) -> str | None:
         return decrypt(server.auth_token)
     except Exception:
         logger.warning("Failed to decrypt auth_token for A2A server %s", server.id)
+        return None
+
+
+def decrypt_oauth2_client_secret(server: A2aServer) -> str | None:
+    """Decrypt the stored OAuth2 client secret. Returns None if not set."""
+    if not server.oauth2_client_secret:
+        return None
+    try:
+        return decrypt(server.oauth2_client_secret)
+    except Exception:
+        logger.warning(
+            "Failed to decrypt oauth2_client_secret for A2A server %s", server.id
+        )
         return None
 
 

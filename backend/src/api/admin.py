@@ -97,6 +97,7 @@ from ..services.a2a_service import (
     decrypt_headers as _a2a_decrypt_headers,
     mask_dict as _a2a_mask_dict,
     get_oauth2_tokens_status as _a2a_oauth2_tokens_status,
+    decrypt_oauth2_client_secret as _a2a_decrypt_oauth2_client_secret,
 )
 from ..services.a2a_circuit_breaker import A2ACircuitBreaker
 from ..db.orm.a2a_call_logs import A2aCallLog
@@ -1703,7 +1704,8 @@ async def list_a2a_servers(
         server_dict["auth_token"] = _a2a_mask_dict({"token": decrypted_token})["token"] if decrypted_token else None
         server_dict["headers"] = _a2a_mask_dict(decrypted_headers) if decrypted_headers else None
         server_dict["oauth2_tokens_status"] = _a2a_oauth2_tokens_status(s)
-        server_dict["oauth2_client_secret"] = _a2a_mask_dict({"secret": s.oauth2_client_secret or ""})["secret"] if s.oauth2_client_secret else None
+        decrypted_secret = _a2a_decrypt_oauth2_client_secret(s)
+        server_dict["oauth2_client_secret"] = _a2a_mask_dict({"secret": decrypted_secret or ""})["secret"] if decrypted_secret else None
         data = A2aServerResponse.model_validate(server_dict)
         items.append(data)
 
@@ -1768,7 +1770,8 @@ async def create_a2a_server(
     server_dict["auth_token"] = _a2a_mask_dict({"token": decrypted_token})["token"] if decrypted_token else None
     server_dict["headers"] = _a2a_mask_dict(decrypted_headers) if decrypted_headers else None
     server_dict["oauth2_tokens_status"] = _a2a_oauth2_tokens_status(server)
-    server_dict["oauth2_client_secret"] = _a2a_mask_dict({"secret": server.oauth2_client_secret or ""})["secret"] if server.oauth2_client_secret else None
+    decrypted_secret = _a2a_decrypt_oauth2_client_secret(server)
+    server_dict["oauth2_client_secret"] = _a2a_mask_dict({"secret": decrypted_secret or ""})["secret"] if decrypted_secret else None
     data = A2aServerResponse.model_validate(server_dict)
     return data
 
@@ -1792,7 +1795,8 @@ async def get_a2a_server(
     server_dict["auth_token"] = _a2a_mask_dict({"token": decrypted_token})["token"] if decrypted_token else None
     server_dict["headers"] = _a2a_mask_dict(decrypted_headers) if decrypted_headers else None
     server_dict["oauth2_tokens_status"] = _a2a_oauth2_tokens_status(server)
-    server_dict["oauth2_client_secret"] = _a2a_mask_dict({"secret": server.oauth2_client_secret or ""})["secret"] if server.oauth2_client_secret else None
+    decrypted_secret = _a2a_decrypt_oauth2_client_secret(server)
+    server_dict["oauth2_client_secret"] = _a2a_mask_dict({"secret": decrypted_secret or ""})["secret"] if decrypted_secret else None
     data = A2aServerResponse.model_validate(server_dict)
     return data
 
@@ -1823,10 +1827,13 @@ async def update_a2a_server(
                   "circuit_breaker_cooldown_seconds",
                   "oauth2_client_id", "oauth2_client_secret",
                   "oauth2_authorize_url", "oauth2_token_url",
-                  "oauth2_scopes", "oauth2_tokens"):
+                  "oauth2_scopes"):
         val = getattr(body, field, None)
         if val is not None:
             update_kwargs[field] = val
+    # oauth2_tokens is special: null means "clear tokens" (e.g. revoke)
+    if "oauth2_tokens" in body.model_fields_set:
+        update_kwargs["oauth2_tokens"] = body.oauth2_tokens
 
     server = await _svc_update_a2a_server(db, server_id, **update_kwargs)
 
@@ -1846,7 +1853,8 @@ async def update_a2a_server(
     server_dict["auth_token"] = _a2a_mask_dict({"token": decrypted_token})["token"] if decrypted_token else None
     server_dict["headers"] = _a2a_mask_dict(decrypted_headers) if decrypted_headers else None
     server_dict["oauth2_tokens_status"] = _a2a_oauth2_tokens_status(server)
-    server_dict["oauth2_client_secret"] = _a2a_mask_dict({"secret": server.oauth2_client_secret or ""})["secret"] if server.oauth2_client_secret else None
+    decrypted_secret = _a2a_decrypt_oauth2_client_secret(server)
+    server_dict["oauth2_client_secret"] = _a2a_mask_dict({"secret": decrypted_secret or ""})["secret"] if decrypted_secret else None
     data = A2aServerResponse.model_validate(server_dict)
     return data
 

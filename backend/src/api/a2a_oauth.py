@@ -6,6 +6,7 @@
 # =============================================================================
 
 import logging
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import RedirectResponse
@@ -55,7 +56,7 @@ async def a2a_oauth2_callback(
             "A2A OAuth2 callback received error: %s", error_description,
         )
         return RedirectResponse(
-            url=f"{FRONTEND_ERROR_URL}?oauth_error={error_description}",
+            url=f"{FRONTEND_ERROR_URL}?oauth_error={quote(error_description)}",
             status_code=302,
         )
 

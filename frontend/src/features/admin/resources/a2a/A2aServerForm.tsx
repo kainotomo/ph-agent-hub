@@ -285,7 +285,7 @@ export function A2aServerForm({ open, server, onClose }: A2aServerFormProps) {
                 <Form.Item
                   name="oauth2_client_id"
                   label="Client ID"
-                  rules={[{ required: true, message: "Client ID is required for OAuth2" }]}
+                  rules={[{ required: !isEdit, message: "Client ID is required for OAuth2" }]}
                 >
                   <Input placeholder="your-client-id" />
                 </Form.Item>
@@ -293,10 +293,10 @@ export function A2aServerForm({ open, server, onClose }: A2aServerFormProps) {
                 <Form.Item
                   name="oauth2_client_secret"
                   label="Client Secret"
-                  rules={[{ required: true, message: "Client secret is required for OAuth2" }]}
+                  rules={[{ required: !isEdit, message: "Client secret is required for OAuth2" }]}
                 >
                   <Input.Password
-                    placeholder="Enter client secret"
+                    placeholder={isEdit ? "Leave blank to keep current secret" : "Enter client secret"}
                     autoComplete="new-password"
                   />
                 </Form.Item>

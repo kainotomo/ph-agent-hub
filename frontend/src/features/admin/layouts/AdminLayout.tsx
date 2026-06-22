@@ -27,6 +27,7 @@ import {
   CloudServerOutlined,
   CodeOutlined,
   LinkOutlined,
+  PhoneOutlined,
 } from "@ant-design/icons";
 import { useNavigate, useLocation, Outlet, useSearchParams } from "react-router-dom";
 import { useAuth } from "../../../providers/AuthProvider";
@@ -78,6 +79,7 @@ export function AdminLayout() {
     { key: "/admin/tools", icon: <ToolOutlined />, label: "Tools" },
     { key: "/admin/mcp-servers", icon: <CloudServerOutlined />, label: "MCP Servers" },
     { key: "/admin/a2a-servers", icon: <LinkOutlined />, label: "A2A Servers" },
+    { key: "/admin/a2a-call-logs", icon: <PhoneOutlined />, label: "A2A Call Logs" },
     {
       key: "/admin/templates",
       icon: <FileTextOutlined />,

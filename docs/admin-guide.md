@@ -557,7 +557,28 @@ Every A2A call is logged with:
 - **Status** — `success`, `timeout`, `error`, or `circuit_open`
 - **Retry count** — how many retries were attempted
 
-Call logs are visible via the admin API (`GET /admin/a2a-call-logs`) and can be filtered by server, status, or date range.
+##### A2A Call Logs UI
+
+**Admin Area → A2A Call Logs** provides a read-only table view of all A2A call records. The page displays:
+
+| Column | Description |
+|--------|-------------|
+| **Timestamp** | When the call occurred (sorted newest-first by default) |
+| **Server** | The A2A server name the call was routed to |
+| **Skill ID** | The remote skill identifier |
+| **Status** | Colored tag: <Tag color="green">Success</Tag>, <Tag color="red">Error</Tag>, <Tag color="orange">Timeout</Tag>, <Tag color="purple">Circuit Open</Tag> |
+| **Latency (ms)** | Call duration in milliseconds |
+| **Retries** | Number of retry attempts |
+| **Error** | Truncated error message (if any) |
+
+**Filters** are available above the table:
+- **Server** — dropdown populated from configured A2A servers
+- **Status** — dropdown with all four status values
+- **Date range** — date picker to narrow results by creation date
+
+Click any row to **expand** it and view the full **Trace ID** and **Error Message** details.
+
+Call logs are immutable append-only records that survive A2A server deletion. They can be filtered by server, status, or date range.
 
 ---
 

@@ -122,7 +122,15 @@ export function ToolList() {
   });
 
   const columns = [
-    { title: "Name", dataIndex: "name", key: "name", sorter: true },
+    { title: "Name", dataIndex: "name", key: "name", sorter: true,
+      render: (v: string, record: ToolData) => (
+        <Typography.Text ellipsis={{ tooltip: record.description || undefined }}>
+          {v}
+        </Typography.Text>
+      ),
+    },
+    { title: "Description", dataIndex: "description", key: "description", 
+      ellipsis: true, width: 250, responsive: ["xl" as const],
     {
       title: "Category",
       dataIndex: "category",

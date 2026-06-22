@@ -117,6 +117,7 @@ export interface ToolData {
   id: string;
   tenant_id: string;
   name: string;
+  description?: string | null;
   type: string;
   category: string;
   config: Record<string, unknown> | null;

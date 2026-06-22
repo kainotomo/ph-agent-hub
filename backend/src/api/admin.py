@@ -318,6 +318,7 @@ class ModelResponse(BaseModel):
 class ToolCreate(BaseModel):
     tenant_id: str | None = None  # admin only — fallback to current_user.tenant_id
     name: str
+    description: str | None = None
     type: str
     config: dict | None = None
     code: str | None = None
@@ -328,6 +329,7 @@ class ToolCreate(BaseModel):
 class ToolUpdate(BaseModel):
     tenant_id: str | None = None  # admin only
     name: str | None = None
+    description: str | None = None
     type: str | None = None
     config: dict | None = None
     code: str | None = None
@@ -339,6 +341,7 @@ class ToolResponse(BaseModel):
     id: str
     tenant_id: str
     name: str
+    description: str | None = None
     type: str
     category: str
     config: dict | None
@@ -1156,6 +1159,7 @@ async def create_tool(
         db,
         tenant_id=tenant_id,
         name=body.name,
+        description=body.description,
         type=body.type,
         config=body.config,
         code=body.code,
@@ -1202,6 +1206,8 @@ async def update_tool(
     update_kwargs: dict = {}
     if body.name is not None:
         update_kwargs["name"] = body.name
+    if body.description is not None:
+        update_kwargs["description"] = body.description
     if body.type is not None:
         update_kwargs["type"] = body.type
     if body.config is not None:

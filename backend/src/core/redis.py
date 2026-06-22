@@ -217,6 +217,40 @@ async def clear_a2a_cancel(task_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# A2A ask_user helpers — used by the ``ask_user`` tool to communicate
+# "agent needs more info" from the agent runner back to the A2A task
+# lifecycle layer.  The tool stores the question under a task-scoped key
+# and the A2A background processor checks it after ``agent.run()``.
+# ---------------------------------------------------------------------------
+ASK_USER_PREFIX = "ask_user:"
+ASK_USER_TTL_SECONDS = 3600
+
+
+async def store_a2a_question(task_id: str, question: str) -> None:
+    """Store an agent question for an A2A *task_id*.
+
+    The A2A task lifecycle layer checks this flag after the agent returns;
+    if present, the task transitions to ``INPUT_REQUIRED`` with the
+    question as the ``status_message``.
+    """
+    r = await get_redis()
+    await r.setex(f"{ASK_USER_PREFIX}{task_id}", ASK_USER_TTL_SECONDS, question)
+
+
+async def get_a2a_question(task_id: str) -> str | None:
+    """Return the agent question for an A2A *task_id*, or None."""
+    r = await get_redis()
+    val = await r.get(f"{ASK_USER_PREFIX}{task_id}")
+    return val  # None if key does not exist
+
+
+async def clear_a2a_question(task_id: str) -> None:
+    """Remove the agent question for an A2A *task_id*."""
+    r = await get_redis()
+    await r.delete(f"{ASK_USER_PREFIX}{task_id}")
+
+
+# ---------------------------------------------------------------------------
 # Follow-up questions helpers — stored in Redis so the frontend can fetch
 # them via a lightweight REST endpoint after the SSE stream closes.
 # ---------------------------------------------------------------------------

@@ -788,6 +788,7 @@ async def run_agent(
     db: AsyncSession,
     current_user: User | None = None,
     file_ids: list[str] | None = None,
+    function_invocation_kwargs: dict | None = None,
 ) -> tuple[str, str]:
     """Assemble and run a MAF agent for a single user message.
 
@@ -797,6 +798,8 @@ async def run_agent(
         db: Active async DB session.
         current_user: The authenticated user (or None for guest sessions).
         file_ids: Optional list of FileUpload IDs to link to the user message.
+        function_invocation_kwargs: Optional kwargs forwarded to tool invocation
+            layers (used by A2A ``ask_user`` tool).
 
     Returns:
         A tuple of (assistant response text, assistant message ID).
@@ -834,6 +837,13 @@ async def run_agent(
             f"Agent execution cancelled for session '{session_id}'"
         )
 
+    # ---- Inject A2A ask_user tool if function_invocation_kwargs present ----
+    _tools = cfg.active_tool_callables
+    if function_invocation_kwargs is not None:
+        from ..tools.ask_user import ask_user
+        # Prepend so it's available but doesn't shadow other tools
+        _tools = [ask_user] + list(_tools)
+
     # ---- 7. Run agent or workflow ----------------------------------------
     raw_response: str
 
@@ -845,7 +855,7 @@ async def run_agent(
                     skill=cfg.skill,
                     model_client=cfg.model_client,
                     system_prompt=cfg.system_prompt,
-                    tools=cfg.active_tool_callables,
+                    tools=_tools,
                     user_message=contextualized_message,
                     agent_name=cfg.agent_name,
                     temperature=cfg.temperature,
@@ -857,11 +867,12 @@ async def run_agent(
                     model=cfg.model,
                     model_client=cfg.model_client,
                     system_prompt=cfg.system_prompt,
-                    tools=cfg.active_tool_callables,
+                    tools=_tools,
                     user_message=contextualized_message,
                     agent_name=cfg.agent_name,
                     temperature=cfg.temperature,
                     reasoning_effort=cfg.reasoning_effort,
+                    function_invocation_kwargs=function_invocation_kwargs,
                 )
         except Exception as exc:
             logger.error("Agent run failed: %s", exc)
@@ -2324,8 +2335,13 @@ async def _run_agent(
     agent_name: str,
     temperature: float = 0.7,
     reasoning_effort: str | None = None,
+    function_invocation_kwargs: dict | None = None,
 ) -> tuple[str, int, int, int]:
     """Run a simple MAF Agent.
+
+    Args:
+        function_invocation_kwargs: Forwarded to ``agent.run()`` for tool
+            invocation layers (A2A ``ask_user`` tool uses ``task_id``).
 
     Returns:
         A tuple of (response_text, tokens_in, tokens_out, cache_hit_tokens).
@@ -2352,7 +2368,10 @@ async def _run_agent(
         tokenizer=tokenizer,
     )
 
-    result = await agent.run(user_message)
+    result = await agent.run(
+        user_message,
+        function_invocation_kwargs=function_invocation_kwargs,
+    )
 
     # Extract token counts (best-effort)
     tokens_in, tokens_out, cache_hit = _extract_token_counts(result)

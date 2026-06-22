@@ -318,3 +318,120 @@ class TestAgentCardA2aMetadata:
         assert skill["outputModes"] == ["text/plain"]
         assert skill["examples"] == []
         assert skill["tags"] == []
+
+
+# ---------------------------------------------------------------------------
+#  Part type round-trip tests — format → extract cycle
+# ---------------------------------------------------------------------------
+
+
+class TestPartTypeRoundTrip:
+    """Verify that Parts formatted by _format_response_part can be
+    parsed by _extract_text_from_parts (text content preservation).
+
+    These test the end-to-end format→extract cycle to ensure Part
+    fidelity across the A2A pipeline.
+    """
+
+    def test_text_round_trip(self):
+        """Text Part: formatted text should be extractable."""
+        from src.api.a2a_server import _extract_text_from_parts
+        from src.tools.a2a import _format_response_part
+
+        # Simulate a response Part
+        from unittest.mock import MagicMock
+
+        part = MagicMock()
+        part.text = "Hello, world!"
+        part.data = None
+        part.url = None
+        part.raw = None
+        part.WhichOneof = MagicMock(return_value="text")
+        part.filename = ""
+        part.media_type = ""
+
+        formatted = _format_response_part(part)
+        assert formatted == "Hello, world!"
+
+        # Simulate the server receiving this as a dict-based Part
+        extracted = _extract_text_from_parts([{"text": formatted}])
+        assert "Hello, world!" in extracted
+
+    def test_data_round_trip(self):
+        """Data Part: JSON content should survive format→extract."""
+        from src.api.a2a_server import _extract_text_from_parts
+        from src.tools.a2a import _format_response_part
+        from unittest.mock import MagicMock
+
+        # Simulate a data Part with structured content
+        part = MagicMock()
+        part.text = None
+        part.url = None
+        part.raw = None
+        part.WhichOneof = MagicMock(return_value="data")
+        part.filename = ""
+        part.media_type = "application/json"
+
+        # Mock the data attribute to have a dict-like structure
+        mock_data = MagicMock()
+        mock_data.items.return_value = [("key", "value"), ("count", 42)]
+        # MessageToDict-like behavior
+        from google.protobuf.json_format import MessageToDict
+        part.data = mock_data
+
+        # For the JSON serialization path, we need MessageToDict to work
+        # Since we're using MagicMock, simulate it differently
+        # The actual code does json.dumps(MessageToDict(r_part.data), indent=2)
+        # So we patch MessageToDict to return a known dict
+        from unittest.mock import patch
+        with patch(
+            "google.protobuf.json_format.MessageToDict",
+            return_value={"key": "value", "count": 42},
+        ):
+            formatted = _format_response_part(part)
+            assert formatted is not None
+            assert '"key"' in formatted
+            assert '"value"' in formatted
+
+            extracted = _extract_text_from_parts([{"text": formatted}])
+            assert "key" in extracted
+            assert "value" in extracted
+
+    def test_mixed_parts_round_trip(self):
+        """Mixed text+data Parts should survive format→extract."""
+        from src.api.a2a_server import _extract_text_from_parts
+        from src.tools.a2a import _format_response_part
+        from unittest.mock import MagicMock, patch
+
+        text_part = MagicMock()
+        text_part.text = "Analysis result:"
+        text_part.data = None
+        text_part.url = None
+        text_part.raw = None
+        text_part.WhichOneof = MagicMock(return_value="text")
+        text_part.filename = ""
+        text_part.media_type = ""
+
+        url_part = MagicMock()
+        url_part.text = None
+        url_part.data = None
+        url_part.url = "https://example.com/chart.png"
+        url_part.raw = None
+        url_part.WhichOneof = MagicMock(return_value="url")
+        url_part.filename = "chart.png"
+        url_part.media_type = ""
+
+        text_fmt = _format_response_part(text_part)
+        url_fmt = _format_response_part(url_part)
+
+        assert text_fmt == "Analysis result:"
+        assert url_fmt == "[file: chart.png] https://example.com/chart.png"
+
+        # The server would receive these as dict-based parts
+        parts = [
+            {"text": text_fmt},
+            {"text": url_fmt},
+        ]
+        extracted = _extract_text_from_parts(parts)
+        assert "Analysis result:" in extracted
+        assert "chart.png" in extracted

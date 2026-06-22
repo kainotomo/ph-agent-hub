@@ -375,6 +375,7 @@ POST   /tasks/{task_id}:cancel              # Cancel a running task
 **Task lifecycle** (Issue #411):
 - **`returnImmediately: true`** — Spawns background agent execution and returns immediately with `TASK_STATE_SUBMITTED`. The client polls `GET /tasks/{id}` until completion.
 - **`taskId` in request** — Resumes a suspended task (`TASK_STATE_INPUT_REQUIRED` or `TASK_STATE_AUTH_REQUIRED`) for multi-turn conversations. The follow-up message is appended to the existing session history.
+- **Input-required flow** — The agent can request additional user input by calling the built-in `ask_user(question)` tool. This stores the question in Redis under `ask_user:{task_id}`. After `agent.run()` returns, the A2A layer detects the flag and transitions the task to `TASK_STATE_INPUT_REQUIRED` with the question as `status_message`. The client can then resume the task by sending a follow-up message with the original `taskId`.
 - **Cancellation** — `POST /tasks/{id}:cancel` sets Redis-backed cancellation flags, transitions the task to `TASK_STATE_CANCELED`, and the agent runner aborts.
 - **Persistence** — Tasks are stored in the `a2a_tasks` database table (ORM: `A2aTask`). Tasks survive server restarts.
 

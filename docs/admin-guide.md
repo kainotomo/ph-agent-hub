@@ -519,6 +519,25 @@ Each A2A server has configurable resilience parameters under the **Advanced / Re
 | **Circuit Breaker Window (s)** | 60 | Time window for counting consecutive failures |
 | **Circuit Breaker Cooldown (s)** | 300 | Cooldown before the circuit allows a probe request |
 
+### 9.7 Tool Management
+
+Tools have a **Description** field (visible and editable in the admin Tool form) that allows administrators to document what each tool does. This description is stored in the database and displayed as a tooltip on the tool's name in the list view.
+
+When creating or editing an **A2A-type tool**, the form shows structured fields for:
+
+| Field | Description |
+|---|---|
+| **A2A Server** | The remote A2A server to connect to |
+| **Skill ID** | Identifier of the remote skill |
+| **Skill Name** | Human-readable name for the skill |
+| **Skill Description** | Description of what the remote skill does |
+| **Input Modes** | Accepted media types (`text/plain`, `application/json`) |
+| **Output Modes** | Response media types (`text/plain`, `application/json`) |
+| **Examples** | Usage examples (one per line) |
+| **Tags** | Comma-separated tags for categorization |
+
+These fields are stored in the tool's `config` JSON and used by the A2A tool wrapper to build the rich docstring and negotiate media types with the remote agent.
+
 #### Circuit Breaker Behaviour
 
 1. **Normal operation**: All calls proceed normally

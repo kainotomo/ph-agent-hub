@@ -130,7 +130,7 @@ export function ToolList() {
       ),
     },
     { title: "Description", dataIndex: "description", key: "description", 
-      ellipsis: true, width: 250, responsive: ["xl" as const],
+      ellipsis: true, width: 250, responsive: ["xl" as const] },
     {
       title: "Category",
       dataIndex: "category",

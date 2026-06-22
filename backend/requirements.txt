@@ -10,7 +10,7 @@ uvicorn[standard]
 sqlalchemy[asyncio]>=2.0
 aiomysql
 pymysql
-alembic
+alembic>=1.13.0
 
 # Encryption & Auth
 cryptography

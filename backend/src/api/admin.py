@@ -83,6 +83,18 @@ from ..services.mcp_service import (
     decrypt_headers,
     mask_dict,
 )
+from ..services.a2a_service import (
+    create_a2a_server as _svc_create_a2a_server,
+    delete_a2a_server as _svc_delete_a2a_server,
+    get_a2a_server as _svc_get_a2a_server,
+    list_a2a_servers as _svc_list_a2a_servers,
+    update_a2a_server as _svc_update_a2a_server,
+    test_a2a_connection as _svc_test_a2a_connection,
+    sync_a2a_tools as _svc_sync_a2a_tools,
+    decrypt_auth_token,
+    decrypt_headers as _a2a_decrypt_headers,
+    mask_dict as _a2a_mask_dict,
+)
 from ..services.template_service import (
     create_template as _svc_create_template,
     delete_template as _svc_delete_template,
@@ -1524,6 +1536,291 @@ async def sync_mcp_server_tools(
         actor=current_user,
         action="mcp_server.tools_synced",
         target_type="mcp_server",
+        target_id=server_id,
+        tenant_id=current_user.tenant_id,
+        ip_address=_get_client_ip(request),
+    )
+    return result
+
+
+# =============================================================================
+# A2A Server Endpoints (admin or manager)
+# =============================================================================
+
+
+class A2aServerCreate(BaseModel):
+    tenant_id: str | None = None  # admin only
+    name: str
+    url: str
+    agent_card_path: str = "/.well-known/agent-card.json"
+    protocol_binding: str = "rest"  # "jsonrpc", "rest", "grpc"
+    auth_scheme: str = "none"
+    auth_token: str | None = None
+    headers: dict | None = None
+    allowed_skills: list[str] | None = None
+    enabled: bool = True
+
+
+class A2aServerUpdate(BaseModel):
+    name: str | None = None
+    url: str | None = None
+    agent_card_path: str | None = None
+    protocol_binding: str | None = None
+    auth_scheme: str | None = None
+    auth_token: str | None = None
+    headers: dict | None = None
+    allowed_skills: list[str] | None = None
+    enabled: bool | None = None
+
+
+class A2aServerResponse(BaseModel):
+    id: str
+    tenant_id: str
+    name: str
+    url: str | None = None
+    agent_card_path: str = "/.well-known/agent-card.json"
+    protocol_binding: str
+    auth_scheme: str | None = None
+    auth_token: str | None = None  # masked
+    headers: dict | None = None  # masked
+    allowed_skills: list | None = None
+    enabled: bool
+    agent_card_cache: dict | None = None
+    agent_card_cached_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class A2aServerTestResponse(BaseModel):
+    connected: bool
+    agent_name: str | None = None
+    agent_description: str | None = None
+    capabilities: dict | None = None
+    skills: list[dict] = []
+    error: str | None = None
+
+
+class A2aServerSyncResponse(BaseModel):
+    created: int
+    updated: int
+    deprecated: int
+
+
+@router.get("/a2a-servers", response_model=PaginatedResponse[A2aServerResponse])
+async def list_a2a_servers(
+    tenant_id: str | None = None,
+    search: str | None = None,
+    protocol_binding: str | None = None,
+    enabled: bool | None = None,
+    page: int = 1,
+    page_size: int = 25,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """List A2A servers. Admin sees all; manager scoped to own tenant."""
+    if current_user.role == "manager":
+        servers, total = await _svc_list_a2a_servers(
+            db, tenant_id=current_user.tenant_id,
+            search=search, protocol_binding=protocol_binding,
+            enabled=enabled, page=page, page_size=page_size,
+        )
+    else:
+        servers, total = await _svc_list_a2a_servers(
+            db, tenant_id=tenant_id,
+            search=search, protocol_binding=protocol_binding,
+            enabled=enabled, page=page, page_size=page_size,
+        )
+
+    total_pages = max(1, -(-total // page_size))
+    items = []
+    for s in servers:
+        decrypted_token = decrypt_auth_token(s)
+        decrypted_headers = _a2a_decrypt_headers(s)
+        server_dict = {c.name: getattr(s, c.name) for c in s.__table__.columns}
+        server_dict["auth_token"] = _a2a_mask_dict({"token": decrypted_token})["token"] if decrypted_token else None
+        server_dict["headers"] = _a2a_mask_dict(decrypted_headers) if decrypted_headers else None
+        data = A2aServerResponse.model_validate(server_dict)
+        items.append(data)
+
+    return PaginatedResponse(
+        items=items, total=total, page=page, page_size=page_size,
+        total_pages=total_pages,
+    )
+
+
+@router.post("/a2a-servers", response_model=A2aServerResponse, status_code=201)
+async def create_a2a_server(
+    body: A2aServerCreate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Create an A2A server config. Admin can specify tenant_id."""
+    if current_user.role == "manager" and body.tenant_id and body.tenant_id != current_user.tenant_id:
+        raise ForbiddenError("Managers can only create A2A servers in their own tenant")
+    tenant_id = body.tenant_id if current_user.role == "admin" and body.tenant_id else current_user.tenant_id
+
+    server = await _svc_create_a2a_server(
+        db,
+        tenant_id=tenant_id,
+        name=body.name,
+        url=body.url,
+        agent_card_path=body.agent_card_path,
+        protocol_binding=body.protocol_binding,
+        auth_scheme=body.auth_scheme,
+        auth_token=body.auth_token,
+        headers=body.headers,
+        allowed_skills=body.allowed_skills,
+        enabled=body.enabled,
+    )
+    await write_audit_log(
+        db,
+        actor=current_user,
+        action="a2a_server.created",
+        target_type="a2a_server",
+        target_id=server.id,
+        tenant_id=current_user.tenant_id,
+        ip_address=_get_client_ip(request),
+    )
+    decrypted_token = decrypt_auth_token(server)
+    decrypted_headers = _a2a_decrypt_headers(server)
+    server_dict = {c.name: getattr(server, c.name) for c in server.__table__.columns}
+    server_dict["auth_token"] = _a2a_mask_dict({"token": decrypted_token})["token"] if decrypted_token else None
+    server_dict["headers"] = _a2a_mask_dict(decrypted_headers) if decrypted_headers else None
+    data = A2aServerResponse.model_validate(server_dict)
+    return data
+
+
+@router.get("/a2a-servers/{server_id}", response_model=A2aServerResponse)
+async def get_a2a_server(
+    server_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Get a single A2A server config. Manager scoped to own tenant."""
+    server = await _svc_get_a2a_server(db, server_id)
+    if server is None:
+        raise NotFoundError("A2A server not found")
+    if current_user.role == "manager" and server.tenant_id != current_user.tenant_id:
+        raise ForbiddenError("Managers can only view A2A servers in their own tenant")
+
+    decrypted_token = decrypt_auth_token(server)
+    decrypted_headers = _a2a_decrypt_headers(server)
+    server_dict = {c.name: getattr(server, c.name) for c in server.__table__.columns}
+    server_dict["auth_token"] = _a2a_mask_dict({"token": decrypted_token})["token"] if decrypted_token else None
+    server_dict["headers"] = _a2a_mask_dict(decrypted_headers) if decrypted_headers else None
+    data = A2aServerResponse.model_validate(server_dict)
+    return data
+
+
+@router.put("/a2a-servers/{server_id}", response_model=A2aServerResponse)
+async def update_a2a_server(
+    server_id: str,
+    body: A2aServerUpdate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Update an A2A server config. Manager scoped to own tenant."""
+    target = await _svc_get_a2a_server(db, server_id)
+    if target is None:
+        raise NotFoundError("A2A server not found")
+    if current_user.role == "manager" and target.tenant_id != current_user.tenant_id:
+        raise ForbiddenError("Managers can only modify A2A servers in their own tenant")
+
+    update_kwargs = {}
+    for field in ("name", "url", "agent_card_path", "protocol_binding",
+                  "auth_scheme", "auth_token", "headers", "allowed_skills",
+                  "enabled"):
+        val = getattr(body, field, None)
+        if val is not None:
+            update_kwargs[field] = val
+
+    server = await _svc_update_a2a_server(db, server_id, **update_kwargs)
+
+    action = "a2a_server.disabled" if body.enabled is False else "a2a_server.updated"
+    await write_audit_log(
+        db,
+        actor=current_user,
+        action=action,
+        target_type="a2a_server",
+        target_id=server_id,
+        tenant_id=current_user.tenant_id,
+        ip_address=_get_client_ip(request),
+    )
+    decrypted_token = decrypt_auth_token(server)
+    decrypted_headers = _a2a_decrypt_headers(server)
+    server_dict = {c.name: getattr(server, c.name) for c in server.__table__.columns}
+    server_dict["auth_token"] = _a2a_mask_dict({"token": decrypted_token})["token"] if decrypted_token else None
+    server_dict["headers"] = _a2a_mask_dict(decrypted_headers) if decrypted_headers else None
+    data = A2aServerResponse.model_validate(server_dict)
+    return data
+
+
+@router.delete("/a2a-servers/{server_id}", status_code=204)
+async def delete_a2a_server(
+    server_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Delete an A2A server and its synced tools. Manager scoped to own tenant."""
+    target = await _svc_get_a2a_server(db, server_id)
+    if target is None:
+        raise NotFoundError("A2A server not found")
+    if current_user.role == "manager" and target.tenant_id != current_user.tenant_id:
+        raise ForbiddenError("Managers can only delete A2A servers in their own tenant")
+
+    await _svc_delete_a2a_server(db, server_id)
+    await write_audit_log(
+        db,
+        actor=current_user,
+        action="a2a_server.deleted",
+        target_type="a2a_server",
+        target_id=server_id,
+        tenant_id=current_user.tenant_id,
+        ip_address=_get_client_ip(request),
+    )
+
+
+@router.post("/a2a-servers/{server_id}/test", response_model=A2aServerTestResponse)
+async def test_a2a_server(
+    server_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Test connection to an A2A server and return discovered skills."""
+    target = await _svc_get_a2a_server(db, server_id)
+    if target is None:
+        raise NotFoundError("A2A server not found")
+    if current_user.role == "manager" and target.tenant_id != current_user.tenant_id:
+        raise ForbiddenError("Managers can only test A2A servers in their own tenant")
+
+    return await _svc_test_a2a_connection(db, server_id)
+
+
+@router.post("/a2a-servers/{server_id}/sync-tools", response_model=A2aServerSyncResponse)
+async def sync_a2a_server_tools(
+    server_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Sync skills from an A2A server into the tools table."""
+    target = await _svc_get_a2a_server(db, server_id)
+    if target is None:
+        raise NotFoundError("A2A server not found")
+    if current_user.role == "manager" and target.tenant_id != current_user.tenant_id:
+        raise ForbiddenError("Managers can only sync A2A servers in their own tenant")
+
+    result = await _svc_sync_a2a_tools(db, server_id)
+    await write_audit_log(
+        db,
+        actor=current_user,
+        action="a2a_server.tools_synced",
+        target_type="a2a_server",
         target_id=server_id,
         tenant_id=current_user.tenant_id,
         ip_address=_get_client_ip(request),

@@ -178,6 +178,11 @@ Key variables:
 | `EMBED_GUEST_TOKEN_SECRET` | Separate JWT secret for guest (widget) tokens. Generate with `python -c "import secrets; print(secrets.token_hex(32))"`. Required for the embeddable chat widget. |
 | `WIDGET_ALLOWED_ORIGINS` | Additional origins allowed to embed the widget in an iframe (CSP `frame-ancestors`). Space-separated, e.g. `https://kainotomo.com`. `'self'` is always included. |
 | `WIDGET_CONFIG_LIMIT` | Per-IP rate limit for `GET /widget/config/{token}` (default: `"30/hour"`) |
+| `A2A_SERVER_ENABLED` | Enable A2A server endpoints (`/.well-known/agent-card.json`, `POST /message:send`, etc.) (default: `"false"`) |
+| `A2A_PUBLIC_URL` | Public-facing base URL shown in the Agent Card (e.g. `https://api.example.com`) |
+| `A2A_ORGANIZATION_NAME` | Organization name shown in the Agent Card `provider` field (default: `"PH Agent Hub"`) |
+| `A2A_ORGANIZATION_URL` | Organization URL shown in the Agent Card `provider` field |
+| `A2A_DOCS_URL` | Documentation URL shown in the Agent Card |
 | `WIDGET_MESSAGE_LIMIT` | Per-guest message rate limit for `POST /widget/session/message`, short window (default: `"20/minute"`) |
 | `WIDGET_TOTAL_MESSAGE_LIMIT` | Per-guest total message rate limit for `POST /widget/session/message`, long window (default: `"100/hour"`) |
 | `WIDGET_SESSION_READ_LIMIT` | Per-guest read rate limit for `GET /widget/session`, `GET /widget/session/messages`, and `DELETE /widget/session/stream` (default: `"60/minute"`) |

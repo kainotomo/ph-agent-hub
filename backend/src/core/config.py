@@ -111,6 +111,18 @@ class Settings(BaseSettings):
     MAX_FREE_TENANTS: int = 3
     LICENSE_PUBLIC_KEY: str = ""
 
+    # --- A2A (Agent-to-Agent) Protocol Server (Issue #404) ---
+    A2A_SERVER_ENABLED: bool = False
+    """Enable A2A server endpoint (/.well-known/agent-card.json)."""
+    A2A_PUBLIC_URL: str = ""
+    """Public-facing base URL for the Agent Card (e.g. https://api.example.com)."""
+    A2A_ORGANIZATION_NAME: str = "PH Agent Hub"
+    """Organization name shown in the Agent Card provider field."""
+    A2A_ORGANIZATION_URL: str = ""
+    """Organization URL shown in the Agent Card provider field."""
+    A2A_DOCS_URL: str = ""
+    """Documentation URL shown in the Agent Card."""
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
     def __init__(self, **kwargs):

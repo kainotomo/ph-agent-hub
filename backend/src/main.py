@@ -26,6 +26,19 @@ from .api.templates import router as templates_router
 from .api.users import router as users_router
 from .api.widget import router as widget_router
 from .core.config import settings
+
+# Conditionally import A2A server router (requires a2a-sdk)
+if settings.A2A_SERVER_ENABLED:
+    try:
+        from .api.a2a_server import router as a2a_server_router
+    except ImportError:
+        a2a_server_router = None
+        import logging
+        logging.getLogger(__name__).warning(
+            "A2A_SERVER_ENABLED=True but a2a-sdk is not installed."
+        )
+else:
+    a2a_server_router = None
 from .core.exceptions import AppException, app_exception_handler
 from .core.limiter import limiter, RateLimitExceeded
 
@@ -138,6 +151,11 @@ app.add_exception_handler(RateLimitExceeded, lambda req, exc: __import__("starle
 # ---------------------------------------------------------------------------
 # API Routers
 # ---------------------------------------------------------------------------
+# A2A server router (/.well-known/agent-card.json, /message:send, etc.)
+# mounted before /api routes so well-known path takes priority.
+if settings.A2A_SERVER_ENABLED and a2a_server_router is not None:
+    app.include_router(a2a_server_router)
+
 app.include_router(auth_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
 app.include_router(users_router, prefix="/api")

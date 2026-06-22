@@ -2097,6 +2097,13 @@ async def _build_tool_callables(
             session_id=session_id,
             cleanup_clients=cleanup_clients,
         )
+    elif tool.type == "a2a":
+        from ..tools.a2a import build_a2a_tool_callables
+        return await build_a2a_tool_callables(
+            db, tool, tenant_id,
+            session_id=session_id,
+            cleanup_clients=cleanup_clients,
+        )
     else:
         logger.warning("Unknown tool type '%s' for tool %s", tool.type, tool.id)
         return []

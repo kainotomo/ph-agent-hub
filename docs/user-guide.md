@@ -176,6 +176,7 @@ Tools let the AI interact with external systems — query databases, call APIs, 
 | **Communication** | Slack, Email | Send messages to Slack channels; **read, send, search, and manage emails** from your connected accounts |
 | **Creative** | Image Generation | Generate images from text descriptions (DALL·E 3, Stable Diffusion) |
 | **MCP** | (dynamically synced) | External tools connected by your administrator via MCP servers — GitHub, databases, file systems, or any MCP-compatible service |
+| **A2A** | (dynamically synced) | Skills from remote AI agents connected via the A2A (Agent-to-Agent) Protocol — your agent can collaborate with other agents across different platforms |
 | **Productivity** | Calendar, Tasks | Check your calendar, schedule meetings, find free time slots; **create, update, and manage tasks and to-do lists** from your connected accounts |
 | **DevOps** | GitHub | Search code, list issues/PRs, read files from GitHub/GitLab repos |
 

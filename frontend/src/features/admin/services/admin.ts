@@ -697,6 +697,89 @@ export function syncMcpServerTools(id: string): Promise<McpServerSyncResult> {
   });
 }
 
+// =============================================================================
+// A2A Servers
+// =============================================================================
+
+export interface A2aServerData {
+  id: string;
+  tenant_id: string;
+  name: string;
+  url: string | null;
+  agent_card_path: string;
+  protocol_binding: "jsonrpc" | "rest" | "grpc";
+  auth_scheme: "none" | "api_key" | "bearer" | "oauth2" | null;
+  auth_token: string | null;
+  headers: Record<string, string> | null;
+  allowed_skills: string[] | null;
+  enabled: boolean;
+  agent_card_cache: Record<string, unknown> | null;
+  agent_card_cached_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface A2aServerTestResult {
+  connected: boolean;
+  agent_name: string | null;
+  agent_description: string | null;
+  capabilities: Record<string, unknown> | null;
+  skills: { id: string; name: string; description: string }[];
+  error: string | null;
+}
+
+export interface A2aServerSyncResult {
+  created: number;
+  updated: number;
+  deprecated: number;
+}
+
+export function listA2aServers(
+  params?: ListParams & { protocol_binding?: string; enabled?: boolean },
+): Promise<PaginatedResponse<A2aServerData>> {
+  const qs = buildQueryString({ ...params });
+  return api<PaginatedResponse<A2aServerData>>(`/admin/a2a-servers${qs}`);
+}
+
+export function getA2aServer(id: string): Promise<A2aServerData> {
+  return api<A2aServerData>(`/admin/a2a-servers/${id}`);
+}
+
+export function createA2aServer(
+  data: Partial<A2aServerData>,
+): Promise<A2aServerData> {
+  return api<A2aServerData>("/admin/a2a-servers", {
+    method: "POST",
+    body: data,
+  });
+}
+
+export function updateA2aServer(
+  id: string,
+  data: Partial<A2aServerData>,
+): Promise<A2aServerData> {
+  return api<A2aServerData>(`/admin/a2a-servers/${id}`, {
+    method: "PUT",
+    body: data,
+  });
+}
+
+export function deleteA2aServer(id: string): Promise<void> {
+  return api<void>(`/admin/a2a-servers/${id}`, { method: "DELETE" });
+}
+
+export function testA2aServer(id: string): Promise<A2aServerTestResult> {
+  return api<A2aServerTestResult>(`/admin/a2a-servers/${id}/test`, {
+    method: "POST",
+  });
+}
+
+export function syncA2aServerTools(id: string): Promise<A2aServerSyncResult> {
+  return api<A2aServerSyncResult>(`/admin/a2a-servers/${id}/sync-tools`, {
+    method: "POST",
+  });
+}
+
 
 // =============================================================================
 // RAG Documents

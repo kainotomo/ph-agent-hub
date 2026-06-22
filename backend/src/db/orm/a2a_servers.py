@@ -1,0 +1,80 @@
+# =============================================================================
+# PH Agent Hub — ORM: A2A Servers
+# =============================================================================
+# Stores A2A (Agent-to-Agent) remote agent connection configurations.
+# Each server can expose multiple skills (discovered via the A2A Agent Card)
+# that are registered as individual Tool records with type="a2a".
+# =============================================================================
+
+import uuid
+from datetime import datetime
+
+from sqlalchemy import String, Boolean, DateTime, Enum, ForeignKey, JSON, Text, func, text as sa_text
+from sqlalchemy.dialects.mysql import CHAR
+from sqlalchemy.orm import Mapped, mapped_column
+
+from ..base import Base
+from .tenants import Tenant
+
+
+class A2aServer(Base):
+    __tablename__ = "a2a_servers"
+
+    id: Mapped[str] = mapped_column(
+        CHAR(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    tenant_id: Mapped[str] = mapped_column(
+        CHAR(36), ForeignKey("tenants.id"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    # Configurable Agent Card path (default: IANA-registered /.well-known/agent-card.json)
+    agent_card_path: Mapped[str] = mapped_column(
+        String(512), nullable=False, server_default=sa_text("'/.well-known/agent-card.json'")
+    )
+    protocol_binding: Mapped[str] = mapped_column(
+        Enum(
+            "jsonrpc",
+            "rest",
+            "grpc",
+            name="a2a_protocol_binding_enum",
+        ),
+        nullable=False,
+    )
+    auth_scheme: Mapped[str | None] = mapped_column(
+        Enum(
+            "none",
+            "api_key",
+            "bearer",
+            "oauth2",
+            name="a2a_auth_scheme_enum",
+        ),
+        nullable=True,
+    )
+    # Encrypted auth token (Fernet-encrypted at the service layer)
+    auth_token: Mapped[str | None] = mapped_column(
+        Text, nullable=True, comment="Fernet-encrypted auth token"
+    )
+    # Encrypted JSON blob of custom HTTP headers
+    headers: Mapped[str | None] = mapped_column(
+        Text, nullable=True, comment="Fernet-encrypted JSON dict of HTTP headers"
+    )
+    # Null = all skills allowed; list = subset of skill IDs
+    allowed_skills: Mapped[list | None] = mapped_column(
+        JSON, nullable=True,
+        comment="Null = all skills allowed; list = subset of skill IDs",
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Cached AgentCard JSON (reduces network calls on sync)
+    agent_card_cache: Mapped[dict | None] = mapped_column(
+        JSON, nullable=True, comment="Cached AgentCard JSON from last discovery"
+    )
+    agent_card_cached_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

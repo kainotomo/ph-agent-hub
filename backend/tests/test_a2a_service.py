@@ -63,6 +63,10 @@ def _create_mock_agent_card(agent_name: str = "Test Agent", skill_list: list[dic
             self.id = data["id"]
             self.name = data.get("name", "")
             self.description = data.get("description", "")
+            self.input_modes = data.get("inputModes") or data.get("input_modes", [])
+            self.output_modes = data.get("outputModes") or data.get("output_modes", [])
+            self.examples = data.get("examples", [])
+            self.tags = data.get("tags", [])
 
     class MockAgentCard:
         def __init__(self):
@@ -468,8 +472,12 @@ class TestTestA2aConnection:
         mock_card = _create_mock_agent_card(
             agent_name="Remote Agent",
             skill_list=[
-                {"id": "s1", "name": "Skill One", "description": "First skill"},
-                {"id": "s2", "name": "Skill Two", "description": "Second skill"},
+                {"id": "s1", "name": "Skill One", "description": "First skill",
+                 "inputModes": ["text/plain"], "outputModes": ["text/plain"],
+                 "examples": ["ex1"], "tags": ["tag1"]},
+                {"id": "s2", "name": "Skill Two", "description": "Second skill",
+                 "inputModes": ["application/json"], "outputModes": ["application/json"],
+                 "examples": [], "tags": []},
             ],
         )
 
@@ -481,6 +489,11 @@ class TestTestA2aConnection:
         assert result["agent_description"] == "A test A2A agent"
         assert len(result["skills"]) == 2
         assert result["skills"][0]["id"] == "s1"
+        assert result["skills"][0]["inputModes"] == ["text/plain"]
+        assert result["skills"][0]["outputModes"] == ["text/plain"]
+        assert result["skills"][0]["examples"] == ["ex1"]
+        assert result["skills"][0]["tags"] == ["tag1"]
+        assert result["skills"][1]["inputModes"] == ["application/json"]
 
     async def test_failed_connection(self, db_session: AsyncSession, test_tenant):
         """Should return error info on failed connection."""
@@ -522,8 +535,12 @@ class TestSyncA2aTools:
         mock_card = _create_mock_agent_card(
             agent_name="Skillful",
             skill_list=[
-                {"id": "s1", "name": "Alpha", "description": "Alpha skill"},
-                {"id": "s2", "name": "Beta", "description": "Beta skill"},
+                {"id": "s1", "name": "Alpha", "description": "Alpha skill",
+                 "inputModes": ["text/plain"], "outputModes": ["text/plain"],
+                 "examples": ["try this"], "tags": ["alpha"]},
+                {"id": "s2", "name": "Beta", "description": "Beta skill",
+                 "inputModes": ["application/json"], "outputModes": ["application/json"],
+                 "examples": [], "tags": ["beta", "json"]},
             ],
         )
 
@@ -544,6 +561,25 @@ class TestSyncA2aTools:
         tools = db_result.scalars().all()
         assert len(tools) == 2
         assert all(t.config["a2a_server_id"] == server.id for t in tools)
+
+        # Verify enriched config fields (Issue #408)
+        s1_tool = next(t for t in tools if t.config["skill_id"] == "s1")
+        assert s1_tool.config["input_modes"] == ["text/plain"]
+        assert s1_tool.config["output_modes"] == ["text/plain"]
+        assert s1_tool.config["examples"] == ["try this"]
+        assert s1_tool.config["tags"] == ["alpha"]
+
+        s2_tool = next(t for t in tools if t.config["skill_id"] == "s2")
+        assert s2_tool.config["input_modes"] == ["application/json"]
+        assert s2_tool.config["output_modes"] == ["application/json"]
+        assert s2_tool.config["examples"] == []
+        assert s2_tool.config["tags"] == ["beta", "json"]
+
+        # Verify Agent Card cache was populated (Issue #408)
+        await db_session.refresh(server)
+        assert server.agent_card_cache is not None
+        assert server.agent_card_cache["name"] == "Skillful"
+        assert server.agent_card_cached_at is not None
 
     async def test_updates_existing_tools(self, db_session: AsyncSession, test_tenant):
         """Should update existing Tool records for known skills."""

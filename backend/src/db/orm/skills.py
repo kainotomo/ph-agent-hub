@@ -5,7 +5,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import String, Boolean, Integer, Float, DateTime, Enum, ForeignKey, func
+from sqlalchemy import String, Boolean, Integer, Float, DateTime, Enum, ForeignKey, JSON, func
 from sqlalchemy.dialects.mysql import CHAR
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -59,6 +59,12 @@ class Skill(Base):
     )
     cross_session_min_score: Mapped[float] = mapped_column(
         Float, default=0.30, nullable=False
+    )
+
+    # ---- A2A Agent Card metadata (Issue #408) ------------------------------
+    a2a_metadata: Mapped[dict | None] = mapped_column(
+        JSON, nullable=True,
+        comment="A2A Agent Card per-skill metadata: {inputModes, outputModes, examples, tags}",
     )
 
     created_at: Mapped[datetime] = mapped_column(

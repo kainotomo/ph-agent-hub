@@ -69,14 +69,16 @@ async def get_agent_card(request: Request):
             ).limit(50)
         )
         for skill in result.scalars().all():
+            # Read A2A metadata from the skill's a2a_metadata column (Issue #408)
+            a2a_meta = skill.a2a_metadata or {}
             skills.append({
                 "id": str(skill.id),
                 "name": skill.name,
                 "description": skill.description or "",
-                "tags": [],
-                "examples": [],
-                "inputModes": ["text/plain"],
-                "outputModes": ["text/plain"],
+                "tags": a2a_meta.get("tags", []),
+                "examples": a2a_meta.get("examples", []),
+                "inputModes": a2a_meta.get("inputModes") or ["text/plain"],
+                "outputModes": a2a_meta.get("outputModes") or ["text/plain"],
             })
     except Exception:
         logger.warning("Failed to load skills for Agent Card", exc_info=True)
@@ -145,12 +147,10 @@ async def a2a_send_message(
     Receives a SendMessageRequest, runs it through the agent runner,
     and returns a Task or Message response per the A2A spec.
     """
-    # Extract user message
+    # Extract user message content from all Part types
     msg = body.message or {}
     parts = msg.get("parts", [])
-    text_content = ""
-    for part in parts:
-        text_content += part.get("text", "")
+    text_content = _extract_text_from_parts(parts)
 
     # Create a task ID
     task_id = str(uuid.uuid4())
@@ -236,9 +236,7 @@ async def a2a_send_message_stream(
 
     msg = body.message or {}
     parts = msg.get("parts", [])
-    text_content = ""
-    for part in parts:
-        text_content += part.get("text", "")
+    text_content = _extract_text_from_parts(parts)
 
     task_id = str(uuid.uuid4())
     context_id = str(uuid.uuid4())
@@ -398,8 +396,38 @@ async def a2a_cancel_task(task_id: str):
 
 
 # ---------------------------------------------------------------------------
-# Internal helper
+# Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _extract_text_from_parts(parts: list[dict]) -> str:
+    """Extract a combined text representation from A2A Parts of all types.
+
+    Handles ``text``, ``data`` (JSON), ``url`` (file references), and
+    ``raw`` (binary) parts per A2A spec Section 4.1.6.
+    """
+    chunks: list[str] = []
+    for part in parts:
+        if "text" in part and part["text"]:
+            chunks.append(part["text"])
+        elif "data" in part and part["data"] is not None:
+            data_val = part["data"]
+            if isinstance(data_val, str):
+                chunks.append(data_val)
+            else:
+                chunks.append(json.dumps(data_val, ensure_ascii=False))
+        elif "url" in part and part["url"]:
+            filename = part.get("filename", "")
+            label = f"[file: {filename}]" if filename else "[url]"
+            chunks.append(f"{label} {part['url']}")
+        elif "raw" in part and part["raw"]:
+            filename = part.get("filename", "")
+            raw_val = part["raw"]
+            # raw is base64-encoded in JSON
+            size = len(raw_val) if isinstance(raw_val, str) else 0
+            label = f"[binary: {filename}]" if filename else "[binary]"
+            chunks.append(f"{label} (base64, {size} chars)")
+    return "\n".join(chunks)
 
 
 async def _run_a2a_agent(text_content: str) -> str:

@@ -860,6 +860,7 @@ async def run_agent(
                     agent_name=cfg.agent_name,
                     temperature=cfg.temperature,
                     reasoning_effort=cfg.reasoning_effort,
+                    function_invocation_kwargs=function_invocation_kwargs,
                 )
                 cache_hit_tokens = 0
             else:
@@ -2399,8 +2400,13 @@ async def _run_workflow(
     agent_name: str,
     temperature: float = 0.7,
     reasoning_effort: str | None = None,
+    function_invocation_kwargs: dict | None = None,
 ) -> tuple[str, int, int]:
     """Run a MAF Workflow via the registry.
+
+    Args:
+        function_invocation_kwargs: Forwarded to ``agent.run()`` for tool
+            invocation layers (A2A ``ask_user`` tool uses ``task_id``).
 
     Returns:
         A tuple of (response_text, tokens_in, tokens_out).
@@ -2428,6 +2434,7 @@ async def _run_workflow(
         system_prompt=system_prompt,
         tools=tools,
         user_message=user_message,
+        function_invocation_kwargs=function_invocation_kwargs,
         agent_name=agent_name,
         temperature=temperature,
         reasoning_effort=reasoning_effort,

@@ -1,7 +1,7 @@
 """Add ``description`` column to ``tools`` table.
 
 Revision ID: add_tool_description
-Revises: a1b2c3d4e5f6_add_datetime_to_tool_type_enum
+Revises: y1z2a3b4c5d6
 Create Date: 2026-06-22
 
 This migration adds a nullable ``description`` text column to the

@@ -68,7 +68,8 @@ export function LoginPage() {
         display: "flex",
         justifyContent: "center",
         alignItems: "center",
-        minHeight: "100vh",
+        minHeight: "100dvh",
+        overflow: "auto",
         background: "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
         padding: 16,
       }}

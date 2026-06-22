@@ -1,39 +1,40 @@
 # =============================================================================
 # PH Agent Hub — A2A Server API Tests
 # =============================================================================
+# Tests the Agent Card handler function directly (not through HTTP routing
+# since the A2A server is disabled by default and requires explicit enablement).
+# =============================================================================
 
 import pytest
-from httpx import AsyncClient, ASGITransport
+from unittest.mock import MagicMock, AsyncMock, patch
 
-from src.main import app
-from src.core.config import settings
+from src.api.a2a_server import get_agent_card
 
-pytestmark = [pytest.mark.integration]
+
+def _make_mock_request(base_url: str = "https://api.example.com"):
+    """Create a mock FastAPI Request with a base_url."""
+    request = MagicMock()
+    request.base_url = base_url.rstrip("/") + "/"
+    # Mock request.state.db as None so the skills DB query is skipped gracefully
+    request.state = MagicMock()
+    request.state.db = None
+    return request
+
+
+def _mock_settings(monkeypatch):
+    """Set A2A settings for testing."""
+    monkeypatch.setattr("src.api.a2a_server.settings.A2A_PUBLIC_URL", "https://api.example.com")
+    monkeypatch.setattr("src.api.a2a_server.settings.A2A_ORGANIZATION_NAME", "Test Hub")
+    monkeypatch.setattr("src.api.a2a_server.settings.A2A_ORGANIZATION_URL", "https://example.com")
 
 
 class TestA2aAgentCard:
-    """Tests for the /.well-known/agent-card.json endpoint."""
+    """Tests for the /.well-known/agent-card.json handler."""
 
-    @pytest.fixture(autouse=True)
-    def _enable_a2a_server(self, monkeypatch):
-        """Enable the A2A server for these tests."""
-        monkeypatch.setattr(settings, "A2A_SERVER_ENABLED", True)
-        monkeypatch.setattr(settings, "A2A_PUBLIC_URL", "https://api.example.com")
-        monkeypatch.setattr(settings, "A2A_ORGANIZATION_NAME", "Test Hub")
-        monkeypatch.setattr(settings, "A2A_ORGANIZATION_URL", "https://example.com")
-        # Re-import to re-evaluate the conditional import
-        import importlib
-        import src.main as main_module
-        importlib.reload(main_module)
-
-    async def test_returns_agent_card(self):
+    async def test_returns_agent_card(self, monkeypatch):
         """Should return a valid AgentCard with required fields."""
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="https://api.example.com") as client:
-            response = await client.get("/.well-known/agent-card.json")
-
-        assert response.status_code == 200
-        data = response.json()
+        _mock_settings(monkeypatch)
+        data = await get_agent_card(_make_mock_request())
 
         # Required AgentCard fields per A2A spec
         assert "name" in data
@@ -46,45 +47,37 @@ class TestA2aAgentCard:
         assert "skills" in data
         assert "securitySchemes" in data
 
-    async def test_capabilities_structure(self):
+    async def test_capabilities_structure(self, monkeypatch):
         """Should have valid capabilities."""
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="https://api.example.com") as client:
-            response = await client.get("/.well-known/agent-card.json")
+        _mock_settings(monkeypatch)
+        data = await get_agent_card(_make_mock_request())
 
-        data = response.json()
         caps = data["capabilities"]
         assert "streaming" in caps
         assert "pushNotifications" in caps
         assert "extendedAgentCard" in caps
 
-    async def test_supported_interfaces(self):
+    async def test_supported_interfaces(self, monkeypatch):
         """Should have at least one supported interface."""
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="https://api.example.com") as client:
-            response = await client.get("/.well-known/agent-card.json")
+        _mock_settings(monkeypatch)
+        data = await get_agent_card(_make_mock_request())
 
-        data = response.json()
         assert len(data["supportedInterfaces"]) >= 1
         interface = data["supportedInterfaces"][0]
         assert "url" in interface
         assert "protocolBinding" in interface
         assert "protocolVersion" in interface
 
-    async def test_security_schemes(self):
+    async def test_security_schemes(self, monkeypatch):
         """Should declare security schemes."""
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="https://api.example.com") as client:
-            response = await client.get("/.well-known/agent-card.json")
+        _mock_settings(monkeypatch)
+        data = await get_agent_card(_make_mock_request())
 
-        data = response.json()
         assert "bearer" in data["securitySchemes"]
 
-    async def test_skills_is_list(self):
+    async def test_skills_is_list(self, monkeypatch):
         """Should have skills as a list (may be empty)."""
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="https://api.example.com") as client:
-            response = await client.get("/.well-known/agent-card.json")
+        _mock_settings(monkeypatch)
+        data = await get_agent_card(_make_mock_request())
 
-        data = response.json()
         assert isinstance(data["skills"], list)

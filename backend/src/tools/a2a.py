@@ -192,6 +192,23 @@ async def _make_a2a_skill_callable(
                 elif auth_token and server.auth_scheme == "api_key":
                     headers.setdefault("Authorization", f"Bearer {auth_token}")
 
+            # OAuth2: get a fresh access token (triggers refresh if expired)
+            if server.auth_scheme == "oauth2":
+                try:
+                    from ..services.a2a_service import get_oauth2_access_token
+                    oauth_token = await get_oauth2_access_token(server, db)
+                    if oauth_token:
+                        headers.setdefault("Authorization", f"Bearer {oauth_token}")
+                    else:
+                        logger.warning(
+                            "No OAuth2 token available for server %s", server.id
+                        )
+                except Exception:
+                    logger.warning(
+                        "Failed to get OAuth2 access token for server %s",
+                        server.id, exc_info=True,
+                    )
+
             # Create or reuse the A2A client
             if a2a_client_ref["client"] is None:
                 _connect = server.timeout_connect_seconds if server.timeout_connect_seconds is not None else settings.A2A_DEFAULT_TIMEOUT_CONNECT_SECONDS

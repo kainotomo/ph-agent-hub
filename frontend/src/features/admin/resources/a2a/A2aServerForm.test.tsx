@@ -21,6 +21,7 @@ const { mockCreateA2aServer, mockUpdateA2aServer } = vi.hoisted(() => ({
 vi.mock("../../services/admin", () => ({
   createA2aServer: (...args: unknown[]) => mockCreateA2aServer(...args),
   updateA2aServer: (...args: unknown[]) => mockUpdateA2aServer(...args),
+  authorizeA2aServer: vi.fn(),
 }));
 
 // Mock Ant Design's message
@@ -37,11 +38,12 @@ vi.mock("antd", async (importOriginal) => {
 
 const MOCK_SERVER = {
   id: "server-1",
+  tenant_id: "tenant-1",
   name: "Test Agent",
-  protocol_binding: "rest",
+  protocol_binding: "rest" as const,
   url: "https://agent.example.com",
   agent_card_path: "/.well-known/agent-card.json",
-  auth_scheme: "bearer",
+  auth_scheme: "bearer" as const,
   auth_token: "",
   headers: null,
   allowed_skills: ["skill-1"],
@@ -55,6 +57,14 @@ const MOCK_SERVER = {
   circuit_breaker_threshold: 5,
   circuit_breaker_window_seconds: 60,
   circuit_breaker_cooldown_seconds: 300,
+  oauth2_client_id: null,
+  oauth2_client_secret: null,
+  oauth2_authorize_url: null,
+  oauth2_token_url: null,
+  oauth2_scopes: null,
+  oauth2_tokens_status: null,
+  agent_card_cache: null,
+  agent_card_cached_at: null,
   created_at: "2025-01-01T00:00:00Z",
   updated_at: "2025-01-01T00:00:00Z",
 };

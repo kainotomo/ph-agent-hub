@@ -339,6 +339,10 @@ async def get_follow_up_questions(tenant_id: str, session_id: str) -> list[str] 
 OAUTH_STATE_PREFIX = "oauth_state:"
 OAUTH_STATE_TTL = 600  # 10 minutes
 
+# A2A OAuth state prefix (Issue #418) — separate namespace from credential OAuth
+A2A_OAUTH_STATE_PREFIX = "a2a_oauth_state:"
+A2A_OAUTH_STATE_TTL = 600  # 10 minutes
+
 
 async def store_oauth_state(
     nonce: str,
@@ -376,6 +380,53 @@ async def get_oauth_state(nonce: str) -> dict | None:
 
     r = await get_redis()
     key = f"{OAUTH_STATE_PREFIX}{nonce}"
+    raw = await r.getdel(key)
+    if raw is None:
+        return None
+    return json.loads(raw)
+
+
+# ---------------------------------------------------------------------------
+# A2A OAuth state helpers (Issue #418)
+# ---------------------------------------------------------------------------
+
+
+async def store_a2a_oauth_state(
+    nonce: str,
+    server_id: str,
+    user_id: str,
+    ttl: int = A2A_OAUTH_STATE_TTL,
+) -> None:
+    """Store an A2A OAuth state nonce in Redis with a TTL.
+
+    Args:
+        nonce: A random UUID v4 — the ``state`` parameter sent to the OAuth provider.
+        server_id: The A2A server being authorized.
+        user_id: The admin user who initiated the flow.
+        ttl: TTL in seconds (default 600 = 10 minutes).
+    """
+    import json
+    import time
+
+    r = await get_redis()
+    payload = json.dumps({
+        "server_id": server_id,
+        "user_id": user_id,
+        "created_at": time.time(),
+    })
+    await r.setex(f"{A2A_OAUTH_STATE_PREFIX}{nonce}", ttl, payload)
+
+
+async def get_a2a_oauth_state(nonce: str) -> dict | None:
+    """Retrieve and **delete** an A2A OAuth state nonce (atomic get-delete).
+
+    Returns the parsed payload dict on first retrieval, or ``None`` if the
+    key does not exist (unknown, expired, or already consumed).
+    """
+    import json
+
+    r = await get_redis()
+    key = f"{A2A_OAUTH_STATE_PREFIX}{nonce}"
     raw = await r.getdel(key)
     if raw is None:
         return None

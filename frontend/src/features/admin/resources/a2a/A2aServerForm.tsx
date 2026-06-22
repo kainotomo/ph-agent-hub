@@ -17,6 +17,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   createA2aServer,
   updateA2aServer,
+  authorizeA2aServer,
   A2aServerData,
 } from "../../services/admin";
 
@@ -58,6 +59,12 @@ export function A2aServerForm({ open, server, onClose }: A2aServerFormProps) {
           circuit_breaker_threshold: server.circuit_breaker_threshold,
           circuit_breaker_window_seconds: server.circuit_breaker_window_seconds,
           circuit_breaker_cooldown_seconds: server.circuit_breaker_cooldown_seconds,
+          // OAuth2 config
+          oauth2_client_id: server.oauth2_client_id,
+          oauth2_client_secret: "",
+          oauth2_authorize_url: server.oauth2_authorize_url,
+          oauth2_token_url: server.oauth2_token_url,
+          oauth2_scopes: server.oauth2_scopes,
         });
       } else {
         form.setFieldsValue({
@@ -118,6 +125,14 @@ export function A2aServerForm({ open, server, onClose }: A2aServerFormProps) {
         ...(values.circuit_breaker_threshold != null && { circuit_breaker_threshold: Number(values.circuit_breaker_threshold) }),
         ...(values.circuit_breaker_window_seconds != null && { circuit_breaker_window_seconds: Number(values.circuit_breaker_window_seconds) }),
         ...(values.circuit_breaker_cooldown_seconds != null && { circuit_breaker_cooldown_seconds: Number(values.circuit_breaker_cooldown_seconds) }),
+        // OAuth2 config
+        ...(values.auth_scheme === "oauth2" && {
+          oauth2_client_id: values.oauth2_client_id || null,
+          oauth2_client_secret: values.oauth2_client_secret || null,
+          oauth2_authorize_url: values.oauth2_authorize_url || null,
+          oauth2_token_url: values.oauth2_token_url || null,
+          oauth2_scopes: values.oauth2_scopes || null,
+        }),
       };
 
       if (isEdit) {
@@ -200,6 +215,7 @@ export function A2aServerForm({ open, server, onClose }: A2aServerFormProps) {
               { value: "none", label: "None" },
               { value: "bearer", label: "Bearer Token" },
               { value: "api_key", label: "API Key" },
+              { value: "oauth2", label: "OAuth2 (Authorization Code)" },
             ]}
           />
         </Form.Item>
@@ -210,7 +226,8 @@ export function A2aServerForm({ open, server, onClose }: A2aServerFormProps) {
         >
           {({ getFieldValue }) =>
             getFieldValue("auth_scheme") &&
-            getFieldValue("auth_scheme") !== "none" ? (
+            getFieldValue("auth_scheme") !== "none" &&
+            getFieldValue("auth_scheme") !== "oauth2" ? (
               <Form.Item
                 name="auth_token"
                 label="Auth Token"
@@ -249,6 +266,140 @@ export function A2aServerForm({ open, server, onClose }: A2aServerFormProps) {
 
         <Form.Item name="enabled" label="Enabled" valuePropName="checked">
           <Switch />
+        </Form.Item>
+
+        {/* ============================================================= */}
+        {/* OAuth2 Configuration (Issue #418)                            */}
+        {/* ============================================================= */}
+        <Form.Item
+          noStyle
+          shouldUpdate={(prev, curr) => prev.auth_scheme !== curr.auth_scheme}
+        >
+          {({ getFieldValue }) =>
+            getFieldValue("auth_scheme") === "oauth2" ? (
+              <>
+                <div style={{ marginTop: 16, marginBottom: 8 }}>
+                  <strong>OAuth2 Configuration</strong>
+                </div>
+
+                <Form.Item
+                  name="oauth2_client_id"
+                  label="Client ID"
+                  rules={[{ required: true, message: "Client ID is required for OAuth2" }]}
+                >
+                  <Input placeholder="your-client-id" />
+                </Form.Item>
+
+                <Form.Item
+                  name="oauth2_client_secret"
+                  label="Client Secret"
+                  rules={[{ required: true, message: "Client secret is required for OAuth2" }]}
+                >
+                  <Input.Password
+                    placeholder="Enter client secret"
+                    autoComplete="new-password"
+                  />
+                </Form.Item>
+
+                <Form.Item
+                  name="oauth2_authorize_url"
+                  label="Authorization URL"
+                  rules={[{ required: true, message: "Authorization URL is required" }]}
+                >
+                  <Input placeholder="https://provider.example.com/oauth2/authorize" />
+                </Form.Item>
+
+                <Form.Item
+                  name="oauth2_token_url"
+                  label="Token URL"
+                  rules={[{ required: true, message: "Token URL is required" }]}
+                >
+                  <Input placeholder="https://provider.example.com/oauth2/token" />
+                </Form.Item>
+
+                <Form.Item
+                  name="oauth2_scopes"
+                  label="Scopes"
+                  tooltip="Space-separated list of OAuth2 scopes"
+                >
+                  <Input placeholder="openid profile email" />
+                </Form.Item>
+
+                {/* Token status + Authorize button (edit mode only) */}
+                {isEdit && server && (
+                  <div style={{ marginBottom: 16 }}>
+                    <div style={{ marginBottom: 8 }}>
+                      <strong>Token Status: </strong>
+                      {server.oauth2_tokens_status === "authorized" ? (
+                        <span style={{ color: "#52c41a" }}>✅ Authorized</span>
+                      ) : server.oauth2_tokens_status === "expired" ? (
+                        <span style={{ color: "#faad14" }}>⚠️ Token expired — re-authorize</span>
+                      ) : server.oauth2_tokens_status === "none" ? (
+                        <span style={{ color: "#999" }}>Not authorized</span>
+                      ) : null}
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          const result = await authorizeA2aServer(server.id);
+                          window.open(result.authorization_url, "_blank");
+                        } catch {
+                          // error handled by API interceptor
+                        }
+                      }}
+                      style={{
+                        padding: "4px 16px",
+                        background: "#1677ff",
+                        color: "#fff",
+                        border: "none",
+                        borderRadius: 4,
+                        cursor: "pointer",
+                        marginRight: 8,
+                      }}
+                    >
+                      {server.oauth2_tokens_status === "expired"
+                        ? "Re-authorize"
+                        : "Authorize"}
+                    </button>
+
+                    {(server.oauth2_tokens_status === "authorized" ||
+                      server.oauth2_tokens_status === "expired") && (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            await updateA2aServer(server.id, {
+                              oauth2_tokens: null as any,
+                            } as any);
+                            message.success("Tokens revoked");
+                            onClose();
+                          } catch {
+                            // error handled by API interceptor
+                          }
+                        }}
+                        style={{
+                          padding: "4px 16px",
+                          background: "#ff4d4f",
+                          color: "#fff",
+                          border: "none",
+                          borderRadius: 4,
+                          cursor: "pointer",
+                        }}
+                      >
+                        Revoke
+                      </button>
+                    )}
+
+                    <div style={{ fontSize: 12, color: "#888", marginTop: 8 }}>
+                      Callback URL: <code>{window.location.origin}/api/a2a/oauth2/callback</code>
+                    </div>
+                  </div>
+                )}
+              </>
+            ) : null
+          }
         </Form.Item>
 
         {/* ============================================================= */}

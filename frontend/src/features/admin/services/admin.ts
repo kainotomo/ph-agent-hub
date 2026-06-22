@@ -724,6 +724,13 @@ export interface A2aServerData {
   circuit_breaker_threshold: number | null;
   circuit_breaker_window_seconds: number | null;
   circuit_breaker_cooldown_seconds: number | null;
+  // --- OAuth2 config (Issue #418) ---
+  oauth2_client_id: string | null;
+  oauth2_client_secret: string | null;
+  oauth2_authorize_url: string | null;
+  oauth2_token_url: string | null;
+  oauth2_scopes: string | null;
+  oauth2_tokens_status: "authorized" | "expired" | "none" | null;
   agent_card_cache: Record<string, unknown> | null;
   agent_card_cached_at: string | null;
   created_at: string;
@@ -789,6 +796,19 @@ export function syncA2aServerTools(id: string): Promise<A2aServerSyncResult> {
   return api<A2aServerSyncResult>(`/admin/a2a-servers/${id}/sync-tools`, {
     method: "POST",
   });
+}
+
+export interface A2aOAuth2AuthorizeResult {
+  authorization_url: string;
+}
+
+export function authorizeA2aServer(
+  id: string,
+): Promise<A2aOAuth2AuthorizeResult> {
+  return api<A2aOAuth2AuthorizeResult>(
+    `/admin/a2a-servers/${id}/oauth2/authorize`,
+    { method: "POST" },
+  );
 }
 
 

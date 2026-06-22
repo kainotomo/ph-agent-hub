@@ -13,11 +13,17 @@ import { BrowserRouter } from "react-router-dom";
 import { A2aServerList } from "./A2aServerList";
 
 // Hoisted mocks
-const { mockListA2aServers, mockGetA2aCircuitBreaker, mockResetA2aCircuitBreaker } = vi.hoisted(
+const {
+  mockListA2aServers, mockGetA2aCircuitBreaker, mockResetA2aCircuitBreaker,
+  mockTestA2aServer, mockSyncA2aServerTools, mockDeleteA2aServer,
+} = vi.hoisted(
   () => ({
     mockListA2aServers: vi.fn(),
     mockGetA2aCircuitBreaker: vi.fn(),
     mockResetA2aCircuitBreaker: vi.fn(),
+    mockTestA2aServer: vi.fn(),
+    mockSyncA2aServerTools: vi.fn(),
+    mockDeleteA2aServer: vi.fn(),
   }),
 );
 
@@ -26,10 +32,10 @@ vi.mock("../../services/admin", () => ({
   listA2aServers: (...args: unknown[]) => mockListA2aServers(...args),
   getA2aCircuitBreaker: (...args: unknown[]) => mockGetA2aCircuitBreaker(...args),
   resetA2aCircuitBreaker: (...args: unknown[]) => mockResetA2aCircuitBreaker(...args),
-  deleteA2aServer: vi.fn(),
+  deleteA2aServer: (...args: unknown[]) => mockDeleteA2aServer(...args),
   updateA2aServer: vi.fn(),
-  testA2aServer: vi.fn(),
-  syncA2aServerTools: vi.fn(),
+  testA2aServer: (...args: unknown[]) => mockTestA2aServer(...args),
+  syncA2aServerTools: (...args: unknown[]) => mockSyncA2aServerTools(...args),
   listTenants: vi.fn().mockResolvedValue({ items: [] }),
 }));
 
@@ -178,5 +184,77 @@ describe("A2aServerList", () => {
     await settle();
 
     expect(screen.getByRole("button", { name: /add a2a server/i })).toBeInTheDocument();
+  });
+
+  it("calls delete on confirm", async () => {
+    mockListA2aServers.mockResolvedValue({
+      items: [MOCK_SERVERS[0]],
+      total: 1,
+      page: 1,
+      page_size: 25,
+      total_pages: 1,
+    });
+    mockGetA2aCircuitBreaker.mockResolvedValue({ degraded: false });
+    mockDeleteA2aServer.mockResolvedValue({});
+
+    renderA2aServerList();
+    await settle();
+
+    // Click the delete button (DeleteOutlined icon)
+    const deleteBtn = screen.getByRole("button", { name: "delete" });
+    await userEvent.click(deleteBtn);
+    await settle();
+
+    // Popconfirm "OK" button
+    const confirmBtn = screen.getByRole("button", { name: /ok/i });
+    await userEvent.click(confirmBtn);
+    await settle();
+
+    expect(mockDeleteA2aServer).toHaveBeenCalledWith("server-1");
+  });
+
+  it("calls test connection on click", async () => {
+    mockListA2aServers.mockResolvedValue({
+      items: [MOCK_SERVERS[0]],
+      total: 1,
+      page: 1,
+      page_size: 25,
+      total_pages: 1,
+    });
+    mockGetA2aCircuitBreaker.mockResolvedValue({ degraded: false });
+    mockTestA2aServer.mockResolvedValue({ connected: true, agent_name: "Test Agent", skills: [], error: "" });
+
+    renderA2aServerList();
+    await settle();
+
+    // Test connection button has "check-circle" icon accessible name
+    const testBtns = screen.getAllByRole("button", { name: "check-circle" });
+    // First check-circle is Test Connection, second is Reset Circuit Breaker
+    await userEvent.click(testBtns[0]);
+    await settle();
+
+    expect(mockTestA2aServer).toHaveBeenCalledWith("server-1");
+  });
+
+  it("calls sync skills on click", async () => {
+    mockListA2aServers.mockResolvedValue({
+      items: [MOCK_SERVERS[0]],
+      total: 1,
+      page: 1,
+      page_size: 25,
+      total_pages: 1,
+    });
+    mockGetA2aCircuitBreaker.mockResolvedValue({ degraded: false });
+    mockSyncA2aServerTools.mockResolvedValue({ created: 2, updated: 0, deprecated: 0 });
+
+    renderA2aServerList();
+    await settle();
+
+    // Sync skills button has "sync" icon accessible name
+    const syncBtn = screen.getByRole("button", { name: "sync" });
+    await userEvent.click(syncBtn);
+    await settle();
+
+    expect(mockSyncA2aServerTools).toHaveBeenCalledWith("server-1");
   });
 });

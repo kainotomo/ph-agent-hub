@@ -263,6 +263,30 @@ export function ToolList() {
         />
         <Select
           allowClear
+          placeholder="Tool type"
+          style={{ width: 140 }}
+          value={params.type as string | undefined}
+          onChange={(value) => updateParams({ type: value, page: 1 })}
+          options={[
+            { label: "A2A (Remote Agent)", value: "a2a" },
+            { label: "MCP", value: "mcp" },
+            { label: "Custom", value: "custom" },
+            { label: "ERPNext", value: "erpnext" },
+            { label: "Web Search", value: "web_search" },
+            { label: "Fetch URL", value: "fetch_url" },
+            { label: "Email", value: "email" },
+            { label: "Slack", value: "slack" },
+            { label: "Tasks", value: "tasks" },
+            { label: "Calendar", value: "calendar" },
+            { label: "GitHub", value: "github" },
+            { label: "SQL Query", value: "sql_query" },
+            { label: "Weather", value: "weather" },
+            { label: "Calculator", value: "calculator" },
+            { label: "Image Generation", value: "image_generation" },
+          ]}
+        />
+        <Select
+          allowClear
           placeholder="Status"
           style={{ width: 120 }}
           value={params.enabled !== undefined ? String(params.enabled) : undefined}

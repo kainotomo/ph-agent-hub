@@ -390,10 +390,30 @@ SUBMITTED → WORKING → COMPLETED
 
 Key files:
 - `api/a2a_server.py` — All 5 endpoints + background task processor
+- `api/admin.py` — A2A server CRUD endpoints (under `/admin/a2a-servers/`), circuit breaker inspection/reset, call log listing
 - `services/a2a_task_service.py` — CRUD + state management for `A2aTask`
 - `services/a2a_service.py` — A2A server configuration CRUD (outbound admin)
-- `core/redis.py` — A2A cancellation flags (`set_a2a_cancel`, `check_a2a_cancel`)
+- `services/a2a_client.py` — Resilient A2A client with retry, timeout, circuit breaker
+- `services/a2a_circuit_breaker.py` — Redis-backed circuit breaker
+- `tools/a2a.py` — A2A tool callable builder for outbound remote calls
+- `core/redis.py` — A2A cancellation flags (`set_a2a_cancel`, `check_a2a_cancel`) and ask_user helpers (`store_a2a_question`, `get_a2a_question`)
+- `db/orm/a2a_servers.py` — `A2aServer` ORM model with resilience columns
 - `db/orm/a2a_tasks.py` — `A2aTask` ORM model
+- `db/orm/a2a_call_logs.py` — `A2aCallLog` ORM model (denormalized call history)
+
+Admin API endpoints (see `api/admin.py`):
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/admin/a2a-servers` | GET | List A2A servers (paginated, filterable) |
+| `/admin/a2a-servers` | POST | Create A2A server |
+| `/admin/a2a-servers/{id}` | GET | Get A2A server details |
+| `/admin/a2a-servers/{id}` | PUT | Update A2A server |
+| `/admin/a2a-servers/{id}` | DELETE | Delete A2A server (cascades to tools) |
+| `/admin/a2a-servers/{id}/test` | POST | Test connection to remote agent |
+| `/admin/a2a-servers/{id}/sync-tools` | POST | Sync remote agent skills as Tool records |
+| `/admin/a2a-servers/{id}/circuit-breaker` | GET | Get circuit breaker state |
+| `/admin/a2a-servers/{id}/circuit-breaker/reset` | POST | Manually reset circuit breaker |
+| `/admin/a2a-call-logs` | GET | List A2A call logs (filterable by server/status/date) |
 
 ---
 

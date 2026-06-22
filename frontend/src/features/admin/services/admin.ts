@@ -713,6 +713,16 @@ export interface A2aServerData {
   headers: Record<string, string> | null;
   allowed_skills: string[] | null;
   enabled: boolean;
+  // --- Resilience config (Issue #409) ---
+  retry_max_attempts: number | null;
+  retry_backoff_base_seconds: number | null;
+  retry_backoff_max_seconds: number | null;
+  timeout_connect_seconds: number | null;
+  timeout_read_seconds: number | null;
+  timeout_stream_seconds: number | null;
+  circuit_breaker_threshold: number | null;
+  circuit_breaker_window_seconds: number | null;
+  circuit_breaker_cooldown_seconds: number | null;
   agent_card_cache: Record<string, unknown> | null;
   agent_card_cached_at: string | null;
   created_at: string;
@@ -782,7 +792,63 @@ export function syncA2aServerTools(id: string): Promise<A2aServerSyncResult> {
 
 
 // =============================================================================
-// RAG Documents
+// A2A Circuit Breaker & Call Logs (Issue #409)
+// =============================================================================
+
+export interface A2aCircuitBreakerState {
+  failures: number;
+  degraded_at: string | null;
+  last_failure_at: string | null;
+  last_probe_at: string | null;
+  threshold: number;
+  window_seconds: number;
+  cooldown_seconds: number;
+  degraded: boolean;
+}
+
+export interface A2aCallLogData {
+  id: string;
+  tenant_id: string;
+  a2a_server_id: string;
+  a2a_server_name: string | null;
+  skill_id: string | null;
+  session_id: string | null;
+  trace_id: string;
+  status: string;
+  latency_ms: number | null;
+  retry_count: number;
+  error_message: string | null;
+  created_at: string;
+}
+
+export function getA2aCircuitBreaker(
+  serverId: string,
+): Promise<A2aCircuitBreakerState> {
+  return api<A2aCircuitBreakerState>(
+    `/admin/a2a-servers/${serverId}/circuit-breaker`,
+  );
+}
+
+export function resetA2aCircuitBreaker(
+  serverId: string,
+): Promise<{ status: string; message: string }> {
+  return api<{ status: string; message: string }>(
+    `/admin/a2a-servers/${serverId}/circuit-breaker/reset`,
+    { method: "POST" },
+  );
+}
+
+export function listA2aCallLogs(
+  params?: ListParams & {
+    a2a_server_id?: string;
+    status?: string;
+    date_from?: string;
+    date_to?: string;
+  },
+): Promise<PaginatedResponse<A2aCallLogData>> {
+  const qs = buildQueryString({ ...params });
+  return api<PaginatedResponse<A2aCallLogData>>(`/admin/a2a-call-logs${qs}`);
+}
 // =============================================================================
 
 export interface RagDocumentData {

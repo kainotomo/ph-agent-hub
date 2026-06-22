@@ -516,7 +516,27 @@ Tracks model usage for analytics and quotas.
 
 ---
 
-## 6.2 Audit Logs
+## 6.2 A2A Call Logs
+
+Tracks A2A call reliability metrics — status, latency, retries, and error details. Append-only; survives A2A server deletion for post-mortem analysis.
+
+**Table: a2a_call_logs**
+- id (UUID, PK)
+- tenant_id (UUID) — denormalised
+- a2a_server_id (UUID) — denormalised; survives server deletion
+- a2a_server_name (string, nullable)
+- skill_id (string, nullable)
+- session_id (UUID, nullable)
+- trace_id (UUID) — correlation ID for the call chain
+- status (string) — one of: success, timeout, error, circuit_open
+- latency_ms (int, nullable)
+- retry_count (int, default 0)
+- error_message (text, nullable)
+- created_at (timestamp)
+
+---
+
+## 6.3 Audit Logs
 
 Tracks administrative and sensitive actions across the platform. Written on every mutating admin operation. Never updated or deleted — append-only.
 

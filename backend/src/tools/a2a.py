@@ -77,6 +77,9 @@ async def build_a2a_tool_callables(
         examples=examples,
         tags=tags,
         cleanup_clients=cleanup_clients,
+        db=db,
+        session_id=session_id,
+        tenant_id=tenant_id,
     )
 
     return [callable_fn]
@@ -92,6 +95,9 @@ async def _make_a2a_skill_callable(
     examples: list[str],
     tags: list[str],
     cleanup_clients: list,
+    db: AsyncSession | None = None,
+    session_id: str = "",
+    tenant_id: str = "",
 ):
     """Create a FunctionTool-like callable that delegates to a remote A2A skill.
 
@@ -247,23 +253,28 @@ async def _make_a2a_skill_callable(
                 config_block.accepted_output_modes.extend(effective_output_modes)
                 request.configuration.CopyFrom(config_block)
 
-            # ---- Send and collect ALL Part types --------------------------
-            result_parts: list[str] = []
-            async for stream_response in client.send_message(request):
-                if stream_response.HasField("task"):
-                    task = stream_response.task
-                    if task.artifacts:
-                        for artifact in task.artifacts:
-                            for r_part in artifact.parts:
-                                formatted = _format_response_part(r_part)
-                                if formatted:
-                                    result_parts.append(formatted)
-                elif stream_response.HasField("message"):
-                    msg_resp = stream_response.message
-                    for r_part in msg_resp.parts:
-                        formatted = _format_response_part(r_part)
-                        if formatted:
-                            result_parts.append(formatted)
+            # ---- Send with resilience wrapper (Issue #409) ----------------
+            from ...services.a2a_client import send_message_resilient
+            from ...core.exceptions import ServiceUnavailableError
+
+            try:
+                result_parts, log_info = await send_message_resilient(
+                    server=server,
+                    a2a_client=client,
+                    send_message_request=request,
+                    skill_id=skill_id,
+                    skill_name=skill_name,
+                    session_id=session_id,
+                    tenant_id=tenant_id,
+                    db=db,
+                )
+            except ServiceUnavailableError as exc:
+                logger.warning(
+                    "A2A circuit breaker blocked call: server=%s skill=%s "
+                    "error=%s",
+                    server.name, skill_id, exc,
+                )
+                return f"[A2A skill '{skill_name}' is currently unavailable: {exc.message}]"
 
             if not result_parts:
                 return f"[A2A skill '{skill_name}' returned no response]"

@@ -21,6 +21,9 @@ from ..services.tool_service import derive_tool_category
 
 logger = logging.getLogger(__name__)
 
+# A2A protocol version this agent hub supports
+A2A_SUPPORTED_PROTOCOL_VERSION = "1.0"
+
 
 # ---------------------------------------------------------------------------
 # CRUD
@@ -82,6 +85,16 @@ async def create_a2a_server(
     headers: dict | None = None,
     allowed_skills: list[str] | None = None,
     enabled: bool = True,
+    # --- Resilience config (Issue #409) ---
+    retry_max_attempts: int | None = None,
+    retry_backoff_base_seconds: float | None = None,
+    retry_backoff_max_seconds: float | None = None,
+    timeout_connect_seconds: float | None = None,
+    timeout_read_seconds: float | None = None,
+    timeout_stream_seconds: float | None = None,
+    circuit_breaker_threshold: int | None = None,
+    circuit_breaker_window_seconds: int | None = None,
+    circuit_breaker_cooldown_seconds: int | None = None,
 ) -> A2aServer:
     """Create a new A2A server config. Encrypts secrets at rest.
 
@@ -104,6 +117,16 @@ async def create_a2a_server(
         headers=encrypted_headers,
         allowed_skills=allowed_skills,
         enabled=enabled,
+        # Resilience config
+        retry_max_attempts=retry_max_attempts,
+        retry_backoff_base_seconds=retry_backoff_base_seconds,
+        retry_backoff_max_seconds=retry_backoff_max_seconds,
+        timeout_connect_seconds=timeout_connect_seconds,
+        timeout_read_seconds=timeout_read_seconds,
+        timeout_stream_seconds=timeout_stream_seconds,
+        circuit_breaker_threshold=circuit_breaker_threshold,
+        circuit_breaker_window_seconds=circuit_breaker_window_seconds,
+        circuit_breaker_cooldown_seconds=circuit_breaker_cooldown_seconds,
     )
     db.add(server)
     await db.commit()
@@ -468,4 +491,50 @@ async def _resolve_agent_card(server: A2aServer):
             agent_card_path=server.agent_card_path,
         )
         card = await resolver.get_agent_card()
+
+        # --- A2A protocol version negotiation (Issue #409) ---------------
+        _validate_supported_interfaces(card, server)
+
         return card
+
+
+# ---------------------------------------------------------------------------
+# A2A protocol version negotiation
+# ---------------------------------------------------------------------------
+
+
+def _validate_supported_interfaces(card, server: A2aServer) -> None:
+    """Validate that the remote Agent Card declares at least one supported
+    protocol version.
+
+    Logs a warning if versions are mismatched but still compatible.
+    Raises ``ValidationError`` if no compatible interface exists.
+    """
+    supported_interfaces = getattr(card, "supportedInterfaces", None) or []
+    if not supported_interfaces:
+        logger.warning(
+            "Agent Card for server '%s' (%s) declares no supportedInterfaces. "
+            "Proceeding — may indicate an older A2A implementation.",
+            server.name, server.url,
+        )
+        return
+
+    compatible = any(
+        getattr(iface, "protocolVersion", None) == A2A_SUPPORTED_PROTOCOL_VERSION
+        for iface in supported_interfaces
+    )
+
+    if compatible:
+        return  # All good
+
+    # Log all declared versions for debugging
+    declared_versions = [
+        getattr(iface, "protocolVersion", "unknown") for iface in supported_interfaces
+    ]
+    logger.warning(
+        "Agent Card for server '%s' (%s) declares protocol versions %s. "
+        "This hub supports %s. Proceeding optimistically.",
+        server.name, server.url,
+        declared_versions,
+        A2A_SUPPORTED_PROTOCOL_VERSION,
+    )

@@ -26,6 +26,10 @@ The backend provides the following core capabilities:
 ### **1.3 Tool Execution**
 - MCP (Model Context Protocol) tools — connect to external MCP servers and sync their tools
 - A2A (Agent-to-Agent) Protocol tools — discover remote A2A agents via Agent Cards and use their skills as tools
+  - `services/a2a_service.py` — CRUD, connection test, tool sync, Agent Card resolution with version negotiation
+  - `services/a2a_circuit_breaker.py` — Redis-backed circuit breaker for A2A servers (consecutive failure tracking, auto-recovery)
+  - `services/a2a_client.py` — resilient `send_message` wrapper with configurable timeouts, retry with exponential backoff, structured logging, and call log persistence
+  - `tools/a2a.py` — builds MAF-compatible tool callables from A2A Tool records; delegates to the resilient client
 - ERPNext API tools (per‑tenant)
 - Membrane tools
 - Custom tools (Python modules)

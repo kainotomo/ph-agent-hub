@@ -503,6 +503,43 @@ From the **A2A Servers** list you can:
 - **Network access**: The backend container must be able to reach the remote agent's URL.
 - **Agent Card validation**: The connection test fetches and validates the Agent Card against the A2A specification schema. Unreachable or malformed endpoints return descriptive errors.
 
+### 9.6 Resilience Configuration (Issue #409)
+
+Each A2A server has configurable resilience parameters under the **Advanced / Resilience** section in the edit form. These control retry behavior, timeouts, and circuit breaker thresholds when your agents call remote A2A skills.
+
+| Field | Default | Description |
+|---|---|---|
+| **Max Retry Attempts** | 3 | Number of times to retry on transient errors (timeout, 5xx, connection reset) |
+| **Retry Backoff Base (s)** | 1.0 | Exponential backoff base: `base × 2^attempt` |
+| **Retry Backoff Max (s)** | 60.0 | Maximum seconds between retries |
+| **Connect Timeout (s)** | 30.0 | HTTP connection timeout |
+| **Read Timeout (s)** | 300.0 | HTTP read timeout for non-streaming calls |
+| **Stream Timeout (s)** | 600.0 | HTTP read timeout for streaming responses |
+| **Circuit Breaker Threshold** | 5 | Consecutive failures within the window to trip the circuit |
+| **Circuit Breaker Window (s)** | 60 | Time window for counting consecutive failures |
+| **Circuit Breaker Cooldown (s)** | 300 | Cooldown before the circuit allows a probe request |
+
+#### Circuit Breaker Behaviour
+
+1. **Normal operation**: All calls proceed normally
+2. **Threshold reached**: After N consecutive failures (within the window), the circuit opens — the server is marked **Degraded** in the admin UI
+3. **Cooldown**: While degraded, all calls are immediately rejected with a clear error
+4. **Probe**: After the cooldown elapses, the next call is allowed as a probe
+5. **Auto-recovery**: If the probe succeeds, the circuit resets; if it fails, the cooldown restarts
+
+The circuit breaker state is stored in Redis and auto-clears after 2× cooldown of inactivity.
+
+#### Observability
+
+Every A2A call is logged with:
+- **Trace ID** — unique correlation ID for the call chain
+- **Server name** + **skill ID** — which remote skill was called
+- **Latency** — call duration in milliseconds
+- **Status** — `success`, `timeout`, `error`, or `circuit_open`
+- **Retry count** — how many retries were attempted
+
+Call logs are visible via the admin API (`GET /admin/a2a-call-logs`) and can be filtered by server, status, or date range.
+
 ---
 
 ## 10. Configuring OAuth for Personal Accounts (Issue #312)

@@ -307,3 +307,70 @@ class TestRequestAuthTool:
 
         assert "Auth requested" in result
         _mock_redis.setex.assert_called_once()
+
+
+class TestRequestAuthAuthCompleted:
+    """The ``auth_completed`` flag in ctx.kwargs prevents re-request."""
+
+    async def test_skips_auth_when_completed_for_matching_provider(self, _mock_redis):
+        """request_auth returns a skip message when auth_completed matches."""
+        from agent_framework import FunctionInvocationContext
+        from src.tools.request_auth import request_auth
+
+        ctx = MagicMock(spec=FunctionInvocationContext)
+        ctx.kwargs = {
+            "task_id": "task-123",
+            "auth_completed": True,
+            "auth_provider": "google",
+            "auth_tool_type": "email",
+        }
+        result = await request_auth(
+            provider="google",
+            tool_type="email",
+            ctx=ctx,
+        )
+
+        assert "already completed" in result
+        assert "retry" in result.lower()
+        _mock_redis.setex.assert_not_called()
+
+    async def test_still_requests_auth_when_provider_does_not_match(self, _mock_redis):
+        """Different provider should still request auth."""
+        from agent_framework import FunctionInvocationContext
+        from src.tools.request_auth import request_auth
+
+        ctx = MagicMock(spec=FunctionInvocationContext)
+        ctx.kwargs = {
+            "task_id": "task-123",
+            "auth_completed": True,
+            "auth_provider": "google",
+            "auth_tool_type": "email",
+        }
+        result = await request_auth(
+            provider="microsoft",
+            tool_type="calendar",
+            ctx=ctx,
+        )
+
+        assert "Auth requested" in result
+        _mock_redis.setex.assert_called_once()
+
+    async def test_no_effect_when_auth_completed_flag_false(self, _mock_redis):
+        """auth_completed=False behaves as normal."""
+        from agent_framework import FunctionInvocationContext
+        from src.tools.request_auth import request_auth
+
+        ctx = MagicMock(spec=FunctionInvocationContext)
+        ctx.kwargs = {
+            "task_id": "task-123",
+            "auth_completed": False,
+            "auth_provider": "google",
+        }
+        result = await request_auth(
+            provider="google",
+            tool_type="email",
+            ctx=ctx,
+        )
+
+        assert "Auth requested" in result
+        _mock_redis.setex.assert_called_once()

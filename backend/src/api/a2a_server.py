@@ -35,6 +35,7 @@ from ..core.dependencies import get_db
 from ..core.redis import set_a2a_cancel
 from ..db.base import AsyncSessionLocal
 from ..db.orm.skills import Skill as SkillORM
+from ..db.orm.messages import Message
 from ..services import a2a_task_service as a2a_tasks
 from ..services import session_service
 
@@ -599,6 +600,59 @@ async def _resume_task(
             },
         )
 
+    # ---- When resuming from AUTH_REQUIRED, inject a system message ----------
+    # telling the agent that the user has completed authentication.  This
+    # breaks the potential infinite loop where the agent calls request_auth,
+    # gets AUTH_REQUIRED, resumes, and calls request_auth again.
+    #
+    # The system message is persisted to the session history so the agent
+    # sees it in context on the next run.
+    extra_fi_kwargs: dict = {}
+    if task.state == a2a_tasks.TASK_STATE_AUTH_REQUIRED:
+        provider = "unknown"
+        tool_type = "unknown"
+        raw_msg = json.loads(task.status_message) if task.status_message else {}
+        if raw_msg and isinstance(raw_msg.get("parts"), list):
+            for part in raw_msg["parts"]:
+                if isinstance(part, dict) and "data" in part:
+                    provider = part["data"].get("provider", "unknown")
+                    tool_type = part["data"].get("tool_type", "unknown")
+                    break
+
+        # Persist a system message to the session so the agent sees it
+        msg_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc)
+        system_msg = Message(
+            id=msg_id,
+            session_id=task.session_id,
+            sender="system",
+            content=[{
+                "type": "text",
+                "text": (
+                    f"[AUTH_COMPLETED] The authentication process for "
+                    f"{provider} ({tool_type}) has been completed. "
+                    f"The credentials should now be available. "
+                    f"Please retry the operation that required authentication "
+                    f"without requesting authentication again."
+                ),
+            }],
+            created_at=now,
+        )
+        db.add(system_msg)
+        await db.commit()
+        logger.info(
+            "Injected auth-completed system message for task %s: "
+            "provider=%s, tool_type=%s",
+            task_id, provider, tool_type,
+        )
+
+        # Signal to the request_auth tool that auth was just completed
+        extra_fi_kwargs = {
+            "auth_completed": True,
+            "auth_provider": provider,
+            "auth_tool_type": tool_type,
+        }
+
     # Re-run the agent with the follow-up message on the same session
     try:
         response_text = await _run_a2a_agent(
@@ -606,6 +660,7 @@ async def _resume_task(
             text_content=text_content,
             db=db,
             task_id=task_id,
+            extra_fi_kwargs=extra_fi_kwargs,
         )
 
         # Check if the agent requested more input (agent can ask follow-ups)
@@ -964,6 +1019,7 @@ async def _run_a2a_agent(
     text_content: str,
     db: AsyncSession,
     task_id: str | None = None,
+    extra_fi_kwargs: dict | None = None,
 ) -> str:
     """Run the ph-agent-hub agent on an existing session and return text.
 
@@ -996,7 +1052,9 @@ async def _run_a2a_agent(
         "cross_session_retrieval_enabled": session.cross_session_retrieval_enabled,
     }
 
-    fi_kwargs = {"task_id": task_id} if task_id else None
+    fi_kwargs: dict | None = {"task_id": task_id} if task_id else None
+    if fi_kwargs and extra_fi_kwargs:
+        fi_kwargs.update(extra_fi_kwargs)
     result_text, _ = await run_agent(
         session_data=session_data,
         user_message=text_content,

@@ -83,6 +83,22 @@ async def request_auth(
     if reason:
         auth_info["reason"] = reason
 
+    # If auth was just completed for this provider on resume, don't
+    # re-request it — tell the agent to retry the actual tool instead.
+    # This prevents an infinite loop where the agent calls request_auth,
+    # the task is resumed, and the agent calls request_auth again.
+    auth_completed = ctx.kwargs.get("auth_completed", False)
+    auth_provider = ctx.kwargs.get("auth_provider", "")
+    if auth_completed and auth_provider == provider:
+        logger.info(
+            "request_auth skipped for task %s — auth already "
+            "completed for %s", task_id, provider,
+        )
+        return (
+            f"[Authentication for {provider} ({tool_type}) was already "
+            f"completed. Please retry the operation using the tool directly.]"
+        )
+
     await store_a2a_auth_request(task_id, auth_info)
     logger.info(
         "request_auth stored auth request for task %s: provider=%s, tool_type=%s",

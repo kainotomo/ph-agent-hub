@@ -2122,7 +2122,15 @@ async def list_a2a_call_logs(
     if date_to:
         stmt = stmt.where(A2aCallLog.created_at <= date_to)
 
-    return await paginate(db, stmt, page=page, page_size=page_size)
+    items, total = await paginate(db, stmt, page=page, page_size=page_size)
+    total_pages = max(1, -(-total // page_size))
+    return PaginatedResponse(
+        items=[A2aCallLogResponse.model_validate(item) for item in items],
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages,
+    )
 
 
 # =============================================================================

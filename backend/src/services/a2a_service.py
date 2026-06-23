@@ -6,8 +6,10 @@
 # Agent Cards are resolved via the a2a-sdk (A2ACardResolver).
 # =============================================================================
 
+import asyncio
 import json
 import logging
+import time
 from datetime import datetime, timezone
 
 from sqlalchemy import select, or_
@@ -95,6 +97,13 @@ async def create_a2a_server(
     circuit_breaker_threshold: int | None = None,
     circuit_breaker_window_seconds: int | None = None,
     circuit_breaker_cooldown_seconds: int | None = None,
+    # --- OAuth2 config (Issue #418) ---
+    oauth2_client_id: str | None = None,
+    oauth2_client_secret: str | None = None,
+    oauth2_authorize_url: str | None = None,
+    oauth2_token_url: str | None = None,
+    oauth2_scopes: str | None = None,
+    oauth2_tokens: str | None = None,
 ) -> A2aServer:
     """Create a new A2A server config. Encrypts secrets at rest.
 
@@ -105,6 +114,8 @@ async def create_a2a_server(
     # Encrypt secrets
     encrypted_token = encrypt(auth_token) if auth_token else None
     encrypted_headers = encrypt(json.dumps(headers)) if headers else None
+    encrypted_oauth2_client_secret = encrypt(oauth2_client_secret) if oauth2_client_secret else None
+    encrypted_oauth2_tokens = encrypt(oauth2_tokens) if oauth2_tokens else None
 
     server = A2aServer(
         tenant_id=tenant_id,
@@ -127,6 +138,13 @@ async def create_a2a_server(
         circuit_breaker_threshold=circuit_breaker_threshold,
         circuit_breaker_window_seconds=circuit_breaker_window_seconds,
         circuit_breaker_cooldown_seconds=circuit_breaker_cooldown_seconds,
+        # OAuth2 config
+        oauth2_client_id=oauth2_client_id,
+        oauth2_client_secret=encrypted_oauth2_client_secret,
+        oauth2_authorize_url=oauth2_authorize_url,
+        oauth2_token_url=oauth2_token_url,
+        oauth2_scopes=oauth2_scopes,
+        oauth2_tokens=encrypted_oauth2_tokens,
     )
     db.add(server)
     await db.commit()
@@ -163,6 +181,12 @@ async def update_a2a_server(
     if "headers" in fields:
         hdrs = fields["headers"]
         fields["headers"] = encrypt(json.dumps(hdrs)) if hdrs else None
+    if "oauth2_client_secret" in fields:
+        secret = fields["oauth2_client_secret"]
+        fields["oauth2_client_secret"] = encrypt(secret) if secret else None
+    if "oauth2_tokens" in fields:
+        tokens = fields["oauth2_tokens"]
+        fields["oauth2_tokens"] = encrypt(tokens) if tokens else None
 
     for key, value in fields.items():
         if hasattr(server, key):
@@ -186,6 +210,9 @@ async def delete_a2a_server(
     server = await get_a2a_server(db, server_id)
     if server is None:
         raise NotFoundError("A2A server not found")
+
+    # Clean up OAuth2 refresh lock if present
+    _oauth2_refresh_locks.pop(server_id, None)
 
     # Delete associated Tool records with type="a2a" pointing to this server
     result = await db.execute(
@@ -218,6 +245,19 @@ def decrypt_auth_token(server: A2aServer) -> str | None:
         return decrypt(server.auth_token)
     except Exception:
         logger.warning("Failed to decrypt auth_token for A2A server %s", server.id)
+        return None
+
+
+def decrypt_oauth2_client_secret(server: A2aServer) -> str | None:
+    """Decrypt the stored OAuth2 client secret. Returns None if not set."""
+    if not server.oauth2_client_secret:
+        return None
+    try:
+        return decrypt(server.oauth2_client_secret)
+    except Exception:
+        logger.warning(
+            "Failed to decrypt oauth2_client_secret for A2A server %s", server.id
+        )
         return None
 
 
@@ -272,7 +312,7 @@ async def test_a2a_connection(
         raise NotFoundError("A2A server not found")
 
     try:
-        agent_card = await _resolve_agent_card(server)
+        agent_card = await _resolve_agent_card(server, db)
         skills = [
             {
                 "id": s.id,
@@ -335,7 +375,7 @@ async def sync_a2a_tools(
         raise NotFoundError("A2A server not found")
 
     try:
-        agent_card = await _resolve_agent_card(server)
+        agent_card = await _resolve_agent_card(server, db)
     except Exception as exc:
         logger.warning("A2A sync failed for server %s: %s", server_id, exc)
         raise ValidationError(
@@ -465,8 +505,12 @@ def _validate_binding_fields(
         )
 
 
-async def _resolve_agent_card(server: A2aServer):
+async def _resolve_agent_card(server: A2aServer, db: AsyncSession | None = None):
     """Resolve an Agent Card from an A2A server using the a2a-sdk.
+
+    Optionally accepts a db session so OAuth2 token refreshes can be
+    persisted. Callers that have a session (test_a2a_connection,
+    sync_a2a_tools) should pass it.
 
     Returns an AgentCard object from the a2a.types module.
     """
@@ -482,7 +526,12 @@ async def _resolve_agent_card(server: A2aServer):
             headers["Authorization"] = f"Bearer {auth_token}"
         elif server.auth_scheme == "api_key":
             headers["Authorization"] = f"Bearer {auth_token}"
-        # OAuth2 is more complex — defer to follow-up implementation
+
+    # OAuth2: get a fresh access token (triggers refresh if expired)
+    if server.auth_scheme == "oauth2" and "authorization" not in {k.lower() for k in headers}:
+        oauth_token = await get_oauth2_access_token(server, db)
+        if oauth_token:
+            headers["Authorization"] = f"Bearer {oauth_token}"
 
     async with httpx.AsyncClient(headers=headers) as client:
         resolver = A2ACardResolver(
@@ -538,3 +587,254 @@ def _validate_supported_interfaces(card, server: A2aServer) -> None:
         declared_versions,
         A2A_SUPPORTED_PROTOCOL_VERSION,
     )
+
+
+# ---------------------------------------------------------------------------
+# OAuth2 token helpers (Issue #418)
+# ---------------------------------------------------------------------------
+
+# Per-server refresh lock to prevent duplicate concurrent refreshes
+_oauth2_refresh_locks: dict[str, asyncio.Lock] = {}
+_oauth2_refresh_locks_lock = asyncio.Lock()
+
+
+def _decrypt_oauth2_tokens(server: A2aServer) -> dict | None:
+    """Decrypt and parse the oauth2_tokens JSON blob.
+
+    Returns None if not set or decrypt fails.
+    """
+    if not server.oauth2_tokens:
+        return None
+    try:
+        return json.loads(decrypt(server.oauth2_tokens))
+    except Exception:
+        logger.warning("Failed to decrypt oauth2_tokens for server %s", server.id)
+        return None
+
+
+def _encrypt_oauth2_tokens(tokens: dict) -> str:
+    """Encrypt OAuth2 tokens dict into a Fernet string."""
+    return encrypt(json.dumps(tokens))
+
+
+def _get_oauth2_client_secret(server: A2aServer) -> str | None:
+    """Decrypt the stored OAuth2 client secret."""
+    if not server.oauth2_client_secret:
+        return None
+    try:
+        return decrypt(server.oauth2_client_secret)
+    except Exception:
+        logger.warning("Failed to decrypt oauth2_client_secret for server %s", server.id)
+        return None
+
+
+async def exchange_oauth2_code(
+    code: str,
+    redirect_uri: str,
+    server: A2aServer,
+) -> dict | None:
+    """Exchange an authorization code for OAuth2 tokens.
+
+    POST to the server's token_url with grant_type=authorization_code.
+    Returns {access_token, refresh_token, expires_at} or None on failure.
+    """
+    import httpx
+
+    client_secret = _get_oauth2_client_secret(server)
+    if not client_secret:
+        logger.warning("Cannot exchange OAuth2 code: no client_secret for server %s", server.id)
+        return None
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(
+                server.oauth2_token_url,
+                data={
+                    "code": code,
+                    "client_id": server.oauth2_client_id,
+                    "client_secret": client_secret,
+                    "redirect_uri": redirect_uri,
+                    "grant_type": "authorization_code",
+                },
+            )
+            if response.status_code != 200:
+                logger.warning(
+                    "OAuth2 code exchange failed for server %s: HTTP %d",
+                    server.id, response.status_code,
+                )
+                return None
+
+            data = response.json()
+
+        tokens: dict = {
+            "access_token": data.get("access_token", ""),
+            "refresh_token": data.get("refresh_token", ""),
+            "expires_at": int(time.time()) + data.get("expires_in", 3600),
+        }
+        return tokens
+    except Exception as exc:
+        logger.error(
+            "OAuth2 code exchange error for server %s: %s",
+            server.id, exc,
+        )
+        return None
+
+
+async def refresh_oauth2_token(
+    server: A2aServer,
+) -> dict | None:
+    """Refresh an OAuth2 access token.
+
+    POST to the server's token_url with grant_type=refresh_token.
+    If the provider returns ``invalid_grant`` (refresh token expired/revoked),
+    clear the stored tokens and return None.
+
+    Returns {access_token, refresh_token?, expires_at} or None on failure.
+    """
+    import httpx
+
+    client_secret = _get_oauth2_client_secret(server)
+    if not client_secret:
+        logger.warning("Cannot refresh OAuth2 token: no client_secret for server %s", server.id)
+        return None
+
+    existing_tokens = _decrypt_oauth2_tokens(server)
+    if not existing_tokens:
+        return None
+
+    refresh_token = existing_tokens.get("refresh_token", "")
+    if not refresh_token:
+        logger.warning("No refresh_token available for server %s", server.id)
+        return None
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(
+                server.oauth2_token_url,
+                data={
+                    "refresh_token": refresh_token,
+                    "client_id": server.oauth2_client_id,
+                    "client_secret": client_secret,
+                    "grant_type": "refresh_token",
+                },
+            )
+
+            if response.status_code != 200:
+                error_body = response.json()
+                error = error_body.get("error", "")
+                if error == "invalid_grant":
+                    logger.warning(
+                        "Refresh token expired/revoked for server %s — clearing tokens",
+                        server.id,
+                    )
+                    # Clear stored tokens so the UI shows "expired"
+                    server.oauth2_tokens = None
+                    return None
+
+                logger.warning(
+                    "OAuth2 token refresh failed for server %s: HTTP %d",
+                    server.id, response.status_code,
+                )
+                return None
+
+            data = response.json()
+
+        tokens: dict = {
+            "access_token": data.get("access_token", ""),
+            "expires_at": int(time.time()) + data.get("expires_in", 3600),
+        }
+        # Some providers rotate refresh tokens
+        new_rt = data.get("refresh_token")
+        if new_rt:
+            tokens["refresh_token"] = new_rt
+        else:
+            # Preserve existing refresh token if not rotated
+            tokens["refresh_token"] = existing_tokens.get("refresh_token", "")
+
+        return tokens
+    except Exception as exc:
+        logger.error(
+            "OAuth2 token refresh error for server %s: %s",
+            server.id, exc,
+        )
+        return None
+
+
+def is_oauth2_token_expired(server: A2aServer) -> bool:
+    """Check if the stored OAuth2 access token is expired (5-minute buffer)."""
+    tokens = _decrypt_oauth2_tokens(server)
+    if not tokens:
+        return True
+    expires_at = tokens.get("expires_at", 0)
+    if not expires_at:
+        return True
+    return int(time.time()) >= (int(expires_at) - 300)
+
+
+def get_oauth2_tokens_status(server: A2aServer) -> str | None:
+    """Return the OAuth2 token status for API responses.
+
+    Returns:
+        - ``"authorized"`` — valid tokens present
+        - ``"expired"`` — tokens present but refresh token is dead
+        - ``"none"`` — no tokens yet
+        - ``None`` — server not using OAuth2
+    """
+    if server.auth_scheme != "oauth2":
+        return None
+    if not server.oauth2_tokens:
+        return "none"
+    tokens = _decrypt_oauth2_tokens(server)
+    if not tokens:
+        return "expired"
+    if not tokens.get("access_token"):
+        return "none"
+    return "authorized"
+
+
+async def get_oauth2_access_token(
+    server: A2aServer,
+    db: AsyncSession | None,
+) -> str | None:
+    """Get a valid OAuth2 access token for the given server.
+
+    Checks expiry and refreshes transparently if needed.
+    Uses a per-server concurrency lock to prevent duplicate refreshes.
+
+    If ``db`` is None, the refreshed token will NOT be persisted to the DB
+    (caller should handle persistence).
+
+    Returns the access token string, or None if unavailable.
+    """
+    # Quick check without lock — most requests are fresh
+    if not is_oauth2_token_expired(server):
+        tokens = _decrypt_oauth2_tokens(server)
+        if tokens:
+            return tokens.get("access_token")
+
+    # Token is expired — acquire per-server lock
+    async with _oauth2_refresh_locks_lock:
+        if server.id not in _oauth2_refresh_locks:
+            _oauth2_refresh_locks[server.id] = asyncio.Lock()
+        lock = _oauth2_refresh_locks[server.id]
+
+    async with lock:
+        # Double-check: another caller may have refreshed while we waited
+        if not is_oauth2_token_expired(server):
+            tokens = _decrypt_oauth2_tokens(server)
+            if tokens:
+                return tokens.get("access_token")
+
+        # Actually needs refresh
+        new_tokens = await refresh_oauth2_token(server)
+        if new_tokens is None:
+            # Refresh failed — tokens may have been cleared in refresh_oauth2_token
+            return None
+
+        # Persist updated tokens if db is available
+        server.oauth2_tokens = _encrypt_oauth2_tokens(new_tokens)
+        if db is not None:
+            await db.commit()
+
+        return new_tokens.get("access_token")
+

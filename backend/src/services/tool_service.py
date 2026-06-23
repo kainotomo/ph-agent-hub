@@ -144,6 +144,7 @@ async def create_tool(
     type: str,
     config: dict | None = None,
     code: str | None = None,
+    description: str | None = None,
     enabled: bool = True,
     is_public: bool = False,
 ) -> Tool:
@@ -157,6 +158,7 @@ async def create_tool(
     tool = Tool(
         tenant_id=tenant_id,
         name=name,
+        description=description,
         type=type,
         config=config,
         code=code,

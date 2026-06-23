@@ -375,6 +375,7 @@ POST   /tasks/{task_id}:cancel              # Cancel a running task
 **Task lifecycle** (Issue #411):
 - **`returnImmediately: true`** — Spawns background agent execution and returns immediately with `TASK_STATE_SUBMITTED`. The client polls `GET /tasks/{id}` until completion.
 - **`taskId` in request** — Resumes a suspended task (`TASK_STATE_INPUT_REQUIRED` or `TASK_STATE_AUTH_REQUIRED`) for multi-turn conversations. The follow-up message is appended to the existing session history.
+- **Input-required flow** — The agent can request additional user input by calling the built-in `ask_user(question)` tool. This stores the question in Redis under `ask_user:{task_id}`. After `agent.run()` returns, the A2A layer detects the flag and transitions the task to `TASK_STATE_INPUT_REQUIRED` with the question as `status_message`. The client can then resume the task by sending a follow-up message with the original `taskId`.
 - **Cancellation** — `POST /tasks/{id}:cancel` sets Redis-backed cancellation flags, transitions the task to `TASK_STATE_CANCELED`, and the agent runner aborts.
 - **Persistence** — Tasks are stored in the `a2a_tasks` database table (ORM: `A2aTask`). Tasks survive server restarts.
 
@@ -389,10 +390,30 @@ SUBMITTED → WORKING → COMPLETED
 
 Key files:
 - `api/a2a_server.py` — All 5 endpoints + background task processor
+- `api/admin.py` — A2A server CRUD endpoints (under `/admin/a2a-servers/`), circuit breaker inspection/reset, call log listing
 - `services/a2a_task_service.py` — CRUD + state management for `A2aTask`
 - `services/a2a_service.py` — A2A server configuration CRUD (outbound admin)
-- `core/redis.py` — A2A cancellation flags (`set_a2a_cancel`, `check_a2a_cancel`)
+- `services/a2a_client.py` — Resilient A2A client with retry, timeout, circuit breaker
+- `services/a2a_circuit_breaker.py` — Redis-backed circuit breaker
+- `tools/a2a.py` — A2A tool callable builder for outbound remote calls
+- `core/redis.py` — A2A cancellation flags (`set_a2a_cancel`, `check_a2a_cancel`) and ask_user helpers (`store_a2a_question`, `get_a2a_question`)
+- `db/orm/a2a_servers.py` — `A2aServer` ORM model with resilience columns
 - `db/orm/a2a_tasks.py` — `A2aTask` ORM model
+- `db/orm/a2a_call_logs.py` — `A2aCallLog` ORM model (denormalized call history)
+
+Admin API endpoints (see `api/admin.py`):
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/admin/a2a-servers` | GET | List A2A servers (paginated, filterable) |
+| `/admin/a2a-servers` | POST | Create A2A server |
+| `/admin/a2a-servers/{id}` | GET | Get A2A server details |
+| `/admin/a2a-servers/{id}` | PUT | Update A2A server |
+| `/admin/a2a-servers/{id}` | DELETE | Delete A2A server (cascades to tools) |
+| `/admin/a2a-servers/{id}/test` | POST | Test connection to remote agent |
+| `/admin/a2a-servers/{id}/sync-tools` | POST | Sync remote agent skills as Tool records |
+| `/admin/a2a-servers/{id}/circuit-breaker` | GET | Get circuit breaker state |
+| `/admin/a2a-servers/{id}/circuit-breaker/reset` | POST | Manually reset circuit breaker |
+| `/admin/a2a-call-logs` | GET | List A2A call logs (filterable by server/status/date) |
 
 ---
 

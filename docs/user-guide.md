@@ -199,6 +199,21 @@ When you change the selected skill during a session, the active tools are automa
 - Tools associated with the new skill are added
 - Tools you've marked as always-on are preserved
 
+### 6.5 Working with A2A Remote Agents
+
+A2A (Agent-to-Agent Protocol) **Remote Agent** tools let your AI assistant collaborate with other AI agents hosted on different platforms, rather than calling individual APIs or tools.
+
+**How it works:**
+- Your administrator connects to remote A2A-compatible agents via the admin panel
+- Each remote agent's capabilities (skills) are automatically discovered and synced as tools
+- You activate them like any other tool — toggle them on in the tool selector
+
+**What to expect:**
+- **Latency**: Remote agents take longer to respond than local tools — the AI needs to communicate with another agent across the network
+- **Availability**: A remote agent may be temporarily unavailable if its server is down or the circuit breaker has tripped (the system will automatically retry and recover)
+- **Visibility**: The AI will tell you when it's using a remote agent — the response will indicate which external agent was contacted
+- **Failures**: If a remote agent fails, the AI will receive an error message and can try again or report the issue to you
+
 This ensures the agent always has the right tools for the selected skill without manual reconfiguration.
 
 ### 6.4 Deactivate Tools

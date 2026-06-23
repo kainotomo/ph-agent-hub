@@ -217,6 +217,84 @@ async def clear_a2a_cancel(task_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# A2A ask_user helpers — used by the ``ask_user`` tool to communicate
+# "agent needs more info" from the agent runner back to the A2A task
+# lifecycle layer.  The tool stores the question under a task-scoped key
+# and the A2A background processor checks it after ``agent.run()``.
+# ---------------------------------------------------------------------------
+ASK_USER_PREFIX = "ask_user:"
+ASK_USER_TTL_SECONDS = 3600
+
+
+async def store_a2a_question(task_id: str, question: str) -> None:
+    """Store an agent question for an A2A *task_id*.
+
+    The A2A task lifecycle layer checks this flag after the agent returns;
+    if present, the task transitions to ``INPUT_REQUIRED`` with the
+    question as the ``status_message``.
+    """
+    r = await get_redis()
+    await r.setex(f"{ASK_USER_PREFIX}{task_id}", ASK_USER_TTL_SECONDS, question)
+
+
+async def get_a2a_question(task_id: str) -> str | None:
+    """Return the agent question for an A2A *task_id*, or None."""
+    r = await get_redis()
+    val = await r.get(f"{ASK_USER_PREFIX}{task_id}")
+    return val  # None if key does not exist
+
+
+async def clear_a2a_question(task_id: str) -> None:
+    """Remove the agent question for an A2A *task_id*."""
+    r = await get_redis()
+    await r.delete(f"{ASK_USER_PREFIX}{task_id}")
+
+
+# ---------------------------------------------------------------------------
+# A2A auth_request helpers — used by the ``request_auth`` tool to
+# communicate "agent needs credentials" from the agent runner back to
+# the A2A task lifecycle layer.  The tool stores an auth info dict under
+# a task-scoped key and the A2A processor checks it after ``agent.run()``.
+# ---------------------------------------------------------------------------
+AUTH_REQUEST_PREFIX = "auth_request:"
+AUTH_REQUEST_TTL_SECONDS = 3600
+
+
+async def store_a2a_auth_request(task_id: str, auth_info: dict) -> None:
+    """Store an authentication request for an A2A *task_id*.
+
+    The A2A task lifecycle layer checks this flag after the agent returns;
+    if present, the task transitions to ``AUTH_REQUIRED`` with the auth
+    info as ``status_message``.
+    """
+    import json
+
+    r = await get_redis()
+    await r.setex(
+        f"{AUTH_REQUEST_PREFIX}{task_id}",
+        AUTH_REQUEST_TTL_SECONDS,
+        json.dumps(auth_info),
+    )
+
+
+async def get_a2a_auth_request(task_id: str) -> dict | None:
+    """Return the auth request info for an A2A *task_id*, or None."""
+    import json
+
+    r = await get_redis()
+    val = await r.get(f"{AUTH_REQUEST_PREFIX}{task_id}")
+    if val is None:
+        return None
+    return json.loads(val)
+
+
+async def clear_a2a_auth_request(task_id: str) -> None:
+    """Remove the auth request for an A2A *task_id*."""
+    r = await get_redis()
+    await r.delete(f"{AUTH_REQUEST_PREFIX}{task_id}")
+
+
+# ---------------------------------------------------------------------------
 # Follow-up questions helpers — stored in Redis so the frontend can fetch
 # them via a lightweight REST endpoint after the SSE stream closes.
 # ---------------------------------------------------------------------------
@@ -261,6 +339,10 @@ async def get_follow_up_questions(tenant_id: str, session_id: str) -> list[str] 
 OAUTH_STATE_PREFIX = "oauth_state:"
 OAUTH_STATE_TTL = 600  # 10 minutes
 
+# A2A OAuth state prefix (Issue #418) — separate namespace from credential OAuth
+A2A_OAUTH_STATE_PREFIX = "a2a_oauth_state:"
+A2A_OAUTH_STATE_TTL = 600  # 10 minutes
+
 
 async def store_oauth_state(
     nonce: str,
@@ -298,6 +380,53 @@ async def get_oauth_state(nonce: str) -> dict | None:
 
     r = await get_redis()
     key = f"{OAUTH_STATE_PREFIX}{nonce}"
+    raw = await r.getdel(key)
+    if raw is None:
+        return None
+    return json.loads(raw)
+
+
+# ---------------------------------------------------------------------------
+# A2A OAuth state helpers (Issue #418)
+# ---------------------------------------------------------------------------
+
+
+async def store_a2a_oauth_state(
+    nonce: str,
+    server_id: str,
+    user_id: str,
+    ttl: int = A2A_OAUTH_STATE_TTL,
+) -> None:
+    """Store an A2A OAuth state nonce in Redis with a TTL.
+
+    Args:
+        nonce: A random UUID v4 — the ``state`` parameter sent to the OAuth provider.
+        server_id: The A2A server being authorized.
+        user_id: The admin user who initiated the flow.
+        ttl: TTL in seconds (default 600 = 10 minutes).
+    """
+    import json
+    import time
+
+    r = await get_redis()
+    payload = json.dumps({
+        "server_id": server_id,
+        "user_id": user_id,
+        "created_at": time.time(),
+    })
+    await r.setex(f"{A2A_OAUTH_STATE_PREFIX}{nonce}", ttl, payload)
+
+
+async def get_a2a_oauth_state(nonce: str) -> dict | None:
+    """Retrieve and **delete** an A2A OAuth state nonce (atomic get-delete).
+
+    Returns the parsed payload dict on first retrieval, or ``None`` if the
+    key does not exist (unknown, expired, or already consumed).
+    """
+    import json
+
+    r = await get_redis()
+    key = f"{A2A_OAUTH_STATE_PREFIX}{nonce}"
     raw = await r.getdel(key)
     if raw is None:
         return None

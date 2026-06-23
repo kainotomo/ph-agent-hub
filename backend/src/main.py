@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .api.admin import router as admin_router
+from .api.a2a_oauth import router as a2a_oauth_router
 from .api.auth import router as auth_router
 from .api.chat import router as chat_router
 from .api.credentials import router as credentials_router
@@ -162,6 +163,7 @@ app.include_router(users_router, prefix="/api")
 app.include_router(memory_router, prefix="/api")
 app.include_router(models_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")
+app.include_router(a2a_oauth_router, prefix="/api")
 app.include_router(templates_router, prefix="/api")
 app.include_router(prompts_router, prefix="/api")
 app.include_router(skills_router, prefix="/api")

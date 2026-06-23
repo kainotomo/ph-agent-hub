@@ -47,6 +47,55 @@ Edit the `env` file and set the following **required** values:
 | `ADMIN_EMAIL` | Initial admin user email (default: `admin@phagent.local`) |
 | `ADMIN_PASSWORD` | Initial admin password — **change before production** |
 
+## 2a. Configuring OAuth2 for A2A Outbound Connections
+
+PH Agent Hub supports the **OAuth2 Authorization Code** grant type for outbound
+A2A (Agent-to-Agent) connections to remote agents that require OAuth2
+authentication.
+
+### Setup Flow
+
+1. **Add the A2A server** with `OAuth2 (Authorization Code)` as the
+authentication scheme.
+2. **Fill in the OAuth2 provider details**:
+   - `Client ID` — from your OAuth2 provider
+   - `Client Secret` — from your OAuth2 provider (Fernet-encrypted at rest)
+   - `Authorization URL` — e.g. `https://provider.example.com/oauth2/authorize`
+   - `Token URL` — e.g. `https://provider.example.com/oauth2/token`
+   - `Scopes` — space-separated, e.g. `openid profile email`
+3. **Click `Authorize`**. A new browser tab opens with the OAuth2 provider's
+   consent screen.
+4. **Approve the authorization request**. The provider redirects back to PH Agent
+   Hub, and the access + refresh tokens are stored (Fernet-encrypted).
+5. **Verify** — the token status shows ✅ Authorized. Run a test connection to
+   confirm.
+
+### Callback URL
+
+The backend listens for the OAuth2 redirect at:
+```
+{API_BASE_URL}/api/a2a/oauth2/callback
+```
+Add this URL to your OAuth2 provider's list of allowed redirect URIs.
+
+### Token Lifecycle
+
+- **Access tokens** are checked for expiry before every outbound request (with a
+  5-minute buffer).
+- **Expired tokens are auto-refreshed** using the stored refresh token — this
+  happens transparently.
+- **If the refresh token expires** (the provider returns `invalid_grant`), the
+  stored tokens are cleared and the admin must re-authorize. The UI shows ⚠️
+  Token expired — re-authorize.
+- **Tokens can be revoked** at any time via the `Revoke` button in the server
+  edit form.
+
+### Concurrent Refresh Protection
+
+If multiple concurrent requests hit an expired token simultaneously, only one
+refresh request is sent to the provider. The other callers wait and receive the
+fresh token (per-server `asyncio.Lock` with double-check pattern).
+
 ### 2.3 Start the Platform
 
 **Development:**
@@ -519,6 +568,25 @@ Each A2A server has configurable resilience parameters under the **Advanced / Re
 | **Circuit Breaker Window (s)** | 60 | Time window for counting consecutive failures |
 | **Circuit Breaker Cooldown (s)** | 300 | Cooldown before the circuit allows a probe request |
 
+### 9.7 Tool Management
+
+Tools have a **Description** field (visible and editable in the admin Tool form) that allows administrators to document what each tool does. This description is stored in the database and displayed as a tooltip on the tool's name in the list view.
+
+When creating or editing an **A2A-type tool**, the form shows structured fields for:
+
+| Field | Description |
+|---|---|
+| **A2A Server** | The remote A2A server to connect to |
+| **Skill ID** | Identifier of the remote skill |
+| **Skill Name** | Human-readable name for the skill |
+| **Skill Description** | Description of what the remote skill does |
+| **Input Modes** | Accepted media types (`text/plain`, `application/json`) |
+| **Output Modes** | Response media types (`text/plain`, `application/json`) |
+| **Examples** | Usage examples (one per line) |
+| **Tags** | Comma-separated tags for categorization |
+
+These fields are stored in the tool's `config` JSON and used by the A2A tool wrapper to build the rich docstring and negotiate media types with the remote agent.
+
 #### Circuit Breaker Behaviour
 
 1. **Normal operation**: All calls proceed normally
@@ -538,7 +606,28 @@ Every A2A call is logged with:
 - **Status** — `success`, `timeout`, `error`, or `circuit_open`
 - **Retry count** — how many retries were attempted
 
-Call logs are visible via the admin API (`GET /admin/a2a-call-logs`) and can be filtered by server, status, or date range.
+##### A2A Call Logs UI
+
+**Admin Area → A2A Call Logs** provides a read-only table view of all A2A call records. The page displays:
+
+| Column | Description |
+|--------|-------------|
+| **Timestamp** | When the call occurred (sorted newest-first by default) |
+| **Server** | The A2A server name the call was routed to |
+| **Skill ID** | The remote skill identifier |
+| **Status** | Colored tag: <Tag color="green">Success</Tag>, <Tag color="red">Error</Tag>, <Tag color="orange">Timeout</Tag>, <Tag color="purple">Circuit Open</Tag> |
+| **Latency (ms)** | Call duration in milliseconds |
+| **Retries** | Number of retry attempts |
+| **Error** | Truncated error message (if any) |
+
+**Filters** are available above the table:
+- **Server** — dropdown populated from configured A2A servers
+- **Status** — dropdown with all four status values
+- **Date range** — date picker to narrow results by creation date
+
+Click any row to **expand** it and view the full **Trace ID** and **Error Message** details.
+
+Call logs are immutable append-only records that survive A2A server deletion. They can be filtered by server, status, or date range.
 
 ---
 

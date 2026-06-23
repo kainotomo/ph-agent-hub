@@ -16,7 +16,7 @@ import {
   Typography,
 } from "antd";
 import { useMutation, useQueryClient, useQuery } from "@tanstack/react-query";
-import { createTool, updateTool, listTenants, ToolData, TenantData } from "../../services/admin";
+import { createTool, updateTool, listTenants, ToolData, TenantData, listA2aServers, A2aServerData } from "../../services/admin";
 import { useAuth } from "../../../../providers/AuthProvider";
 import { CodeEditor } from "../../../../shared/components/CodeEditor";
 
@@ -58,16 +58,38 @@ export function ToolForm({ open, tool, duplicateFrom, onClose }: ToolFormProps) 
     enabled: open && isAdmin,
   });
 
+  const { data: a2aServers } = useQuery({
+    queryKey: ["admin-a2a-servers-tool-form"],
+    queryFn: () => listA2aServers({ page_size: 100 }),
+    select: (data) => data?.items || [],
+    enabled: open,
+  });
+
   React.useEffect(() => {
     if (open) {
       if (duplicateFrom) {
         const fields: Record<string, unknown> = {
           tenant_id: duplicateFrom.tenant_id,
           name: duplicateFrom.name,
+          description: duplicateFrom.description || "",
           type: duplicateFrom.type,
           enabled: duplicateFrom.enabled,
           is_public: duplicateFrom.is_public,
         };
+        if (duplicateFrom.type === "a2a" && duplicateFrom.config) {
+          fields.a2a_server_id = duplicateFrom.config.a2a_server_id || "";
+          fields.skill_id = duplicateFrom.config.skill_id || "";
+          fields.skill_name = duplicateFrom.config.skill_name || "";
+          fields.skill_description = duplicateFrom.config.skill_description || "";
+          fields.input_modes = duplicateFrom.config.input_modes || [];
+          fields.output_modes = duplicateFrom.config.output_modes || [];
+          fields.examples = Array.isArray(duplicateFrom.config.examples)
+            ? duplicateFrom.config.examples.join("\n")
+            : "";
+          fields.tags = Array.isArray(duplicateFrom.config.tags)
+            ? duplicateFrom.config.tags.join(", ")
+            : "";
+        }
         if (duplicateFrom.type === "erpnext" && duplicateFrom.config) {
           fields.erpnext_base_url = duplicateFrom.config.base_url || "";
           fields.erpnext_api_key = duplicateFrom.config.api_key || "";
@@ -92,10 +114,26 @@ export function ToolForm({ open, tool, duplicateFrom, onClose }: ToolFormProps) 
         const fields: Record<string, unknown> = {
           tenant_id: tool.tenant_id,
           name: tool.name,
+          description: tool.description || "",
           type: tool.type,
           enabled: tool.enabled,
           is_public: tool.is_public,
         };
+        // Populate A2A fields from config
+        if (tool.type === "a2a" && tool.config) {
+          fields.a2a_server_id = tool.config.a2a_server_id || "";
+          fields.skill_id = tool.config.skill_id || "";
+          fields.skill_name = tool.config.skill_name || "";
+          fields.skill_description = tool.config.skill_description || "";
+          fields.input_modes = tool.config.input_modes || [];
+          fields.output_modes = tool.config.output_modes || [];
+          fields.examples = Array.isArray(tool.config.examples)
+            ? tool.config.examples.join("\n")
+            : "";
+          fields.tags = Array.isArray(tool.config.tags)
+            ? tool.config.tags.join(", ")
+            : "";
+        }
         // Populate structured ERPNext fields from config
         if (tool.type === "erpnext" && tool.config) {
           fields.erpnext_base_url = tool.config.base_url || "";
@@ -157,6 +195,29 @@ export function ToolForm({ open, tool, duplicateFrom, onClose }: ToolFormProps) 
           company_logo_url: data.doc_company_logo_url || "",
         };
         delete data.doc_company_logo_url;
+      } else if (data.type === "a2a") {
+        data.config = {
+          a2a_server_id: data.a2a_server_id || "",
+          skill_id: data.skill_id || "",
+          skill_name: data.skill_name || "",
+          skill_description: data.skill_description || "",
+          input_modes: data.input_modes || [],
+          output_modes: data.output_modes || [],
+          examples: typeof data.examples === "string"
+            ? data.examples.split("\n").filter(Boolean)
+            : [],
+          tags: typeof data.tags === "string"
+            ? data.tags.split(",").map((t: string) => t.trim()).filter(Boolean)
+            : [],
+        };
+        delete data.a2a_server_id;
+        delete data.skill_id;
+        delete data.skill_name;
+        delete data.skill_description;
+        delete data.input_modes;
+        delete data.output_modes;
+        delete data.examples;
+        delete data.tags;
       } else if (typeof data.config_json === "string" && data.config_json.trim()) {
         try {
           data.config = JSON.parse(data.config_json as string);
@@ -208,6 +269,29 @@ export function ToolForm({ open, tool, duplicateFrom, onClose }: ToolFormProps) 
           company_logo_url: data.doc_company_logo_url || "",
         };
         delete data.doc_company_logo_url;
+      } else if (data.type === "a2a") {
+        data.config = {
+          a2a_server_id: data.a2a_server_id || "",
+          skill_id: data.skill_id || "",
+          skill_name: data.skill_name || "",
+          skill_description: data.skill_description || "",
+          input_modes: data.input_modes || [],
+          output_modes: data.output_modes || [],
+          examples: typeof data.examples === "string"
+            ? data.examples.split("\n").filter(Boolean)
+            : [],
+          tags: typeof data.tags === "string"
+            ? data.tags.split(",").map((t: string) => t.trim()).filter(Boolean)
+            : [],
+        };
+        delete data.a2a_server_id;
+        delete data.skill_id;
+        delete data.skill_name;
+        delete data.skill_description;
+        delete data.input_modes;
+        delete data.output_modes;
+        delete data.examples;
+        delete data.tags;
       } else if (typeof data.config_json === "string" && data.config_json.trim()) {
         try {
           data.config = JSON.parse(data.config_json as string);
@@ -268,6 +352,9 @@ export function ToolForm({ open, tool, duplicateFrom, onClose }: ToolFormProps) 
         <Form.Item name="name" label="Name" rules={[{ required: true }]}>
           <Input />
         </Form.Item>
+        <Form.Item name="description" label="Description">
+          <Input.TextArea rows={2} placeholder="Describe what this tool does" />
+        </Form.Item>
         <Form.Item
           name="type"
           label="Type"
@@ -303,10 +390,65 @@ export function ToolForm({ open, tool, duplicateFrom, onClose }: ToolFormProps) 
               { label: "Weather", value: "weather" },
               { label: "Web Search", value: "web_search" },
               { label: "Wikipedia", value: "wikipedia" },
+              { label: "A2A (Remote Agent)", value: "a2a" },
             ]}
             onChange={(value) => setToolType(value)}
           />
         </Form.Item>
+
+        {/* A2A-specific structured fields */}
+        {toolType === "a2a" && (
+          <>
+            <Form.Item
+              name="a2a_server_id"
+              label="A2A Server"
+              rules={[{ required: true, message: "A2A server is required" }]}
+            >
+              <Select
+                placeholder="Select an A2A server"
+                options={(a2aServers || []).map((s: A2aServerData) => ({
+                  label: s.name,
+                  value: s.id,
+                }))}
+              />
+            </Form.Item>
+            <Form.Item name="skill_id" label="Skill ID">
+              <Input placeholder="Remote skill identifier" />
+            </Form.Item>
+            <Form.Item name="skill_name" label="Skill Name">
+              <Input placeholder="Human-readable skill name" />
+            </Form.Item>
+            <Form.Item name="skill_description" label="Skill Description">
+              <TextArea rows={2} placeholder="Describe what this remote skill does" />
+            </Form.Item>
+            <Form.Item name="input_modes" label="Input Modes">
+              <Select
+                mode="multiple"
+                placeholder="Select input modes"
+                options={[
+                  { label: "Text", value: "text/plain" },
+                  { label: "JSON", value: "application/json" },
+                ]}
+              />
+            </Form.Item>
+            <Form.Item name="output_modes" label="Output Modes">
+              <Select
+                mode="multiple"
+                placeholder="Select output modes"
+                options={[
+                  { label: "Text", value: "text/plain" },
+                  { label: "JSON", value: "application/json" },
+                ]}
+              />
+            </Form.Item>
+            <Form.Item name="examples" label="Examples (one per line)">
+              <TextArea rows={3} placeholder="Example 1&#10;Example 2" />
+            </Form.Item>
+            <Form.Item name="tags" label="Tags (comma-separated)">
+              <Input placeholder="json, analysis, reporting" />
+            </Form.Item>
+          </>
+        )}
 
         {/* ERPNext-specific structured fields */}
         {toolType === "erpnext" && (
@@ -370,7 +512,7 @@ export function ToolForm({ open, tool, duplicateFrom, onClose }: ToolFormProps) 
         )}
 
         {/* Generic config JSON for tools without structured fields */}
-        {!["erpnext", "sql_query", "document_generation", "custom"].includes(toolType) && (
+        {!["erpnext", "sql_query", "document_generation", "custom", "a2a"].includes(toolType) && (
           <Form.Item
             name="config_json"
             label="Configuration (JSON)"

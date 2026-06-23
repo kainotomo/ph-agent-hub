@@ -6,6 +6,7 @@
 
 from datetime import datetime
 from typing import Literal
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
@@ -26,6 +27,7 @@ from ..core.dependencies import (
 )
 from ..core.exceptions import ConflictError, ForbiddenError, NotFoundError, ValidationError
 from ..core.pagination import PaginatedResponse
+from ..core.redis import store_a2a_oauth_state
 from ..db.orm.users import User as UserORM
 from ..services.audit_service import list_audit_logs, write_audit_log
 from ..services.tenant_service import (
@@ -94,6 +96,8 @@ from ..services.a2a_service import (
     decrypt_auth_token,
     decrypt_headers as _a2a_decrypt_headers,
     mask_dict as _a2a_mask_dict,
+    get_oauth2_tokens_status as _a2a_oauth2_tokens_status,
+    decrypt_oauth2_client_secret as _a2a_decrypt_oauth2_client_secret,
 )
 from ..services.a2a_circuit_breaker import A2ACircuitBreaker
 from ..db.orm.a2a_call_logs import A2aCallLog
@@ -318,6 +322,7 @@ class ModelResponse(BaseModel):
 class ToolCreate(BaseModel):
     tenant_id: str | None = None  # admin only — fallback to current_user.tenant_id
     name: str
+    description: str | None = None
     type: str
     config: dict | None = None
     code: str | None = None
@@ -328,6 +333,7 @@ class ToolCreate(BaseModel):
 class ToolUpdate(BaseModel):
     tenant_id: str | None = None  # admin only
     name: str | None = None
+    description: str | None = None
     type: str | None = None
     config: dict | None = None
     code: str | None = None
@@ -339,6 +345,7 @@ class ToolResponse(BaseModel):
     id: str
     tenant_id: str
     name: str
+    description: str | None = None
     type: str
     category: str
     config: dict | None
@@ -1156,6 +1163,7 @@ async def create_tool(
         db,
         tenant_id=tenant_id,
         name=body.name,
+        description=body.description,
         type=body.type,
         config=body.config,
         code=body.code,
@@ -1202,6 +1210,8 @@ async def update_tool(
     update_kwargs: dict = {}
     if body.name is not None:
         update_kwargs["name"] = body.name
+    if body.description is not None:
+        update_kwargs["description"] = body.description
     if body.type is not None:
         update_kwargs["type"] = body.type
     if body.config is not None:
@@ -1571,6 +1581,12 @@ class A2aServerCreate(BaseModel):
     circuit_breaker_threshold: int | None = None
     circuit_breaker_window_seconds: int | None = None
     circuit_breaker_cooldown_seconds: int | None = None
+    # --- OAuth2 config (Issue #418) ---
+    oauth2_client_id: str | None = None
+    oauth2_client_secret: str | None = None
+    oauth2_authorize_url: str | None = None
+    oauth2_token_url: str | None = None
+    oauth2_scopes: str | None = None
 
 
 class A2aServerUpdate(BaseModel):
@@ -1593,6 +1609,13 @@ class A2aServerUpdate(BaseModel):
     circuit_breaker_threshold: int | None = None
     circuit_breaker_window_seconds: int | None = None
     circuit_breaker_cooldown_seconds: int | None = None
+    # --- OAuth2 config (Issue #418) ---
+    oauth2_client_id: str | None = None
+    oauth2_client_secret: str | None = None
+    oauth2_authorize_url: str | None = None
+    oauth2_token_url: str | None = None
+    oauth2_scopes: str | None = None
+    oauth2_tokens: str | None = None  # set to null to revoke
 
 
 class A2aServerResponse(BaseModel):
@@ -1617,6 +1640,13 @@ class A2aServerResponse(BaseModel):
     circuit_breaker_threshold: int | None = None
     circuit_breaker_window_seconds: int | None = None
     circuit_breaker_cooldown_seconds: int | None = None
+    # --- OAuth2 config (Issue #418) ---
+    oauth2_client_id: str | None = None
+    oauth2_client_secret: str | None = None  # masked
+    oauth2_authorize_url: str | None = None
+    oauth2_token_url: str | None = None
+    oauth2_scopes: str | None = None
+    oauth2_tokens_status: str | None = None  # "authorized" | "expired" | "none" | None
     agent_card_cache: dict | None = None
     agent_card_cached_at: datetime | None = None
     created_at: datetime
@@ -1673,6 +1703,9 @@ async def list_a2a_servers(
         server_dict = {c.name: getattr(s, c.name) for c in s.__table__.columns}
         server_dict["auth_token"] = _a2a_mask_dict({"token": decrypted_token})["token"] if decrypted_token else None
         server_dict["headers"] = _a2a_mask_dict(decrypted_headers) if decrypted_headers else None
+        server_dict["oauth2_tokens_status"] = _a2a_oauth2_tokens_status(s)
+        decrypted_secret = _a2a_decrypt_oauth2_client_secret(s)
+        server_dict["oauth2_client_secret"] = _a2a_mask_dict({"secret": decrypted_secret or ""})["secret"] if decrypted_secret else None
         data = A2aServerResponse.model_validate(server_dict)
         items.append(data)
 
@@ -1715,6 +1748,12 @@ async def create_a2a_server(
         circuit_breaker_threshold=body.circuit_breaker_threshold,
         circuit_breaker_window_seconds=body.circuit_breaker_window_seconds,
         circuit_breaker_cooldown_seconds=body.circuit_breaker_cooldown_seconds,
+        # OAuth2 config
+        oauth2_client_id=body.oauth2_client_id,
+        oauth2_client_secret=body.oauth2_client_secret,
+        oauth2_authorize_url=body.oauth2_authorize_url,
+        oauth2_token_url=body.oauth2_token_url,
+        oauth2_scopes=body.oauth2_scopes,
     )
     await write_audit_log(
         db,
@@ -1730,6 +1769,9 @@ async def create_a2a_server(
     server_dict = {c.name: getattr(server, c.name) for c in server.__table__.columns}
     server_dict["auth_token"] = _a2a_mask_dict({"token": decrypted_token})["token"] if decrypted_token else None
     server_dict["headers"] = _a2a_mask_dict(decrypted_headers) if decrypted_headers else None
+    server_dict["oauth2_tokens_status"] = _a2a_oauth2_tokens_status(server)
+    decrypted_secret = _a2a_decrypt_oauth2_client_secret(server)
+    server_dict["oauth2_client_secret"] = _a2a_mask_dict({"secret": decrypted_secret or ""})["secret"] if decrypted_secret else None
     data = A2aServerResponse.model_validate(server_dict)
     return data
 
@@ -1752,6 +1794,9 @@ async def get_a2a_server(
     server_dict = {c.name: getattr(server, c.name) for c in server.__table__.columns}
     server_dict["auth_token"] = _a2a_mask_dict({"token": decrypted_token})["token"] if decrypted_token else None
     server_dict["headers"] = _a2a_mask_dict(decrypted_headers) if decrypted_headers else None
+    server_dict["oauth2_tokens_status"] = _a2a_oauth2_tokens_status(server)
+    decrypted_secret = _a2a_decrypt_oauth2_client_secret(server)
+    server_dict["oauth2_client_secret"] = _a2a_mask_dict({"secret": decrypted_secret or ""})["secret"] if decrypted_secret else None
     data = A2aServerResponse.model_validate(server_dict)
     return data
 
@@ -1779,10 +1824,16 @@ async def update_a2a_server(
                   "retry_backoff_max_seconds", "timeout_connect_seconds",
                   "timeout_read_seconds", "timeout_stream_seconds",
                   "circuit_breaker_threshold", "circuit_breaker_window_seconds",
-                  "circuit_breaker_cooldown_seconds"):
+                  "circuit_breaker_cooldown_seconds",
+                  "oauth2_client_id", "oauth2_client_secret",
+                  "oauth2_authorize_url", "oauth2_token_url",
+                  "oauth2_scopes"):
         val = getattr(body, field, None)
         if val is not None:
             update_kwargs[field] = val
+    # oauth2_tokens is special: null means "clear tokens" (e.g. revoke)
+    if "oauth2_tokens" in body.model_fields_set:
+        update_kwargs["oauth2_tokens"] = body.oauth2_tokens
 
     server = await _svc_update_a2a_server(db, server_id, **update_kwargs)
 
@@ -1801,6 +1852,9 @@ async def update_a2a_server(
     server_dict = {c.name: getattr(server, c.name) for c in server.__table__.columns}
     server_dict["auth_token"] = _a2a_mask_dict({"token": decrypted_token})["token"] if decrypted_token else None
     server_dict["headers"] = _a2a_mask_dict(decrypted_headers) if decrypted_headers else None
+    server_dict["oauth2_tokens_status"] = _a2a_oauth2_tokens_status(server)
+    decrypted_secret = _a2a_decrypt_oauth2_client_secret(server)
+    server_dict["oauth2_client_secret"] = _a2a_mask_dict({"secret": decrypted_secret or ""})["secret"] if decrypted_secret else None
     data = A2aServerResponse.model_validate(server_dict)
     return data
 
@@ -1872,6 +1926,70 @@ async def sync_a2a_server_tools(
         ip_address=_get_client_ip(request),
     )
     return result
+
+
+class A2aOAuth2AuthorizeResponse(BaseModel):
+    authorization_url: str
+
+
+@router.post("/a2a-servers/{server_id}/oauth2/authorize", response_model=A2aOAuth2AuthorizeResponse)
+async def authorize_a2a_server_oauth2(
+    server_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Generate an OAuth2 authorization URL for an A2A server.
+
+    Stores a state nonce in Redis for callback validation.
+    The admin must open the returned URL in a browser to complete authorization.
+    """
+    from ..core.config import settings
+
+    target = await _svc_get_a2a_server(db, server_id)
+    if target is None:
+        raise NotFoundError("A2A server not found")
+    if current_user.role == "manager" and target.tenant_id != current_user.tenant_id:
+        raise ForbiddenError("Managers can only authorize A2A servers in their own tenant")
+
+    # Validate OAuth2 config is present
+    if target.auth_scheme != "oauth2":
+        raise ValidationError("A2A server is not configured for OAuth2 authentication")
+    if not target.oauth2_client_id or not target.oauth2_authorize_url or not target.oauth2_token_url:
+        raise ValidationError(
+            "OAuth2 client_id, authorize_url, and token_url must be configured"
+        )
+
+    # Generate state nonce and store in Redis
+    nonce = str(uuid.uuid4())
+    await store_a2a_oauth_state(nonce, server_id, current_user.id)
+
+    # Build redirect URI
+    redirect_uri = f"{settings.API_BASE_URL}/api/a2a/oauth2/callback"
+
+    # Build authorization URL
+    from urllib.parse import urlencode
+    params = {
+        "response_type": "code",
+        "client_id": target.oauth2_client_id,
+        "redirect_uri": redirect_uri,
+        "state": nonce,
+    }
+    if target.oauth2_scopes:
+        params["scope"] = target.oauth2_scopes
+
+    authorization_url = f"{target.oauth2_authorize_url}?{urlencode(params)}"
+
+    await write_audit_log(
+        db,
+        actor=current_user,
+        action="a2a_server.oauth2_authorize_initiated",
+        target_type="a2a_server",
+        target_id=server_id,
+        tenant_id=current_user.tenant_id,
+        ip_address=_get_client_ip(request),
+    )
+    return A2aOAuth2AuthorizeResponse(authorization_url=authorization_url)
 
 
 # =============================================================================
@@ -2004,7 +2122,15 @@ async def list_a2a_call_logs(
     if date_to:
         stmt = stmt.where(A2aCallLog.created_at <= date_to)
 
-    return await paginate(db, stmt, page=page, page_size=page_size)
+    items, total = await paginate(db, stmt, page=page, page_size=page_size)
+    total_pages = max(1, -(-total // page_size))
+    return PaginatedResponse(
+        items=[A2aCallLogResponse.model_validate(item) for item in items],
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages,
+    )
 
 
 # =============================================================================

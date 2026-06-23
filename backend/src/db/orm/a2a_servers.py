@@ -59,6 +59,35 @@ class A2aServer(Base):
     headers: Mapped[str | None] = mapped_column(
         Text, nullable=True, comment="Fernet-encrypted JSON dict of HTTP headers"
     )
+
+    # --- OAuth2 configuration (Issue #418) ---
+    oauth2_client_id: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+        comment="OAuth2 client identifier for Authorization Code flow",
+    )
+    # Fernet-encrypted OAuth2 client secret
+    oauth2_client_secret: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+        comment="Fernet-encrypted OAuth2 client secret",
+    )
+    oauth2_authorize_url: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+        comment="OAuth2 authorization endpoint URL",
+    )
+    oauth2_token_url: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+        comment="OAuth2 token endpoint URL",
+    )
+    oauth2_scopes: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+        comment="Space-separated OAuth2 scope string",
+    )
+    # Fernet-encrypted JSON blob of OAuth2 runtime tokens
+    oauth2_tokens: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+        comment="Fernet-encrypted JSON blob of OAuth2 tokens (access_token, refresh_token, expires_at)",
+    )
+
     # Null = all skills allowed; list = subset of skill IDs
     allowed_skills: Mapped[list | None] = mapped_column(
         JSON, nullable=True,

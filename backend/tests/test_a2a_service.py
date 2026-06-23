@@ -650,3 +650,505 @@ class TestSyncA2aTools:
         # Verify the old tool was disabled
         await db_session.refresh(old_tool)
         assert old_tool.enabled is False
+
+
+# =============================================================================
+# OAuth2 Tests (Issue #418)
+# =============================================================================
+
+
+class TestCreateA2aServerWithOAuth2:
+    """Tests for creating A2A servers with OAuth2 config."""
+
+    async def test_create_with_oauth2_config(self, db_session: AsyncSession, test_tenant):
+        """Should store OAuth2 config with client_secret encrypted."""
+        server = await create_a2a_server(
+            db_session, **_make_server_kwargs(
+                test_tenant.id,
+                auth_scheme="oauth2",
+                oauth2_client_id="my-client-id",
+                oauth2_client_secret="my-client-secret",
+                oauth2_authorize_url="https://provider.example.com/oauth2/authorize",
+                oauth2_token_url="https://provider.example.com/oauth2/token",
+                oauth2_scopes="openid profile email",
+            ),
+        )
+        assert server.auth_scheme == "oauth2"
+        assert server.oauth2_client_id == "my-client-id"
+        assert server.oauth2_authorize_url == "https://provider.example.com/oauth2/authorize"
+        assert server.oauth2_token_url == "https://provider.example.com/oauth2/token"
+        assert server.oauth2_scopes == "openid profile email"
+        # Client secret should be encrypted
+        assert server.oauth2_client_secret is not None
+        assert "my-client-secret" not in server.oauth2_client_secret
+
+    async def test_create_without_oauth2(self, db_session: AsyncSession, test_tenant):
+        """Should create server with no OAuth2 fields set."""
+        server = await create_a2a_server(
+            db_session, **_make_server_kwargs(test_tenant.id),
+        )
+        assert server.oauth2_client_id is None
+        assert server.oauth2_client_secret is None
+
+
+class TestDecryptOAuth2Helpers:
+    """Tests for OAuth2 decryption and status helpers."""
+
+    async def test_decrypt_oauth2_client_secret(self, db_session: AsyncSession, test_tenant):
+        """Should decrypt an encrypted client_secret."""
+        from src.services.a2a_service import decrypt_oauth2_client_secret
+        encrypted = encrypt("my-secret-value")
+        server = A2aServer(
+            tenant_id=test_tenant.id, name="OAuth2 Test",
+            protocol_binding="rest", url="https://oauth2.example.com",
+            auth_scheme="oauth2", oauth2_client_secret=encrypted,
+        )
+        db_session.add(server)
+        await db_session.flush()
+
+        result = decrypt_oauth2_client_secret(server)
+        assert result == "my-secret-value"
+
+    async def test_decrypt_oauth2_client_secret_none(self):
+        """Should return None when no client_secret is set."""
+        from src.services.a2a_service import decrypt_oauth2_client_secret
+        server = A2aServer(
+            tenant_id="test", name="No Secret",
+            protocol_binding="rest", url="https://nosecret.example.com",
+        )
+        assert decrypt_oauth2_client_secret(server) is None
+
+
+class TestOAuth2TokenStatus:
+    """Tests for get_oauth2_tokens_status."""
+
+    async def test_not_oauth2_returns_none(self, db_session: AsyncSession, test_tenant):
+        """Should return None when auth_scheme is not oauth2."""
+        from src.services.a2a_service import get_oauth2_tokens_status
+        server = A2aServer(
+            tenant_id=test_tenant.id, name="Bearer",
+            protocol_binding="rest", url="https://bearer.example.com",
+            auth_scheme="bearer",
+        )
+        assert get_oauth2_tokens_status(server) is None
+
+    async def test_no_tokens_returns_none(self, db_session: AsyncSession, test_tenant):
+        """Should return 'none' when no oauth2_tokens stored."""
+        from src.services.a2a_service import get_oauth2_tokens_status
+        server = A2aServer(
+            tenant_id=test_tenant.id, name="OAuth2 No Tokens",
+            protocol_binding="rest", url="https://oauth2.example.com",
+            auth_scheme="oauth2",
+            oauth2_tokens=None,
+        )
+        assert get_oauth2_tokens_status(server) == "none"
+
+    async def test_with_valid_tokens_returns_authorized(self, db_session: AsyncSession, test_tenant):
+        """Should return 'authorized' when valid tokens exist."""
+        from src.services.a2a_service import get_oauth2_tokens_status
+        import time
+        tokens = json.dumps({
+            "access_token": "valid-access-token",
+            "refresh_token": "valid-refresh-token",
+            "expires_at": int(time.time()) + 3600,
+        })
+        server = A2aServer(
+            tenant_id=test_tenant.id, name="OAuth2 Tokens",
+            protocol_binding="rest", url="https://oauth2.example.com",
+            auth_scheme="oauth2",
+            oauth2_tokens=encrypt(tokens),
+        )
+        db_session.add(server)
+        await db_session.flush()
+
+        assert get_oauth2_tokens_status(server) == "authorized"
+
+    async def test_empty_access_token_returns_none(self, db_session: AsyncSession, test_tenant):
+        """Should return 'none' when access_token is empty."""
+        from src.services.a2a_service import get_oauth2_tokens_status
+        tokens = json.dumps({"access_token": "", "refresh_token": "", "expires_at": 0})
+        server = A2aServer(
+            tenant_id=test_tenant.id, name="OAuth2 Empty",
+            protocol_binding="rest", url="https://oauth2.example.com",
+            auth_scheme="oauth2",
+            oauth2_tokens=encrypt(tokens),
+        )
+        db_session.add(server)
+        await db_session.flush()
+
+        assert get_oauth2_tokens_status(server) == "none"
+
+    async def test_corrupted_tokens_returns_expired(self, db_session: AsyncSession, test_tenant):
+        """Should return 'expired' when tokens cannot be decrypted."""
+        from src.services.a2a_service import get_oauth2_tokens_status
+        server = A2aServer(
+            tenant_id=test_tenant.id, name="Corrupted",
+            protocol_binding="rest", url="https://corrupted.example.com",
+            auth_scheme="oauth2",
+            oauth2_tokens="not-valid-fernet-data",
+        )
+        db_session.add(server)
+        await db_session.flush()
+
+        assert get_oauth2_tokens_status(server) == "expired"
+
+
+class TestOAuth2TokenExchange:
+    """Tests for exchange_oauth2_code and refresh_oauth2_token."""
+
+    async def test_exchange_oauth2_code_success(self, db_session: AsyncSession, test_tenant):
+        """Should exchange code for tokens via POST to token_url."""
+        from src.services.a2a_service import exchange_oauth2_code
+        import time
+
+        server = A2aServer(
+            tenant_id=test_tenant.id, name="Exchange Test",
+            protocol_binding="rest", url="https://exchange.example.com",
+            auth_scheme="oauth2",
+            oauth2_client_id="test-client-id",
+            oauth2_client_secret=encrypt("test-client-secret"),
+            oauth2_token_url="https://provider.example.com/oauth2/token",
+        )
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json = MagicMock(return_value={
+            "access_token": "new-access-token",
+            "refresh_token": "new-refresh-token",
+            "expires_in": 3600,
+        })
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.__aenter__.return_value = mock_client
+            mock_client.post = AsyncMock(return_value=mock_response)
+            mock_client_cls.return_value = mock_client
+
+            result = await exchange_oauth2_code(
+                code="auth-code-123",
+                redirect_uri="http://localhost:8000/api/a2a/oauth2/callback",
+                server=server,
+            )
+
+        assert result is not None
+        assert result["access_token"] == "new-access-token"
+        assert result["refresh_token"] == "new-refresh-token"
+        assert result["expires_at"] > int(time.time())
+
+    async def test_exchange_oauth2_code_failure(self, db_session: AsyncSession, test_tenant):
+        """Should return None when token exchange fails."""
+        from src.services.a2a_service import exchange_oauth2_code
+
+        server = A2aServer(
+            tenant_id=test_tenant.id, name="Exchange Fail",
+            protocol_binding="rest", url="https://fail.example.com",
+            auth_scheme="oauth2",
+            oauth2_client_id="test-client-id",
+            oauth2_client_secret=encrypt("test-client-secret"),
+            oauth2_token_url="https://provider.example.com/oauth2/token",
+        )
+
+        mock_response = MagicMock()
+        mock_response.status_code = 400
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.__aenter__.return_value = mock_client
+            mock_client.post = AsyncMock(return_value=mock_response)
+            mock_client_cls.return_value = mock_client
+
+            result = await exchange_oauth2_code(
+                code="bad-code",
+                redirect_uri="http://localhost:8000/api/a2a/oauth2/callback",
+                server=server,
+            )
+
+        assert result is None
+
+    async def test_refresh_oauth2_token_success(self, db_session: AsyncSession, test_tenant):
+        """Should refresh token via POST to token_url."""
+        from src.services.a2a_service import refresh_oauth2_token
+        import time
+
+        old_tokens = json.dumps({
+            "access_token": "old-access-token",
+            "refresh_token": "old-refresh-token",
+            "expires_at": int(time.time()) - 100,  # expired
+        })
+
+        server = A2aServer(
+            tenant_id=test_tenant.id, name="Refresh Test",
+            protocol_binding="rest", url="https://refresh.example.com",
+            auth_scheme="oauth2",
+            oauth2_client_id="test-client-id",
+            oauth2_client_secret=encrypt("test-client-secret"),
+            oauth2_token_url="https://provider.example.com/oauth2/token",
+            oauth2_tokens=encrypt(old_tokens),
+        )
+        db_session.add(server)
+        await db_session.flush()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json = MagicMock(return_value={
+            "access_token": "refreshed-access-token",
+            "expires_in": 3600,
+        })
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.__aenter__.return_value = mock_client
+            mock_client.post = AsyncMock(return_value=mock_response)
+            mock_client_cls.return_value = mock_client
+
+            result = await refresh_oauth2_token(server)
+
+        assert result is not None
+        assert result["access_token"] == "refreshed-access-token"
+        # Should preserve existing refresh_token when provider doesn't rotate
+        assert result["refresh_token"] == "old-refresh-token"
+        assert result["expires_at"] > int(time.time())
+
+    async def test_refresh_oauth2_token_invalid_grant(self, db_session: AsyncSession, test_tenant):
+        """Should clear tokens when provider returns invalid_grant."""
+        from src.services.a2a_service import refresh_oauth2_token
+        import time
+
+        old_tokens = json.dumps({
+            "access_token": "dead-token",
+            "refresh_token": "dead-refresh-token",
+            "expires_at": int(time.time()) - 100,
+        })
+
+        server = A2aServer(
+            tenant_id=test_tenant.id, name="Invalid Grant",
+            protocol_binding="rest", url="https://invalid.example.com",
+            auth_scheme="oauth2",
+            oauth2_client_id="test-client-id",
+            oauth2_client_secret=encrypt("test-client-secret"),
+            oauth2_token_url="https://provider.example.com/oauth2/token",
+            oauth2_tokens=encrypt(old_tokens),
+        )
+        db_session.add(server)
+        await db_session.flush()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 400
+        mock_response.json = MagicMock(return_value={"error": "invalid_grant"})
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.__aenter__.return_value = mock_client
+            mock_client.post = AsyncMock(return_value=mock_response)
+            mock_client_cls.return_value = mock_client
+
+            result = await refresh_oauth2_token(server)
+
+        assert result is None
+        # Tokens should be cleared
+        assert server.oauth2_tokens is None
+
+    async def test_refresh_oauth2_token_no_refresh_token(self, db_session: AsyncSession, test_tenant):
+        """Should return None when no refresh_token available."""
+        from src.services.a2a_service import refresh_oauth2_token
+        import time
+
+        tokens_no_rt = json.dumps({
+            "access_token": "access-only",
+            "refresh_token": "",
+            "expires_at": int(time.time()) - 100,
+        })
+
+        server = A2aServer(
+            tenant_id=test_tenant.id, name="No Refresh",
+            protocol_binding="rest", url="https://norefresh.example.com",
+            auth_scheme="oauth2",
+            oauth2_client_id="test-client-id",
+            oauth2_client_secret=encrypt("test-client-secret"),
+            oauth2_token_url="https://provider.example.com/oauth2/token",
+            oauth2_tokens=encrypt(tokens_no_rt),
+        )
+
+        result = await refresh_oauth2_token(server)
+        assert result is None
+
+
+class TestOAuth2IsTokenExpired:
+    """Tests for is_oauth2_token_expired."""
+
+    def test_fresh_token_not_expired(self):
+        """Should return False for a fresh token."""
+        from src.services.a2a_service import is_oauth2_token_expired
+        import time
+        tokens = json.dumps({
+            "access_token": "fresh",
+            "refresh_token": "fresh-rt",
+            "expires_at": int(time.time()) + 3600,
+        })
+        server = A2aServer(
+            tenant_id="test", name="Fresh",
+            protocol_binding="rest", url="https://fresh.example.com",
+            auth_scheme="oauth2",
+            oauth2_tokens=encrypt(tokens),
+        )
+        assert is_oauth2_token_expired(server) is False
+
+    def test_expired_token(self):
+        """Should return True for an expired token."""
+        from src.services.a2a_service import is_oauth2_token_expired
+        import time
+        tokens = json.dumps({
+            "access_token": "stale",
+            "refresh_token": "stale-rt",
+            "expires_at": int(time.time()) - 100,
+        })
+        server = A2aServer(
+            tenant_id="test", name="Stale",
+            protocol_binding="rest", url="https://stale.example.com",
+            auth_scheme="oauth2",
+            oauth2_tokens=encrypt(tokens),
+        )
+        assert is_oauth2_token_expired(server) is True
+
+    def test_no_tokens_returns_expired(self):
+        """Should return True when no tokens stored."""
+        from src.services.a2a_service import is_oauth2_token_expired
+        server = A2aServer(
+            tenant_id="test", name="No Tokens",
+            protocol_binding="rest", url="https://notokens.example.com",
+            auth_scheme="oauth2",
+        )
+        assert is_oauth2_token_expired(server) is True
+
+
+class TestOAuth2Update:
+    """Tests for updating OAuth2 config on existing servers."""
+
+    async def test_update_oauth2_config(self, db_session: AsyncSession, test_tenant):
+        """Should update OAuth2 fields with re-encryption."""
+        server = A2aServer(
+            tenant_id=test_tenant.id, name="OAuth2 Update",
+            protocol_binding="rest", url="https://update.example.com",
+            auth_scheme="oauth2",
+            oauth2_client_id="old-client-id",
+            oauth2_client_secret=encrypt("old-secret"),
+        )
+        db_session.add(server)
+        await db_session.flush()
+
+        updated = await update_a2a_server(
+            db_session, server.id,
+            oauth2_client_id="new-client-id",
+            oauth2_client_secret="new-client-secret",
+            oauth2_scopes="new-scope",
+        )
+
+        assert updated.oauth2_client_id == "new-client-id"
+        assert updated.oauth2_scopes == "new-scope"
+        # Secret should be re-encrypted
+        assert "new-client-secret" not in updated.oauth2_client_secret
+        from src.services.a2a_service import decrypt_oauth2_client_secret
+        assert decrypt_oauth2_client_secret(updated) == "new-client-secret"
+
+    async def test_revoke_tokens_by_setting_null(self, db_session: AsyncSession, test_tenant):
+        """Should clear oauth2_tokens when set to None."""
+        from src.core.encryption import encrypt
+        import time
+
+        tokens = json.dumps({
+            "access_token": "to-revoke",
+            "refresh_token": "to-revoke-rt",
+            "expires_at": int(time.time()) + 3600,
+        })
+        server = A2aServer(
+            tenant_id=test_tenant.id, name="OAuth2 Revoke",
+            protocol_binding="rest", url="https://revoke.example.com",
+            auth_scheme="oauth2",
+            oauth2_tokens=encrypt(tokens),
+        )
+        db_session.add(server)
+        await db_session.flush()
+
+        # Simulate what the update endpoint does with oauth2_tokens=None
+        from src.services.a2a_service import get_oauth2_tokens_status
+        assert get_oauth2_tokens_status(server) == "authorized"
+
+        updated = await update_a2a_server(
+            db_session, server.id, oauth2_tokens=None,
+        )
+        assert updated.oauth2_tokens is None
+        assert get_oauth2_tokens_status(updated) == "none"
+
+
+class TestOAuth2GetAccessToken:
+    """Tests for get_oauth2_access_token."""
+
+    async def test_fresh_token_no_refresh(self, db_session: AsyncSession, test_tenant):
+        """Should return fresh access token without calling refresh."""
+        from src.services.a2a_service import get_oauth2_access_token
+        import time
+
+        tokens = json.dumps({
+            "access_token": "still-fresh",
+            "refresh_token": "still-fresh-rt",
+            "expires_at": int(time.time()) + 3600,
+        })
+        server = A2aServer(
+            tenant_id=test_tenant.id, name="Still Fresh",
+            protocol_binding="rest", url="https://fresh.example.com",
+            auth_scheme="oauth2",
+            oauth2_client_id="test-client-id",
+            oauth2_client_secret=encrypt("test-secret"),
+            oauth2_token_url="https://provider.example.com/oauth2/token",
+            oauth2_tokens=encrypt(tokens),
+        )
+        db_session.add(server)
+        await db_session.flush()
+
+        access_token = await get_oauth2_access_token(server, db_session)
+        assert access_token == "still-fresh"
+
+    async def test_expired_token_triggers_refresh(self, db_session: AsyncSession, test_tenant):
+        """Should refresh an expired token and return the new one."""
+        from src.services.a2a_service import get_oauth2_access_token
+        import time
+
+        old_tokens = json.dumps({
+            "access_token": "expired-access",
+            "refresh_token": "still-valid-rt",
+            "expires_at": int(time.time()) - 100,
+        })
+        server = A2aServer(
+            tenant_id=test_tenant.id, name="Expired",
+            protocol_binding="rest", url="https://expired.example.com",
+            auth_scheme="oauth2",
+            oauth2_client_id="test-client-id",
+            oauth2_client_secret=encrypt("test-secret"),
+            oauth2_token_url="https://provider.example.com/oauth2/token",
+            oauth2_tokens=encrypt(old_tokens),
+        )
+        db_session.add(server)
+        await db_session.flush()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json = MagicMock(return_value={
+            "access_token": "refreshed-access",
+            "expires_in": 3600,
+        })
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.__aenter__.return_value = mock_client
+            mock_client.post = AsyncMock(return_value=mock_response)
+            mock_client_cls.return_value = mock_client
+
+            access_token = await get_oauth2_access_token(server, db_session)
+
+        assert access_token == "refreshed-access"
+
+        # Verify tokens were persisted
+        await db_session.refresh(server)
+        from src.services.a2a_service import _decrypt_oauth2_tokens
+        persisted = _decrypt_oauth2_tokens(server)
+        assert persisted["access_token"] == "refreshed-access"

@@ -30,8 +30,9 @@ import {
   PlusOutlined,
   SearchOutlined,
   CheckCircleOutlined,
+  PhoneOutlined,
 } from "@ant-design/icons";
-import { useSearchParams } from "react-router-dom";
+import { useSearchParams, Link } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   listA2aServers,
@@ -39,6 +40,7 @@ import {
   updateA2aServer,
   testA2aServer,
   syncA2aServerTools,
+  authorizeA2aServer,
   getA2aCircuitBreaker,
   resetA2aCircuitBreaker,
   A2aServerData,
@@ -154,6 +156,14 @@ export function A2aServerList() {
       });
     });
   }, [data?.items]);
+
+  const authorizeMutation = useMutation({
+    mutationFn: (id: string) => authorizeA2aServer(id),
+    onSuccess: (data) => {
+      window.open(data.authorization_url, "_blank");
+    },
+    onError: () => message.error("Failed to initiate OAuth2 authorization"),
+  });
 
   const resetCircuitMutation = useMutation({
     mutationFn: (id: string) => resetA2aCircuitBreaker(id),
@@ -278,6 +288,26 @@ export function A2aServerList() {
               onClick={() => syncMutation.mutate(record.id)}
             />
           </Tooltip>
+          {record.auth_scheme === "oauth2" && record.oauth2_tokens_status !== "authorized" && (
+            <Tooltip title={record.oauth2_tokens_status === "expired" ? "Re-authorize OAuth2" : "Authorize OAuth2"}>
+              <Button
+                type="link"
+                size="small"
+                icon={<ApiOutlined />}
+                loading={authorizeMutation.isPending && authorizeMutation.variables === record.id}
+                onClick={async () => {
+                  try {
+                    const result = await authorizeA2aServer(record.id);
+                    window.open(result.authorization_url, "_blank");
+                  } catch {
+                    // handled by API interceptor
+                  }
+                }}
+              >
+                {record.oauth2_tokens_status === "expired" ? "Re-authorize" : "Authorize"}
+              </Button>
+            </Tooltip>
+          )}
           {circuitStates[record.id]?.degraded && (
             <Tooltip title="Reset Circuit Breaker">
               <Button
@@ -317,6 +347,9 @@ export function A2aServerList() {
             <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreating(true)}>
               Add A2A Server
             </Button>
+            <Link to="/admin/a2a-call-logs">
+              <Button icon={<PhoneOutlined />}>Call Logs</Button>
+            </Link>
             <Input
               placeholder="Search..."
               prefix={<SearchOutlined />}
@@ -358,6 +391,19 @@ export function A2aServerList() {
                       key="sync"
                       onClick={() => syncMutation.mutate(item.id)}
                     />,
+                    item.auth_scheme === "oauth2" && item.oauth2_tokens_status !== "authorized" && (
+                      <Button
+                        key="authorize"
+                        type="link"
+                        size="small"
+                        onClick={async () => {
+                          const result = await authorizeA2aServer(item.id);
+                          window.open(result.authorization_url, "_blank");
+                        }}
+                      >
+                        {item.oauth2_tokens_status === "expired" ? "Re-auth" : "Auth"}
+                      </Button>
+                    ),
                     <Popconfirm
                       title="Delete?"
                       onConfirm={() => deleteMutation.mutate(item.id)}
@@ -415,6 +461,9 @@ export function A2aServerList() {
         <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreating(true)}>
           Add A2A Server
         </Button>
+        <Link to="/admin/a2a-call-logs">
+          <Button icon={<PhoneOutlined />}>Call Logs</Button>
+        </Link>
         <Input
           placeholder="Search by name or URL..."
           prefix={<SearchOutlined />}

@@ -14,6 +14,9 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
+# Import sql_query early to avoid event loop interactions during test execution
+from src.tools.sql_query import build_sql_query_tools
+
 # ---------------------------------------------------------------------------
 # Module markers — pure unit tests, no DB / no network
 # ---------------------------------------------------------------------------
@@ -1684,24 +1687,10 @@ class TestSqlQuery:
     # sql_query tool — success path
     # ======================================================================
 
-    @pytest.fixture
-    def tools(self, mock_engine):
-        """Build the three SQL query tools with a mock engine."""
-        # Patch _get_engine before building tools so the engine is never created
-        with patch("src.tools.sql_query._get_engine", return_value=mock_engine):
-            from src.tools.sql_query import build_sql_query_tools
-            tools_list = build_sql_query_tools(
-                {"connection_string": "mysql://user:pass@localhost:3306/testdb"},
-            )
-        return tools_list  # [sql_query, list_tables, describe_table]
+    async def test_sql_query_success(self):
+        """Execute a valid SELECT query and return columnar results."""
+        from src.tools.sql_query import build_sql_query_tools
 
-    @pytest.fixture
-    def mock_engine(self):
-        """Build a fully mocked async SQLAlchemy engine.
-
-        Uses MagicMock for the engine (engine.connect() is a sync call)
-        and AsyncMock for the connection (execute/commit are async).
-        """
         class MockRow:
             def __init__(self, values, keys):
                 self._values = values
@@ -1712,35 +1701,29 @@ class TestSqlQuery:
             def keys(self):
                 return lambda: self._keys_list
 
-        rows_data = [
-            MockRow([1, "Alice", "alice@example.com"], ["id", "name", "email"]),
-            MockRow([2, "Bob", "bob@example.com"], ["id", "name", "email"]),
-        ]
-
-        # Use a list subclass so iteration works naturally through list.__iter__
         class MockResult(list):
             def keys(self):
                 return ["id", "name", "email"]
 
+        rows_data = [MockRow([1, "Alice", "alice@example.com"], ["id", "name", "email"]),
+                     MockRow([2, "Bob", "bob@example.com"], ["id", "name", "email"])]
         mock_result = MockResult(rows_data)
 
         mock_conn = AsyncMock()
         mock_conn.execute = AsyncMock(return_value=mock_result)
         mock_conn.commit = AsyncMock()
 
-        # Use MagicMock for engine so engine.connect() is sync, not a coroutine
         mock_engine = MagicMock()
-        mock_engine.connect.return_value.__aenter__.return_value = mock_conn
-        mock_engine.connect.return_value.__aexit__ = AsyncMock(return_value=False)
-
-        return mock_engine
-
-    async def test_sql_query_success(self, tools, mock_engine):
-        """Execute a valid SELECT query and return columnar results."""
-        sql_query_tool = tools[0]
+        connect_cm = AsyncMock()
+        connect_cm.__aenter__.return_value = mock_conn
+        connect_cm.__aexit__ = AsyncMock(return_value=False)
+        mock_engine.connect.return_value = connect_cm
 
         with patch("src.tools.sql_query._get_engine", return_value=mock_engine):
-            result = await sql_query_tool(query="SELECT id, name, email FROM users")
+            tools_list = build_sql_query_tools(
+                {"connection_string": "mysql://user:pass@localhost:3306/testdb"},
+            )
+            result = await tools_list[0](query="SELECT id, name, email FROM users")
 
         assert "error" not in result, result.get("error")
         assert result["columns"] == ["id", "name", "email"]
@@ -1904,14 +1887,24 @@ class TestSqlQuery:
     # sql_query — error paths
     # ======================================================================
 
-    async def test_sql_query_empty(self, tools):
+    async def test_sql_query_empty(self):
         """Empty query returns error dict."""
-        result = await tools[0](query="")
+        from src.tools.sql_query import build_sql_query_tools
+        with patch("src.tools.sql_query._get_engine"):
+            tools_list = build_sql_query_tools(
+                {"connection_string": "mysql://u:p@localhost/db"},
+            )
+            result = await tools_list[0](query="")
         assert "error" in result
 
-    async def test_sql_query_unsafe_sql(self, tools):
+    async def test_sql_query_unsafe_sql(self):
         """Unsafe SQL returns error dict (not an exception)."""
-        result = await tools[0](query="DROP TABLE users")
+        from src.tools.sql_query import build_sql_query_tools
+        with patch("src.tools.sql_query._get_engine"):
+            tools_list = build_sql_query_tools(
+                {"connection_string": "mysql://u:p@localhost/db"},
+            )
+            result = await tools_list[0](query="DROP TABLE users")
         assert "error" in result
 
     async def test_sql_query_execution_failure(self):
@@ -2080,30 +2073,45 @@ class TestSqlQuery:
         assert result["columns"][0]["name"] == "id"
         assert len(result["sample_rows"]) == 1
 
-    async def test_describe_table_invalid_name(self, tools):
+    async def test_describe_table_invalid_name(self):
         """Invalid table name (SQL injection attempt) returns error."""
-        result = await tools[2](table="users; DROP TABLE users")
+        from src.tools.sql_query import build_sql_query_tools
+        with patch("src.tools.sql_query._get_engine"):
+            tools_list = build_sql_query_tools(
+                {"connection_string": "mysql://u:p@localhost/db"},
+            )
+            result = await tools_list[2](table="users; DROP TABLE users")
         assert "error" in result
 
-    async def test_describe_table_empty_name(self, tools):
+    async def test_describe_table_empty_name(self):
         """Empty table name returns error."""
-        result = await tools[2](table="")
+        from src.tools.sql_query import build_sql_query_tools
+        with patch("src.tools.sql_query._get_engine"):
+            tools_list = build_sql_query_tools(
+                {"connection_string": "mysql://u:p@localhost/db"},
+            )
+            result = await tools_list[2](table="")
         assert "error" in result
 
-    async def test_describe_table_not_found(self, tools):
+    async def test_describe_table_not_found(self):
         """Table not found returns error."""
-        empty_result = MagicMock()
-        empty_result.__iter__.return_value = iter([])
+        from src.tools.sql_query import build_sql_query_tools
 
         mock_conn = AsyncMock()
-        mock_conn.execute = AsyncMock(return_value=empty_result)
+        mock_conn.execute = AsyncMock(return_value=[])
         mock_conn.commit = AsyncMock()
 
-        mock_engine = AsyncMock()
-        mock_engine.connect.return_value.__aenter__.return_value = mock_conn
+        mock_engine = MagicMock()
+        connect_cm = AsyncMock()
+        connect_cm.__aenter__.return_value = mock_conn
+        connect_cm.__aexit__ = AsyncMock(return_value=False)
+        mock_engine.connect.return_value = connect_cm
 
         with patch("src.tools.sql_query._get_engine", return_value=mock_engine):
-            result = await tools[2](table="nonexistent")
+            tools_list = build_sql_query_tools(
+                {"connection_string": "mysql://u:p@localhost/db"},
+            )
+            result = await tools_list[2](table="nonexistent")
 
         assert "error" in result
 

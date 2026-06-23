@@ -5,7 +5,6 @@
 // expandable rows for trace_id / error_message (read-only).
 // =============================================================================
 
-import { useState } from "react";
 import {
   Table,
   Tag,

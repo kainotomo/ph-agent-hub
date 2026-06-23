@@ -28,6 +28,9 @@ export interface ListParams {
   execution_type?: string;
   visibility?: string;
   source?: string;
+  // A2A call log filters
+  a2a_server_id?: string;
+  status?: string;
   is_pinned?: boolean;
   action?: string;
   actor_id?: string;

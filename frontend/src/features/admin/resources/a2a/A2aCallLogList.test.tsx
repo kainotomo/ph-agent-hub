@@ -6,7 +6,7 @@
 // =============================================================================
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { cleanup, render, screen, act, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter } from "react-router-dom";
 import { A2aCallLogList } from "./A2aCallLogList";
@@ -122,12 +122,6 @@ function renderA2aCallLogList() {
       </BrowserRouter>
     </QueryClientProvider>,
   );
-}
-
-async function settle() {
-  await act(async () => {
-    await new Promise((r) => setTimeout(r, 300));
-  });
 }
 
 // ---------------------------------------------------------------------------

@@ -63,7 +63,7 @@ export function DemoPage() {
           flexDirection: "column",
           justifyContent: "center",
           alignItems: "center",
-          height: "100vh",
+          height: "100dvh",
           gap: 16,
         }}
       >
@@ -81,7 +81,7 @@ export function DemoPage() {
           flexDirection: "column",
           justifyContent: "center",
           alignItems: "center",
-          height: "100vh",
+          height: "100dvh",
           padding: 32,
           gap: 16,
           textAlign: "center",
@@ -113,7 +113,7 @@ export function DemoPage() {
           flexDirection: "column",
           justifyContent: "center",
           alignItems: "center",
-          height: "100vh",
+          height: "100dvh",
           padding: 32,
           gap: 16,
           textAlign: "center",
@@ -139,7 +139,7 @@ export function DemoPage() {
 
   return (
     <ConfigProvider theme={themeConfig}>
-      <Layout style={{ height: "100vh", overflow: "hidden", background: "#fff" }}>
+      <Layout style={{ height: "100dvh", overflow: "hidden", background: "#fff" }}>
         {/* Demo banner */}
         <div
           style={{

@@ -134,7 +134,7 @@ export function WidgetPage() {
           display: "flex",
           justifyContent: "center",
           alignItems: "center",
-          height: "100vh",
+          height: "100dvh",
         }}
       >
         <Spin size="large" />
@@ -149,7 +149,7 @@ export function WidgetPage() {
           display: "flex",
           justifyContent: "center",
           alignItems: "center",
-          height: "100vh",
+          height: "100dvh",
           padding: 24,
         }}
       >
@@ -162,7 +162,7 @@ export function WidgetPage() {
 
   return (
     <ConfigProvider theme={themeConfig}>
-      <Layout style={{ height: "100vh", overflow: "hidden", background: "#fff" }}>
+      <Layout style={{ height: "100dvh", overflow: "hidden", background: "#fff" }}>
         <Content style={{ padding: 0, overflow: "hidden" }}>
           <ChatWindow
             sessionId={config.session_id}

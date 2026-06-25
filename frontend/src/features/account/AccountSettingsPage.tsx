@@ -146,7 +146,7 @@ export function AccountSettingsPage() {
   const grouped = groupByToolType(credentials?.items || []);
 
   return (
-    <Layout style={{ height: "100vh", overflow: "auto" }}>
+    <Layout style={{ height: "100dvh", overflow: "auto" }}>
       <Content style={{ padding: "24px", maxWidth: 800, margin: "0 auto", width: "100%" }}>
         <Space style={{ marginBottom: 24 }}>
           <Button icon={<ArrowLeftOutlined />} onClick={() => navigate("/chat")}>

@@ -57,7 +57,7 @@ export function ChatPage() {
   };
 
   return (
-    <Layout style={{ height: "100vh", overflow: "hidden" }}>
+    <Layout style={{ height: "100dvh", overflow: "hidden" }}>
       <SessionSidebar />
       <Content>
         {!sessionId ? (

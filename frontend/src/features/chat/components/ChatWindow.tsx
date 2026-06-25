@@ -1573,6 +1573,7 @@ export function ChatWindow({
       <div
         style={{
           padding: "12px 16px",
+          paddingBottom: "calc(12px + env(safe-area-inset-bottom, 0px))",
           borderTop: "1px solid #f0f0f0",
         }}
       >

@@ -185,7 +185,7 @@ export function AdminLayout() {
   );
 
   return (
-    <Layout style={{ height: "100vh" }}>
+    <Layout style={{ height: "100dvh" }}>
       {isMobile ? (
         <>
           <Header

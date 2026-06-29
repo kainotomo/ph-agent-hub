@@ -342,6 +342,7 @@ Tools extend agent capabilities — they can call external APIs, query ERPNext i
 | **slack** | Communication | Send messages to Slack channels | `webhook_url`, `bot_token`, `default_channel`, `allowed_channels` |
 | **sql_query** | Enterprise | Read-only SQL against tenant-configured DB (PostgreSQL, MySQL, MariaDB) | `connection_string`, `row_limit` |
 | **stock_data** | Financial | Stock quotes, historical prices, financials, analyst ratings (yfinance) | None |
+| **stock_screener** | Financial | Stock screening by custom criteria — region, sector, P/E, dividend yield, etc. (yfinance EquityQuery) | None |
 | **tasks** | Productivity | Create, update, and list tasks via Google Tasks or Microsoft To Do. Requires per-user OAuth. Users connect via Account Settings. | None |
 | **weather** | Utility | Weather via wttr.in | None |
 | **web_search** | Web | SearXNG-backed web search | `searxng_url` |

@@ -280,6 +280,7 @@ export function ToolList() {
             { label: "Calendar", value: "calendar" },
             { label: "GitHub", value: "github" },
             { label: "SQL Query", value: "sql_query" },
+            { label: "Stock Screener", value: "stock_screener" },
             { label: "Weather", value: "weather" },
             { label: "Calculator", value: "calculator" },
             { label: "Image Generation", value: "image_generation" },

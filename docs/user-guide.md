@@ -170,7 +170,7 @@ Tools let the AI interact with external systems — query databases, call APIs, 
 | Category | Tools | What the AI can do |
 |---|---|---|
 | **Web** | Web Search, Fetch URL, Browser, RSS Feed, Wikipedia, RAG Search | Search the internet, read web pages, take screenshots, extract tables, search your uploaded documents |
-| **Financial** | Stock Data, Market Overview, ETF Data, Currency Exchange, Portfolio, SEC Filings | Get stock quotes, analyze portfolios, check exchange rates, read SEC filings |
+| **Financial** | Stock Data, Stock Screener, Market Overview, ETF Data, Currency Exchange, Portfolio, SEC Filings | Get stock quotes, screen stocks by custom criteria, analyze portfolios, check exchange rates, read SEC filings |
 | **Enterprise** | ERPNext, SQL Query | Query your ERP system, run read-only SQL on your database |
 | **Utility** | Calculator, Code Interpreter, Datetime, Document Generation, Weather | Do math, run Python code, check dates/times, generate PDFs/Excel/CSV, check weather |
 | **Communication** | Slack, Email | Send messages to Slack channels; **read, send, search, and manage emails** from your connected accounts |

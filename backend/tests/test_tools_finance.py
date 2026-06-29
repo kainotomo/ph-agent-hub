@@ -1918,3 +1918,144 @@ class TestMarketMoversFallback:
 
         assert "gainers" in result
         assert "losers" in result
+
+
+# ===========================================================================
+# Stock Screener Tests (Issue #428)
+# ===========================================================================
+
+
+class TestStockScreener:
+    """Tests for ``stock_screener`` (yfinance EquityQuery + screen())."""
+
+    @pytest.fixture
+    def tool(self):
+        mod = __import__(
+            "src.tools.stock_screener", fromlist=["build_stock_screener_tools"]
+        )
+        return mod.build_stock_screener_tools()[0]
+
+    async def test_success_with_filters(self, tool):
+        """Region + sector + filter returns parsed results."""
+        mock_quotes = [
+            {
+                "symbol": "XOM",
+                "shortName": "Exxon Mobil Corp.",
+                "regularMarketPrice": 120.50,
+                "regularMarketChange": 1.20,
+                "regularMarketChangePercent": 1.01,
+                "regularMarketVolume": 15000000,
+                "intradaymarketcap": 500_000_000_000,
+                "sector": "Energy",
+                "industry": "Oil & Gas E&P",
+                "exchange": "NYQ",
+                "peratio.lasttwelvemonths": 12.5,
+                "forward_dividend_yield": 3.2,
+                "beta": 0.85,
+            },
+        ]
+
+        with patch("yfinance.screen", return_value={"quotes": mock_quotes}):
+            result = await tool(region="us", sector="Energy", pe_max=15, limit=10)
+
+        assert "error" not in result
+        assert result["source"] == "yfinance"
+        assert result["count"] == 1
+        assert len(result["results"]) == 1
+        assert result["results"][0]["symbol"] == "XOM"
+        assert result["filters_applied"]["region"] == "us"
+        assert result["filters_applied"]["sector"] == "Energy"
+
+    async def test_empty_results(self, tool):
+        """No matches returns empty results list."""
+        with patch("yfinance.screen", return_value={"quotes": []}):
+            result = await tool(region="us", sector="Energy", pe_max=15)
+
+        assert "error" not in result
+        assert result["count"] == 0
+        assert result["results"] == []
+
+    async def test_no_filters_returns_error(self, tool):
+        """Calling with no filters returns an error."""
+        result = await tool()
+
+        assert "error" in result
+        assert "At least one filter criterion" in result["error"]
+
+    async def test_screen_exception(self, tool):
+        """yfinance.screen failure returns error dict."""
+        with patch(
+            "yfinance.screen",
+            side_effect=Exception("API failure"),
+        ):
+            result = await tool(region="us", sector="Energy")
+
+        assert "error" in result
+
+    async def test_limit_capped(self, tool):
+        """Limit > 250 is capped to 250."""
+        mock_quotes = [{"symbol": f"STOCK{i}"} for i in range(300)]
+
+        with patch("yfinance.screen", return_value={"quotes": mock_quotes}):
+            result = await tool(region="us", limit=500)
+
+        assert "error" not in result
+        # Only 250 max from mock, but test that cap doesn't crash
+        assert result["count"] <= 250
+
+    async def test_sort_params_passed(self, tool):
+        """sort_by and sort_asc passed to yfinance.screen."""
+        mock_quotes = [{"symbol": "AAPL"}]
+
+        with patch("yfinance.screen", return_value={"quotes": mock_quotes}) as mock_screen:
+            await tool(region="us", sort_by="dayvolume", sort_asc=True, limit=10)
+
+        mock_screen.assert_called_once()
+        _call_kwargs = mock_screen.call_args[1]
+        assert _call_kwargs.get("sortField") == "dayvolume"
+        assert _call_kwargs.get("sortAsc") is True
+
+    async def test_invalid_response(self, tool):
+        """Non-dict response returns empty results gracefully."""
+        with patch("yfinance.screen", return_value=None):
+            result = await tool(region="us")
+
+        assert "error" not in result
+        assert result["count"] == 0
+
+    async def test_multiple_filters(self, tool):
+        """Multiple numeric and categorical filters work together."""
+        mock_quotes = [
+            {
+                "symbol": "MSFT",
+                "shortName": "Microsoft Corp.",
+                "regularMarketPrice": 350.00,
+                "regularMarketChange": 2.00,
+                "regularMarketChangePercent": 0.57,
+                "regularMarketVolume": 25000000,
+                "intradaymarketcap": 2_500_000_000_000,
+                "sector": "Technology",
+                "industry": "Software - Infrastructure",
+                "exchange": "NMS",
+                "peratio.lasttwelvemonths": 28.0,
+                "forward_dividend_yield": 0.8,
+                "beta": 0.90,
+            },
+        ]
+
+        with patch("yfinance.screen", return_value={"quotes": mock_quotes}):
+            result = await tool(
+                region="us",
+                sector="Technology",
+                pe_max=30,
+                market_cap_min=1_000_000_000_000,
+                dividend_yield_min=0.5,
+                eps_growth_min=10,
+                beta_max=1.5,
+                volume_min=1_000_000,
+            )
+
+        assert "error" not in result
+        assert result["count"] == 1
+        assert result["results"][0]["symbol"] == "MSFT"
+        assert len(result["filters_applied"]) == 8

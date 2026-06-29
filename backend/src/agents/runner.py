@@ -1686,6 +1686,7 @@ async def _auto_select_tools(
         "web_search": ["search", "find", "look up", "google", "browse"],
         "fetch_url": ["url", "website", "webpage", "page", "http", "fetch"],
         "stock_data": ["stock", "price", "ticker", "market", "share", "aapl", "msft", "nvda"],
+        "stock_screener": ["screener", "screen", "filter stocks", "find stocks", "search stocks", "criteria", "discover"],
         "sec_filings": ["sec", "filing", "10-k", "10-q", "edgar", "financial"],
         "wikipedia": ["wikipedia", "wiki", "encyclopedia"],
         "currency_exchange": ["currency", "exchange rate", "convert", "usd", "eur"],
@@ -2052,6 +2053,9 @@ async def _build_tool_callables(
     elif tool.type == "stock_data":
         from ..tools.stock_data import build_stock_data_tools
         return build_stock_data_tools(tool.config or {})
+    elif tool.type == "stock_screener":
+        from ..tools.stock_screener import build_stock_screener_tools
+        return build_stock_screener_tools(tool.config or {})
     elif tool.type == "portfolio":
         from ..tools.portfolio import build_portfolio_tools
         return build_portfolio_tools(tool.config or {})

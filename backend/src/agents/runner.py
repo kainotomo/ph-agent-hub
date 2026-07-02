@@ -1436,7 +1436,7 @@ async def _resolve_tool_callables(
                 .where(
                     UserToolCredential.user_id == user_id,
                     UserToolCredential.status == "active",
-                    Tool.type.in_({"email", "calendar", "tasks"}),
+                    Tool.type.in_({"email", "calendar", "tasks", "erpnext"}),
                     Tool.tenant_id == tenant_id,
                     Tool.enabled == True,
                 )
@@ -1468,7 +1468,7 @@ async def _resolve_tool_callables(
         try:
             from ..db.orm.user_tool_credentials import UserToolCredential
 
-            tool_ids_for_creds = [t.id for t in tools if t.type in ("email", "calendar", "tasks")]
+            tool_ids_for_creds = [t.id for t in tools if t.type in ("email", "calendar", "tasks", "erpnext")]
             if tool_ids_for_creds:
                 cred_result = await db.execute(
                     select(UserToolCredential).where(
@@ -2010,7 +2010,12 @@ async def _build_tool_callables(
             of the tenant-level ``tool.config`` (Issue #312).
     """
     if tool.type == "erpnext":
-        return await _build_erpnext_callables(db, tool, tenant_id, session_id=session_id, cleanup_clients=cleanup_clients)
+        return await _build_erpnext_callables(
+            db, tool, tenant_id,
+            session_id=session_id,
+            cleanup_clients=cleanup_clients,
+            user_credentials=user_credentials,
+        )
     elif tool.type == "membrane":
         from ..tools.membrane import build_membrane_tools
         return build_membrane_tools(tool.config or {})
@@ -2143,10 +2148,14 @@ async def _build_erpnext_callables(
     tenant_id: str,
     session_id: str = "",
     cleanup_clients: list | None = None,
+    user_credentials: list | None = None,
 ) -> list:
     """Build ERPNext tool callables for a given Tool record.
 
-    Reads credentials directly from ``tool.config`` JSON.
+    Credentials are resolved in this order:
+    1. Per-user ``user_credentials`` (when provided) — first active credential wins.
+    2. Fall back to ``tool.config`` (tenant-level config).
+
     Queries ALL FileUpload records for the session so the
     ``upload_file`` tool can access files uploaded in any
     message — the built-in ``list_uploaded_files`` tool
@@ -2156,18 +2165,26 @@ async def _build_erpnext_callables(
     on *cleanup_clients* so the caller can close it after the
     agent run completes.
     """
+    import json as _json
     import httpx
-    from ..tools.erpnext import build_erpnext_tools
+    from ..tools.erpnext import build_erpnext_tools, _resolve_erpnext_credentials
 
     config = tool.config or {}
-    base_url = config.get("base_url")
-    api_key = config.get("api_key")
-    api_secret = config.get("api_secret")
+
+    # Resolve credentials — per-user takes precedence over tenant config
+    resolved = _resolve_erpnext_credentials(
+        tool_config=config,
+        user_credentials=user_credentials,
+    )
+    base_url = resolved.get("base_url", "")
+    api_key = resolved.get("api_key", "")
+    api_secret = resolved.get("api_secret", "")
 
     if not all([base_url, api_key, api_secret]):
         raise NotFoundError(
-            f"ERPNext tool '{tool.name}' is missing required config fields. "
-            "Set base_url, api_key, and api_secret in the tool config."
+            f"ERPNext tool '{tool.name}' has no valid credentials. "
+            "Either configure base_url, api_key, and api_secret in the "
+            "tool config, or add per-user credentials via Account Settings."
         )
 
     # Build the shared httpx client — caller is responsible for closing it
@@ -2210,6 +2227,7 @@ async def _build_erpnext_callables(
         httpx_client=erpnext_client,
         file_infos=file_infos,
         tool_name=tool.name,
+        user_credentials=user_credentials,
     )
 
 

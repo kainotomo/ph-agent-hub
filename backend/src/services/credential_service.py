@@ -241,6 +241,20 @@ async def test_connection(
     return await _do_test_connection(credential, db=db)
 
 
+async def test_raw_erpnext_connection(
+    base_url: str, api_key: str, api_secret: str,
+) -> dict:
+    """Test ERPNext connectivity without a stored credential.
+
+    Used by the pre-save test in the manual ERPNext setup UI.
+    """
+    return await _test_erpnext_connection({
+        "base_url": base_url,
+        "api_key": api_key,
+        "api_secret": api_secret,
+    })
+
+
 async def test_raw_imap_connection(
     host: str, port: int, username: str, password: str,
 ) -> dict:
@@ -255,7 +269,7 @@ async def test_raw_imap_connection(
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-VALID_PROVIDERS = frozenset({"gmail", "outlook", "imap", "google", "microsoft"})
+VALID_PROVIDERS = frozenset({"gmail", "outlook", "imap", "google", "microsoft", "erpnext"})
 
 
 def _validate_provider(provider: str) -> None:
@@ -309,6 +323,8 @@ async def _do_test_connection(
 
     if provider == "imap":
         return await _test_imap_connection(creds)
+    elif provider == "erpnext":
+        return await _test_erpnext_connection(creds)
     elif provider in ("gmail", "outlook", "google", "microsoft"):
         result = await _test_oauth_connection(provider, tool_type, tokens)
 
@@ -484,3 +500,53 @@ async def _test_oauth_connection(provider: str, tool_type: str, tokens: dict) ->
         return {"ok": False, "message": f"Connection test failed: {exc}"}
 
     return {"ok": False, "message": "Could not test connection (unknown error)"}
+
+
+# ---------------------------------------------------------------------------
+# ERPNext test connection
+# ---------------------------------------------------------------------------
+
+
+async def _test_erpnext_connection(creds: dict) -> dict:
+    """Test ERPNext connectivity by hitting the auth check endpoint.
+
+    Args:
+        creds: Dict with ``base_url``, ``api_key``, ``api_secret``.
+
+    Returns:
+        A dict with ``ok`` (bool) and ``message`` (str).
+    """
+    base_url = creds.get("base_url", "").rstrip("/")
+    api_key = creds.get("api_key", "")
+    api_secret = creds.get("api_secret", "")
+
+    if not base_url:
+        return {"ok": False, "message": "ERPNext base URL not provided"}
+    if not api_key or not api_secret:
+        return {"ok": False, "message": "ERPNext API key and secret are required"}
+
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                f"{base_url}/api/method/frappe.auth.get_logged_user",
+                headers={"Authorization": f"token {api_key}:{api_secret}"},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                user = data.get("message", "unknown")
+                return {"ok": True, "message": f"Connected as {user}"}
+            elif resp.status_code == 403:
+                return {"ok": False, "message": "Invalid API credentials (HTTP 403)"}
+            elif resp.status_code == 401:
+                return {"ok": False, "message": "Authentication failed (HTTP 401). Check API key and secret."}
+            else:
+                body = resp.text[:200]
+                return {"ok": False, "message": f"ERPNext returned HTTP {resp.status_code}: {body}"}
+    except httpx.ConnectError:
+        return {"ok": False, "message": f"Could not connect to {base_url}. Check the URL."}
+    except httpx.TimeoutException:
+        return {"ok": False, "message": f"Connection to {base_url} timed out."}
+    except Exception as exc:
+        return {"ok": False, "message": f"Connection test failed: {exc}"}

@@ -132,3 +132,13 @@ A log of key design decisions made during the design phase, with rationale. Orde
 **Rationale:** The previous state format (`user_id:tool_id:8-char-hex`) was unsigned, non-expiring, and replayable. An attacker could forge or replay state to bind credentials to the wrong user context. A Redis-backed nonce store provides tamper evidence (no embedded info), automatic expiry (TTL), and one-time use (atomic GETDEL) without introducing new cryptographic primitives or infrastructure. The codebase already uses Redis for session storage, rate limiting, and JTI denylist — this follows the same established patterns.
 **Alternatives considered:** Fernet-signed state (replayable within TTL without server-side tracking; still requires server-side nonce to enforce one-time use), local in-memory dict (lost on reload, not shared across workers).
 **Reference:** `backend/src/core/redis.py` (`store_oauth_state`, `get_oauth_state`), [Issue #345](https://github.com/kainotomo/ph-agent-hub/issues/345)
+
+---
+
+## D-14 — Per-user ERPNext credentials with tenant fallback
+
+**Date:** 2026-07-02
+**Decision:** ERPNext tool credentials can be configured at two levels: tenant-level `tool.config` (admin setup) and per-user `UserToolCredential` (user connects their own account via Account Settings). Per-user credentials take precedence; tenant-level config acts as the fallback default.
+**Rationale:** In multi-tenant deployments, different users connect to different ERPNext sites or have distinct API keys/permissions. Sharing a single tenant-level API key loses audit trails and forces all users into the same identity. The email/calendar/tasks tools already follow this pattern (Issue #312), proving the architecture. Existing tenant-level setups continue working unchanged.
+**Alternatives considered:** Tenant-level only (rejected — breaks multi-user ERPNext use cases), per-user only with no fallback (rejected — breaks backward compatibility for existing setups).
+**Reference:** `backend/src/tools/erpnext.py` (`_resolve_erpnext_credentials`, `build_erpnext_tools`), `backend/src/agents/runner.py` (`_build_erpnext_callables`), [Issue #432](https://github.com/kainotomo/ph-agent-hub/issues/432)

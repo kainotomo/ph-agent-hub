@@ -1795,7 +1795,7 @@ async def _auto_select_tools(
         try:
             from ..db.orm.user_tool_credentials import UserToolCredential
             cred_tool_ids = set()
-            for t_type in ("email", "calendar", "tasks"):
+            for t_type in ("email", "calendar", "tasks", "erpnext"):
                 for t in candidate_tools:
                     if t.type == t_type:
                         cred_tool_ids.add(t.id)
@@ -1890,7 +1890,7 @@ async def _auto_select_tools(
     if user_id:
         try:
             from ..db.orm.user_tool_credentials import UserToolCredential
-            tool_ids_for_creds = [t.id for t in shortlisted_tools if t.type in ("email", "calendar", "tasks")]
+            tool_ids_for_creds = [t.id for t in shortlisted_tools if t.type in ("email", "calendar", "tasks", "erpnext")]
             if tool_ids_for_creds:
                 cred_result = await db.execute(
                     select(UserToolCredential).where(

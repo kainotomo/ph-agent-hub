@@ -1438,7 +1438,6 @@ async def _resolve_tool_callables(
                     UserToolCredential.status == "active",
                     Tool.type.in_({"email", "calendar", "tasks", "erpnext"}),
                     Tool.tenant_id == tenant_id,
-                    Tool.enabled == True,
                 )
             )
             cred_rows = cred_result.all()

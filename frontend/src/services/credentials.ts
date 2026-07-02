@@ -78,8 +78,15 @@ export function createCredential(data: CreateCredentialRequest): Promise<Credent
   });
 }
 
-export function getToolIdByType(tool_type: string): Promise<{ tool_id: string }> {
-  return api<{ tool_id: string }>(`/credentials/tool-id${qs({ tool_type })}`);
+export interface ToolInfo {
+  id: string;
+  name: string;
+  description?: string;
+  base_url?: string;
+}
+
+export function getToolIdByType(tool_type: string): Promise<{ tool_id: string; tools?: ToolInfo[] }> {
+  return api<{ tool_id: string; tools?: ToolInfo[] }>(`/credentials/tool-id${qs({ tool_type })}`);
 }
 
 export function deleteCredential(credential_id: string): Promise<void> {

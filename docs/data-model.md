@@ -124,7 +124,12 @@ Tools represent external integrations (ERPNext, Membrane, custom tools).
 
 ## 1.5 ERPNext (Tool Type)
 
-ERPNext integration is handled through the tool system. An ERPNext tool instance is created via the `/admin/tools` endpoint with `type=erpnext` and connection details stored in `tools.config` as a JSON object:
+ERPNext integration is handled through the tool system. An ERPNext tool instance is created via the `/admin/tools` endpoint with `type=erpnext`. Credentials can be provided at two levels:
+
+1. **Tenant-level** — Admin sets `base_url`, `api_key`, `api_secret` in `tools.config` (the original approach). This serves as the fallback default for all users.
+2. **Per-user** — Users connect their own ERPNext site via **Account Settings** (`/settings`). Per-user credentials are stored in `user_tool_credentials` and take precedence over tenant-level config.
+
+Tenant-level `tools.config` example:
 
 ```json
 {
@@ -154,7 +159,7 @@ Users can mark tools as "always on" so they're automatically activated in new se
 
 ## 1.7 User Tool Credentials (Issue #312)
 
-Per-user credentials for tools that require personal authentication (email, calendar, tasks). Each row represents one connected account — a user can have multiple accounts for the same tool type (e.g., Work Gmail + Personal Gmail).
+Per-user credentials for tools that require personal authentication (email, calendar, tasks, erpnext). Each row represents one connected account — a user can have multiple accounts for the same tool type (e.g., Work Gmail + Personal Gmail).
 
 Credentials and OAuth tokens are encrypted at rest via the `EncryptedString` ORM column type, using the same Fernet encryption as the `models.api_key` field.
 
@@ -164,7 +169,7 @@ Credentials and OAuth tokens are encrypted at rest via the `EncryptedString` ORM
 - user_id (UUID, FK → users.id, CASCADE) — who owns this credential
 - tool_id (UUID, FK → tools.id, CASCADE) — which tool this credential is for
 - label (string, 255, NOT NULL) — user-defined display name (e.g., "Work Gmail")
-- provider (enum: gmail, outlook, imap, google, microsoft) — the authentication provider
+- provider (enum: gmail, outlook, imap, google, microsoft, erpnext) — the authentication provider
 - email_address (string, 255, nullable) — primary email address for this account
 - credentials (Text, nullable) — encrypted JSON: IMAP/SMTP passwords, client IDs, etc.
 - oauth_tokens (Text, nullable) — encrypted JSON: access_token, refresh_token, expires_at

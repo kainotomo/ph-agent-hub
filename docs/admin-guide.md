@@ -328,7 +328,7 @@ Tools extend agent capabilities — they can call external APIs, query ERPNext i
 | **datetime** | Utility | Timezone-aware date/time queries | `timezone` |
 | **document_generation** | Utility | Markdown→PDF (weasyprint), list→Excel (openpyxl), list→CSV | `company_logo_url` |
 | **email** | Communication | Send, read, search, and manage emails. Supports SMTP/SendGrid (tenant-level) and per-user connected accounts (IMAP, Gmail API, Microsoft Graph). Users connect their own accounts via Account Settings. | `provider`, `smtp_host`, `smtp_port`, `smtp_username`, `smtp_password`, `api_key`, `from_email`, `from_name`, `allowed_recipients` |
-| **erpnext** | Enterprise | ERPNext full CRUD, file upload, doctype metadata | `base_url`, `api_key`, `api_secret` |
+| **erpnext** | Enterprise | ERPNext full CRUD, file upload, doctype metadata. Supports tenant-level config (admin) **and** per-user connected accounts (users connect their own ERPNext site via Account Settings). | `base_url`, `api_key`, `api_secret` (tenant-level) OR per-user credentials via Account Settings |
 | **etf_data** | Financial | ETF holdings and profiles (yfinance) | None |
 | **fetch_url** | Web | HTTP GET fetching with HTML→text conversion | `timeout`, `user_agent` |
 | **github** | DevOps | GitHub/GitLab — search code, list issues/PRs, read files, create issues | `provider`, `token`, `api_base`, `allowed_repos` |

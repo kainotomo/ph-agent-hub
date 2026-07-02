@@ -17,6 +17,7 @@ import {
   Modal,
   Form,
   Input,
+  Select,
   message,
   Spin,
   Empty,
@@ -36,6 +37,7 @@ import {
   CheckSquareOutlined,
   ArrowLeftOutlined,
   ReloadOutlined,
+  DatabaseOutlined,
 } from "@ant-design/icons";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -50,6 +52,7 @@ import {
   getGoogleOAuthUrl,
   getMicrosoftOAuthUrl,
   CredentialData,
+  ToolInfo,
 } from "../../services/credentials";
 
 const { Content } = Layout;
@@ -73,6 +76,11 @@ const TOOL_TYPE_NAMES: Record<string, { name: string; icon: React.ReactNode; des
     icon: <CheckSquareOutlined />,
     description: "Create, update, and manage your to-do lists",
   },
+  erpnext: {
+    name: "ERPNext",
+    icon: <DatabaseOutlined />,
+    description: "Query your ERP system, create and manage documents",
+  },
 };
 
 const PROVIDER_LABELS: Record<string, { label: string; color: string }> = {
@@ -81,6 +89,7 @@ const PROVIDER_LABELS: Record<string, { label: string; color: string }> = {
   imap: { label: "IMAP", color: "green" },
   google: { label: "Google", color: "red" },
   microsoft: { label: "Microsoft", color: "blue" },
+  erpnext: { label: "ERPNext", color: "orange" },
 };
 
 const STATUS_COLORS: Record<string, string> = {
@@ -107,6 +116,7 @@ export function AccountSettingsPage() {
     toolType: string;
   }>({ open: false, toolId: "", toolType: "" });
   const [imapModal, setImapModal] = useState(false);
+  const [erpnextModal, setErpnextModal] = useState(false);
 
   // Handle OAuth callback redirect in popup window
   useEffect(() => {
@@ -281,6 +291,10 @@ export function AccountSettingsPage() {
             setConnectModal({ ...connectModal, open: false });
             setImapModal(true);
           }}
+          onERPNext={() => {
+            setConnectModal({ ...connectModal, open: false });
+            setErpnextModal(true);
+          }}
         />
 
         {/* Manual IMAP Setup Modal */}
@@ -289,6 +303,16 @@ export function AccountSettingsPage() {
           onClose={() => setImapModal(false)}
           onSaved={() => {
             setImapModal(false);
+            queryClient.invalidateQueries({ queryKey: ["credentials"] });
+          }}
+        />
+
+        {/* ERPNext Setup Modal */}
+        <ErpnextSetupModal
+          open={erpnextModal}
+          onClose={() => setErpnextModal(false)}
+          onSaved={() => {
+            setErpnextModal(false);
             queryClient.invalidateQueries({ queryKey: ["credentials"] });
           }}
         />
@@ -365,11 +389,13 @@ function ConnectAccountModal({
   toolType,
   onClose,
   onIMAP,
+  onERPNext,
 }: {
   open: boolean;
   toolType: string;
   onClose: () => void;
   onIMAP: () => void;
+  onERPNext: () => void;
 }) {
   const [connecting, setConnecting] = useState<string | null>(null);
 
@@ -435,6 +461,18 @@ function ConnectAccountModal({
             </Button>
             <Text type="secondary" style={{ fontSize: 12, textAlign: "center" }}>
               Use app passwords for Gmail/Outlook with IMAP enabled on your account
+            </Text>
+          </>
+        )}
+
+        {toolType === "erpnext" && (
+          <>
+            <Divider>or</Divider>
+            <Button block size="large" onClick={onERPNext}>
+              🔑 Manual ERPNext Setup
+            </Button>
+            <Text type="secondary" style={{ fontSize: 12, textAlign: "center" }}>
+              Enter your ERPNext site URL, API key, and API secret
             </Text>
           </>
         )}
@@ -600,6 +638,146 @@ function ManualSetupModal({
         >
           Test Connection
         </Button>
+      </Form>
+    </Modal>
+  );
+}
+
+// =============================================================================
+// ERPNext Setup Modal
+// =============================================================================
+
+function ErpnextSetupModal({
+  open,
+  onClose,
+  onSaved,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [form] = Form.useForm();
+  const [creating, setCreating] = useState(false);
+  const [tools, setTools] = useState<ToolInfo[]>([]);
+  const [loadingTools, setLoadingTools] = useState(false);
+
+  // Fetch available ERPNext tools when modal opens
+  useEffect(() => {
+    if (open) {
+      setLoadingTools(true);
+      getToolIdByType("erpnext")
+        .then((result) => {
+          // If multiple tools exist, use the full list; otherwise wrap the single one
+          const toolList = result.tools ?? [{ id: result.tool_id, name: result.tool_id }];
+          setTools(toolList);
+          // Pre-select the first tool
+          form.setFieldsValue({ tool_id: toolList[0]?.id });
+        })
+        .catch(() => {
+          setTools([]);
+        })
+        .finally(() => setLoadingTools(false));
+    }
+  }, [open, form]);
+
+  const handleSave = async () => {
+    try {
+      const values = await form.validateFields();
+      setCreating(true);
+
+      await createCredential({
+        tool_id: values.tool_id,
+        label: values.label,
+        provider: "erpnext",
+        email_address: values.email || undefined,
+        credentials: {
+          base_url: values.base_url,
+          api_key: values.api_key,
+          api_secret: values.api_secret,
+        },
+        is_default: true,
+      });
+
+      message.success(`"${values.label}" connected successfully`);
+      onSaved();
+    } catch (err: unknown) {
+      if (err instanceof Error) {
+        message.error(err.message);
+      }
+    }
+    setCreating(false);
+  };
+
+  return (
+    <Modal
+      title="🔑 Connect ERPNext Account"
+      open={open}
+      onCancel={onClose}
+      onOk={handleSave}
+      confirmLoading={creating}
+      okText="Save Account"
+      width={520}
+    >
+      <Form form={form} layout="vertical" style={{ marginTop: 16 }}>
+        <Form.Item
+          name="label"
+          label="Account Label"
+          rules={[{ required: true, message: "Enter a label (e.g. 'My ERP')" }]}
+        >
+          <Input placeholder="e.g. My ERP, Production Site" />
+        </Form.Item>
+
+        {tools.length > 1 && (
+          <Form.Item
+            name="tool_id"
+            label="ERPNext Tool"
+            rules={[{ required: true, message: "Select which ERPNext tool to connect" }]}
+          >
+            <Select
+              placeholder="Select an ERPNext tool"
+              loading={loadingTools}
+              options={tools.map((t) => ({
+                label: t.base_url ? `${t.name} (${t.base_url})` : t.name,
+                value: t.id,
+              }))}
+            />
+          </Form.Item>
+        )}
+
+        <Form.Item
+          name="base_url"
+          label="ERPNext Site URL"
+          rules={[
+            { required: true, message: "Enter your ERPNext site URL" },
+            { type: "url", message: "Enter a valid URL (https://...)" },
+          ]}
+        >
+          <Input placeholder="https://erpnext.example.com" />
+        </Form.Item>
+
+        <Form.Item
+          name="api_key"
+          label="API Key"
+          rules={[{ required: true, message: "Enter your ERPNext API key" }]}
+        >
+          <Input placeholder="Your ERPNext API key" />
+        </Form.Item>
+
+        <Form.Item
+          name="api_secret"
+          label="API Secret"
+          rules={[{ required: true, message: "Enter your ERPNext API secret" }]}
+        >
+          <Input.Password placeholder="Your ERPNext API secret" />
+        </Form.Item>
+
+        <Form.Item
+          name="email"
+          label="Email (optional)"
+          extra="Your ERPNext login email — for display purposes only"
+        >
+          <Input placeholder="you@example.com" />
+        </Form.Item>
       </Form>
     </Modal>
   );

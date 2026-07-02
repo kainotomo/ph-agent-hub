@@ -50,6 +50,53 @@ def _build_auth_header(api_key: str, api_secret: str) -> dict[str, str]:
     return {"Authorization": f"token {api_key}:{api_secret}"}
 
 
+def _resolve_erpnext_credentials(
+    tool_config: dict | None = None,
+    user_credentials: list | None = None,
+) -> dict:
+    """Resolve ERPNext connection parameters from user credentials or tenant config.
+
+    Per-user credentials take precedence over tenant-level ``tool.config``.
+
+    Args:
+        tool_config: Tenant-level tool config dict (from ``Tool.config``).
+        user_credentials: Optional list of ``UserToolCredential`` ORM instances.
+
+    Returns:
+        A dict with ``base_url``, ``api_key``, ``api_secret``.
+        Returns an empty dict when neither source has complete credentials.
+    """
+    # Phase 1 — try per-user credentials first
+    if user_credentials:
+        import json as _json
+
+        for cred in user_credentials:
+            if cred.status != "active":
+                continue
+            raw = cred.credentials
+            if not raw:
+                continue
+            try:
+                parsed = _json.loads(raw) if isinstance(raw, str) else raw
+            except Exception:
+                continue
+            base_url = parsed.get("base_url", "").strip()
+            api_key = parsed.get("api_key", "").strip()
+            api_secret = parsed.get("api_secret", "").strip()
+            if base_url and api_key and api_secret:
+                return {"base_url": base_url, "api_key": api_key, "api_secret": api_secret}
+
+    # Phase 2 — fall back to tenant-level tool.config
+    config = tool_config or {}
+    base_url = config.get("base_url", "").strip()
+    api_key = config.get("api_key", "").strip()
+    api_secret = config.get("api_secret", "").strip()
+    if base_url and api_key and api_secret:
+        return {"base_url": base_url, "api_key": api_key, "api_secret": api_secret}
+
+    return {}
+
+
 async def _safe_erpnext_response(resp: httpx.Response) -> dict:
     """Process an ERPNext HTTP response, returning the JSON body.
 
@@ -88,14 +135,22 @@ def build_erpnext_tools(
     httpx_client: httpx.AsyncClient,
     file_infos: list[dict] | None = None,
     tool_name: str | None = None,
+    user_credentials: list | None = None,
+    db: object | None = None,
 ) -> list:
     """Return a list of MAF @tool-decorated async functions bound to an
     ERPNext instance.
 
+    Credentials are resolved in this order:
+    1. Per-user ``user_credentials`` (when provided) — first active credential wins.
+    2. Fall back to the ``base_url`` / ``api_key`` / ``api_secret`` parameters
+       (typically from tenant-level ``tool.config``).
+
     Args:
-        base_url: ERPNext site URL (e.g. ``https://erp.example.com``).
-        api_key: ERPNext API key.
-        api_secret: ERPNext API secret.
+        base_url: ERPNext site URL (e.g. ``https://erp.example.com``) — used
+            as fallback when no per-user credential is available.
+        api_key: ERPNext API key — fallback.
+        api_secret: ERPNext API secret — fallback.
         httpx_client: A pre-configured ``httpx.AsyncClient`` whose lifecycle
             is managed by the caller.  Must already have ``base_url`` and
             ``Authorization`` headers set.
@@ -104,6 +159,10 @@ def build_erpnext_tools(
         tool_name: Optional display name of the Tool ORM record. When provided,
             each tool function is prefixed (e.g. ``erpnext_kainotomo_com__get_doc``)
             to prevent name collisions when multiple ERPNext instances are active.
+        user_credentials: Optional list of ``UserToolCredential`` ORM instances
+            for per-user ERPNext accounts. Takes precedence over base_url/api_key/
+            api_secret.
+        db: Optional async DB session (for future use, e.g. token persistence).
 
     Returns:
         A list of callables ready to pass to ``Agent(tools=...)``.

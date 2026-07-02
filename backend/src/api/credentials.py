@@ -124,32 +124,51 @@ def _cred_to_response(
 
 @router.get("/tool-id", response_model=dict)
 async def get_tool_id_by_type(
-    tool_type: str = Query(..., description="Tool type (email, calendar, tasks)"),
+    tool_type: str = Query(..., description="Tool type (email, calendar, tasks, erpnext)"),
     current_user: UserORM = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Look up a tool's ID by its type.
+    """Look up tool IDs by their type.
 
-    Used by the frontend when creating credentials — the user selects
-    a tool type (email, calendar, tasks) and needs the actual tool ID
-    to pass to the create credential endpoint.
+    Returns ALL tools of the given type so the frontend can let the user
+    choose which one to associate their credential with.  Credentials are
+    scoped to a specific tool record — when multiple tools of the same
+    type exist (e.g. "Production ERP" + "Staging ERP"), each can have
+    its own set of per-user credentials.
+
+    Both enabled and disabled tools are returned so users can create
+    credentials even when the tool is temporarily disabled.
     """
     result = await db.execute(
         _select(ToolORM)
         .where(
             ToolORM.type == tool_type,
             ToolORM.tenant_id == current_user.tenant_id,
-            ToolORM.enabled == True,  # noqa: E712
         )
-        .limit(1)
+        .order_by(ToolORM.name)
     )
-    tool = result.scalar_one_or_none()
-    if not tool:
+    tools = list(result.scalars().all())
+    if not tools:
         raise NotFoundError(
-            f"No enabled '{tool_type}' tool found. "
+            f"No '{tool_type}' tool found. "
             f"An administrator must create one in Admin Area → Tools."
         )
-    return {"tool_id": tool.id}
+
+    # For backward compatibility, return the first tool's id at the top level
+    # when there's exactly one tool.  When multiple exist, return all tools
+    # so the frontend can let the user pick.
+    return {
+        "tool_id": tools[0].id,
+        "tools": [
+            {
+                "id": t.id,
+                "name": t.name,
+                "description": t.description or "",
+                "base_url": (t.config or {}).get("base_url", ""),
+            }
+            for t in tools
+        ],
+    }
 
 
 @router.get("", response_model=CredentialListResponse)

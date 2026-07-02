@@ -30,7 +30,7 @@ The backend provides the following core capabilities:
   - `services/a2a_circuit_breaker.py` — Redis-backed circuit breaker for A2A servers (consecutive failure tracking, auto-recovery)
   - `services/a2a_client.py` — resilient `send_message` wrapper with configurable timeouts, retry with exponential backoff, structured logging, and call log persistence
   - `tools/a2a.py` — builds MAF-compatible tool callables from A2A Tool records; delegates to the resilient client
-- ERPNext API tools (per‑tenant)
+- ERPNext API tools (per‑tenant with optional per‑user credentials)
 - Membrane tools
 - Custom tools (Python modules)
 - Tool permission enforcement based on user roles and tenant settings

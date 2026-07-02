@@ -660,18 +660,25 @@ function ErpnextSetupModal({
   const [creating, setCreating] = useState(false);
   const [tools, setTools] = useState<ToolInfo[]>([]);
   const [loadingTools, setLoadingTools] = useState(false);
+  // When there's exactly one tool, store its ID directly (no dropdown needed)
+  const [singleToolId, setSingleToolId] = useState<string | null>(null);
 
   // Fetch available ERPNext tools when modal opens
   useEffect(() => {
     if (open) {
       setLoadingTools(true);
+      setSingleToolId(null);
       getToolIdByType("erpnext")
         .then((result) => {
-          // If multiple tools exist, use the full list; otherwise wrap the single one
           const toolList = result.tools ?? [{ id: result.tool_id, name: result.tool_id }];
           setTools(toolList);
-          // Pre-select the first tool
-          form.setFieldsValue({ tool_id: toolList[0]?.id });
+          if (toolList.length === 1) {
+            // Single tool — store ID directly, no dropdown needed
+            setSingleToolId(toolList[0].id);
+          } else {
+            // Multiple tools — pre-select first one in the dropdown
+            form.setFieldsValue({ tool_id: toolList[0]?.id });
+          }
         })
         .catch(() => {
           setTools([]);
@@ -685,8 +692,12 @@ function ErpnextSetupModal({
       const values = await form.validateFields();
       setCreating(true);
 
+      // Use the directly stored ID when there's a single tool,
+      // otherwise use the dropdown selection.
+      const tool_id = singleToolId ?? values.tool_id;
+
       await createCredential({
-        tool_id: values.tool_id,
+        tool_id,
         label: values.label,
         provider: "erpnext",
         email_address: values.email || undefined,

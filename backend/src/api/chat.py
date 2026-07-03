@@ -2294,6 +2294,11 @@ async def upload_file(
             "Promoting temp session %s to permanent on file upload",
             session_id,
         )
+        # Snapshot existing temp messages BEFORE promotion — must
+        # migrate them to MariaDB or they are lost with the Redis keys
+        # (Issue #439).
+        temp_messages = await get_temp_messages(session_id)
+
         session_create = SessionCreate(
             title=data.get("title", "New Chat"),
             is_temporary=False,
@@ -2310,6 +2315,35 @@ async def upload_file(
         data = await _lazy_create_session(
             db, session_id, session_create, current_user,
         )
+
+        # Migrate existing temp messages to the new permanent session
+        if temp_messages:
+            from datetime import timezone as _tz
+            for msg in temp_messages:
+                created_at = msg.get("created_at")
+                if created_at and isinstance(created_at, str):
+                    created_at = datetime.fromisoformat(created_at)
+                elif not created_at:
+                    created_at = datetime.now(_tz.utc)
+
+                db_msg = Message(
+                    id=msg.get("id", str(uuid.uuid4())),
+                    session_id=session_id,
+                    sender=msg.get("sender", "user"),
+                    content=msg.get("content"),
+                    model_id=msg.get("model_id"),
+                    tool_calls=msg.get("tool_calls"),
+                    tokens_in=msg.get("tokens_in"),
+                    tokens_out=msg.get("tokens_out"),
+                    created_at=created_at,
+                )
+                db.add(db_msg)
+            await db.flush()
+            logger.info(
+                "Migrated %d temp messages to permanent session %s during upload promotion",
+                len(temp_messages), session_id,
+            )
+
         # Re-link any files uploaded during the pending phase
         await upload_service.link_pending_uploads_to_session(
             db, session_id, current_user.id,

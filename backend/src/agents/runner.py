@@ -1436,7 +1436,7 @@ async def _resolve_tool_callables(
                 .where(
                     UserToolCredential.user_id == user_id,
                     UserToolCredential.status == "active",
-                    Tool.type.in_({"email", "calendar", "tasks", "erpnext"}),
+                    Tool.type.in_({"email", "calendar", "tasks", "erpnext", "github"}),
                     Tool.tenant_id == tenant_id,
                 )
             )
@@ -1467,7 +1467,7 @@ async def _resolve_tool_callables(
         try:
             from ..db.orm.user_tool_credentials import UserToolCredential
 
-            tool_ids_for_creds = [t.id for t in tools if t.type in ("email", "calendar", "tasks", "erpnext")]
+            tool_ids_for_creds = [t.id for t in tools if t.type in ("email", "calendar", "tasks", "erpnext", "github")]
             if tool_ids_for_creds:
                 cred_result = await db.execute(
                     select(UserToolCredential).where(
@@ -2110,7 +2110,10 @@ async def _build_tool_callables(
         )
     elif tool.type == "github":
         from ..tools.github import build_github_tools
-        return build_github_tools(tool.config or {})
+        return build_github_tools(
+            tool.config or {},
+            user_credentials=user_credentials,
+        )
     elif tool.type == "calendar":
         from ..tools.calendar import build_calendar_tools
         return await build_calendar_tools(

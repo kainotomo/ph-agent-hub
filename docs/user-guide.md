@@ -178,7 +178,7 @@ Tools let the AI interact with external systems — query databases, call APIs, 
 | **MCP** | (dynamically synced) | External tools connected by your administrator via MCP servers — GitHub, databases, file systems, or any MCP-compatible service |
 | **A2A** | (dynamically synced) | Skills from remote AI agents connected via the A2A (Agent-to-Agent) Protocol — your agent can collaborate with other agents across different platforms |
 | **Productivity** | Calendar, Tasks | Check your calendar, schedule meetings, find free time slots; **create, update, and manage tasks and to-do lists** from your connected accounts |
-| **DevOps** | GitHub | Search code, list issues/PRs, read files from GitHub/GitLab repos |
+| **DevOps** | GitHub | Search code, list issues/PRs, read files from GitHub/GitLab repos. Connect your own GitHub account via **Settings → Account Settings**. |
 
 ### 6.2 Activate Tools
 
@@ -227,13 +227,13 @@ Toggle a tool off to prevent the AI from using it. The change takes effect immed
 - **Check tool results** — the AI shows you what each tool returned so you can verify accuracy
 - **Financial tools are free** — stock data, market overview, and currency exchange require no API keys
 - **Generated files** — PDFs, Excel files, images, and screenshots appear as download links in the chat
-- **Personal accounts** — tools like Email, Calendar, and Tasks can use your own connected accounts. Set them up in **Account Settings** (gear icon in the sidebar)
+- **Personal accounts** — tools like Email, Calendar, Tasks, and GitHub can use your own connected accounts. Set them up in **Account Settings** (gear icon in the sidebar)
 
 ---
 
 ## 8. Account Settings
 
-Account Settings lets you connect your personal email, calendar, and task accounts so the AI agent can read, send, and manage them on your behalf.
+Account Settings lets you connect your personal email, calendar, task, and GitHub accounts so the AI agent can read, send, and manage them on your behalf.
 
 ### 8.1 Accessing Account Settings
 
@@ -298,6 +298,32 @@ Once connected, the agent can:
 ### 8.6 Troubleshooting
 
 - **"Test connection failed"** — verify your IMAP/SMTP server addresses and port numbers. For Gmail/Outlook with 2FA, use an **app password** (not your regular password).
+
+### 8.7 Connecting a GitHub Account
+
+The agent can search code, list issues/PRs, and read files from GitHub repositories using your personal access token (PAT).
+
+**Connecting with a Personal Access Token:**
+1. In Account Settings, click **Connect Account** under GitHub
+2. Click **Connect with Personal Access Token**
+3. Fill in:
+   - **Account Label** — a name you'll recognize (e.g., "Work GitHub" or "Personal Account")
+   - **Personal Access Token** — a GitHub PAT with `repo` and `user` scopes (see below)
+   - **GitHub Username** — optional, for display purposes
+4. Click **Save Account**
+
+> **Where to get a token:** Go to [GitHub Settings → Developer settings → Personal access tokens → Tokens (classic)](https://github.com/settings/tokens) and generate a new token with at least the `repo` scope (for private repository access) and `user` scope (for rate limit identification).
+
+### 8.8 What the Agent Can Do with GitHub
+
+Once connected, the agent can:
+- **Search code** — "Find the function `calculate_total` in the frontend repo"
+- **List issues** — "Show me the open issues in kainotomo/ph-agent-hub"
+- **Get file contents** — "Read the main configuration file from the backend"
+- **List pull requests** — "What PRs are open in the API repository?"
+- **Create issues** — "Create an issue about the login bug"
+
+If you have a tenant-level GitHub token configured by your administrator, you can still use those features — connecting your own account gives you access under your own identity and rate limit quota.
 - **"Token expired"** (OAuth only) — click the **Reconnect** button next to the account to re-authenticate.
 - **"No accounts connected"** — the agent will tell you if no email/calendar/task accounts are found. Go to Account Settings to add one.
 

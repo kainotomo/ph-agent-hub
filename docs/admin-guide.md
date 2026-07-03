@@ -331,7 +331,7 @@ Tools extend agent capabilities — they can call external APIs, query ERPNext i
 | **erpnext** | Enterprise | ERPNext full CRUD, file upload, doctype metadata. Supports tenant-level config (admin) **and** per-user connected accounts (users connect their own ERPNext site via Account Settings). | `base_url`, `api_key`, `api_secret` (tenant-level) OR per-user credentials via Account Settings |
 | **etf_data** | Financial | ETF holdings and profiles (yfinance) | None |
 | **fetch_url** | Web | HTTP GET fetching with HTML→text conversion | `timeout`, `user_agent` |
-| **github** | DevOps | GitHub/GitLab — search code, list issues/PRs, read files, create issues. Supports tenant-level PAT (admin) **and** per-user connected accounts (users connect their own GitHub PAT via Account Settings). | `provider`, `token`, `api_base`, `allowed_repos` (tenant-level) OR per-user PAT via Account Settings |
+| **github** | DevOps | GitHub/GitLab — search code, list issues/PRs, read files, create issues/PRs, comment on issues/PRs, create/update files, merge PRs, and set issue labels. Supports tenant-level PAT (admin) **and** per-user connected accounts (users connect their own GitHub PAT via Account Settings). | `provider`, `token`, `api_base`, `allowed_repos` (tenant-level) OR per-user PAT via Account Settings |
 | **image_generation** | Creative | DALL·E 3 / Stable Diffusion — text prompt → image (stored in MinIO/S3) | `provider`, `api_key`, `model`, `default_size`, `default_quality` |
 | **market_overview** | Financial | Global index quotes, market movers (yfinance) | None |
 | **membrane** | Enterprise | Membrane framework integration | (provider-specific) |

@@ -322,6 +322,11 @@ Once connected, the agent can:
 - **Get file contents** — "Read the main configuration file from the backend"
 - **List pull requests** — "What PRs are open in the API repository?"
 - **Create issues** — "Create an issue about the login bug"
+- **Create pull requests** — "Open a PR to fix the typo in README.md"
+- **Comment on issues/PRs** — "Add a comment to issue #42 explaining the fix"
+- **Create or update files** — "Update the configuration with the new API key and commit it"
+- **Merge pull requests** — "Merge PR #123 once the checks pass"
+- **Add issue labels** — "Add the 'bug' and 'urgent' labels to issue #10"
 
 If you have a tenant-level GitHub token configured by your administrator, you can still use those features — connecting your own account gives you access under your own identity and rate limit quota.
 - **"Token expired"** (OAuth only) — click the **Reconnect** button next to the account to re-authenticate.

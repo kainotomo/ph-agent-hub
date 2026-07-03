@@ -18,6 +18,7 @@ paths-ignore:
   - "infrastructure/env.example"   # Template file, not actual secrets
   - ".gitguardian.yml"             # This config file itself
   - ".github/workflows/ci.yml"     # CI test credentials (ephemeral, zero production access)
+  - "backend/tests/test_tools_integration.py"  # Test mock tokens, not real secrets
 
 # Detector-level overrides
 detectors:

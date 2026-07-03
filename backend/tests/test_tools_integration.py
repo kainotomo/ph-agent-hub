@@ -771,6 +771,163 @@ class TestGithubTools:
             assert result["number"] == 10
             assert result["title"] == "New bug"
 
+    # ------------------------------------------------------------------
+    # New write tools (Issue #441)
+    # ------------------------------------------------------------------
+
+    async def test_create_pull_request_success(self, tools):
+        create_pr = tools[5]
+        mock_resp = _make_mock_httpx_response(
+            status_code=201,
+            json_data={
+                "number": 42,
+                "title": "Fix the bug",
+                "html_url": "http://example.com/42",
+                "state": "open",
+                "draft": False,
+            },
+            headers={"X-RateLimit-Remaining": "80"},
+        )
+
+        with patch("src.tools.github.httpx.AsyncClient", return_value=_make_mock_httpx_client(mock_resp)):
+            result = await create_pr(repo="owner/repo", title="Fix the bug", head="feature", base="main")
+            assert result["number"] == 42
+            assert result["title"] == "Fix the bug"
+            assert result["state"] == "open"
+            assert result["draft"] is False
+
+    async def test_create_pull_request_repo_not_allowed(self, tools):
+        create_pr = tools[5]
+        result = await create_pr(repo="unallowed/repo", title="Fix", head="feature", base="main")
+        assert "error" in result
+        assert "not in the allowed list" in result["error"]
+
+    async def test_create_pull_request_missing_head(self, tools):
+        create_pr = tools[5]
+        result = await create_pr(repo="owner/repo", title="Fix", head="", base="main")
+        assert "error" in result
+
+    async def test_create_pull_request_missing_base(self, tools):
+        create_pr = tools[5]
+        result = await create_pr(repo="owner/repo", title="Fix", head="feature", base="")
+        assert "error" in result
+
+    async def test_comment_on_issue_success(self, tools):
+        comment = tools[6]
+        mock_resp = _make_mock_httpx_response(
+            status_code=201,
+            json_data={
+                "id": 12345,
+                "html_url": "http://example.com/#issuecomment-12345",
+                "body": "Thanks for the report!",
+            },
+            headers={"X-RateLimit-Remaining": "70"},
+        )
+
+        with patch("src.tools.github.httpx.AsyncClient", return_value=_make_mock_httpx_client(mock_resp)):
+            result = await comment(repo="owner/repo", issue_number=5, body="Thanks for the report!")
+            assert result["id"] == 12345
+            assert "Thanks" in result["body"]
+
+    async def test_comment_on_issue_missing_body(self, tools):
+        comment = tools[6]
+        result = await comment(repo="owner/repo", issue_number=5, body="")
+        assert "error" in result
+
+    async def test_comment_on_issue_invalid_number(self, tools):
+        comment = tools[6]
+        result = await comment(repo="owner/repo", issue_number=0, body="test")
+        assert "error" in result
+
+    async def test_create_or_update_file_create_success(self, tools):
+        file_tool = tools[7]
+        mock_resp = _make_mock_httpx_response(
+            status_code=201,
+            json_data={
+                "content": {"path": "src/new.py", "html_url": "http://example.com/src/new.py"},
+                "commit": {"sha": "abc123"},
+            },
+            headers={"X-RateLimit-Remaining": "60"},
+        )
+
+        with patch("src.tools.github.httpx.AsyncClient", return_value=_make_mock_httpx_client(mock_resp)):
+            result = await file_tool(repo="owner/repo", path="src/new.py", message="Add new file", content="print('hello')")
+            assert result["action"] == "created"
+            assert result["commit_sha"] == "abc123"
+
+    async def test_create_or_update_file_update_success(self, tools):
+        file_tool = tools[7]
+        mock_resp = _make_mock_httpx_response(
+            status_code=200,
+            json_data={
+                "content": {"path": "src/existing.py", "html_url": "http://example.com/src/existing.py"},
+                "commit": {"sha": "def456"},
+            },
+            headers={"X-RateLimit-Remaining": "60"},
+        )
+
+        with patch("src.tools.github.httpx.AsyncClient", return_value=_make_mock_httpx_client(mock_resp)):
+            result = await file_tool(
+                repo="owner/repo", path="src/existing.py", message="Update file",
+                content="print('updated')", sha="existing-sha-123",
+            )
+            assert result["action"] == "updated"
+            assert result["commit_sha"] == "def456"
+
+    async def test_create_or_update_file_missing_message(self, tools):
+        file_tool = tools[7]
+        result = await file_tool(repo="owner/repo", path="src/test.py", message="", content="data")
+        assert "error" in result
+
+    async def test_merge_pull_request_success(self, tools):
+        merge_pr = tools[8]
+        mock_resp = _make_mock_httpx_response(
+            status_code=200,
+            json_data={
+                "merged": True,
+                "message": "Pull Request successfully merged",
+                "sha": "merge-sha-789",
+            },
+            headers={"X-RateLimit-Remaining": "50"},
+        )
+
+        with patch("src.tools.github.httpx.AsyncClient", return_value=_make_mock_httpx_client(mock_resp)):
+            result = await merge_pr(repo="owner/repo", pull_number=42)
+            assert result["merged"] is True
+            assert result["sha"] == "merge-sha-789"
+
+    async def test_merge_pull_request_invalid_number(self, tools):
+        merge_pr = tools[8]
+        result = await merge_pr(repo="owner/repo", pull_number=-1)
+        assert "error" in result
+
+    async def test_merge_pull_request_invalid_method(self, tools):
+        merge_pr = tools[8]
+        result = await merge_pr(repo="owner/repo", pull_number=1, merge_method="invalid")
+        assert "error" in result
+
+    async def test_add_issue_labels_success(self, tools):
+        label_tool = tools[9]
+        mock_resp = _make_mock_httpx_response(
+            status_code=200,
+            json_data=[
+                {"name": "bug"},
+                {"name": "urgent"},
+            ],
+            headers={"X-RateLimit-Remaining": "40"},
+        )
+
+        with patch("src.tools.github.httpx.AsyncClient", return_value=_make_mock_httpx_client(mock_resp)):
+            result = await label_tool(repo="owner/repo", issue_number=10, labels=["bug", "urgent"])
+            assert "labels" in result
+            assert "bug" in result["labels"]
+            assert "urgent" in result["labels"]
+
+    async def test_add_issue_labels_empty_list(self, tools):
+        label_tool = tools[9]
+        result = await label_tool(repo="owner/repo", issue_number=10, labels=[])
+        assert "error" in result
+
     async def test_rate_limit_exceeded(self, tools):
         search_code = tools[0]
         mock_resp = _make_mock_httpx_response(
@@ -937,6 +1094,31 @@ class TestGithubGitLab:
         result = await create_issue(repo="owner/repo", title="Test")
         assert "error" in result
 
+    async def test_gitlab_create_pull_request_unsupported(self, tools):
+        create_pr = tools[5]
+        result = await create_pr(repo="owner/repo", title="PR", head="feature", base="main")
+        assert "error" in result
+
+    async def test_gitlab_comment_on_issue_unsupported(self, tools):
+        comment = tools[6]
+        result = await comment(repo="owner/repo", issue_number=1, body="Nice work")
+        assert "error" in result
+
+    async def test_gitlab_create_or_update_file_unsupported(self, tools):
+        file_tool = tools[7]
+        result = await file_tool(repo="owner/repo", path="f.py", message="msg", content="data")
+        assert "error" in result
+
+    async def test_gitlab_merge_pull_request_unsupported(self, tools):
+        merge_pr = tools[8]
+        result = await merge_pr(repo="owner/repo", pull_number=1)
+        assert "error" in result
+
+    async def test_gitlab_add_issue_labels_unsupported(self, tools):
+        label_tool = tools[9]
+        result = await label_tool(repo="owner/repo", issue_number=1, labels=["bug"])
+        assert "error" in result
+
 
 class TestGithubHelpers:
     """Tests for internal helpers in github.py."""
@@ -952,6 +1134,25 @@ class TestGithubHelpers:
             result = await _github_request("/repos/owner/repo", "bad-token")
             assert "error" in result
             assert "Authentication failed" in result["error"]
+
+    async def test_github_request_422(self):
+        mock_resp = _make_mock_httpx_response(
+            status_code=422,
+            json_data={
+                "message": "Validation Failed",
+                "errors": [
+                    {"resource": "PullRequest", "code": "custom",
+                     "field": "head", "message": "head is not a branch"},
+                ],
+            },
+            headers={"X-RateLimit-Remaining": "50"},
+        )
+        with patch("src.tools.github.httpx.AsyncClient", return_value=_make_mock_httpx_client(mock_resp)):
+            from src.tools.github import _github_request
+            result = await _github_request("/repos/owner/repo/pulls", "token", method="POST", json_data={})
+            assert "error" in result
+            assert "422" in result["error"]
+            assert "head" in result["error"]
 
     async def test_github_request_timeout(self):
         client = AsyncMock()

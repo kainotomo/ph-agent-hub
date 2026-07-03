@@ -1,7 +1,8 @@
 # =============================================================================
 # PH Agent Hub — GitHub Integration Tool Factory
 # =============================================================================
-# Search code, list issues/PRs, read files from GitHub/GitLab repos.
+# Search code, list issues/PRs, read files, create issues/PRs, comment,
+# manage files, merge PRs, and label issues on GitHub/GitLab repos.
 # PAT stored encrypted in tool.config. Repo allowlist support.
 #
 # Dependencies: httpx (already installed)
@@ -87,6 +88,12 @@ async def _github_request(
                 response = await client.get(url, headers=headers)
             elif method == "POST":
                 response = await client.post(url, headers=headers, json=json_data)
+            elif method == "PUT":
+                response = await client.put(url, headers=headers, json=json_data)
+            elif method == "PATCH":
+                response = await client.patch(url, headers=headers, json=json_data)
+            elif method == "DELETE":
+                response = await client.delete(url, headers=headers)
             else:
                 return {"error": f"Unsupported HTTP method: {method}"}
 
@@ -102,6 +109,31 @@ async def _github_request(
                 return {"error": f"Access forbidden: {response.text[:300]}", "rate_limit_remaining": remaining}
             elif response.status_code == 404:
                 return {"error": "Resource not found. Check the repository name and path.", "rate_limit_remaining": remaining}
+            elif response.status_code == 422:
+                details = ""
+                try:
+                    body = response.json()
+                    if isinstance(body, dict):
+                        errors = body.get("errors", [])
+                        if errors:
+                            detail_msgs = []
+                            for err in errors:
+                                code = err.get("code", "")
+                                field = err.get("field", "")
+                                msg = err.get("message", "")
+                                parts = [p for p in [field, code, msg] if p]
+                                if parts:
+                                    detail_msgs.append(": ".join(parts))
+                            if detail_msgs:
+                                details = " — " + "; ".join(detail_msgs)
+                        if not details:
+                            details = body.get("message", "")
+                except Exception:
+                    pass
+                return {
+                    "error": f"GitHub API rejected the request (HTTP 422){details}",
+                    "rate_limit_remaining": remaining,
+                }
 
             response.raise_for_status()
             data = response.json()
@@ -125,6 +157,8 @@ async def _github_request(
 async def _gitlab_request(
     endpoint: str,
     token: str,
+    method: str = "GET",
+    json_data: dict | None = None,
     timeout: float = DEFAULT_TIMEOUT,
     api_base: str = GITLAB_API_BASE,
 ) -> dict:
@@ -137,7 +171,14 @@ async def _gitlab_request(
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.get(url, headers=headers)
+            if method == "GET":
+                response = await client.get(url, headers=headers)
+            elif method == "POST":
+                response = await client.post(url, headers=headers, json=json_data)
+            elif method == "PUT":
+                response = await client.put(url, headers=headers, json=json_data)
+            else:
+                return {"error": f"Unsupported HTTP method: {method}"}
             if response.status_code == 401:
                 return {"error": "Authentication failed. Check your access token."}
             elif response.status_code == 404:
@@ -243,8 +284,8 @@ def build_github_tools(
             result = await _gitlab_request(
                 f"/projects/{encoded_repo}/search?scope=blobs&search={encoded_query}",
                 _resolve_github_token(),
-                timeout,
-                api_base,
+                timeout=timeout,
+                api_base=api_base,
             )
         else:
             # GitHub code search
@@ -308,8 +349,8 @@ def build_github_tools(
             result = await _gitlab_request(
                 f"/projects/{encoded_repo}/issues?state={state}&per_page={per_page}",
                 _resolve_github_token(),
-                timeout,
-                api_base,
+                timeout=timeout,
+                api_base=api_base,
             )
         else:
             result = await _github_request(
@@ -384,8 +425,8 @@ def build_github_tools(
             result = await _gitlab_request(
                 f"/projects/{encoded_repo}/repository/files/{encoded_path}/raw?ref={encoded_ref}",
                 _resolve_github_token(),
-                timeout,
-                api_base,
+                timeout=timeout,
+                api_base=api_base,
             )
             if "error" in result:
                 return result
@@ -461,8 +502,8 @@ def build_github_tools(
             result = await _gitlab_request(
                 f"/projects/{encoded_repo}/merge_requests?state={state}&per_page={per_page}",
                 _resolve_github_token(),
-                timeout,
-                api_base,
+                timeout=timeout,
+                api_base=api_base,
             )
         else:
             result = await _github_request(
@@ -551,4 +592,346 @@ def build_github_tools(
             "rate_limit_remaining": result.get("rate_limit_remaining", "unknown"),
         }
 
-    return [search_code, list_issues, get_file_content, list_pull_requests, create_issue]
+    # ------------------------------------------------------------------
+    @tool
+    async def create_pull_request(repo: str, title: str, head: str, base: str, body: str = "", draft: bool = False) -> dict:
+        """Create a pull request in a GitHub repository.
+
+        Note: Pull request creation is currently only supported for GitHub.
+        GitLab support may be added in a future update.
+
+        Args:
+            repo: Repository in "owner/name" format.
+            title: Pull request title.
+            head: The name of the branch where your changes are implemented.
+            base: The name of the branch you want the changes pulled into.
+            body: Pull request body/description (Markdown supported).
+            draft: Whether to create the pull request as a draft (default False).
+
+        Returns:
+            A dict with:
+            - ``number``: the new pull request number
+            - ``title``: PR title
+            - ``html_url``: URL to the created PR
+            - ``state``: PR state (e.g., "open")
+            - ``draft``: whether the PR is a draft
+            - ``rate_limit_remaining``: remaining API requests
+            - ``error``: error message if creation failed
+        """
+        if not repo or not repo.strip():
+            return {"error": "No repository provided"}
+        if not title or not title.strip():
+            return {"error": "No pull request title provided"}
+        if not head or not head.strip():
+            return {"error": "No head branch provided"}
+        if not base or not base.strip():
+            return {"error": "No base branch provided"}
+        if not _check_repo_allowed(repo, allowed_repos):
+            return {"error": f"Repository '{repo}' is not in the allowed list"}
+
+        if is_gitlab:
+            return {"error": "Pull request creation via GitLab is not yet supported"}
+
+        payload: dict[str, Any] = {
+            "title": title,
+            "head": head,
+            "base": base,
+            "draft": draft,
+        }
+        if body:
+            payload["body"] = body
+
+        result = await _github_request(
+            f"/repos/{repo}/pulls",
+            _resolve_github_token(),
+            method="POST",
+            json_data=payload,
+            timeout=timeout,
+            api_base=api_base,
+        )
+
+        if "error" in result:
+            return result
+
+        data = result.get("data", {})
+        return {
+            "number": data.get("number", ""),
+            "title": data.get("title", title),
+            "html_url": data.get("html_url", ""),
+            "state": data.get("state", ""),
+            "draft": data.get("draft", draft),
+            "rate_limit_remaining": result.get("rate_limit_remaining", "unknown"),
+        }
+
+    # ------------------------------------------------------------------
+    @tool
+    async def comment_on_issue(repo: str, issue_number: int, body: str) -> dict:
+        """Add a comment to an issue or pull request in a GitHub repository.
+
+        Note: Commenting is currently only supported for GitHub.
+        GitLab support may be added in a future update.
+
+        Args:
+            repo: Repository in "owner/name" format.
+            issue_number: The issue or pull request number.
+            body: The comment text (Markdown supported).
+
+        Returns:
+            A dict with:
+            - ``id``: the comment ID
+            - ``html_url``: URL to the created comment
+            - ``body``: the comment body
+            - ``rate_limit_remaining``: remaining API requests
+            - ``error``: error message if creation failed
+        """
+        if not repo or not repo.strip():
+            return {"error": "No repository provided"}
+        if not isinstance(issue_number, int) or issue_number < 1:
+            return {"error": "Invalid issue number"}
+        if not body or not body.strip():
+            return {"error": "No comment body provided"}
+        if not _check_repo_allowed(repo, allowed_repos):
+            return {"error": f"Repository '{repo}' is not in the allowed list"}
+
+        if is_gitlab:
+            return {"error": "Commenting via GitLab is not yet supported"}
+
+        result = await _github_request(
+            f"/repos/{repo}/issues/{issue_number}/comments",
+            _resolve_github_token(),
+            method="POST",
+            json_data={"body": body},
+            timeout=timeout,
+            api_base=api_base,
+        )
+
+        if "error" in result:
+            return result
+
+        data = result.get("data", {})
+        return {
+            "id": data.get("id", ""),
+            "html_url": data.get("html_url", ""),
+            "body": data.get("body", body),
+            "rate_limit_remaining": result.get("rate_limit_remaining", "unknown"),
+        }
+
+    # ------------------------------------------------------------------
+    @tool
+    async def create_or_update_file(repo: str, path: str, message: str, content: str, branch: str = "main", sha: str | None = None) -> dict:
+        """Create or update a single file in a GitHub repository.
+
+        If ``sha`` is provided, the file will be updated. If ``sha`` is omitted,
+        the file will be created (fails if the file already exists with a
+        helpful error message asking you to provide the SHA).
+
+        Note: File creation/update is currently only supported for GitHub.
+        GitLab support may be added in a future update.
+
+        Args:
+            repo: Repository in "owner/name" format.
+            path: Path to the file within the repository.
+            message: Commit message describing the change.
+            content: The file content (plain text — will be base64-encoded).
+            branch: Branch to commit to (default "main").
+            sha: The blob SHA of the existing file. Required for updates.
+                  Omit when creating a new file.
+
+        Returns:
+            A dict with:
+            - ``path``: the file path
+            - ``html_url``: URL to the file on the web
+            - ``commit_sha``: SHA of the created commit
+            - ``action``: "created" or "updated"
+            - ``rate_limit_remaining``: remaining API requests
+            - ``error``: error message if failed
+        """
+        if not repo or not repo.strip():
+            return {"error": "No repository provided"}
+        if not path or not path.strip():
+            return {"error": "No file path provided"}
+        if not message or not message.strip():
+            return {"error": "No commit message provided"}
+        if not content:
+            return {"error": "No file content provided"}
+        if not _check_repo_allowed(repo, allowed_repos):
+            return {"error": f"Repository '{repo}' is not in the allowed list"}
+
+        if is_gitlab:
+            return {"error": "File creation/update via GitLab is not yet supported"}
+
+        import base64
+        encoded_content = base64.b64encode(content.encode("utf-8")).decode("utf-8")
+
+        payload: dict[str, Any] = {
+            "message": message,
+            "content": encoded_content,
+            "branch": branch,
+        }
+        if sha:
+            payload["sha"] = sha
+
+        result = await _github_request(
+            f"/repos/{repo}/contents/{path}",
+            _resolve_github_token(),
+            method="PUT",
+            json_data=payload,
+            timeout=timeout,
+            api_base=api_base,
+        )
+
+        if "error" in result:
+            return result
+
+        data = result.get("data", {})
+        # GitHub returns 201 for creates and 200 for updates
+        action = data.get("commit", {}).get("sha", "") if data else ""
+        return {
+            "path": data.get("content", {}).get("path", path),
+            "html_url": data.get("content", {}).get("html_url", ""),
+            "commit_sha": data.get("commit", {}).get("sha", ""),
+            "action": sha and "updated" or "created",
+            "rate_limit_remaining": result.get("rate_limit_remaining", "unknown"),
+        }
+
+    # ------------------------------------------------------------------
+    @tool
+    async def merge_pull_request(repo: str, pull_number: int, merge_method: str = "merge", commit_title: str = "", commit_message: str = "") -> dict:
+        """Merge a pull request in a GitHub repository.
+
+        Note: PR merging is currently only supported for GitHub.
+        GitLab support may be added in a future update.
+
+        Args:
+            repo: Repository in "owner/name" format.
+            pull_number: The pull request number to merge.
+            merge_method: Merge method — "merge", "squash", or "rebase"
+                          (default "merge").
+            commit_title: Optional custom title for the merge commit.
+            commit_message: Optional custom message for the merge commit.
+
+        Returns:
+            A dict with:
+            - ``merged``: whether the merge was successful (bool)
+            - ``message``: status message from the API
+            - ``sha``: SHA of the merge commit (if merged)
+            - ``rate_limit_remaining``: remaining API requests
+            - ``error``: error message if merge failed
+        """
+        if not repo or not repo.strip():
+            return {"error": "No repository provided"}
+        if not isinstance(pull_number, int) or pull_number < 1:
+            return {"error": "Invalid pull request number"}
+        if merge_method not in ("merge", "squash", "rebase"):
+            return {"error": f"Invalid merge method '{merge_method}'. Choose 'merge', 'squash', or 'rebase'."}
+        if not _check_repo_allowed(repo, allowed_repos):
+            return {"error": f"Repository '{repo}' is not in the allowed list"}
+
+        if is_gitlab:
+            return {"error": "Pull request merging via GitLab is not yet supported"}
+
+        payload: dict[str, Any] = {
+            "merge_method": merge_method,
+        }
+        if commit_title:
+            payload["commit_title"] = commit_title
+        if commit_message:
+            payload["commit_message"] = commit_message
+
+        result = await _github_request(
+            f"/repos/{repo}/pulls/{pull_number}/merge",
+            _resolve_github_token(),
+            method="PUT",
+            json_data=payload,
+            timeout=timeout,
+            api_base=api_base,
+        )
+
+        if "error" in result:
+            return result
+
+        data = result.get("data", {})
+        return {
+            "merged": data.get("merged", False),
+            "message": data.get("message", ""),
+            "sha": data.get("sha", ""),
+            "rate_limit_remaining": result.get("rate_limit_remaining", "unknown"),
+        }
+
+    # ------------------------------------------------------------------
+    @tool
+    async def add_issue_labels(repo: str, issue_number: int, labels: list[str]) -> dict:
+        """Add (replace) labels on an issue or pull request in a GitHub repository.
+
+        **Note**: This **replaces** all existing labels with the provided list.
+        To add labels incrementally, include the existing labels you want to keep.
+
+        Note: Label management is currently only supported for GitHub.
+        GitLab support may be added in a future update.
+
+        Args:
+            repo: Repository in "owner/name" format.
+            issue_number: The issue or pull request number.
+            labels: List of label names to set (e.g., ["bug", "urgent"]).
+                    This replaces all existing labels.
+
+        Returns:
+            A dict with:
+            - ``issue_number``: the issue/PR number
+            - ``labels``: the final list of labels on the issue
+            - ``html_url``: URL to the issue
+            - ``rate_limit_remaining``: remaining API requests
+            - ``error``: error message if failed
+        """
+        if not repo or not repo.strip():
+            return {"error": "No repository provided"}
+        if not isinstance(issue_number, int) or issue_number < 1:
+            return {"error": "Invalid issue number"}
+        if not labels or not isinstance(labels, list) or len(labels) == 0:
+            return {"error": "No labels provided. Provide a list of at least one label."}
+        if not _check_repo_allowed(repo, allowed_repos):
+            return {"error": f"Repository '{repo}' is not in the allowed list"}
+
+        if is_gitlab:
+            return {"error": "Label management via GitLab is not yet supported"}
+
+        result = await _github_request(
+            f"/repos/{repo}/issues/{issue_number}/labels",
+            _resolve_github_token(),
+            method="POST",
+            json_data={"labels": labels},
+            timeout=timeout,
+            api_base=api_base,
+        )
+
+        if "error" in result:
+            return result
+
+        data = result.get("data", [])
+        if isinstance(data, dict):
+            data = [data]
+
+        final_labels = [
+            lbl.get("name", lbl) if isinstance(lbl, dict) else lbl
+            for lbl in data
+        ]
+
+        return {
+            "issue_number": issue_number,
+            "labels": final_labels,
+            "html_url": f"{api_base.rstrip('/')}/repos/{repo}/issues/{issue_number}",
+            "rate_limit_remaining": result.get("rate_limit_remaining", "unknown"),
+        }
+
+    return [
+        search_code,
+        list_issues,
+        get_file_content,
+        list_pull_requests,
+        create_issue,
+        create_pull_request,
+        comment_on_issue,
+        create_or_update_file,
+        merge_pull_request,
+        add_issue_labels,
+    ]

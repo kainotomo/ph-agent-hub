@@ -156,7 +156,10 @@ async def _gitlab_request(
 # ---------------------------------------------------------------------------
 
 
-def build_github_tools(tool_config: dict | None = None) -> list:
+def build_github_tools(
+    tool_config: dict | None = None,
+    user_credentials: list | None = None,
+) -> list:
     """Return a list of MAF @tool-decorated async functions for GitHub/GitLab.
 
     Args:
@@ -166,6 +169,9 @@ def build_github_tools(tool_config: dict | None = None) -> list:
             - ``api_base`` (str): Custom API base URL (for self-hosted instances)
             - ``allowed_repos`` (list[str]): Repo allowlist patterns
             - ``timeout`` (float): Request timeout in seconds (default 30)
+        user_credentials: Optional list of ``UserToolCredential`` ORM
+            instances. Per-user tokens take precedence over the tenant-level
+            ``tool_config`` token (Issue #434).
 
     Returns:
         A list of callables ready to pass to ``Agent(tools=...)``.
@@ -181,6 +187,31 @@ def build_github_tools(tool_config: dict | None = None) -> list:
         api_base = GITHUB_API_BASE if provider == "github" else GITLAB_API_BASE
 
     is_gitlab = provider == "gitlab"
+
+    # ------------------------------------------------------------------
+    # Per-user token resolution (Phase 1: user creds, Phase 2: tenant config)
+    # ------------------------------------------------------------------
+    def _resolve_github_token() -> str:
+        """Return the effective token — per-user credential or tenant fallback."""
+        if user_credentials:
+            import json as _json
+
+            for cred in user_credentials:
+                if cred.status != "active":
+                    continue
+                raw = cred.credentials
+                if not raw:
+                    continue
+                try:
+                    parsed = _json.loads(raw) if isinstance(raw, str) else raw
+                except Exception:
+                    continue
+                access_token = parsed.get("access_token", "").strip()
+                if access_token:
+                    return access_token
+
+        # Fall back to tenant-level token (already resolved above)
+        return token
 
     # ------------------------------------------------------------------
     @tool
@@ -211,7 +242,7 @@ def build_github_tools(tool_config: dict | None = None) -> list:
             encoded_repo = quote(repo.replace("/", "%2F"))
             result = await _gitlab_request(
                 f"/projects/{encoded_repo}/search?scope=blobs&search={encoded_query}",
-                token,
+                _resolve_github_token(),
                 timeout,
                 api_base,
             )
@@ -220,7 +251,7 @@ def build_github_tools(tool_config: dict | None = None) -> list:
             encoded_query = quote(f"{query} repo:{repo}")
             result = await _github_request(
                 f"/search/code?q={encoded_query}",
-                token,
+                _resolve_github_token(),
                 timeout=timeout,
                 api_base=api_base,
             )
@@ -276,14 +307,14 @@ def build_github_tools(tool_config: dict | None = None) -> list:
             encoded_repo = quote(repo.replace("/", "%2F"))
             result = await _gitlab_request(
                 f"/projects/{encoded_repo}/issues?state={state}&per_page={per_page}",
-                token,
+                _resolve_github_token(),
                 timeout,
                 api_base,
             )
         else:
             result = await _github_request(
                 f"/repos/{repo}/issues?state={state}&per_page={per_page}",
-                token,
+                _resolve_github_token(),
                 timeout=timeout,
                 api_base=api_base,
             )
@@ -352,7 +383,7 @@ def build_github_tools(tool_config: dict | None = None) -> list:
             encoded_ref = quote(ref, safe="")
             result = await _gitlab_request(
                 f"/projects/{encoded_repo}/repository/files/{encoded_path}/raw?ref={encoded_ref}",
-                token,
+                _resolve_github_token(),
                 timeout,
                 api_base,
             )
@@ -365,7 +396,7 @@ def build_github_tools(tool_config: dict | None = None) -> list:
         else:
             result = await _github_request(
                 f"/repos/{repo}/contents/{path}?ref={ref}",
-                token,
+                _resolve_github_token(),
                 timeout=timeout,
                 api_base=api_base,
             )
@@ -429,14 +460,14 @@ def build_github_tools(tool_config: dict | None = None) -> list:
             encoded_repo = quote(repo.replace("/", "%2F"))
             result = await _gitlab_request(
                 f"/projects/{encoded_repo}/merge_requests?state={state}&per_page={per_page}",
-                token,
+                _resolve_github_token(),
                 timeout,
                 api_base,
             )
         else:
             result = await _github_request(
                 f"/repos/{repo}/pulls?state={state}&per_page={per_page}",
-                token,
+                _resolve_github_token(),
                 timeout=timeout,
                 api_base=api_base,
             )
@@ -502,7 +533,7 @@ def build_github_tools(tool_config: dict | None = None) -> list:
 
         result = await _github_request(
             f"/repos/{repo}/issues",
-            token,
+            _resolve_github_token(),
             method="POST",
             json_data={"title": title, "body": body},
             timeout=timeout,

@@ -785,6 +785,115 @@ class TestGithubTools:
             assert "error" in result
             assert "Rate limit" in result["error"]
 
+    # ------------------------------------------------------------------
+    # Per-user credential tests (Issue #434)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _make_mock_credential(access_token: str, status: str = "active") -> object:
+        """Return a mock ``UserToolCredential``-like object."""
+        import json
+
+        cred = MagicMock()
+        cred.status = status
+        cred.credentials = json.dumps({"access_token": access_token})
+        return cred
+
+    async def test_per_user_token_overrides_tenant_config(self):
+        """Per-user active credential takes precedence over tool_config.token."""
+        from src.tools.github import build_github_tools
+
+        user_cred = self._make_mock_credential("ghp_user_pat_abc123")
+        tools = build_github_tools(
+            {"token": "ghp_tenant_config_token", "allowed_repos": ["owner/repo"]},
+            user_credentials=[user_cred],
+        )
+        search_code = tools[0]
+
+        mock_resp = _make_mock_httpx_response(
+            status_code=200,
+            json_data={"total_count": 1, "items": [{"path": "f.py", "name": "f.py"}]},
+            headers={"X-RateLimit-Remaining": "42"},
+        )
+
+        with patch("src.tools.github.httpx.AsyncClient", return_value=_make_mock_httpx_client(mock_resp)) as mock_client:
+            result = await search_code(query="test", repo="owner/repo")
+            # Verify the per-user token was sent in the Authorization header
+            call_kwargs = mock_client.return_value.get.call_args
+            headers = call_kwargs[1].get("headers", {})
+            assert headers.get("Authorization") == "Bearer ghp_user_pat_abc123", (
+                f"Expected per-user token, got: {headers.get('Authorization')}"
+            )
+            assert result["total_count"] == 1
+
+    async def test_falls_back_to_tenant_token(self):
+        """Empty user_credentials falls back to tool_config.token."""
+        from src.tools.github import build_github_tools
+
+        tools = build_github_tools(
+            {"token": "ghp_tenant_fallback", "allowed_repos": ["owner/repo"]},
+            user_credentials=[],
+        )
+        search_code = tools[0]
+
+        mock_resp = _make_mock_httpx_response(
+            status_code=200,
+            json_data={"total_count": 1, "items": [{"path": "f.py", "name": "f.py"}]},
+            headers={"X-RateLimit-Remaining": "42"},
+        )
+
+        with patch("src.tools.github.httpx.AsyncClient", return_value=_make_mock_httpx_client(mock_resp)) as mock_client:
+            result = await search_code(query="test", repo="owner/repo")
+            call_kwargs = mock_client.return_value.get.call_args
+            headers = call_kwargs[1].get("headers", {})
+            assert headers.get("Authorization") == "Bearer ghp_tenant_fallback"
+            assert result["total_count"] == 1
+
+    async def test_skips_inactive_user_credentials(self):
+        """Inactive credentials are skipped, falling back to tenant token."""
+        from src.tools.github import build_github_tools
+
+        expired_cred = self._make_mock_credential("ghp_expired_token", status="expired")
+        tools = build_github_tools(
+            {"token": "ghp_tenant_still_works", "allowed_repos": ["owner/repo"]},
+            user_credentials=[expired_cred],
+        )
+        search_code = tools[0]
+
+        mock_resp = _make_mock_httpx_response(
+            status_code=200,
+            json_data={"total_count": 0, "items": []},
+            headers={"X-RateLimit-Remaining": "42"},
+        )
+
+        with patch("src.tools.github.httpx.AsyncClient", return_value=_make_mock_httpx_client(mock_resp)) as mock_client:
+            result = await search_code(query="test", repo="owner/repo")
+            call_kwargs = mock_client.return_value.get.call_args
+            headers = call_kwargs[1].get("headers", {})
+            assert headers.get("Authorization") == "Bearer ghp_tenant_still_works"
+            assert "total_count" in result
+
+    async def test_error_when_no_token_at_all(self):
+        """No per-user credentials and no tenant token returns an auth error."""
+        from src.tools.github import build_github_tools
+
+        tools = build_github_tools(
+            {"allowed_repos": ["owner/repo"]},
+            user_credentials=[],
+        )
+        search_code = tools[0]
+
+        mock_resp = _make_mock_httpx_response(
+            status_code=401,
+            json_data={"message": "Bad credentials"},
+            headers={"X-RateLimit-Remaining": "0"},
+        )
+
+        with patch("src.tools.github.httpx.AsyncClient", return_value=_make_mock_httpx_client(mock_resp)):
+            result = await search_code(query="test", repo="owner/repo")
+            assert "error" in result
+            assert "Authentication failed" in result["error"]
+
 
 class TestGithubGitLab:
     """Tests for ``build_github_tools()`` — GitLab provider."""

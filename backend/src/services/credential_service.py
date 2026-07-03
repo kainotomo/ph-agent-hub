@@ -269,7 +269,7 @@ async def test_raw_imap_connection(
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-VALID_PROVIDERS = frozenset({"gmail", "outlook", "imap", "google", "microsoft", "erpnext"})
+VALID_PROVIDERS = frozenset({"gmail", "outlook", "imap", "google", "microsoft", "erpnext", "github"})
 
 
 def _validate_provider(provider: str) -> None:
@@ -325,6 +325,8 @@ async def _do_test_connection(
         return await _test_imap_connection(creds)
     elif provider == "erpnext":
         return await _test_erpnext_connection(creds)
+    elif provider == "github":
+        return await _test_github_connection(creds)
     elif provider in ("gmail", "outlook", "google", "microsoft"):
         result = await _test_oauth_connection(provider, tool_type, tokens)
 
@@ -548,5 +550,57 @@ async def _test_erpnext_connection(creds: dict) -> dict:
         return {"ok": False, "message": f"Could not connect to {base_url}. Check the URL."}
     except httpx.TimeoutException:
         return {"ok": False, "message": f"Connection to {base_url} timed out."}
+    except Exception as exc:
+        return {"ok": False, "message": f"Connection test failed: {exc}"}
+
+
+# ---------------------------------------------------------------------------
+# GitHub test connection
+# ---------------------------------------------------------------------------
+
+
+async def _test_github_connection(creds: dict) -> dict:
+    """Test GitHub connectivity by calling ``GET /user`` with the PAT.
+
+    Args:
+        creds: Dict with ``access_token`` (GitHub personal access token).
+
+    Returns:
+        A dict with ``ok`` (bool) and ``message`` (str).
+    """
+    access_token = creds.get("access_token", "").strip()
+
+    if not access_token:
+        return {"ok": False, "message": "GitHub personal access token not provided"}
+
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                "https://api.github.com/user",
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "Authorization": f"Bearer {access_token}",
+                    "User-Agent": "ph-agent-hub/1.0",
+                },
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                login = data.get("login", "unknown")
+                return {"ok": True, "message": f"Connected as {login}"}
+            elif resp.status_code == 401:
+                return {"ok": False, "message": "Authentication failed. Token is invalid or expired."}
+            elif resp.status_code == 403:
+                if "rate limit" in resp.text.lower():
+                    return {"ok": False, "message": "Rate limit exceeded. Try again later."}
+                return {"ok": False, "message": "Access forbidden. Check token scopes."}
+            else:
+                body = resp.text[:200]
+                return {"ok": False, "message": f"GitHub returned HTTP {resp.status_code}: {body}"}
+    except httpx.ConnectError:
+        return {"ok": False, "message": "Could not connect to api.github.com"}
+    except httpx.TimeoutException:
+        return {"ok": False, "message": "Connection to api.github.com timed out."}
     except Exception as exc:
         return {"ok": False, "message": f"Connection test failed: {exc}"}

@@ -44,7 +44,7 @@ class UserToolCredential(Base):
         comment="User-defined display name (e.g., 'Work Gmail', 'Personal Outlook')",
     )
     provider: Mapped[str] = mapped_column(
-        Enum("gmail", "outlook", "imap", "google", "microsoft", "erpnext",
+        Enum("gmail", "outlook", "imap", "google", "microsoft", "erpnext", "github",
              name="credential_provider_enum"),
         nullable=False,
     )

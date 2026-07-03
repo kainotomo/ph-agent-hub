@@ -38,6 +38,7 @@ import {
   ArrowLeftOutlined,
   ReloadOutlined,
   DatabaseOutlined,
+  GithubOutlined,
 } from "@ant-design/icons";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -81,6 +82,11 @@ const TOOL_TYPE_NAMES: Record<string, { name: string; icon: React.ReactNode; des
     icon: <DatabaseOutlined />,
     description: "Query your ERP system, create and manage documents",
   },
+  github: {
+    name: "GitHub",
+    icon: <GithubOutlined />,
+    description: "Search code, list issues/PRs, and read files from GitHub repositories",
+  },
 };
 
 const PROVIDER_LABELS: Record<string, { label: string; color: string }> = {
@@ -90,6 +96,7 @@ const PROVIDER_LABELS: Record<string, { label: string; color: string }> = {
   google: { label: "Google", color: "red" },
   microsoft: { label: "Microsoft", color: "blue" },
   erpnext: { label: "ERPNext", color: "orange" },
+  github: { label: "GitHub", color: "black" },
 };
 
 const STATUS_COLORS: Record<string, string> = {
@@ -117,6 +124,7 @@ export function AccountSettingsPage() {
   }>({ open: false, toolId: "", toolType: "" });
   const [imapModal, setImapModal] = useState(false);
   const [erpnextModal, setErpnextModal] = useState(false);
+  const [githubModal, setGithubModal] = useState(false);
 
   // Handle OAuth callback redirect in popup window
   useEffect(() => {
@@ -295,6 +303,10 @@ export function AccountSettingsPage() {
             setConnectModal({ ...connectModal, open: false });
             setErpnextModal(true);
           }}
+          onGitHub={() => {
+            setConnectModal({ ...connectModal, open: false });
+            setGithubModal(true);
+          }}
         />
 
         {/* Manual IMAP Setup Modal */}
@@ -313,6 +325,16 @@ export function AccountSettingsPage() {
           onClose={() => setErpnextModal(false)}
           onSaved={() => {
             setErpnextModal(false);
+            queryClient.invalidateQueries({ queryKey: ["credentials"] });
+          }}
+        />
+
+        {/* GitHub Setup Modal */}
+        <GithubSetupModal
+          open={githubModal}
+          onClose={() => setGithubModal(false)}
+          onSaved={() => {
+            setGithubModal(false);
             queryClient.invalidateQueries({ queryKey: ["credentials"] });
           }}
         />
@@ -390,12 +412,14 @@ function ConnectAccountModal({
   onClose,
   onIMAP,
   onERPNext,
+  onGitHub,
 }: {
   open: boolean;
   toolType: string;
   onClose: () => void;
   onIMAP: () => void;
   onERPNext: () => void;
+  onGitHub: () => void;
 }) {
   const [connecting, setConnecting] = useState<string | null>(null);
 
@@ -473,6 +497,18 @@ function ConnectAccountModal({
             </Button>
             <Text type="secondary" style={{ fontSize: 12, textAlign: "center" }}>
               Enter your ERPNext site URL, API key, and API secret
+            </Text>
+          </>
+        )}
+
+        {toolType === "github" && (
+          <>
+            <Divider>or</Divider>
+            <Button block size="large" onClick={onGitHub}>
+              <GithubOutlined /> Connect with Personal Access Token
+            </Button>
+            <Text type="secondary" style={{ fontSize: 12, textAlign: "center" }}>
+              Enter a GitHub Personal Access Token with repo and user scopes
             </Text>
           </>
         )}
@@ -788,6 +824,140 @@ function ErpnextSetupModal({
           extra="Your ERPNext login email — for display purposes only"
         >
           <Input placeholder="you@example.com" />
+        </Form.Item>
+      </Form>
+    </Modal>
+  );
+}
+
+// =============================================================================
+// GitHub Setup Modal
+// =============================================================================
+
+function GithubSetupModal({
+  open,
+  onClose,
+  onSaved,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [form] = Form.useForm();
+  const [creating, setCreating] = useState(false);
+  const [tools, setTools] = useState<ToolInfo[]>([]);
+  const [loadingTools, setLoadingTools] = useState(false);
+  const [singleToolId, setSingleToolId] = useState<string | null>(null);
+
+  // Fetch available GitHub tools when modal opens
+  useEffect(() => {
+    if (open) {
+      setLoadingTools(true);
+      setSingleToolId(null);
+      getToolIdByType("github")
+        .then((result) => {
+          const toolList = result.tools ?? [{ id: result.tool_id, name: result.tool_id }];
+          setTools(toolList);
+          if (toolList.length === 1) {
+            setSingleToolId(toolList[0].id);
+          } else {
+            form.setFieldsValue({ tool_id: toolList[0]?.id });
+          }
+        })
+        .catch(() => {
+          setTools([]);
+        })
+        .finally(() => setLoadingTools(false));
+    }
+  }, [open, form]);
+
+  const handleSave = async () => {
+    try {
+      const values = await form.validateFields();
+      setCreating(true);
+
+      const tool_id = singleToolId ?? values.tool_id;
+
+      await createCredential({
+        tool_id,
+        label: values.label,
+        provider: "github",
+        email_address: values.email || undefined,
+        credentials: {
+          access_token: values.access_token,
+        },
+        is_default: true,
+      });
+
+      message.success(`"${values.label}" connected successfully`);
+      onSaved();
+    } catch (err: unknown) {
+      if (err instanceof Error) {
+        message.error(err.message);
+      }
+    }
+    setCreating(false);
+  };
+
+  return (
+    <Modal
+      title={<><GithubOutlined /> Connect GitHub Account</>}
+      open={open}
+      onCancel={onClose}
+      onOk={handleSave}
+      confirmLoading={creating}
+      okText="Save Account"
+      width={520}
+    >
+      <Form form={form} layout="vertical" style={{ marginTop: 16 }}>
+        <Form.Item
+          name="label"
+          label="Account Label"
+          rules={[{ required: true, message: "Enter a label (e.g. 'Work GitHub')" }]}
+        >
+          <Input placeholder="e.g. Personal GitHub, Work GitHub" />
+        </Form.Item>
+
+        {tools.length > 1 && (
+          <Form.Item
+            name="tool_id"
+            label="GitHub Tool"
+            rules={[{ required: true, message: "Select which GitHub tool to connect" }]}
+          >
+            <Select
+              placeholder="Select a GitHub tool"
+              loading={loadingTools}
+              options={tools.map((t) => ({
+                label: t.name,
+                value: t.id,
+              }))}
+            />
+          </Form.Item>
+        )}
+
+        <Form.Item
+          name="access_token"
+          label="Personal Access Token"
+          rules={[{ required: true, message: "Enter your GitHub personal access token" }]}
+          extra={
+            <a
+              href="https://github.com/settings/tokens"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Generate a token at GitHub Settings → Developer settings → Personal access tokens
+            </a>
+          }
+        >
+          <Input.Password placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" />
+        </Form.Item>
+
+        <Form.Item
+          name="email"
+          label="GitHub Username (optional)"
+          extra="Your GitHub username — for display purposes only"
+        >
+          <Input placeholder="octocat" />
         </Form.Item>
       </Form>
     </Modal>

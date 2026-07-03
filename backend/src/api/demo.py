@@ -205,7 +205,7 @@ async def create_demo_session(
         "selected_model_id": None,
         "thinking_enabled": False,
         "temperature": None,
-        "active_tool_ids": [],
+        "active_tool_ids": None,
         "created_at": now.isoformat(),
         "updated_at": now.isoformat(),
     }

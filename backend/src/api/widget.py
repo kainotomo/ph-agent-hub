@@ -132,7 +132,7 @@ async def get_widget_config(
         "selected_model_id": config.default_model_id,
         "thinking_enabled": False,
         "temperature": None,
-        "active_tool_ids": [],
+        "active_tool_ids": None,
         "created_at": now.isoformat(),
         "updated_at": now.isoformat(),
     }

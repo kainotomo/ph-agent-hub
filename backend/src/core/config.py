@@ -85,8 +85,8 @@ class Settings(BaseSettings):
     # --- Logging ---
     LOG_LEVEL: str = "INFO"
 
-    # --- Auto tool selection (Issue #287) ---
-    AUTO_SELECT_TOOLS_TOP_K: int = 3
+    # --- Auto tool selection (Issue #287, #439) ---
+    AUTO_SELECT_TOOLS_TOP_K: int = 8
 
     # --- Agent execution (Issue #317) ---
     AGENT_MAX_STEPS: int = 15

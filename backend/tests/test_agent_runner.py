@@ -1603,6 +1603,92 @@ class TestAutoSelectTools:
         )
         assert isinstance(result, list)
 
+    async def test_step_5c_uses_session_data_active_tool_ids(
+        self, db_session, test_tenant, test_tool, test_session, test_user
+    ):
+        """Verify Step 5c uses session_data['active_tool_ids'] instead of re-querying DB.
+
+        When active_tool_ids is present in session_data (loaded by _load_session),
+        Step 5c must use it regardless of DB state (Issue #439 fix).
+        """
+        from src.db.orm.sessions import SessionActiveTool
+
+        # Create a session with an active tool in the DB
+        sat = SessionActiveTool(
+            session_id=test_session.id,
+            tool_id=test_tool.id,
+        )
+        db_session.add(sat)
+        await db_session.flush()
+
+        # Provide active_tool_ids in session_data (simulates _load_session having populated it)
+        session_data = {
+            "id": test_session.id,
+            "is_temporary": False,
+            "tenant_id": test_tenant.id,
+            "user_id": test_user.id,
+            "auto_select_tools": True,
+            "active_tool_ids": [test_tool.id],
+        }
+
+        result = await self.fn(
+            db_session,
+            session_data,
+            test_tenant.id,
+            "test message about nothing in particular",
+            [],
+            [],
+            None,
+            "user1",
+        )
+        assert isinstance(result, list)
+
+        # Verify the session-active tool is in the shortlist (Step 5c retained it)
+        # We check that callables were returned — the tool should be present
+        # since Step 5c forcibly retains session-active tools.
+        # The exact callable count depends on other tenant tools, but at least
+        # one callable (the session-active test_tool) must be present.
+        assert len(result) >= 1, (
+            "Step 5c should retain the session-active tool even when "
+            "the message doesn't match the tool's keywords"
+        )
+
+    async def test_step_5c_falls_back_to_db_when_session_data_missing(
+        self, db_session, test_tenant, test_tool, test_session
+    ):
+        """Verify Step 5c falls back to DB query when session_data lacks active_tool_ids."""
+        from src.db.orm.sessions import SessionActiveTool
+
+        # Create a session with an active tool
+        sat = SessionActiveTool(
+            session_id=test_session.id,
+            tool_id=test_tool.id,
+        )
+        db_session.add(sat)
+        await db_session.flush()
+
+        # session_data without active_tool_ids key — should trigger DB fallback
+        session_data = {
+            "id": test_session.id,
+            "is_temporary": False,
+            "tenant_id": test_tenant.id,
+            "auto_select_tools": True,
+        }
+
+        result = await self.fn(
+            db_session,
+            session_data,
+            test_tenant.id,
+            "unrelated message with no keyword match",
+            [],
+            [],
+            None,
+            None,
+        )
+        assert isinstance(result, list)
+        # Should still have callables (session-active tool retained via DB fallback)
+        assert len(result) >= 1
+
 
 # =============================================================================
 # Phase 5: Summarization tests

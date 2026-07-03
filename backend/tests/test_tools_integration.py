@@ -664,7 +664,7 @@ class TestGithubTools:
     def tools(self):
         from src.tools.github import build_github_tools
         return build_github_tools({
-            "token": "ghp_test",
+            "token": "mock-tenant-token",
             "allowed_repos": ["owner/repo"],
         })
 
@@ -803,9 +803,9 @@ class TestGithubTools:
         """Per-user active credential takes precedence over tool_config.token."""
         from src.tools.github import build_github_tools
 
-        user_cred = self._make_mock_credential("ghp_user_pat_abc123")
+        user_cred = self._make_mock_credential("mock-user-pat-abc123")
         tools = build_github_tools(
-            {"token": "ghp_tenant_config_token", "allowed_repos": ["owner/repo"]},
+            {"token": "mock-tenant-config", "allowed_repos": ["owner/repo"]},
             user_credentials=[user_cred],
         )
         search_code = tools[0]
@@ -821,7 +821,7 @@ class TestGithubTools:
             # Verify the per-user token was sent in the Authorization header
             call_kwargs = mock_client.return_value.get.call_args
             headers = call_kwargs[1].get("headers", {})
-            assert headers.get("Authorization") == "Bearer ghp_user_pat_abc123", (
+            assert headers.get("Authorization") == "Bearer mock-user-pat-abc123", (
                 f"Expected per-user token, got: {headers.get('Authorization')}"
             )
             assert result["total_count"] == 1
@@ -831,7 +831,7 @@ class TestGithubTools:
         from src.tools.github import build_github_tools
 
         tools = build_github_tools(
-            {"token": "ghp_tenant_fallback", "allowed_repos": ["owner/repo"]},
+            {"token": "mock-tenant-fallback", "allowed_repos": ["owner/repo"]},
             user_credentials=[],
         )
         search_code = tools[0]
@@ -846,16 +846,16 @@ class TestGithubTools:
             result = await search_code(query="test", repo="owner/repo")
             call_kwargs = mock_client.return_value.get.call_args
             headers = call_kwargs[1].get("headers", {})
-            assert headers.get("Authorization") == "Bearer ghp_tenant_fallback"
+            assert headers.get("Authorization") == "Bearer mock-tenant-fallback"
             assert result["total_count"] == 1
 
     async def test_skips_inactive_user_credentials(self):
         """Inactive credentials are skipped, falling back to tenant token."""
         from src.tools.github import build_github_tools
 
-        expired_cred = self._make_mock_credential("ghp_expired_token", status="expired")
+        expired_cred = self._make_mock_credential("mock-expired-token", status="expired")
         tools = build_github_tools(
-            {"token": "ghp_tenant_still_works", "allowed_repos": ["owner/repo"]},
+            {"token": "mock-tenant-still-works", "allowed_repos": ["owner/repo"]},
             user_credentials=[expired_cred],
         )
         search_code = tools[0]
@@ -870,7 +870,7 @@ class TestGithubTools:
             result = await search_code(query="test", repo="owner/repo")
             call_kwargs = mock_client.return_value.get.call_args
             headers = call_kwargs[1].get("headers", {})
-            assert headers.get("Authorization") == "Bearer ghp_tenant_still_works"
+            assert headers.get("Authorization") == "Bearer mock-tenant-still-works"
             assert "total_count" in result
 
     async def test_error_when_no_token_at_all(self):

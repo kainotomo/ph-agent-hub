@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, File, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import delete, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
@@ -227,7 +228,9 @@ async def _lazy_create_session(
     """
     # Resolve active tool IDs (mirrors create_session endpoint logic)
     active_tool_ids = session_data.active_tool_ids
-    if active_tool_ids is None:
+    if not active_tool_ids:
+        # Auto-activate: user's always-on tools + skill tools
+        # Treat None and [] the same — both mean "no explicit tools selected"
         always_on_ids: set[str] = set()
         try:
             pref_result = await db.execute(
@@ -487,8 +490,9 @@ async def create_session(
     """
     # Resolve active tool IDs: explicit list > always-on + skill tools > empty
     active_tool_ids = body.active_tool_ids
-    if active_tool_ids is None:
+    if not active_tool_ids:
         # Auto-activate: user's always-on tools + skill tools
+        # Treat None and [] the same — both mean "no explicit tools selected"
         always_on_ids: set[str] = set()
         try:
             pref_result = await db.execute(
@@ -971,15 +975,26 @@ async def send_message(
             "Promoting temp session %s to permanent on first message",
             session_id,
         )
-        data = await _lazy_create_session(
-            db, session_id, body.session_data, current_user,
-        )
-        # Re-link any files uploaded during the pending phase
-        await upload_service.link_pending_uploads_to_session(
-            db, session_id, current_user.id,
-        )
-        # Clean up the stale Redis temp entry
-        await delete_temp_session(session_id)
+        try:
+            data = await _lazy_create_session(
+                db, session_id, body.session_data, current_user,
+            )
+        except IntegrityError:
+            # Race: upload_file already created the permanent session.
+            # Re-fetch the existing session data.
+            logger.info(
+                "Session %s already promoted to permanent by concurrent request — re-fetching",
+                session_id,
+            )
+            await db.rollback()
+            data = await _load_session(db, session_id)
+        else:
+            # Re-link any files uploaded during the pending phase
+            await upload_service.link_pending_uploads_to_session(
+                db, session_id, current_user.id,
+            )
+            # Clean up the stale Redis temp entry
+            await delete_temp_session(session_id)
 
     # ---- Auto-title: if session still has the default title, use the
     #      first user message as the title.  Set a raw truncated title
@@ -2264,7 +2279,7 @@ async def upload_file(
             "auto_select_tools": True,
             "thinking_enabled": None,
             "temperature": None,
-            "active_tool_ids": [],
+            "active_tool_ids": None,
             "created_at": now,
             "updated_at": now,
         }

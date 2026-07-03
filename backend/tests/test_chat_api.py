@@ -149,6 +149,46 @@ class TestCreateSession:
         data = resp.json()
         assert data["title"] == "Tooled Chat"
 
+    async def test_create_session_with_empty_tool_ids_auto_activates(
+        self, async_client, auth_headers, test_user, test_model, test_tool, db_session
+    ):
+        """Verify active_tool_ids=[] triggers auto-activation (Issue #439 fix).
+
+        An empty list should behave the same as None — both mean "no explicit
+        tools selected", so always-on + skill tools should be auto-activated.
+        """
+        from src.db.orm.user_tool_preferences import UserToolPreference
+
+        # Set the test tool as always-on for this user
+        pref = UserToolPreference(
+            user_id=test_user.id,
+            tool_id=test_tool.id,
+            always_on=True,
+        )
+        db_session.add(pref)
+        await db_session.flush()
+
+        headers = auth_headers(test_user)
+        payload = {
+            "title": "Empty IDs Chat",
+            "selected_model_id": test_model.id,
+            "active_tool_ids": [],  # empty list — should auto-activate
+        }
+        resp = await async_client.post("/api/chat/session", json=payload, headers=headers)
+        assert resp.status_code == 201, resp.text
+        data = resp.json()
+        assert data["title"] == "Empty IDs Chat"
+
+        # Verify the always-on tool was auto-activated
+        tools_resp = await async_client.get(
+            f"/api/chat/session/{data['id']}/tools", headers=headers
+        )
+        assert tools_resp.status_code == 200
+        tool_ids = [t["id"] for t in tools_resp.json()]
+        assert test_tool.id in tool_ids, (
+            "Always-on tool should be auto-activated when active_tool_ids=[]"
+        )
+
     async def test_create_session_with_auto_route_enabled(
         self, async_client, auth_headers, test_user
     ):
@@ -2277,6 +2317,67 @@ class TestLazyCreateSession:
             headers=headers,
         )
         assert resp.status_code == 200, resp.text
+
+    @patch("src.api.chat.run_agent")
+    async def test_lazy_create_after_file_upload_activates_tools(
+        self, mock_run_agent, async_client, auth_headers, test_user, test_model, test_tool, db_session
+    ):
+        """Verify uploading a file before the first message doesn't lose tools (Issue #439 fix).
+
+        Previously, upload_file() created a temp session with active_tool_ids=[],
+        and _lazy_create_session() checked "if active_tool_ids is None" — but []
+        is not None, so auto-activation was skipped and zero tools were activated.
+        """
+        from src.db.orm.user_tool_preferences import UserToolPreference
+
+        mock_run_agent.return_value = ("Fixed response!", str(uuid.uuid4()))
+
+        # Set the test tool as always-on
+        pref = UserToolPreference(
+            user_id=test_user.id,
+            tool_id=test_tool.id,
+            always_on=True,
+        )
+        db_session.add(pref)
+        await db_session.flush()
+
+        headers = auth_headers(test_user)
+        session_id = str(uuid.uuid4())
+
+        # Step 1: Upload a file (this used to create a session with zero tools)
+        files = {"file": ("hello.txt", b"Hello world", "text/plain")}
+        upload_resp = await async_client.post(
+            f"/api/chat/session/{session_id}/upload",
+            files=files,
+            headers=headers,
+        )
+        # Upload should succeed (may be 201 if MinIO available, or error if not)
+        # The important thing is the session was created
+
+        # Step 2: Send first message
+        payload = {
+            "content": "Check tools are active",
+            "session_data": {
+                "title": "Post-Upload Chat",
+                "selected_model_id": test_model.id,
+            },
+        }
+        resp = await async_client.post(
+            f"/api/chat/session/{session_id}/message",
+            json=payload,
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+
+        # Step 3: Verify the always-on tool is active in the session
+        tools_resp = await async_client.get(
+            f"/api/chat/session/{session_id}/tools", headers=headers
+        )
+        assert tools_resp.status_code == 200, tools_resp.text
+        tool_ids = [t["id"] for t in tools_resp.json()]
+        assert test_tool.id in tool_ids, (
+            "Always-on tool should be active after file upload + first message"
+        )
 
 
 class TestFinalizeSession:

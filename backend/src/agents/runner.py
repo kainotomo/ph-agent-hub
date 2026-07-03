@@ -1842,19 +1842,37 @@ async def _auto_select_tools(
     # ── Step 5c: Forcibly include session-active tools (always-on) ──────
     # Tools that the user manually activated or set as always-on must
     # never be dropped by the Top-K filter.  These are non-negotiable.
+    #
+    # Use session_data["active_tool_ids"] when available (already loaded
+    # by _load_session) instead of re-querying the DB — avoids a fragile
+    # second query that could fail transiently (Issue #439).
     active_ids: set[str] = set()
     if is_temporary:
         active_ids.update(session_data.get("active_tool_ids", []))
     else:
-        try:
-            sa_result = await db.execute(
-                select(SessionActiveTool.tool_id).where(
-                    SessionActiveTool.session_id == session_id
-                )
+        # Prefer the already-loaded list from _load_session
+        loaded_ids = session_data.get("active_tool_ids")
+        if loaded_ids is not None:
+            active_ids.update(loaded_ids)
+        else:
+            # Fallback: re-query DB (should not happen under normal flow)
+            logger.warning(
+                "Step 5c: active_tool_ids not in session_data — querying DB for session %s",
+                session_id,
             )
-            active_ids.update(row[0] for row in sa_result.all())
-        except Exception:
-            logger.debug("Failed to query session active tools", exc_info=True)
+            try:
+                sa_result = await db.execute(
+                    select(SessionActiveTool.tool_id).where(
+                        SessionActiveTool.session_id == session_id
+                    )
+                )
+                active_ids.update(row[0] for row in sa_result.all())
+            except Exception:
+                logger.warning(
+                    "Step 5c: Failed to query session active tools for session %s",
+                    session_id,
+                    exc_info=True,
+                )
 
     if active_ids:
         seen_ids = {t.id for t in shortlisted_tools}

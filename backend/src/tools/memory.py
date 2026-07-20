@@ -4,6 +4,10 @@
 # MAF @tool functions that let the agent persist, delete, and list memory
 # entries.  Always available — unconditionally appended in
 # ``_resolve_tool_callables()`` alongside the file_list tools.
+#
+# These tools use the runner's shared ``db`` session WITHOUT calling
+# ``commit()`` or ``flush()``.  The runner's transaction takes care of
+# persisting all changes at the end of the agent run.
 # =============================================================================
 
 import logging
@@ -30,7 +34,8 @@ def build_memory_tools(
     all conversations for the same user.
 
     Args:
-        db: Active async DB session.
+        db: Active async DB session (shared with the agent runner — changes
+            are persisted when the runner commits its transaction).
         user_id: The current user's ID.
         tenant_id: The current tenant's ID.
     """
@@ -66,8 +71,18 @@ def build_memory_tools(
             existing = result.scalar_one_or_none()
 
             if existing:
+                # Protect user-created (manual) entries from agent overwrite
+                if existing.source == "manual":
+                    return {
+                        "key": key,
+                        "value": value,
+                        "action": "skipped",
+                        "message": (
+                            f"A user-created memory with key {key!r} already "
+                            "exists. Ask the user if they'd like to update it."
+                        ),
+                    }
                 existing.value = value
-                await db.commit()
                 logger.debug(
                     "save_memory updated key=%r for user=%s", key, user_id
                 )
@@ -87,7 +102,6 @@ def build_memory_tools(
                 source="automatic",
             )
             db.add(memory)
-            await db.commit()
             logger.debug(
                 "save_memory created key=%r for user=%s", key, user_id
             )
@@ -143,7 +157,6 @@ def build_memory_tools(
             await db.execute(
                 delete(Memory).where(Memory.id == existing.id)
             )
-            await db.commit()
             logger.debug(
                 "delete_memory deleted key=%r for user=%s", key, user_id
             )

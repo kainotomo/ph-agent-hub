@@ -5,7 +5,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import String, Text, DateTime, Enum, ForeignKey, func
+from sqlalchemy import String, Text, DateTime, Enum, ForeignKey, UniqueConstraint, func
 from sqlalchemy.dialects.mysql import CHAR
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -17,6 +17,12 @@ from .sessions import Session
 
 class Memory(Base):
     __tablename__ = "memory"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "tenant_id", "key", "session_id",
+            name="uq_memory_user_tenant_key_session",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(
         CHAR(36), primary_key=True, default=lambda: str(uuid.uuid4())

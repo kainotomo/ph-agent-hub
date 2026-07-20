@@ -57,6 +57,18 @@ export interface ToolResultEvent {
   };
 }
 
+export interface MemoryUpdatedEvent {
+  event: "memory_updated";
+  data: {
+    session_id: string;
+    message_id: string;
+    tool_name: string;
+    action: "saved" | "deleted";
+    key: string | null;
+    success: boolean;
+  };
+}
+
 export interface StepCompleteEvent {
   event: "step_complete";
   data: {
@@ -139,6 +151,7 @@ export type StreamEvent =
   | TokenEvent
   | ToolStartEvent
   | ToolResultEvent
+  | MemoryUpdatedEvent
   | StepCompleteEvent
   | MessageCompleteEvent
   | ReasoningTokenEvent
@@ -179,6 +192,7 @@ export function useStream(apiPrefix: string = "chat") {
         onToken?: (token: string, messageId: string) => void;
         onToolStart?: (data: ToolStartEvent["data"]) => void;
         onToolResult?: (data: ToolResultEvent["data"]) => void;
+        onMemoryUpdated?: (data: MemoryUpdatedEvent["data"]) => void;
         onStepComplete?: (data: StepCompleteEvent["data"]) => void;
         onMessageComplete?: (data: MessageCompleteEvent["data"]) => void;
         onReasoningToken?: (delta: string, messageId: string) => void;
@@ -290,6 +304,9 @@ export function useStream(apiPrefix: string = "chat") {
                   case "tool_result":
                     handlers.onToolResult?.(parsed);
                     break;
+                  case "memory_updated":
+                    handlers.onMemoryUpdated?.(parsed);
+                    break;
                   case "step_complete":
                     handlers.onStepComplete?.(parsed);
                     break;
@@ -399,6 +416,7 @@ export function useStream(apiPrefix: string = "chat") {
         onToken?: (token: string, messageId: string) => void;
         onToolStart?: (data: ToolStartEvent["data"]) => void;
         onToolResult?: (data: ToolResultEvent["data"]) => void;
+        onMemoryUpdated?: (data: MemoryUpdatedEvent["data"]) => void;
         onStepComplete?: (data: StepCompleteEvent["data"]) => void;
         onMessageComplete?: (data: MessageCompleteEvent["data"]) => void;
         onReasoningToken?: (delta: string, messageId: string) => void;
@@ -453,6 +471,9 @@ export function useStream(apiPrefix: string = "chat") {
                     break;
                   case "tool_result":
                     handlers.onToolResult?.(parsed);
+                    break;
+                  case "memory_updated":
+                    handlers.onMemoryUpdated?.(parsed);
                     break;
                   case "step_complete":
                     handlers.onStepComplete?.(parsed);
@@ -522,6 +543,7 @@ export function useStream(apiPrefix: string = "chat") {
         onToken?: (token: string, messageId: string) => void;
         onToolStart?: (data: ToolStartEvent["data"]) => void;
         onToolResult?: (data: ToolResultEvent["data"]) => void;
+        onMemoryUpdated?: (data: MemoryUpdatedEvent["data"]) => void;
         onStepComplete?: (data: StepCompleteEvent["data"]) => void;
         onMessageComplete?: (data: MessageCompleteEvent["data"]) => void;
         onReasoningToken?: (delta: string, messageId: string) => void;
@@ -579,6 +601,9 @@ export function useStream(apiPrefix: string = "chat") {
                     break;
                   case "tool_result":
                     handlers.onToolResult?.(parsed);
+                    break;
+                  case "memory_updated":
+                    handlers.onMemoryUpdated?.(parsed);
                     break;
                   case "step_complete":
                     handlers.onStepComplete?.(parsed);

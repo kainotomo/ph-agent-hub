@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator
+from textwrap import dedent as _dedent
 
 from sqlalchemy import select
 from sqlalchemy.exc import DatabaseError
@@ -1163,6 +1164,35 @@ async def _build_system_prompt(
                 "Note: Your saved memories could not be loaded due to an "
                 "unexpected error."
             )
+
+    # ---- Memory usage guidance (Issue #451) --------------------------------
+    # Instruct the agent to proactively use save_memory/delete_memory tools
+    # for user facts, preferences, and recurring needs.
+    user_id = session_data.get("user_id", "")
+    is_temporary = session_data.get("is_temporary", False)
+    if user and user_id and not is_temporary:
+        parts.append(_dedent("""\
+            ## Memory Guidance
+
+            You have access to memory tools (save_memory, delete_memory,
+            list_memory) to persist information across conversations.
+            Use them proactively:
+
+            - When the user shares a fact about themselves (name, role,
+              company, preferences, project context), call save_memory to
+              remember it.
+            - When the user describes a recurring workflow or need, save it
+              for future reference.
+            - When information becomes outdated or the user corrects
+              themselves, update the existing memory entry (same key, new
+              value).
+            - When the user asks you to forget something, use delete_memory.
+            - After saving or updating, briefly acknowledge it naturally
+              (e.g. "I've saved that, I'll remember for next time").
+            - Use list_memory to see what you already know about the user.
+            - Do NOT overwrite user-created memories (source=manual). If you
+              need to update one, ask the user first.
+        """))
 
     # ---- Cross-session memory retrieval (Issue #229) -----------------------
     # Inject relevant past conversation snippets via semantic search.
@@ -3332,6 +3362,33 @@ async def _run_agent_stream(
                 # Yield the tool_result event
                 yield _sse_event("tool_result", tool_result_payload,
                                  session_id=session_id, message_id=message_id)
+
+                # ── Memory updated event (Issue #451) ──────────────────────
+                # When memory tools complete, emit a dedicated event so the
+                # frontend can show "Memory updated" notifications.
+                if tool_name in ("save_memory", "delete_memory"):
+                    memory_action = "saved"
+                    if tool_name == "delete_memory":
+                        memory_action = "deleted"
+                    # Try to extract the memory key from output
+                    memory_key = None
+                    if isinstance(output, dict):
+                        memory_key = output.get("key")
+                    elif isinstance(output, str):
+                        # Fallback: parse JSON string
+                        import json as _json
+                        try:
+                            parsed = _json.loads(output)
+                            if isinstance(parsed, dict):
+                                memory_key = parsed.get("key")
+                        except (_json.JSONDecodeError, TypeError):
+                            pass
+                    yield _sse_event("memory_updated", {
+                        "tool_name": tool_name,
+                        "action": memory_action,
+                        "key": memory_key,
+                        "success": success,
+                    }, session_id=session_id, message_id=message_id)
 
             # ── Step completion (Issue #447 — parallel batches count as 1) ──
             if func_results_in_update:

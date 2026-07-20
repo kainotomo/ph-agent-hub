@@ -623,6 +623,17 @@ export function ChatWindow({
         onToolResult(data) {
           setToolEvents((prev) => [...prev, { type: "function_result", data }]);
         },
+        onMemoryUpdated(data) {
+          queryClient.invalidateQueries({ queryKey: ["memory", sessionId] });
+          notification.info({
+            message: data.action === "saved" ? "Information saved" : "Memory deleted",
+            description: data.action === "saved"
+              ? "I'll remember this for next time."
+              : "Memory entry has been removed.",
+            placement: "bottomRight",
+            duration: 4,
+          });
+        },
         onMessageComplete(data) {
           // Don't clear editingMsgId here — the refetch hasn't completed yet.
           // It gets cleared by the useEffect below when messages update.
@@ -727,6 +738,17 @@ export function ChatWindow({
           ...prev,
           { type: "function_result", data },
         ]);
+      },
+      onMemoryUpdated(data) {
+        queryClient.invalidateQueries({ queryKey: ["memory", sessionId] });
+        notification.info({
+          message: data.action === "saved" ? "Information saved" : "Memory deleted",
+          description: data.action === "saved"
+            ? "I'll remember this for next time."
+            : "Memory entry has been removed.",
+          placement: "bottomRight",
+          duration: 4,
+        });
       },
       onMessageComplete(data) {
         setPendingUserMessage(null);
@@ -859,6 +881,17 @@ export function ChatWindow({
       },
       onToolResult(data) {
         setToolEvents((prev) => [...prev, { type: "function_result", data }]);
+      },
+      onMemoryUpdated(data) {
+        queryClient.invalidateQueries({ queryKey: ["memory", sessionId] });
+        notification.info({
+          message: data.action === "saved" ? "Information saved" : "Memory deleted",
+          description: data.action === "saved"
+            ? "I'll remember this for next time."
+            : "Memory entry has been removed.",
+          placement: "bottomRight",
+          duration: 4,
+        });
       },
       onMessageComplete(data) {
         setRegeneratingMsgId(null);

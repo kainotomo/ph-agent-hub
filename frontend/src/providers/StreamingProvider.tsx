@@ -1,30 +1,34 @@
 // =============================================================================
 // PH Agent Hub — StreamingProvider
 // =============================================================================
-// React context that shares the currently-streaming session ID between
-// ChatWindow and SessionSidebar.  When ChatWindow starts/resumes a stream,
-// it sets streamingSessionId; when the stream ends, it clears it.
-// The sidebar reads this to show a spinner on the running session.
+// React context that shares the set of currently-streaming session IDs
+// between ChatWindow and SessionSidebar.  Multiple agents can run
+// concurrently (different sessions), and each shows its own spinner
+// in the sidebar.
 //
-// This context survives navigation — if the user navigates away while
-// an agent is running, the sidebar can still show the spinner.
+// addStreamingSession(sessionId)  — called when a stream starts
+// removeStreamingSession(sessionId) — called when a stream ends
+// clearStreamingSessions()  — called to clear all (e.g. on unmount)
 // =============================================================================
 
 import React, { createContext, useContext, useState, useCallback } from "react";
 
 interface StreamingContextValue {
-  /** The session ID currently being streamed, or null if idle. */
-  streamingSessionId: string | null;
-  /** Set the currently-streaming session ID. */
-  setStreamingSessionId: (id: string | null) => void;
-  /** Clear the streaming state. */
-  clearStreamingSession: () => void;
+  /** Set of session IDs currently being streamed. */
+  streamingSessionIds: Set<string>;
+  /** Register a session as actively streaming. */
+  addStreamingSession: (id: string) => void;
+  /** Unregister a session (stream ended or detected inactive). */
+  removeStreamingSession: (id: string) => void;
+  /** Clear all streaming sessions (e.g. on context unmount). */
+  clearStreamingSessions: () => void;
 }
 
 const StreamingContext = createContext<StreamingContextValue>({
-  streamingSessionId: null,
-  setStreamingSessionId: () => {},
-  clearStreamingSession: () => {},
+  streamingSessionIds: new Set(),
+  addStreamingSession: () => {},
+  removeStreamingSession: () => {},
+  clearStreamingSessions: () => {},
 });
 
 export function StreamingProvider({
@@ -32,20 +36,37 @@ export function StreamingProvider({
 }: {
   children: React.ReactNode;
 }) {
-  const [streamingSessionId, setStreamingSessionId] = useState<string | null>(
-    null,
+  const [streamingSessionIds, setStreamingSessionIds] = useState<Set<string>>(
+    () => new Set(),
   );
 
-  const clearStreamingSession = useCallback(() => {
-    setStreamingSessionId(null);
+  const addStreamingSession = useCallback((id: string) => {
+    setStreamingSessionIds((prev) => {
+      if (prev.has(id)) return prev; // Already present — no update needed
+      return new Set(prev).add(id);
+    });
+  }, []);
+
+  const removeStreamingSession = useCallback((id: string) => {
+    setStreamingSessionIds((prev) => {
+      if (!prev.has(id)) return prev; // Not present — no update needed
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  }, []);
+
+  const clearStreamingSessions = useCallback(() => {
+    setStreamingSessionIds(new Set());
   }, []);
 
   return (
     <StreamingContext.Provider
       value={{
-        streamingSessionId,
-        setStreamingSessionId,
-        clearStreamingSession,
+        streamingSessionIds,
+        addStreamingSession,
+        removeStreamingSession,
+        clearStreamingSessions,
       }}
     >
       {children}

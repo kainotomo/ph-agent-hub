@@ -42,8 +42,9 @@ class StreamBridge:
     event consumers (SSE streams).
 
     Events are stored in a deque of last N events for replay on new
-    subscriptions.  Multiple concurrent subscribers read from the same
-    :class:`asyncio.Queue` so they all see the same live stream.
+    subscriptions.  Each subscriber gets its own :class:`asyncio.Queue`
+    so all subscribers receive all events (broadcast, not competing
+    consumers).
 
     Auto-emits heartbeat events if no events arrive for *heartbeat_interval*
     seconds.
@@ -62,9 +63,8 @@ class StreamBridge:
         #: Bounded buffer of past events for replay on new subscriptions.
         self._buffer: deque[dict[str, Any]] = deque(maxlen=max_buffer)
 
-        #: Queue for live events.  Each subscriber creates its own listening
-        #: task that pushes into this queue.
-        self._queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        #: Per-subscriber queues — each subscriber gets ALL events.
+        self._subscribers: list[asyncio.Queue[dict[str, Any] | None]] = []
 
         #: Total number of events produced (for monitoring / debugging).
         self._event_count: int = 0
@@ -88,8 +88,8 @@ class StreamBridge:
     async def put(self, event: dict[str, Any]) -> None:
         """Write an event to the bridge.
 
-        The event is appended to the replay buffer and pushed into the
-        live queue for all current subscribers.
+        The event is appended to the replay buffer and pushed into ALL
+        subscriber queues so every connected SSE client receives it.
         """
         if self._closed:
             logger.warning(
@@ -100,7 +100,10 @@ class StreamBridge:
 
         self._buffer.append(event)
         self._event_count += 1
-        await self._queue.put(event)
+
+        # Broadcast to all subscribers (each gets a copy).
+        for sub in self._subscribers:
+            await sub.put(event)
 
     async def close(self) -> None:
         """Close the bridge, signalling all subscribers to stop.
@@ -112,13 +115,9 @@ class StreamBridge:
                 return
             self._closed = True
 
-        # Push ``None`` sentinel so all subscribers wake up and stop.
-        # The number of sentinels pushed equals the number of pending
-        # subscribers (best-effort).  Subscribers that join later will
-        # see ``_closed is True`` and return immediately.
-        pending = self._queue.qsize() + 1  # +1 for potential in-flight subscriber
-        for _ in range(pending):
-            await self._queue.put(None)
+        # Push ``None`` sentinel to ALL subscriber queues.
+        for sub in self._subscribers:
+            await sub.put(None)
 
         logger.debug(
             "StreamBridge[%s] closed — %d events produced, %d buffered",
@@ -133,33 +132,42 @@ class StreamBridge:
         """Return an async iterator that replays buffered events then yields
         live events from the queue.
 
-        When the bridge is closed the iterator stops (does NOT raise
-        ``StopAsyncIteration`` — it simply returns).
+        Each subscriber gets its own private queue, so all subscribers
+        receive all events (broadcast).  When the bridge is closed the
+        iterator stops (does NOT raise ``StopAsyncIteration``).
         """
         # Replay buffered events first.
         for event in self._buffer:
             yield event
 
-        # Consume live events from the queue.
-        while not self._closed:
-            try:
-                # Use wait_for so we can emit heartbeats even if the queue
-                # is idle for a long time (e.g. during a slow tool call).
-                event = await asyncio.wait_for(
-                    self._queue.get(),
-                    timeout=self._heartbeat_interval,
-                )
-            except asyncio.TimeoutError:
-                # No event arrived — emit heartbeat so the SSE connection
-                # stays alive.
-                yield {"event": "heartbeat", "data": "{}"}
-                continue
+        # Create a per-subscriber queue so this reader doesn't compete
+        # with other readers for events.
+        queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        self._subscribers.append(queue)
+        try:
+            while not self._closed:
+                try:
+                    # Use wait_for so we can emit heartbeats even if the queue
+                    # is idle for a long time (e.g. during a slow tool call).
+                    event = await asyncio.wait_for(
+                        queue.get(),
+                        timeout=self._heartbeat_interval,
+                    )
+                except asyncio.TimeoutError:
+                    # No event arrived — emit heartbeat so the SSE connection
+                    # stays alive.
+                    yield {"event": "heartbeat", "data": "{}"}
+                    continue
 
-            if event is None:
-                # Sentinel — bridge is closed.
-                return
+                if event is None:
+                    # Sentinel — bridge is closed.
+                    return
 
-            yield event
+                yield event
+        finally:
+            # Clean up this subscriber's queue on exit (aclose/disconnect).
+            if queue in self._subscribers:
+                self._subscribers.remove(queue)
 
     # ------------------------------------------------------------------
     # Queries

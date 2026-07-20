@@ -35,7 +35,6 @@ import {
 import { getDemoMessages } from "../services/demo";
 import { getWidgetMessages } from "../services/widget";
 import api, { getToken } from "../../../services/api";
-import { useStreamingContext } from "../../../providers/StreamingProvider";
 import {
   ModelSelector,
   TemplateSelector,

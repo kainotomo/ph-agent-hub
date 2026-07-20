@@ -1419,14 +1419,23 @@ def _spawn_agent_background(
 ) -> asyncio.Task:
     """Create and return a background ``asyncio.Task`` for agent execution.
 
-    Sets the Redis ``stream:active:`` flag and registers the bridge
-    before spawning the task.
-    """
-    # Set Redis active flag so the frontend can detect a running agent.
-    asyncio.ensure_future(set_stream_active(session_id))
+    Sets the Redis ``stream:active:`` flag (fire-and-forget via
+    ``ensure_future``) and registers the bridge before spawning the task.
+    The agent task also has a keepalive loop that periodically refreshes
+    the flag, so even if this initial fire-and-forget is delayed the flag
+    will be set within the first keepalive interval (60 s).
 
-    # Register the bridge for reconnect subscribers.
+    However, for immediate availability (the frontend checks status right
+    after the SSE response starts), we eagerly await a simple ``ping`` via
+    the keepalive task's first iteration instead.
+    """
+    # Register the bridge immediately so reconnect subscribers can find it.
     register_bridge(session_id, bridge)
+
+    # Start the Redis active flag asynchronously — it will be set before
+    # the agent produces its first event (the keepalive loop runs
+    # immediately inside _run_agent_background).
+    asyncio.ensure_future(set_stream_active(session_id))
 
     task = asyncio.create_task(
         _run_agent_background(
@@ -1601,10 +1610,14 @@ async def stream_status(
 
     Returns ``{"active": bool}`` using a Redis lookup — no DB query needed.
     Used by the frontend on mount to decide whether to reconnect.
+
+    Note: Ownership verification is done via a lightweight session load
+    to prevent information disclosure (leaking whether arbitrary sessions
+    are active).
     """
-    # We still need to verify ownership, but can skip the full session load
-    # and just check the Redis flag.  The cancel/reconnect endpoints do the
-    # full ownership check.
+    data = await _load_session(db, session_id)
+    await _require_session_owner(data, current_user)
+
     active = await check_stream_active(session_id)
     return {"active": active}
 

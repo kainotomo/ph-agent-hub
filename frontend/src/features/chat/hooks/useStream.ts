@@ -38,6 +38,8 @@ export interface ToolStartEvent {
     tool_name: string;
     tool_call_id: string;
     arguments: Record<string, unknown>;
+    /** Issue #447 — present when multiple tools execute in parallel */
+    batch_id?: string;
   };
 }
 
@@ -50,6 +52,8 @@ export interface ToolResultEvent {
     tool_name: string;
     success: boolean;
     result_summary: unknown;
+    /** Issue #447 — present when multiple tools execute in parallel */
+    batch_id?: string;
   };
 }
 
@@ -59,6 +63,10 @@ export interface StepCompleteEvent {
     session_id: string;
     message_id: string;
     step_name: string;
+    /** Issue #447 — present when the step contained a parallel batch */
+    batch_id?: string;
+    /** Issue #447 — number of tools in the parallel batch */
+    batch_size?: number;
   };
 }
 

@@ -1323,6 +1323,41 @@ async def _build_system_prompt(
                 user.id, exc_info=True,
             )
 
+    # ---- Parallel tool execution guidance (Issue #447) --------------------
+    # When tools are enabled and the feature flag is on, instruct the LLM
+    # to batch independent tool calls into a single response so the MAF
+    # framework can execute them concurrently via asyncio.gather.
+    # Only inject when a template or skill is configured (implies tools are
+    # likely active); skip for the default "helpful assistant" fallback.
+    _has_configured_behavior = bool(
+        session_data.get("selected_template_id")
+        or session_data.get("selected_skill_id")
+    )
+    if settings.AGENT_PARALLEL_TOOLS_ENABLED and _has_configured_behavior:
+        parallel_guidance = (
+            "## Parallel Tool Execution\n"
+            "\n"
+            "**IMPORTANT — Performance guideline:**\n"
+            "When you need to call MULTIPLE tools whose results do NOT depend "
+            "on each other, call ALL of them in a SINGLE response message "
+            "(i.e. emit multiple tool_calls at once).  The system will "
+            "execute them concurrently, which is dramatically faster.\n"
+            "\n"
+            "Only call tools one-at-a-time when a later tool genuinely "
+            "needs the output of an earlier tool.  When in doubt, batch "
+            "independent calls together — the user will get results much "
+            "faster.\n"
+            "\n"
+            "Example:\n"
+            "  - ✅ 'Search Apple stock AND Tesla stock' → both web_search "
+            "tools in ONE message\n"
+            "  - ✅ 'Fetch page A, page B, and page C' → three fetch_url "
+            "tools in ONE message\n"
+            "  - ❌ 'Search then email the result' → sequence is correct, "
+            "email depends on search"
+        )
+        parts.append(parallel_guidance)
+
     if parts:
         return "\n\n---\n\n".join(parts)
 
@@ -2397,6 +2432,10 @@ async def _run_agent(
         default_options["reasoning_effort"] = reasoning_effort
     if getattr(model, "max_tokens", 0) and model.max_tokens > 0:
         default_options["max_tokens"] = model.max_tokens
+    # Issue #447 — allow the LLM provider to return multiple tool_calls
+    # in a single response so MAF can execute them concurrently.
+    if settings.AGENT_PARALLEL_TOOLS_ENABLED and tools:
+        default_options["allow_multiple_tool_calls"] = True
 
     compaction_strategy, tokenizer = _build_compaction_strategy(
         model, model_client, tools,
@@ -3173,6 +3212,10 @@ async def _run_agent_stream(
         default_options["reasoning_effort"] = reasoning_effort
     if getattr(model, "max_tokens", 0) and model.max_tokens > 0:
         default_options["max_tokens"] = model.max_tokens
+    # Issue #447 — allow the LLM provider to return multiple tool_calls
+    # in a single response so MAF can execute them concurrently.
+    if settings.AGENT_PARALLEL_TOOLS_ENABLED and tools:
+        default_options["allow_multiple_tool_calls"] = True
 
     compaction_strategy, tokenizer = _build_compaction_strategy(
         model, model_client, tools,
@@ -3217,6 +3260,19 @@ async def _run_agent_stream(
         inner_event_count += 1
         if inner_event_count <= 5 or inner_event_count % 20 == 0:
             content_types = [getattr(c, "type", "?") for c in (update.contents if hasattr(update, 'contents') else [])]
+
+        # Issue #447 — detect parallel tool batches.
+        # MAF yields all function_results from an asyncio.gather batch in
+        # a single ChatResponseUpdate.  Group them so the frontend can
+        # display parallel execution and we count the batch as ONE step.
+        func_results_in_update: list[Any] = []
+        for content in update.contents:
+            if getattr(content, "type", None) in ("function_result", "tool_result"):
+                func_results_in_update.append(content)
+
+        is_parallel_batch = len(func_results_in_update) > 1
+        batch_id = str(uuid.uuid4()) if is_parallel_batch else None
+
         # Check each content item in the update
         for content in update.contents:
             content_type = getattr(content, "type", None)
@@ -3252,31 +3308,45 @@ async def _run_agent_stream(
                         pending.get("args_str", ""), output
                     )
 
-                # Yield a single consolidated tool_start event
-                yield _sse_event("tool_start", {
+                # Build the tool event payloads with batch_id for Issue #447
+                tool_start_payload: dict = {
                     "tool_call_id": tool_call_id,
                     "tool_name": tool_name,
                     "arguments": resolved_args,
-                }, session_id=session_id, message_id=message_id)
-
-                # Yield the tool_result event
-                yield _sse_event("tool_result", {
+                }
+                tool_result_payload: dict = {
                     "tool_call_id": tool_call_id,
                     "tool_name": tool_name,
                     "success": success,
                     "result_summary": result_summary,
                     "output": output,
-                }, session_id=session_id, message_id=message_id)
+                }
+                if batch_id:
+                    tool_start_payload["batch_id"] = batch_id
+                    tool_result_payload["batch_id"] = batch_id
 
+                # Yield a single consolidated tool_start event
+                yield _sse_event("tool_start", tool_start_payload,
+                                 session_id=session_id, message_id=message_id)
+
+                # Yield the tool_result event
+                yield _sse_event("tool_result", tool_result_payload,
+                                 session_id=session_id, message_id=message_id)
+
+            # ── Step completion (Issue #447 — parallel batches count as 1) ──
+            if func_results_in_update:
                 step_index += 1
-                yield _sse_event("step_complete", {
+                step_payload: dict = {
                     "step_index": step_index,
                     "total_steps_so_far": step_index,
-                }, session_id=session_id, message_id=message_id)
+                }
+                if batch_id:
+                    step_payload["batch_id"] = batch_id
+                    step_payload["batch_size"] = len(func_results_in_update)
+                yield _sse_event("step_complete", step_payload,
+                                 session_id=session_id, message_id=message_id)
 
                 # ── Step limit guard ────────────────────────────────────
-                # Prevent runaway agents that loop indefinitely on tool
-                # results (see agent_memory_crash_analysis.md).
                 if step_index >= settings.AGENT_MAX_STEPS:
                     logger.warning(
                         "Agent step limit reached (%d) for session %s — terminating stream",

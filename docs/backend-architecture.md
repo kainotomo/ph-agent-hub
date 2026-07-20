@@ -37,6 +37,15 @@ The backend provides the following core capabilities:
 - Session-level tool activation: users may activate tenant-approved tools per session; the active tool list is enforced at execution time
 - Managers may create, edit, and delete tools within their tenant
 
+**Parallel Tool Execution (Issue #447):** When the LLM returns multiple
+`tool_calls` in a single response for independent operations, MAF executes
+them concurrently via `asyncio.gather`. The system prompt includes guidance
+encouraging the LLM to batch independent calls. The feature is gated by
+`AGENT_PARALLEL_TOOLS_ENABLED` (default `True`) in `backend/src/core/config.py`.
+Streaming SSE events include a `batch_id` field so the frontend can display
+parallel execution indicators. Parallel batches count as a single step toward
+`AGENT_MAX_STEPS`, preventing premature termination.
+
 ### **1.4 Authentication & Authorization**
 - JWT‑based authentication
 - Three user roles:

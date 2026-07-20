@@ -998,6 +998,7 @@ export function ChatWindow({
           output: (ev.data as Record<string, unknown>).result_summary,
           is_error: !(ev.data as Record<string, unknown>).success,
           call_id: (ev.data as Record<string, unknown>).tool_call_id,
+          batch_id: (ev.data as Record<string, unknown>).batch_id,
         })),
       ],
       model_id: selectedModelId || null,

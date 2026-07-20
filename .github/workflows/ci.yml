@@ -6,6 +6,7 @@
 # Backend requires:
 #   - MariaDB (service container) for ORM-based integration tests
 #   - Redis (service container) for caching and JTI denylist
+#   - MinIO (service container) for S3-backed file upload tests
 #   - No real API keys — all external calls are mocked
 #
 # Frontend requires:
@@ -24,7 +25,7 @@ env:
   DATABASE_URL: mysql+aiomysql://root:root@127.0.0.1:3306/phagent_hub?charset=utf8mb4
   REDIS_URL: redis://localhost:6379/0
 
-  # ── MinIO (dummy values — no tests touch MinIO directly) ────────────────
+  # ── MinIO (dummy values — required for file upload test endpoints) ───────
   MINIO_ENDPOINT: http://localhost:9000
   MINIO_ACCESS_KEY: minioaccess
   MINIO_SECRET_KEY: miniosecret
@@ -69,6 +70,20 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
+      minio:
+        image: minio/minio:latest
+        command: server /data
+        env:
+          MINIO_ROOT_USER: minioaccess
+          MINIO_ROOT_PASSWORD: miniosecret
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -103,6 +118,7 @@ jobs:
           cd backend
           pytest tests/ \
             -n auto \
+            --dist loadscope \
             --durations=15 \
             -m "not e2e and not slow" \
             --cov=src/services \
@@ -154,6 +170,20 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
+      minio:
+        image: minio/minio:latest
+        command: server /data
+        env:
+          MINIO_ROOT_USER: minioaccess
+          MINIO_ROOT_PASSWORD: miniosecret
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -186,7 +216,7 @@ jobs:
           ENCRYPTION_KEY: ${{ steps.gen-key.outputs.fernet }}
         run: |
           cd backend
-          pytest tests/ -n auto --durations=15 -m "security or tenant_isolation or regression" -v
+          pytest tests/ -n auto --dist loadscope --durations=15 -m "security or tenant_isolation or regression" -v
 
   # ──────────────────────────────────────────────────────────────────────────
   # Frontend: install deps → type-check → build

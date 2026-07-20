@@ -47,6 +47,8 @@ interface ContentItem {
   output?: string;
   is_error?: boolean;
   id?: string;
+  /** Issue #447 — groups tools that executed in the same parallel batch */
+  batch_id?: string;
 }
 
 function parseContent(content: unknown): ContentItem[] {
@@ -325,7 +327,21 @@ function MessageBubbleInner({
         )}
 
         {/* Tool calls / results */}
-        {toolItems.length > 0 && (
+        {toolItems.length > 0 && (() => {
+          // Issue #447 — group tools by batch_id for parallel execution display.
+          // Tools without batch_id (sequential) each get their own group.
+          const grouped: { batchId: string | null; items: ContentItem[] }[] = [];
+          for (const item of toolItems) {
+            const bid = item.batch_id || null;
+            const last = grouped[grouped.length - 1];
+            if (last && last.batchId === bid) {
+              last.items.push(item);
+            } else {
+              grouped.push({ batchId: bid, items: [item] });
+            }
+          }
+
+          return (
           <Collapse
             ghost
             size="small"
@@ -342,41 +358,59 @@ function MessageBubbleInner({
                 ),
                 children: (
                   <div style={{ maxHeight: 200, overflow: "auto" }}>
-                    {toolItems.map((item, i) => (
-                      <div key={i} style={{ marginBottom: 8 }}>
-                        {item.type === "function_call" ? (
-                          <Tag color="blue">
-                            🔧 {item.name}
-                          </Tag>
-                        ) : (
-                          <div>
-                            <Tag
-                              color={
-                                item.is_error
-                                  ? "red"
-                                  : "green"
-                              }
-                            >
-                              ✓ {item.name || "result"}
-                            </Tag>
-                            {item.output && (
-                              <Paragraph
-                                ellipsis={{ rows: 2 }}
-                                style={{
-                                  fontSize: 12,
-                                  margin: "4px 0 0 0",
-                                  color: isUser ? "#fff" : "#666",
-                                }}
-                              >
-                                {typeof item.output === "string"
-                                  ? item.output
-                                  : JSON.stringify(item.output)}
-                              </Paragraph>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    ))}
+                    {grouped.map((group, gi) => {
+                      const isParallel = group.batchId !== null && group.items.length > 1;
+                      return (
+                        <div key={gi} style={{ marginBottom: 8 }}>
+                          {/* Parallel batch indicator */}
+                          {isParallel && (
+                            <div style={{
+                              fontSize: 11,
+                              color: "#1677ff",
+                              marginBottom: 4,
+                              fontWeight: 500,
+                            }}>
+                              ⚡ Running {group.items.length} tools in parallel…
+                            </div>
+                          )}
+                          {group.items.map((item, i) => (
+                            <div key={i} style={{ marginBottom: 4, paddingLeft: isParallel ? 12 : 0 }}>
+                              {item.type === "function_call" ? (
+                                <Tag color="blue">
+                                  🔧 {item.name}
+                                </Tag>
+                              ) : (
+                                <div>
+                                  <Tag
+                                    color={
+                                      item.is_error
+                                        ? "red"
+                                        : "green"
+                                    }
+                                  >
+                                    ✓ {item.name || "result"}
+                                  </Tag>
+                                  {item.output && (
+                                    <Paragraph
+                                      ellipsis={{ rows: 2 }}
+                                      style={{
+                                        fontSize: 12,
+                                        margin: "4px 0 0 0",
+                                        color: isUser ? "#fff" : "#666",
+                                      }}
+                                    >
+                                      {typeof item.output === "string"
+                                        ? item.output
+                                        : JSON.stringify(item.output)}
+                                    </Paragraph>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })}
                   </div>
                 ),
                 style: {
@@ -385,7 +419,8 @@ function MessageBubbleInner({
               },
             ]}
           />
-        )}
+          );
+        })()}
         {/* Attached files (user messages only) */}
         {isUser && attachedFiles && attachedFiles.length > 0 && (
           <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 4 }}>

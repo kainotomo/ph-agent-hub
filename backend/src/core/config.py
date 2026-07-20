@@ -93,6 +93,13 @@ class Settings(BaseSettings):
     """Maximum number of tool-call steps before the agent loop terminates.
     Prevents runaway agents that loop indefinitely on tool results."""
 
+    # --- Parallel tool execution (Issue #447) ---
+    AGENT_PARALLEL_TOOLS_ENABLED: bool = True
+    """When True, injects system prompt guidance telling the LLM to batch
+    independent tool calls into a single response.  The MAF framework
+    already executes batched calls via asyncio.gather; this flag controls
+    whether the agent is prompted to produce batched calls."""
+
     # --- OAuth (Issue #312) ---
     GOOGLE_CLIENT_ID: str = ""
     """Google OAuth client ID for Gmail/Calendar/Tasks access."""

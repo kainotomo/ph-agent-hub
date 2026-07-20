@@ -488,6 +488,13 @@ export function useStream(apiPrefix: string = "chat") {
                 addStreamingSession(sessionId);
                 return;
               }
+              // Agent finished between status check and reconnect request.
+              // Backend returns 200 OK with {"active": false} as JSON.
+              if (response.ok) {
+                // Silently close — no error shown to user.
+                handlers.onClose?.();
+                return;
+              }
               // If the stream is not available (agent already finished),
               // treat it as a normal close.
               if (response.status === 404 || response.status === 400) {

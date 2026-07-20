@@ -514,6 +514,8 @@ export function ChatWindow({
   useEffect(() => {
     resetStream();
     reconnectAttemptedRef.current = false;
+    // Clear stopped-session tracking so a new session can reconnect.
+    stoppedSessionsRef.current.clear();
     setStreamingContent("");
     setStreamingReasoningContent("");
     setStreamingMessageId(null);
@@ -534,10 +536,12 @@ export function ChatWindow({
   // open a reconnect SSE stream to resume live updates.
   const [reconnecting, setReconnecting] = useState(false);
   const reconnectAttemptedRef = useRef(false);
+  const stoppedSessionsRef = useRef(new Set<string>());
 
   useEffect(() => {
     // Only for normal chat sessions — not demo or widget.
-    if (demo || widget || pendingFlag || !sessionId || reconnectAttemptedRef.current) {
+    // Skip reconnect if user explicitly stopped this session (Issue #457).
+    if (demo || widget || pendingFlag || !sessionId || reconnectAttemptedRef.current || stoppedSessionsRef.current.has(sessionId)) {
       return;
     }
 
@@ -550,58 +554,13 @@ export function ChatWindow({
         if (status.active) {
           setReconnecting(true);
           reconnectAttemptedRef.current = true;
+          const reconnectHandlers = buildStreamHandlers('reconnect');
           await startReconnect(sessionId, {
-            onToken: (token, msgId) => {
-              setStreamingMessageId((prev) => prev ?? msgId);
-              setStreamingContent((prev) => prev + token);
-            },
-            onReasoningToken: (delta, msgId) => {
-              setStreamingMessageId((prev) => prev ?? msgId);
-              setStreamingReasoningContent((prev) => prev + delta);
-            },
-            onToolStart: (data) => {
-              setToolEvents((prev) => [
-                ...prev,
-                { type: "function_call", data: data as unknown as Record<string, unknown> },
-              ]);
-            },
-            onToolResult: (data) => {
-              setToolEvents((prev) => [
-                ...prev,
-                { type: "function_result", data: data as unknown as Record<string, unknown> },
-              ]);
-            },
-            onMemoryUpdated: () => {
-              // Sidebar will auto-refresh on session invalidation
-            },
-            onStepComplete: () => {
-              // No UI update needed
-            },
-            onMessageComplete: (data) => {
-              setStreamingTokens({
-                tokens_in: data.tokens_in ?? 0,
-                tokens_out: data.tokens_out ?? 0,
-              });
-              queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
-              queryClient.invalidateQueries({ queryKey: ["sessions"] });
-            },
-            onFollowUpQuestions: (questions) => {
-              setFollowUpQuestions(questions);
-            },
-            onSummarized: () => {
-              queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
-            },
-            onTagsUpdated: () => {
-              queryClient.invalidateQueries({ queryKey: ["sessions"] });
-            },
-            onError: (error) => {
-              setStreamError(error);
-            },
+            ...reconnectHandlers,
             onClose: () => {
               if (!cancelled) {
                 setReconnecting(false);
-                queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
-                queryClient.invalidateQueries({ queryKey: ["sessions"] });
+                reconnectHandlers.onClose();
               }
             },
           });
@@ -689,6 +648,153 @@ export function ChatWindow({
     [demo],
   );
 
+  // ---- Shared stream handler factory (Issue #457) ---------------------------
+  // Builds the handler object passed to startStream, startReconnect,
+  // startRegenerateStream, or startEditStream.  Keeps 4 nearly-identical
+  // handler sets in sync without code duplication.
+  const buildStreamHandlers = useCallback(
+    (mode: 'send' | 'reconnect' | 'regenerate' | 'edit') => {
+      const isReconnect = mode === 'reconnect';
+      const isRegenerate = mode === 'regenerate';
+      const isEdit = mode === 'edit';
+      const isSend = mode === 'send';
+
+      return {
+        onToken: (token: string, msgId: string) => {
+          setStreamingMessageId((prev) => prev ?? msgId);
+          setStreamingContent((prev) => prev + token);
+        },
+        onReasoningToken: (delta: string, msgId: string) => {
+          setStreamingMessageId((prev) => prev ?? msgId);
+          setStreamingReasoningContent((prev) => prev + delta);
+        },
+        onToolStart: (data: Record<string, unknown>) => {
+          setToolEvents((prev) => [...prev, { type: "function_call", data }]);
+        },
+        onToolResult: (data: Record<string, unknown>) => {
+          setToolEvents((prev) => [...prev, { type: "function_result", data }]);
+        },
+        onStepComplete: () => { /* No UI update needed */ },
+        onFollowUpQuestions: (questions: string[]) => {
+          setFollowUpQuestions(questions);
+        },
+        onTagsUpdated: () => {
+          queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        },
+        onMemoryUpdated: isReconnect
+          ? () => { /* Sidebar auto-refreshes on session invalidation */ }
+          : (data: { action: string }) => {
+              queryClient.invalidateQueries({ queryKey: ["memory", sessionId] });
+              notification.info({
+                message: data.action === "saved" ? "Information saved" : "Memory deleted",
+                description: data.action === "saved"
+                  ? "I'll remember this for next time."
+                  : "Memory entry has been removed.",
+                placement: "bottomRight",
+                duration: 4,
+              });
+            },
+        onSummarized: isReconnect
+          ? () => { /* No notification during reconnect */ }
+          : (data: { summarized_message_count: number }) => {
+              notification.info({
+                message: "Conversation Summarized",
+                description: `Compressed ${data.summarized_message_count} earlier messages to save context space.`,
+                placement: "topRight",
+                duration: 4,
+              });
+            },
+        onMessageComplete: (data: {
+          message_id?: string;
+          tokens_in?: number;
+          tokens_out?: number;
+        }) => {
+          if (isRegenerate) setRegeneratingMsgId(null);
+          if (isSend || isEdit) setPendingUserMessage(null);
+          setToolEvents([]);
+          if (data.tokens_in || data.tokens_out) {
+            setStreamingTokens({
+              tokens_in: data.tokens_in || 0,
+              tokens_out: data.tokens_out || 0,
+            });
+          }
+          if (isSend && !demo) {
+            // Chat mode: clear streaming state and refetch from API.
+            setStreamingContent("");
+            setStreamingReasoningContent("");
+            setStreamingMessageId(null);
+            queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+            queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+            queryClient.invalidateQueries({ queryKey: ["sessions"] });
+            queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
+          } else if (isSend && demo) {
+            // Demo mode: keep streamingMessageId so the streaming
+            // content bubble remains visible as the final message.
+            setStreamingMessageId(data.message_id || "demo-response");
+          } else if (isReconnect) {
+            // Reconnect: update tokens without clearing streaming state;
+            // onClose handles the final cleanup.
+            queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+            queryClient.invalidateQueries({ queryKey: ["sessions"] });
+          } else {
+            // Regenerate / Edit: clear streaming state and refetch.
+            setStreamingContent("");
+            setStreamingReasoningContent("");
+            setStreamingMessageId(null);
+            queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+            queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+            queryClient.invalidateQueries({ queryKey: ["sessions"] });
+            queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
+          }
+        },
+        onError: (err: string) => {
+          if (isRegenerate) setRegeneratingMsgId(null);
+          if (isEdit) setEditingMsgId(null);
+          if (isSend || isEdit) setPendingUserMessage(null);
+          setStreamingTokens(null);
+          setStreamError(err);
+          if (!isReconnect) {
+            message.error(err || (isEdit ? "Edit failed" : isRegenerate ? "Regenerate failed" : "Request failed"));
+          } else {
+            console.error("Reconnect stream error:", err);
+          }
+        },
+        onClose: () => {
+          if (isRegenerate) setRegeneratingMsgId(null);
+          if (isEdit) setEditingMsgId(null);
+          if (isSend || isEdit) setPendingUserMessage(null);
+          setStreamingContent("");
+          setStreamingReasoningContent("");
+          setStreamingMessageId(null);
+          setToolEvents([]);
+          setStreamingTokens(null);
+          if (!demo) {
+            queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+            queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+            queryClient.invalidateQueries({ queryKey: ["sessions"] });
+            queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
+          } else {
+            queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+          }
+          if (!isReconnect) {
+            fetchFollowUpQuestions(sessionId, setFollowUpQuestions);
+            // Re-fetch sessions after a delay so auto-generated tags appear
+            setTimeout(() => {
+              queryClient.invalidateQueries({ queryKey: ["sessions"] });
+            }, 3000);
+          }
+        },
+      };
+    },
+    [
+      sessionId, queryClient, demo,
+      setStreamingContent, setStreamingReasoningContent, setStreamingMessageId,
+      setStreamError, setToolEvents, setFollowUpQuestions, setStreamingTokens,
+      setPendingUserMessage, setRegeneratingMsgId, setEditingMsgId,
+      fetchFollowUpQuestions,
+    ],
+  );
+
   const handleSend = useCallback(async () => {
     if (!inputValue.trim() || streaming) return;
     const content = inputValue.trim();
@@ -712,30 +818,7 @@ export function ChatWindow({
       });
 
       startEditStream(sessionId, msgId, content, sessionTemperature ?? undefined, {
-        onToken(token, msgId) {
-          setStreamingMessageId(msgId);
-          setStreamingContent((prev) => prev + token);
-        },
-        onReasoningToken(delta) {
-          setStreamingReasoningContent((prev) => prev + delta);
-        },
-        onToolStart(data) {
-          setToolEvents((prev) => [...prev, { type: "function_call", data }]);
-        },
-        onToolResult(data) {
-          setToolEvents((prev) => [...prev, { type: "function_result", data }]);
-        },
-        onMemoryUpdated(data) {
-          queryClient.invalidateQueries({ queryKey: ["memory", sessionId] });
-          notification.info({
-            message: data.action === "saved" ? "Information saved" : "Memory deleted",
-            description: data.action === "saved"
-              ? "I'll remember this for next time."
-              : "Memory entry has been removed.",
-            placement: "bottomRight",
-            duration: 4,
-          });
-        },
+        ...buildStreamHandlers('edit'),
         onMessageComplete(data) {
           // Don't clear editingMsgId here — the refetch hasn't completed yet.
           // It gets cleared by the useEffect below when messages update.
@@ -751,40 +834,6 @@ export function ChatWindow({
           queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
           queryClient.invalidateQueries({ queryKey: ["sessions"] });
           queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
-        },
-        onFollowUpQuestions(questions) {
-          setFollowUpQuestions(questions);
-        },
-        onSummarized(data) {
-          notification.info({
-            message: "Conversation Summarized",
-            description: `Compressed ${data.summarized_message_count} earlier messages to save context space.`,
-            placement: "topRight",
-            duration: 4,
-          });
-        },
-        onError(err) {
-          setEditingMsgId(null);
-          setPendingUserMessage(null);
-          setStreamingTokens(null);
-          setStreamError(err);
-          message.error(err || "Edit failed");
-        },
-        onClose() {
-          setPendingUserMessage(null);
-          setStreamingContent("");
-          setStreamingReasoningContent("");
-          setStreamingMessageId(null);
-          setToolEvents([]);
-          setStreamingTokens(null);
-          queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
-          queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
-          queryClient.invalidateQueries({ queryKey: ["sessions"] });
-          fetchFollowUpQuestions(sessionId, setFollowUpQuestions);
-          // Re-fetch sessions after a delay so auto-generated tags appear
-          setTimeout(() => {
-            queryClient.invalidateQueries({ queryKey: ["sessions"] });
-          }, 3000);
         },
       });
       return;
@@ -821,105 +870,8 @@ export function ChatWindow({
       fileIds.length > 0 ? fileIds : undefined,
       sessionTemperature ?? undefined,
       sessionData,
-      {
-      onToken(token, msgId) {
-        setStreamingMessageId(msgId);
-        setStreamingContent((prev) => prev + token);
-      },
-      onReasoningToken(delta) {
-        setStreamingReasoningContent((prev) => prev + delta);
-      },
-      onToolStart(data) {
-        setToolEvents((prev) => [
-          ...prev,
-          { type: "function_call", data },
-        ]);
-      },
-      onToolResult(data) {
-        setToolEvents((prev) => [
-          ...prev,
-          { type: "function_result", data },
-        ]);
-      },
-      onMemoryUpdated(data) {
-        queryClient.invalidateQueries({ queryKey: ["memory", sessionId] });
-        notification.info({
-          message: data.action === "saved" ? "Information saved" : "Memory deleted",
-          description: data.action === "saved"
-            ? "I'll remember this for next time."
-            : "Memory entry has been removed.",
-          placement: "bottomRight",
-          duration: 4,
-        });
-      },
-      onMessageComplete(data) {
-        setPendingUserMessage(null);
-        setToolEvents([]);
-        if (data.tokens_in || data.tokens_out) {
-          setStreamingTokens({ tokens_in: data.tokens_in || 0, tokens_out: data.tokens_out || 0 });
-        }
-        if (!demo) {
-          // In chat mode, clear streaming state and refetch from API.
-          setStreamingContent("");
-          setStreamingReasoningContent("");
-          setStreamingMessageId(null);
-          queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
-          queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
-          queryClient.invalidateQueries({ queryKey: ["sessions"] });
-          queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
-        } else {
-          // In demo mode, keep streamingMessageId so the streaming
-          // content bubble remains visible as the final message.
-          setStreamingMessageId(data.message_id || "demo-response");
-        }
-      },
-      onFollowUpQuestions(questions) {
-        setFollowUpQuestions(questions);
-      },
-      onTagsUpdated(_data) {
-        queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      },
-      onSummarized(data) {
-        notification.info({
-          message: "Conversation Summarized",
-          description: `Compressed ${data.summarized_message_count} earlier messages to save context space.`,
-          placement: "topRight",
-          duration: 4,
-        });
-      },
-      onError(err) {
-        setPendingUserMessage(null);
-        setStreamingTokens(null);
-        setStreamError(err);
-        console.error("Stream error:", err);
-      },
-      onClose() {
-        setPendingUserMessage(null);
-        setToolEvents([]);
-        setStreamingTokens(null);
-        if (!demo) {
-          // In chat mode, clear streaming state and refetch from API.
-          setStreamingContent("");
-          setStreamingReasoningContent("");
-          setStreamingMessageId(null);
-          queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
-          queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
-          queryClient.invalidateQueries({ queryKey: ["sessions"] });
-          queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
-        } else {
-          // In demo mode, refetch persisted messages from Redis without
-          // clearing streaming state yet — the streaming bubble stays
-          // visible until the refetched messages arrive, then a useEffect
-          // below swaps the streaming bubble for real persisted messages.
-          queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
-        }
-        fetchFollowUpQuestions(sessionId, setFollowUpQuestions);
-        // Re-fetch sessions after a delay so auto-generated tags appear
-        setTimeout(() => {
-          queryClient.invalidateQueries({ queryKey: ["sessions"] });
-        }, 3000);
-      },
-    });
+      buildStreamHandlers('send'),
+    );
   }, [inputValue, streaming, sessionId, startStream, queryClient, pendingFiles, editingMsgId, pendingFlag, pendModelId, pendTemplateId, pendSkillId, pendAutoRoute, pendAutoSelectTools, pendActiveToolIds, thinkingEnabled, sessionTemperature]);
 
   const handleStop = async () => {
@@ -933,6 +885,11 @@ export function ChatWindow({
     setStreamingMessageId(null);
     setStreamingTokens(null);
     setToolEvents([]);
+    // Track that this session was explicitly stopped so reconnecting
+    // won't attempt to rejoin a cancelled agent (Issue #457).
+    if (sessionId) {
+      stoppedSessionsRef.current.add(sessionId);
+    }
     await stopStream(sessionId);
   };
 
@@ -970,83 +927,7 @@ export function ChatWindow({
     setFollowUpQuestions([]);
     setStreamingTokens(null);
 
-    startRegenerateStream(sessionId, messageId, {
-      onToken(token, msgId) {
-        setStreamingMessageId(msgId);
-        setStreamingContent((prev) => prev + token);
-      },
-      onReasoningToken(delta) {
-        setStreamingReasoningContent((prev) => prev + delta);
-      },
-      onToolStart(data) {
-        setToolEvents((prev) => [...prev, { type: "function_call", data }]);
-      },
-      onToolResult(data) {
-        setToolEvents((prev) => [...prev, { type: "function_result", data }]);
-      },
-      onMemoryUpdated(data) {
-        queryClient.invalidateQueries({ queryKey: ["memory", sessionId] });
-        notification.info({
-          message: data.action === "saved" ? "Information saved" : "Memory deleted",
-          description: data.action === "saved"
-            ? "I'll remember this for next time."
-            : "Memory entry has been removed.",
-          placement: "bottomRight",
-          duration: 4,
-        });
-      },
-      onMessageComplete(data) {
-        setRegeneratingMsgId(null);
-        setStreamingContent("");
-        setStreamingReasoningContent("");
-        setStreamingMessageId(null);
-        setToolEvents([]);
-        if (data.tokens_in || data.tokens_out) {
-          setStreamingTokens({ tokens_in: data.tokens_in || 0, tokens_out: data.tokens_out || 0 });
-        }
-        queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
-        queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
-        queryClient.invalidateQueries({ queryKey: ["sessions"] });
-        queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
-      },
-      onFollowUpQuestions(questions) {
-        setFollowUpQuestions(questions);
-      },
-      onTagsUpdated(_data) {
-        queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      },
-      onSummarized(data) {
-        notification.info({
-          message: "Conversation Summarized",
-          description: `Compressed ${data.summarized_message_count} earlier messages to save context space.`,
-          placement: "topRight",
-          duration: 4,
-        });
-      },
-      onError(err) {
-        setRegeneratingMsgId(null);
-        setStreamingTokens(null);
-        setStreamError(err);
-        message.error(err || "Regenerate failed");
-      },
-      onClose() {
-        setRegeneratingMsgId(null);
-        setStreamingContent("");
-        setStreamingReasoningContent("");
-        setStreamingMessageId(null);
-        setToolEvents([]);
-        setStreamingTokens(null);
-        queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
-        queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
-        queryClient.invalidateQueries({ queryKey: ["sessions"] });
-        queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
-        fetchFollowUpQuestions(sessionId, setFollowUpQuestions);
-        // Re-fetch sessions after a delay so auto-generated tags appear
-        setTimeout(() => {
-          queryClient.invalidateQueries({ queryKey: ["sessions"] });
-        }, 3000);
-      },
-    });
+    startRegenerateStream(sessionId, messageId, buildStreamHandlers('regenerate'));
   }, [streaming, sessionId, startRegenerateStream, queryClient]);
 
   // File upload handlers
@@ -1462,19 +1343,33 @@ export function ChatWindow({
             </div>
           )}
           components={{
-            Header: () =>
-              streamError ? (
-                <div style={{ padding: "0 16px" }}>
-                  <Alert
-                    message="Error"
-                    description={streamError}
-                    type="error"
-                    closable
-                    onClose={() => setStreamError(null)}
-                    style={{ marginBottom: 12 }}
-                  />
-                </div>
-              ) : null,
+            Header: () => (
+              <>
+                {reconnecting && (
+                  <div style={{ padding: "0 16px" }}>
+                    <Alert
+                      message="Reconnecting to live session…"
+                      type="info"
+                      icon={<Spin size="small" />}
+                      showIcon
+                      style={{ marginBottom: 8, borderLeft: "4px solid #1677ff" }}
+                    />
+                  </div>
+                )}
+                {streamError ? (
+                  <div style={{ padding: "0 16px" }}>
+                    <Alert
+                      message="Error"
+                      description={streamError}
+                      type="error"
+                      closable
+                      onClose={() => setStreamError(null)}
+                      style={{ marginBottom: 12 }}
+                    />
+                  </div>
+                ) : null}
+              </>
+            ),
             EmptyPlaceholder: () =>
               loadingMessages ? (
                 <div style={{ textAlign: "center", padding: 48 }}>

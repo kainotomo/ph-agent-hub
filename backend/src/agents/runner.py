@@ -790,6 +790,7 @@ async def run_agent(
     current_user: User | None = None,
     file_ids: list[str] | None = None,
     function_invocation_kwargs: dict | None = None,
+    extra_tools: list | None = None,
 ) -> tuple[str, str]:
     """Assemble and run a MAF agent for a single user message.
 
@@ -800,7 +801,10 @@ async def run_agent(
         current_user: The authenticated user (or None for guest sessions).
         file_ids: Optional list of FileUpload IDs to link to the user message.
         function_invocation_kwargs: Optional kwargs forwarded to tool invocation
-            layers (used by A2A ``ask_user`` tool).
+            layers (used by A2A ``ask_user`` tool and autopilot ``task_complete`` tool).
+        extra_tools: Optional list of additional ``@tool``-decorated callables
+            to inject beyond those resolved from the session configuration
+            (used by the autopilot controller to inject ``task_complete``).
 
     Returns:
         A tuple of (assistant response text, assistant message ID).
@@ -845,6 +849,11 @@ async def run_agent(
         from ..tools.request_auth import request_auth
         # Prepend so they're available but don't shadow other tools
         _tools = [ask_user, request_auth] + list(_tools)
+
+    # ---- Inject extra tools (autopilot task_complete, etc.) ----------------
+    if extra_tools:
+        # Append so built-in/A2A tools take precedence
+        _tools = list(_tools) + list(extra_tools)
 
     # ---- 7. Run agent or workflow ----------------------------------------
     raw_response: str
@@ -2768,6 +2777,7 @@ async def run_agent_stream(
     current_user: User | None = None,
     message_id: str = "",
     file_ids: list[str] | None = None,
+    extra_tools: list | None = None,
 ) -> AsyncIterator[dict]:
     """Assemble and run a MAF agent, yielding typed SSE event dicts.
 
@@ -2783,6 +2793,8 @@ async def run_agent_stream(
         message_id: Pre-generated UUID for the assistant message (used
             for client-side correlation across all events).
         file_ids: Optional list of FileUpload IDs to link to the user message.
+        extra_tools: Optional list of additional ``@tool``-decorated callables
+            to inject beyond those resolved from the session configuration.
 
     Yields:
         Dicts with ``event`` and ``data`` keys suitable for
@@ -2873,13 +2885,18 @@ async def run_agent_stream(
             cfg.execution_type,
             getattr(cfg.skill, "name", None) if cfg.skill else None,
         )
+        # ---- Inject extra tools into streaming tool list --------------------
+        _stream_tools = cfg.active_tool_callables
+        if extra_tools:
+            _stream_tools = list(_stream_tools) + list(extra_tools)
+
         if cfg.execution_type == "workflow":
             stream = _run_workflow_stream(
                 model=cfg.model,
                 skill=cfg.skill,
                 model_client=cfg.model_client,
                 system_prompt=cfg.system_prompt,
-                tools=cfg.active_tool_callables,
+                tools=_stream_tools,
                 user_message=contextualized_message,
                 agent_name=cfg.agent_name,
                 session_id=session_id,
@@ -2893,7 +2910,7 @@ async def run_agent_stream(
                 model=cfg.model,
                 model_client=cfg.model_client,
                 system_prompt=cfg.system_prompt,
-                tools=cfg.active_tool_callables,
+                tools=_stream_tools,
                 user_message=contextualized_message,
                 agent_name=cfg.agent_name,
                 session_id=session_id,

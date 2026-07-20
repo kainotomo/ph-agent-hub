@@ -93,6 +93,12 @@ class Settings(BaseSettings):
     """Maximum number of tool-call steps before the agent loop terminates.
     Prevents runaway agents that loop indefinitely on tool results."""
 
+    # --- Autopilot (Issue #446) ---
+    AUTOPILOT_MAX_TURNS: int = 20
+    """Maximum number of agent-invocation turns before the autopilot
+    controller forces a summary.  Protects against runaway autonomous
+    sessions that don't call ``task_complete``."""
+
     # --- Parallel tool execution (Issue #447) ---
     AGENT_PARALLEL_TOOLS_ENABLED: bool = True
     """When True, injects system prompt guidance telling the LLM to batch

@@ -136,6 +136,12 @@ class MessageCreate(BaseModel):
     file_ids: list[str] | None = None
     temperature: float | None = None
     session_data: SessionCreate | None = None
+    autopilot: bool = False
+    """When True, runs the agent in autopilot mode — autonomous multi-turn
+    execution toward the goal in ``content`` without waiting for user
+    prompts between turns.  The agent calls ``task_complete()`` when
+    done.  Only supported for permanent (non-temporary) sessions.
+    (Issue #446)"""
 
 
 class MessageResponse(BaseModel):
@@ -1129,13 +1135,29 @@ async def send_message(
     # Inject per-message temperature override into session_data
     if body.temperature is not None:
         data["_message_temperature"] = body.temperature
-    response_text, assistant_msg_id = await run_agent(
-        session_data=data,
-        user_message=modified_message,
-        db=db,
-        current_user=current_user,
-        file_ids=valid_file_ids,
-    )
+
+    # ---- Autopilot mode (Issue #446) --------------------------------------
+    if body.autopilot:
+        if data.get("is_temporary", False):
+            raise ValidationError(
+                "Autopilot is not supported for temporary sessions"
+            )
+        from ..agents.autopilot import run_autopilot
+
+        response_text, assistant_msg_id = await run_autopilot(
+            session_data=data,
+            goal=modified_message,
+            db=db,
+            current_user=current_user,
+        )
+    else:
+        response_text, assistant_msg_id = await run_agent(
+            session_data=data,
+            user_message=modified_message,
+            db=db,
+            current_user=current_user,
+            file_ids=valid_file_ids,
+        )
 
     model_id = data.get("selected_model_id")
 

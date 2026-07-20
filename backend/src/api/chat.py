@@ -1121,6 +1121,22 @@ async def send_message(
         # Inject per-message temperature override into session_data
         if body.temperature is not None:
             data["_message_temperature"] = body.temperature
+
+        # ---- Autopilot mode (Issue #446) — streaming path ----------------
+        if body.autopilot:
+            if data.get("is_temporary", False):
+                raise ValidationError(
+                    "Autopilot is not supported for temporary sessions"
+                )
+            return await _handle_streaming_autopilot(
+                session_id=session_id,
+                body=body,
+                data=data,
+                db=db,
+                current_user=current_user,
+                modified_message=modified_message,
+            )
+
         return await _handle_streaming_message(
             session_id=session_id,
             body=body,
@@ -1399,6 +1415,98 @@ async def _run_agent_background(
             )
 
 
+async def _run_autopilot_background(
+    session_id: str,
+    data: dict[str, Any],
+    user_message: str,
+    current_user: UserORM,
+    bridge: StreamBridge,
+    max_turns: int | None = None,
+) -> None:
+    """Run the autopilot in the background, writing events to *bridge*.
+
+    Same pattern as ``_run_agent_background`` but calls
+    ``run_autopilot_stream()`` instead of ``run_agent_stream()``.
+    The meta-loop handles multiple turns autonomously.
+
+    Cleanup on completion (``finally``):
+      - Clears the Redis ``stream:active:`` flag
+      - Closes and removes the bridge
+    """
+    from ..db.base import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as stream_db:
+        try:
+            # Periodic Redis keepalive so the frontend can check status.
+            keepalive_task = asyncio.ensure_future(
+                _keep_stream_active_loop(session_id, bridge)
+            )
+
+            from ..agents.autopilot import run_autopilot_stream
+
+            await run_autopilot_stream(
+                session_data=data,
+                goal=user_message,
+                db=stream_db,
+                current_user=current_user,
+                bridge=bridge,
+                max_turns=max_turns,
+            )
+
+        except asyncio.CancelledError:
+            logger.info(
+                "Background autopilot task cancelled for session %s",
+                session_id,
+            )
+        except Exception:
+            logger.exception(
+                "Background autopilot task failed for session %s",
+                session_id,
+            )
+            await bridge.put({
+                "event": "error",
+                "data": json.dumps({
+                    "code": "autopilot_error",
+                    "message": "Autopilot execution failed",
+                    "session_id": session_id,
+                }),
+            })
+        finally:
+            # Stop the keepalive loop.
+            keepalive_task.cancel()
+            try:
+                await keepalive_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+            # Clean up Redis active flag.
+            await clear_stream_active(session_id)
+
+            # Clean up Redis cancel flag if set.
+            await clear_stream_cancel(session_id)
+
+            # Close the bridge — signals all subscribers to stop.
+            await bridge.close()
+
+            # Remove from registry.
+            remove_bridge(session_id)
+
+            # Ensure DB connection is returned to pool.
+            try:
+                await asyncio.shield(stream_db.rollback())
+            except (asyncio.CancelledError, Exception):
+                pass
+            try:
+                await asyncio.shield(stream_db.close())
+            except (asyncio.CancelledError, Exception):
+                pass
+
+            logger.info(
+                "Background autopilot task finished for session %s",
+                session_id,
+            )
+
+
 async def _keep_stream_active_loop(
     session_id: str,
     bridge: StreamBridge,
@@ -1473,6 +1581,35 @@ def _spawn_agent_background(
     return task
 
 
+def _spawn_autopilot_background(
+    session_id: str,
+    data: dict,
+    user_message: str,
+    current_user: UserORM,
+    bridge: StreamBridge,
+    max_turns: int | None = None,
+) -> asyncio.Task:
+    """Create and return a background ``asyncio.Task`` for autopilot execution.
+
+    Same pattern as ``_spawn_agent_background`` — registers the bridge,
+    sets the Redis active flag, and spawns via ``asyncio.create_task``.
+    """
+    register_bridge(session_id, bridge)
+    asyncio.ensure_future(set_stream_active(session_id))
+
+    task = asyncio.create_task(
+        _run_autopilot_background(
+            session_id=session_id,
+            data=data,
+            user_message=user_message,
+            current_user=current_user,
+            bridge=bridge,
+            max_turns=max_turns,
+        )
+    )
+    return task
+
+
 async def _handle_streaming_message(
     session_id: str,
     body: MessageCreate,
@@ -1505,6 +1642,38 @@ async def _handle_streaming_message(
     )
 
     # Return SSE response that reads from the bridge.
+    return EventSourceResponse(
+        bridge.subscribe(), media_type="text/event-stream"
+    )
+
+
+async def _handle_streaming_autopilot(
+    session_id: str,
+    body: MessageCreate,
+    data: dict[str, Any],
+    db: AsyncSession,
+    current_user: UserORM,
+    modified_message: str = "",
+) -> EventSourceResponse:
+    """Send a message in autopilot mode and run the meta-loop in the
+    background, returning SSE.
+
+    Same pattern as ``_handle_streaming_message`` — the autopilot runs as
+    a background task and the SSE client reads from a ``StreamBridge``.
+    If the SSE client disconnects, the autopilot continues uninterrupted
+    (same resilience guarantee as normal streaming chat).
+    """
+    _user_message = modified_message or body.content
+
+    bridge = StreamBridge(session_id=session_id)
+    _spawn_autopilot_background(
+        session_id=session_id,
+        data=data,
+        user_message=_user_message,
+        current_user=current_user,
+        bridge=bridge,
+    )
+
     return EventSourceResponse(
         bridge.subscribe(), media_type="text/event-stream"
     )

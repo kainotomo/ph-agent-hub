@@ -2778,6 +2778,7 @@ async def run_agent_stream(
     message_id: str = "",
     file_ids: list[str] | None = None,
     extra_tools: list | None = None,
+    function_invocation_kwargs: dict | None = None,
 ) -> AsyncIterator[dict]:
     """Assemble and run a MAF agent, yielding typed SSE event dicts.
 
@@ -2795,6 +2796,8 @@ async def run_agent_stream(
         file_ids: Optional list of FileUpload IDs to link to the user message.
         extra_tools: Optional list of additional ``@tool``-decorated callables
             to inject beyond those resolved from the session configuration.
+        function_invocation_kwargs: Optional kwargs forwarded to tool invocation
+            layers (used by autopilot ``task_complete`` tool).
 
     Yields:
         Dicts with ``event`` and ``data`` keys suitable for
@@ -2918,6 +2921,7 @@ async def run_agent_stream(
                 token_counts=_stream_token_info,
                 temperature=cfg.temperature,
                 reasoning_effort=cfg.reasoning_effort,
+                function_invocation_kwargs=function_invocation_kwargs,
             )
         event_count = 0
         async for event_dict in stream:
@@ -3242,6 +3246,7 @@ async def _run_agent_stream(
     token_counts: dict | None = None,
     temperature: float = 0.7,
     reasoning_effort: str | None = None,
+    function_invocation_kwargs: dict | None = None,
 ) -> AsyncIterator[dict]:
     """Run a MAF Agent in streaming mode, yielding SSE event dicts.
 
@@ -3278,7 +3283,10 @@ async def _run_agent_stream(
         tokenizer=tokenizer,
     )
 
-    response_stream = agent.run(user_message, stream=True)
+    if function_invocation_kwargs is not None:
+        response_stream = agent.run(user_message, stream=True, function_invocation_kwargs=function_invocation_kwargs)
+    else:
+        response_stream = agent.run(user_message, stream=True)
     logger.info(
         "Agent.run returned: type=%s",
         type(response_stream).__module__ + "." + type(response_stream).__qualname__,

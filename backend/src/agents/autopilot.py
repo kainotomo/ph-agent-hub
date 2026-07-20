@@ -27,7 +27,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import uuid
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -174,3 +176,130 @@ async def run_autopilot(
             f"Autopilot reached {max_turns} turns without completing the "
             f"goal.  Unable to generate summary: {exc}"
         ) from exc
+
+
+async def run_autopilot_stream(
+    session_data: dict[str, Any],
+    goal: str,
+    db: AsyncSession,
+    current_user: UserORM,
+    bridge: Any,
+    max_turns: int | None = None,
+) -> None:
+    """Execute an agent autonomously across multiple turns, writing SSE
+    events to *bridge* for live streaming to the frontend.
+
+    Same meta-loop as :func:`run_autopilot` but uses
+    :func:`run_agent_stream` for each turn and forwards all agent events
+    (token, tool_start, tool_result, etc.) to the bridge.  Autopilot
+    lifecycle events (turn_start, turn_complete, complete) are also
+    written to the bridge.
+
+    Args:
+        session_data: Unified session dict (from DB or Redis).
+        goal: The user's objective for the autopilot run.
+        db: Active async DB session.
+        current_user: The authenticated user.
+        bridge: A ``StreamBridge`` instance to write SSE events into.
+        max_turns: Maximum number of agent invocations before forcing
+            a summary (default: ``settings.AUTOPILOT_MAX_TURNS``).
+    """
+    if max_turns is None:
+        max_turns = settings.AUTOPILOT_MAX_TURNS
+
+    completion_state: dict[str, Any] = {"done": False, "summary": ""}
+
+    from ..tools.task_complete import task_complete
+
+    task_complete_tools = [task_complete]
+    session_id = session_data.get("id", "?")
+
+    for turn in range(1, max_turns + 1):
+        # ---- Prepare the user message for this turn ---------------------
+        if turn == 1:
+            turn_message = (
+                f"## Goal\n\n{goal}\n\n"
+                "Work autonomously toward this goal using the available tools. "
+                "When you have fully achieved the objective call "
+                "`task_complete()` with a comprehensive summary of what was "
+                "accomplished."
+            )
+        else:
+            turn_message = (
+                "Continue working toward the original goal. "
+                "Use the available tools to make further progress. "
+                "Call `task_complete(summary=...)` only when the entire "
+                "goal has been fully achieved."
+            )
+
+        # ---- Emit autopilot_turn_start event ----------------------------
+        await bridge.put({
+            "event": "autopilot_turn_start",
+            "data": json.dumps({
+                "turn": turn,
+                "max_turns": max_turns,
+                "message": turn_message[:200],
+            }),
+        })
+
+        # ---- Run the agent for this turn (streaming) --------------------
+        # Generate a unique message_id for this turn's conversation bubble.
+        turn_message_id = str(uuid.uuid4())
+
+        from .runner import run_agent_stream
+
+        async for event_dict in run_agent_stream(
+            session_data=session_data,
+            user_message=turn_message,
+            db=db,
+            current_user=current_user,
+            message_id=turn_message_id,
+            extra_tools=task_complete_tools,
+            function_invocation_kwargs={
+                "completion_state": completion_state,
+            },
+        ):
+            await bridge.put(event_dict)
+
+        # ---- Emit autopilot_turn_complete event -------------------------
+        await bridge.put({
+            "event": "autopilot_turn_complete",
+            "data": json.dumps({
+                "turn": turn,
+                "max_turns": max_turns,
+            }),
+        })
+
+        # ---- Check if the agent signalled completion --------------------
+        if completion_state["done"]:
+            logger.info(
+                "Autopilot stream completed on turn %d/%d for session %s "
+                "(summary length=%d)",
+                turn, max_turns, session_id,
+                len(completion_state["summary"]),
+            )
+            await bridge.put({
+                "event": "autopilot_complete",
+                "data": json.dumps({
+                    "summary": completion_state["summary"],
+                    "turn": turn,
+                }),
+            })
+            return
+
+    # ---- Max turns reached — emit a summary event -----------------------
+    logger.warning(
+        "Autopilot stream reached max turns (%d) for session %s",
+        max_turns, session_id,
+    )
+    await bridge.put({
+        "event": "autopilot_max_turns",
+        "data": json.dumps({
+            "max_turns": max_turns,
+            "session_id": session_id,
+            "message": (
+                f"Reached maximum of {max_turns} turns without completing "
+                f"the goal.  Here is what was accomplished so far."
+            ),
+        }),
+    })

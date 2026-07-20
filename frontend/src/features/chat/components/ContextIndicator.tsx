@@ -157,19 +157,19 @@ export function ContextIndicator({ sessionId }: ContextIndicatorProps) {
             justifyContent: "center",
             padding: 0,
             lineHeight: 0,
-            height: 24,
-            width: 24,
+            height: 18,
+            width: 18,
           }}
         >
           {hasContextLength ? (
             <Progress
               type="circle"
               percent={progressPct}
-              size={22}
+              size={16}
               strokeColor={strokeColor}
               trailColor="#d9d9d9"
               format={() => ""}
-              strokeWidth={5}
+              strokeWidth={4}
             />
           ) : (
             <CompressOutlined style={{ fontSize: 14, color: "#8c8c8c" }} />

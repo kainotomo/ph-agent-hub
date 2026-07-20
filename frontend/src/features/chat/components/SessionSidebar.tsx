@@ -231,15 +231,16 @@ export function SessionSidebar() {
           borderBottom: "1px solid #f0f0f0",
         }}
       >
-        <Space
+        <div
           style={{
+            display: "flex",
+            alignItems: "center",
             width: "100%",
-            justifyContent: "space-between",
           }}
         >
-          <Logo size={28} showText={!collapsed} textColor="#141414" />
+          <Logo size={28} textColor="#141414" />
           {!collapsed && (
-            <Space size={4}>
+            <Space size={4} style={{ marginLeft: "auto" }}>
               {sessionExists && <ContextIndicator sessionId={sessionId} />}
               <Tooltip title="Search">
                 <Button
@@ -290,7 +291,7 @@ export function SessionSidebar() {
               </Tooltip>
             </Space>
           )}
-        </Space>
+        </div>
       </div>
 
       {/* New Chat Button */}

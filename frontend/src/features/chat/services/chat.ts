@@ -492,3 +492,45 @@ export function listSessionsByTag(tag: string): Promise<SessionData[]> {
     `/chat/sessions/by-tag?tag=${encodeURIComponent(tag)}`,
   );
 }
+
+// ---------------------------------------------------------------------------
+// Stream Status & Reconnect — Issue #455
+// ---------------------------------------------------------------------------
+
+export interface StreamStatusResponse {
+  active: boolean;
+}
+
+/**
+ * Check whether a background agent is currently running for *sessionId*.
+ * Lightweight Redis check, no DB query.
+ */
+export function getStreamStatus(
+  sessionId: string,
+): Promise<StreamStatusResponse> {
+  return api<StreamStatusResponse>(
+    `/chat/session/${sessionId}/stream-status`,
+  );
+}
+
+/**
+ * Reconnect to an already-running agent stream.
+ * Returns the raw Response so the caller can open an EventSource.
+ * Throws if the session has no active stream.
+ */
+export async function reconnectStream(
+  sessionId: string,
+): Promise<Response> {
+  const BASE_URL = import.meta.env.VITE_API_URL || "/api";
+  const token = getToken();
+  const res = await fetch(
+    `${BASE_URL}/chat/session/${sessionId}/stream`,
+    {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    },
+  );
+  if (!res.ok) {
+    throw new Error(`Reconnect failed with status ${res.status}`);
+  }
+  return res;
+}

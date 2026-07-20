@@ -166,6 +166,49 @@ async def clear_stream_cancel(session_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Stream active flag helpers — used to indicate that a background agent
+# task is currently running for a given session.  The frontend checks
+# this flag on mount to decide whether to reconnect to a live stream.
+# The TTL acts as a safety net: if the agent process crashes without
+# cleanup, the flag auto-expires.
+# ---------------------------------------------------------------------------
+STREAM_ACTIVE_PREFIX = "stream:active:"
+STREAM_ACTIVE_DEFAULT_TTL = 300  # 5 minutes
+
+
+async def set_stream_active(session_id: str, ttl: int = STREAM_ACTIVE_DEFAULT_TTL) -> None:
+    """Set a "stream active" flag for *session_id*.
+
+    The flag auto-expires after *ttl* seconds (default 5 min) as a
+    safety net in case the agent process crashes.
+    """
+    r = await get_redis()
+    await r.setex(f"{STREAM_ACTIVE_PREFIX}{session_id}", ttl, "1")
+
+
+async def refresh_stream_active(session_id: str, ttl: int = STREAM_ACTIVE_DEFAULT_TTL) -> None:
+    """Renew the TTL on a "stream active" flag.
+
+    Called periodically by the background agent task while it's still
+    running.
+    """
+    r = await get_redis()
+    await r.expire(f"{STREAM_ACTIVE_PREFIX}{session_id}", ttl)
+
+
+async def check_stream_active(session_id: str) -> bool:
+    """Return True if a background agent is running for *session_id*."""
+    r = await get_redis()
+    return await r.exists(f"{STREAM_ACTIVE_PREFIX}{session_id}") > 0
+
+
+async def clear_stream_active(session_id: str) -> None:
+    """Remove the "stream active" flag for *session_id*."""
+    r = await get_redis()
+    await r.delete(f"{STREAM_ACTIVE_PREFIX}{session_id}")
+
+
+# ---------------------------------------------------------------------------
 # A2A task cancellation helpers — bridge A2A task IDs to the existing
 # stream-level cancellation mechanism.
 # ---------------------------------------------------------------------------

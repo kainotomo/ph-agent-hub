@@ -9,6 +9,7 @@ import { ConfigProvider, App as AntApp } from "antd";
 import { QueryProvider } from "../providers/QueryProvider";
 import { AuthProvider } from "../providers/AuthProvider";
 import { TenantProvider } from "../providers/TenantProvider";
+import { StreamingProvider } from "../providers/StreamingProvider";
 import { router } from "./router";
 
 function App() {
@@ -25,7 +26,9 @@ function App() {
         <QueryProvider>
           <AuthProvider>
             <TenantProvider>
-              <RouterProvider router={router} />
+              <StreamingProvider>
+                <RouterProvider router={router} />
+              </StreamingProvider>
             </TenantProvider>
           </AuthProvider>
         </QueryProvider>

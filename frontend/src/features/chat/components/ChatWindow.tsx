@@ -30,6 +30,7 @@ import {
   finalizeSession,
   updateAssistantMessage,
   listAlwaysOnTools,
+  getStreamStatus,
 } from "../services/chat";
 import { getDemoMessages } from "../services/demo";
 import { getWidgetMessages } from "../services/widget";
@@ -411,7 +412,7 @@ export function ChatWindow({
     "Summarize a document",
   ];
 
-  const { streaming, startStream, startRegenerateStream, startEditStream, stopStream } = useStream(
+  const { streaming, startStream, startRegenerateStream, startEditStream, stopStream, startReconnect, resetStream } = useStream(
     demo ? "demo" : widget ? "widget" : "chat"
   );
 
@@ -505,7 +506,14 @@ export function ChatWindow({
   // next message the user sends (Issue #124).  Stream abort on unmount is
   // handled inside useStream.ts, and stale session–switch state is cleared
   // by the state‑reset effect below.
+  //
+  // Issue #455: Because React reuses the same ChatWindow when navigating
+  // between sessions in the same route, the useStream hook's internal
+  // streaming state would persist across navigations.  We call
+  // resetStream() to clear it without cancelling the background agent.
   useEffect(() => {
+    resetStream();
+    reconnectAttemptedRef.current = false;
     setStreamingContent("");
     setStreamingReasoningContent("");
     setStreamingMessageId(null);
@@ -519,7 +527,101 @@ export function ChatWindow({
     setSessionTemperature(temperature ?? null);
     setLocalCrossSessionMemory(crossSessionMemoryEnabled ?? null);
     queryClient.invalidateQueries({ queryKey: ["memory"] });
-  }, [sessionId, temperature, crossSessionMemoryEnabled, queryClient]);
+  }, [sessionId, temperature, crossSessionMemoryEnabled, queryClient, resetStream]);
+
+  // ---- Issue #455: Reconnect to a running agent on mount -----------------
+  // When navigating back to a session where the agent is still running,
+  // open a reconnect SSE stream to resume live updates.
+  const [reconnecting, setReconnecting] = useState(false);
+  const reconnectAttemptedRef = useRef(false);
+
+  useEffect(() => {
+    // Only for normal chat sessions — not demo or widget.
+    if (demo || widget || pendingFlag || !sessionId || reconnectAttemptedRef.current) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const checkAndReconnect = async () => {
+      try {
+        const status = await getStreamStatus(sessionId);
+        if (cancelled) return;
+        if (status.active) {
+          setReconnecting(true);
+          reconnectAttemptedRef.current = true;
+          await startReconnect(sessionId, {
+            onToken: (token, msgId) => {
+              setStreamingMessageId((prev) => prev ?? msgId);
+              setStreamingContent((prev) => prev + token);
+            },
+            onReasoningToken: (delta, msgId) => {
+              setStreamingMessageId((prev) => prev ?? msgId);
+              setStreamingReasoningContent((prev) => prev + delta);
+            },
+            onToolStart: (data) => {
+              setToolEvents((prev) => [
+                ...prev,
+                { type: "function_call", data: data as unknown as Record<string, unknown> },
+              ]);
+            },
+            onToolResult: (data) => {
+              setToolEvents((prev) => [
+                ...prev,
+                { type: "function_result", data: data as unknown as Record<string, unknown> },
+              ]);
+            },
+            onMemoryUpdated: () => {
+              // Sidebar will auto-refresh on session invalidation
+            },
+            onStepComplete: () => {
+              // No UI update needed
+            },
+            onMessageComplete: (data) => {
+              setStreamingTokens({
+                tokens_in: data.tokens_in ?? 0,
+                tokens_out: data.tokens_out ?? 0,
+              });
+              queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+              queryClient.invalidateQueries({ queryKey: ["sessions"] });
+            },
+            onFollowUpQuestions: (questions) => {
+              setFollowUpQuestions(questions);
+            },
+            onSummarized: () => {
+              queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+            },
+            onTagsUpdated: () => {
+              queryClient.invalidateQueries({ queryKey: ["sessions"] });
+            },
+            onError: (error) => {
+              setStreamError(error);
+            },
+            onClose: () => {
+              if (!cancelled) {
+                setReconnecting(false);
+                queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+                queryClient.invalidateQueries({ queryKey: ["sessions"] });
+              }
+            },
+          });
+        }
+      } catch {
+        // Stream status check failed — session may not exist yet.
+        // This is normal for lazy-created sessions.
+      } finally {
+        if (!cancelled) {
+          setReconnecting(false);
+        }
+      }
+    };
+
+    checkAndReconnect();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId, demo, widget, pendingFlag, startReconnect, queryClient]);
 
   // Auto-scroll to bottom when messages finish loading (existing session)
   useEffect(() => {

@@ -14,6 +14,7 @@ import {
   Button,
   Typography,
   Space,
+  Spin,
   Tooltip,
   Drawer,
   Modal,
@@ -49,6 +50,7 @@ import { Logo } from "../../../shared/components/Logo";
 import { useNavigate, useParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../../../providers/AuthProvider";
+import { useStreamingContext } from "../../../providers/StreamingProvider";
 import {
   listSessions,
   createSession,
@@ -59,6 +61,7 @@ import {
   removeTagFromSession,
   exportSession,
   importSession,
+  getStreamStatus,
 } from "../services/chat";
 import { ContextIndicator } from "./ContextIndicator";
 import { MemoryManager } from "./MemoryManager";
@@ -80,12 +83,59 @@ export function SessionSidebar() {
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const { streamingSessionIds, removeStreamingSession } = useStreamingContext();
+  const streamingSessionIdsRef = useRef(streamingSessionIds);
+  streamingSessionIdsRef.current = streamingSessionIds;
 
   React.useEffect(() => {
     const handleResize = () => setIsMobile(window.innerWidth < 768);
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
   }, []);
+
+  // ---- Issue #455: Poll streaming session status -------------------------
+  // Poll ALL active sessions every 10 seconds.  When an agent finishes
+  // (Redis stream:active: flag cleared), the session is removed from the
+  // set and the sidebar spinner disappears for that session.
+  //
+  // The first check is delayed by 3 seconds to give the backend time to
+  // set the Redis stream:active: flag after spawning the agent.
+  useEffect(() => {
+    if (streamingSessionIds.size === 0) return;
+
+    let cancelled = false;
+
+    const check = async () => {
+      const ids = streamingSessionIdsRef.current;
+      if (ids.size === 0) return;
+
+      for (const sid of ids) {
+        try {
+          const status = await getStreamStatus(sid);
+          if (cancelled) return;
+          if (!status.active) {
+            removeStreamingSession(sid);
+          }
+        } catch {
+          // Session may no longer exist — remove from active set
+          if (!cancelled) {
+            removeStreamingSession(sid);
+          }
+        }
+      }
+    };
+
+    // Delay first check by 3s so the backend has time to set the Redis flag.
+    const timer = setTimeout(() => {
+      check();
+    }, 3000);
+    const interval = setInterval(check, 10000);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      clearInterval(interval);
+    };
+  }, [streamingSessionIds, removeStreamingSession]);
 
   const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -457,16 +507,23 @@ export function SessionSidebar() {
               >
                 <List.Item.Meta
                   title={
-                    <Text
-                      ellipsis
-                      style={{
-                        maxWidth: collapsed ? 0 : 160,
-                        display: "inline-block",
-                      }}
-                    >
-                      {item.is_temporary && "⚡ "}
-                      {item.title && item.title.length <= 2 && item.title !== "New Chat" ? "New Chat" : item.title}
-                    </Text>
+                    <Space size={4} style={{ display: "flex", alignItems: "center" }}>
+                      {streamingSessionIds.has(item.id) && (
+                        <Tooltip title="Agent is running...">
+                          <Spin size="small" style={{ flexShrink: 0 }} />
+                        </Tooltip>
+                      )}
+                      <Text
+                        ellipsis
+                        style={{
+                          maxWidth: collapsed ? 0 : 140,
+                          display: "inline-block",
+                        }}
+                      >
+                        {item.is_temporary && "⚡ "}
+                        {item.title && item.title.length <= 2 && item.title !== "New Chat" ? "New Chat" : item.title}
+                      </Text>
+                    </Space>
                   }
                   description={
                     !collapsed ? (

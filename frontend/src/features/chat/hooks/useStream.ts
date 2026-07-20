@@ -13,6 +13,7 @@ import {
   EventStreamContentType,
 } from "@microsoft/fetch-event-source";
 import { getToken } from "../../../services/api";
+import { useStreamingContext } from "../../../providers/StreamingProvider";
 
 const BASE_URL = import.meta.env.VITE_API_URL || "/api";
 
@@ -172,9 +173,25 @@ export function useStream(apiPrefix: string = "chat") {
   );
   const abortRef = useRef<AbortController | null>(null);
 
+  // Issue #455 — share streaming state with sidebar via context.
+  // addStreamingSession: called when a stream starts (regardless of session).
+  // removeStreamingSession: called when a stream ends for this session.
+  const { addStreamingSession, removeStreamingSession } = useStreamingContext();
+
   // Abort any in-flight SSE stream when the hook unmounts. Without this,
   // @microsoft/fetch-event-source reconnects on document visibility change
   // after navigation, re-POSTing the message (Issue #124).
+  //
+  // Issue #455: We intentionally do NOT call stopStream here — the agent
+  // should keep running in the background.  We only abort the local SSE
+  // subscription so the component doesn't leak memory.
+  //
+  // IMPORTANT: Do NOT clear the streaming context here.  When the user
+  // navigates from /chat/:sessionId to /chat (no session), ChatWindow
+  // unmounts and this cleanup runs.  If we cleared context here, the
+  // sidebar spinner would disappear even though the agent is still
+  // running in the background.  Context is only cleared on actual
+  // stream end (message_complete event, onerror, stopStream).
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
@@ -207,6 +224,7 @@ export function useStream(apiPrefix: string = "chat") {
       abortRef.current = controller;
       setStreaming(true);
       setStreamingSessionId(sessionId);
+      addStreamingSession(sessionId);
 
       const token = getToken();
 
@@ -255,6 +273,7 @@ export function useStream(apiPrefix: string = "chat") {
         } finally {
           setStreaming(false);
           setStreamingSessionId(null);
+          removeStreamingSession(sessionId);
           handlers.onClose?.();
         }
         return;
@@ -337,31 +356,35 @@ export function useStream(apiPrefix: string = "chat") {
               }
             },
             onclose() {
+              // Only remove from active set on NATURAL stream end.
+              // When the controller is aborted (resetStream/navigation),
+              // the agent is still running — keep the session active.
+              if (!controller.signal.aborted) {
+                removeStreamingSession(sessionId);
+              }
               setStreaming(false);
               setStreamingSessionId(null);
               handlers.onClose?.();
             },
             onerror(err) {
-              // Don't throw on abort — but still run onClose so the
-              // ChatWindow can refetch messages (the backend may have
-              // persisted a partial response).
               if (controller.signal.aborted) {
                 setStreaming(false);
                 setStreamingSessionId(null);
                 handlers.onClose?.();
-                return; // stops the retry
+                return;
               }
-              // Don't throw — let onclose fire to clean up state and refresh messages
+              removeStreamingSession(sessionId);
               setStreaming(false);
               setStreamingSessionId(null);
               handlers.onClose?.();
-              throw err; // rethrow to stop retries but onclose already ran
+              throw err;
             },
           },
         );
       } catch (err) {
         if (!controller.signal.aborted) {
           handlers.onError?.(String(err), "");
+          removeStreamingSession(sessionId);
         }
         setStreaming(false);
         setStreamingSessionId(null);
@@ -387,6 +410,8 @@ export function useStream(apiPrefix: string = "chat") {
       } catch {
         // Best effort
       }
+      // Remove from active set immediately — user explicitly stopped this agent.
+      removeStreamingSession(sessionId);
       // 2. Schedule a safety-net abort in case the backend doesn't finish
       //    within 2 s (e.g. stuck in a long tool call).  When the backend
       //    shuts down cleanly the onclose handler fires and does the final
@@ -401,6 +426,150 @@ export function useStream(apiPrefix: string = "chat") {
           }
         }, 2000);
       } else {
+        setStreaming(false);
+        setStreamingSessionId(null);
+      }
+    },
+    [],
+  );
+
+  const startReconnect = useCallback(
+    async (
+      sessionId: string,
+      handlers: {
+        onToken?: (token: string, messageId: string) => void;
+        onToolStart?: (data: ToolStartEvent["data"]) => void;
+        onToolResult?: (data: ToolResultEvent["data"]) => void;
+        onMemoryUpdated?: (data: MemoryUpdatedEvent["data"]) => void;
+        onStepComplete?: (data: StepCompleteEvent["data"]) => void;
+        onMessageComplete?: (data: MessageCompleteEvent["data"]) => void;
+        onReasoningToken?: (delta: string, messageId: string) => void;
+        onFollowUpQuestions?: (questions: string[]) => void;
+        onSummarized?: (data: SummarizedEvent["data"]) => void;
+        onTagsUpdated?: (data: TagsUpdatedEvent["data"]) => void;
+        onError?: (error: string, messageId: string) => void;
+        onClose?: () => void;
+      },
+    ): Promise<void> => {
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      // IMPORTANT: Do NOT set streaming=true yet — wait until onopen
+      // confirms the SSE connection is live.  This prevents a race where
+      // startReconnect sets streaming=true, then immediately an onerror/
+      // onclose fires (because the agent finished between getStreamStatus
+      // and the reconnect request), leaving streaming=true with no actual
+      // SSE stream.
+      //
+      // streamingSessionId and context are set inside onopen.
+      const token = getToken();
+
+      try {
+        await fetchEventSource(
+          `${BASE_URL}/chat/session/${sessionId}/stream`,
+          {
+            method: "GET",
+            headers: {
+              Accept: "text/event-stream",
+              ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            openWhenHidden: true,
+            signal: controller.signal,
+            async onopen(response) {
+              if (
+                response.ok &&
+                response.headers
+                  .get("content-type")
+                  ?.includes(EventStreamContentType)
+              ) {
+                // SSE connection confirmed — now signal that streaming is live.
+                setStreaming(true);
+                setStreamingSessionId(sessionId);
+                addStreamingSession(sessionId);
+                return;
+              }
+              // If the stream is not available (agent already finished),
+              // treat it as a normal close.
+              if (response.status === 404 || response.status === 400) {
+                handlers.onClose?.();
+                return;
+              }
+              throw new Error(
+                `Reconnect stream failed with status ${response.status}`,
+              );
+            },
+            onmessage(ev) {
+              try {
+                const parsed = JSON.parse(ev.data);
+                switch (ev.event) {
+                  case "token":
+                    handlers.onToken?.(parsed.delta, parsed.message_id);
+                    break;
+                  case "tool_start":
+                    handlers.onToolStart?.(parsed);
+                    break;
+                  case "tool_result":
+                    handlers.onToolResult?.(parsed);
+                    break;
+                  case "memory_updated":
+                    handlers.onMemoryUpdated?.(parsed);
+                    break;
+                  case "step_complete":
+                    handlers.onStepComplete?.(parsed);
+                    break;
+                  case "message_complete":
+                    handlers.onMessageComplete?.(parsed);
+                    break;
+                  case "reasoning_token":
+                    handlers.onReasoningToken?.(parsed.delta, parsed.message_id);
+                    break;
+                  case "follow_up_questions":
+                    handlers.onFollowUpQuestions?.(parsed.questions || []);
+                    break;
+                  case "summarized":
+                    handlers.onSummarized?.(parsed);
+                    break;
+                  case "tags_updated":
+                    handlers.onTagsUpdated?.(parsed);
+                    break;
+                  case "error":
+                    handlers.onError?.(parsed.message || parsed.error || "Unknown error", parsed.message_id);
+                    break;
+                  case "heartbeat":
+                    break;
+                }
+              } catch {
+                // Ignore parse errors on individual events
+              }
+            },
+            onclose() {
+              if (!controller.signal.aborted) {
+                removeStreamingSession(sessionId);
+              }
+              setStreaming(false);
+              setStreamingSessionId(null);
+              handlers.onClose?.();
+            },
+            onerror(err) {
+              if (controller.signal.aborted) {
+                setStreaming(false);
+                setStreamingSessionId(null);
+                handlers.onClose?.();
+                return;
+              }
+              removeStreamingSession(sessionId);
+              setStreaming(false);
+              setStreamingSessionId(null);
+              handlers.onClose?.();
+              throw err;
+            },
+          },
+        );
+      } catch (err) {
+        if (!controller.signal.aborted) {
+          handlers.onError?.(String(err), "");
+          removeStreamingSession(sessionId);
+        }
         setStreaming(false);
         setStreamingSessionId(null);
       }
@@ -431,6 +600,7 @@ export function useStream(apiPrefix: string = "chat") {
       abortRef.current = controller;
       setStreaming(true);
       setStreamingSessionId(sessionId);
+      addStreamingSession(sessionId);
 
       const token = getToken();
 
@@ -504,6 +674,9 @@ export function useStream(apiPrefix: string = "chat") {
               }
             },
             onclose() {
+              if (!controller.signal.aborted) {
+                removeStreamingSession(sessionId);
+              }
               setStreaming(false);
               setStreamingSessionId(null);
               handlers.onClose?.();
@@ -515,6 +688,7 @@ export function useStream(apiPrefix: string = "chat") {
                 handlers.onClose?.();
                 return;
               }
+              removeStreamingSession(sessionId);
               setStreaming(false);
               setStreamingSessionId(null);
               handlers.onClose?.();
@@ -525,6 +699,7 @@ export function useStream(apiPrefix: string = "chat") {
       } catch (err) {
         if (!controller.signal.aborted) {
           handlers.onError?.(String(err), "");
+          removeStreamingSession(sessionId);
         }
         setStreaming(false);
         setStreamingSessionId(null);
@@ -557,6 +732,7 @@ export function useStream(apiPrefix: string = "chat") {
       abortRef.current = controller;
       setStreaming(true);
       setStreamingSessionId(sessionId);
+      addStreamingSession(sessionId);
 
       const token = getToken();
 
@@ -631,6 +807,9 @@ export function useStream(apiPrefix: string = "chat") {
               }
             },
             onclose() {
+              if (!controller.signal.aborted) {
+                removeStreamingSession(sessionId);
+              }
               setStreaming(false);
               setStreamingSessionId(null);
               handlers.onClose?.();
@@ -642,6 +821,7 @@ export function useStream(apiPrefix: string = "chat") {
                 handlers.onClose?.();
                 return;
               }
+              removeStreamingSession(sessionId);
               setStreaming(false);
               setStreamingSessionId(null);
               handlers.onClose?.();
@@ -652,6 +832,7 @@ export function useStream(apiPrefix: string = "chat") {
       } catch (err) {
         if (!controller.signal.aborted) {
           handlers.onError?.(String(err), "");
+          removeStreamingSession(sessionId);
         }
         setStreaming(false);
         setStreamingSessionId(null);
@@ -660,13 +841,35 @@ export function useStream(apiPrefix: string = "chat") {
     [],
   );
 
+  // Issue #455: when the parent component reuses this hook across session
+  // navigations (same route, different param), the old fetchEventSource is
+  // still alive (the cleanup effect only fires on unmount, not on session
+  // change).  This creates TWO connections to the same bridge and stale
+  // onclose/onerror callbacks that override the new streaming state.
+  //
+  // We therefore abort the old SSE connection here.  This is safe: it only
+  // closes the LOCAL fetchEventSource — the background agent task on the
+  // backend continues running independently.
+  //
+  // IMPORTANT: Do NOT touch the streaming context here — the sidebar
+  // spinner must persist when navigating away from a running session.
+  const resetStream = useCallback(() => {
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
+    setStreaming(false);
+  }, []);
+
   return {
     streaming,
     streamingSessionId,
+    resetStream,
     startStream,
     startRegenerateStream,
     startEditStream,
     stopStream,
+    startReconnect,
   };
 }
 

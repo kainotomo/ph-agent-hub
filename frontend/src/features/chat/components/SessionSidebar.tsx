@@ -14,6 +14,7 @@ import {
   Button,
   Typography,
   Space,
+  Spin,
   Tooltip,
   Drawer,
   Modal,
@@ -49,6 +50,7 @@ import { Logo } from "../../../shared/components/Logo";
 import { useNavigate, useParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../../../providers/AuthProvider";
+import { useStreamingContext } from "../../../providers/StreamingProvider";
 import {
   listSessions,
   createSession,
@@ -80,6 +82,7 @@ export function SessionSidebar() {
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const { streamingSessionId } = useStreamingContext();
 
   React.useEffect(() => {
     const handleResize = () => setIsMobile(window.innerWidth < 768);
@@ -457,16 +460,23 @@ export function SessionSidebar() {
               >
                 <List.Item.Meta
                   title={
-                    <Text
-                      ellipsis
-                      style={{
-                        maxWidth: collapsed ? 0 : 160,
-                        display: "inline-block",
-                      }}
-                    >
-                      {item.is_temporary && "⚡ "}
-                      {item.title && item.title.length <= 2 && item.title !== "New Chat" ? "New Chat" : item.title}
-                    </Text>
+                    <Space size={4} style={{ display: "flex", alignItems: "center" }}>
+                      {streamingSessionId === item.id && (
+                        <Tooltip title="Agent is running...">
+                          <Spin size="small" style={{ flexShrink: 0 }} />
+                        </Tooltip>
+                      )}
+                      <Text
+                        ellipsis
+                        style={{
+                          maxWidth: collapsed ? 0 : 140,
+                          display: "inline-block",
+                        }}
+                      >
+                        {item.is_temporary && "⚡ "}
+                        {item.title && item.title.length <= 2 && item.title !== "New Chat" ? "New Chat" : item.title}
+                      </Text>
+                    </Space>
                   }
                   description={
                     !collapsed ? (

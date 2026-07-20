@@ -13,6 +13,7 @@ import {
   EventStreamContentType,
 } from "@microsoft/fetch-event-source";
 import { getToken } from "../../../services/api";
+import { useStreamingContext } from "../../../providers/StreamingProvider";
 
 const BASE_URL = import.meta.env.VITE_API_URL || "/api";
 
@@ -172,9 +173,22 @@ export function useStream(apiPrefix: string = "chat") {
   );
   const abortRef = useRef<AbortController | null>(null);
 
+  // Issue #455 — share streaming state with sidebar via context.
+  const { setStreamingSessionId: setContextStreaming } = useStreamingContext();
+
+  // Sync local streamingSessionId to context whenever it changes,
+  // so the sidebar can show a spinner on the running session.
+  useEffect(() => {
+    setContextStreaming(streamingSessionId);
+  }, [streamingSessionId, setContextStreaming]);
+
   // Abort any in-flight SSE stream when the hook unmounts. Without this,
   // @microsoft/fetch-event-source reconnects on document visibility change
   // after navigation, re-POSTing the message (Issue #124).
+  //
+  // Issue #455: We intentionally do NOT call stopStream here — the agent
+  // should keep running in the background.  We only abort the local SSE
+  // subscription so the component doesn't leak memory.
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
@@ -401,6 +415,137 @@ export function useStream(apiPrefix: string = "chat") {
           }
         }, 2000);
       } else {
+        setStreaming(false);
+        setStreamingSessionId(null);
+      }
+    },
+    [],
+  );
+
+  const startReconnect = useCallback(
+    async (
+      sessionId: string,
+      handlers: {
+        onToken?: (token: string, messageId: string) => void;
+        onToolStart?: (data: ToolStartEvent["data"]) => void;
+        onToolResult?: (data: ToolResultEvent["data"]) => void;
+        onMemoryUpdated?: (data: MemoryUpdatedEvent["data"]) => void;
+        onStepComplete?: (data: StepCompleteEvent["data"]) => void;
+        onMessageComplete?: (data: MessageCompleteEvent["data"]) => void;
+        onReasoningToken?: (delta: string, messageId: string) => void;
+        onFollowUpQuestions?: (questions: string[]) => void;
+        onSummarized?: (data: SummarizedEvent["data"]) => void;
+        onTagsUpdated?: (data: TagsUpdatedEvent["data"]) => void;
+        onError?: (error: string, messageId: string) => void;
+        onClose?: () => void;
+      },
+    ): Promise<void> => {
+      const controller = new AbortController();
+      abortRef.current = controller;
+      setStreaming(true);
+      setStreamingSessionId(sessionId);
+
+      const token = getToken();
+
+      try {
+        await fetchEventSource(
+          `${BASE_URL}/chat/session/${sessionId}/stream`,
+          {
+            method: "GET",
+            headers: {
+              Accept: "text/event-stream",
+              ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            openWhenHidden: true,
+            signal: controller.signal,
+            async onopen(response) {
+              if (
+                response.ok &&
+                response.headers
+                  .get("content-type")
+                  ?.includes(EventStreamContentType)
+              ) {
+                return;
+              }
+              // If the stream is not available (agent already finished),
+              // treat it as a normal close.
+              if (response.status === 404 || response.status === 400) {
+                setStreaming(false);
+                setStreamingSessionId(null);
+                handlers.onClose?.();
+                return;
+              }
+              throw new Error(
+                `Reconnect stream failed with status ${response.status}`,
+              );
+            },
+            onmessage(ev) {
+              try {
+                const parsed = JSON.parse(ev.data);
+                switch (ev.event) {
+                  case "token":
+                    handlers.onToken?.(parsed.delta, parsed.message_id);
+                    break;
+                  case "tool_start":
+                    handlers.onToolStart?.(parsed);
+                    break;
+                  case "tool_result":
+                    handlers.onToolResult?.(parsed);
+                    break;
+                  case "memory_updated":
+                    handlers.onMemoryUpdated?.(parsed);
+                    break;
+                  case "step_complete":
+                    handlers.onStepComplete?.(parsed);
+                    break;
+                  case "message_complete":
+                    handlers.onMessageComplete?.(parsed);
+                    break;
+                  case "reasoning_token":
+                    handlers.onReasoningToken?.(parsed.delta, parsed.message_id);
+                    break;
+                  case "follow_up_questions":
+                    handlers.onFollowUpQuestions?.(parsed.questions || []);
+                    break;
+                  case "summarized":
+                    handlers.onSummarized?.(parsed);
+                    break;
+                  case "tags_updated":
+                    handlers.onTagsUpdated?.(parsed);
+                    break;
+                  case "error":
+                    handlers.onError?.(parsed.message || parsed.error || "Unknown error", parsed.message_id);
+                    break;
+                  case "heartbeat":
+                    break;
+                }
+              } catch {
+                // Ignore parse errors on individual events
+              }
+            },
+            onclose() {
+              setStreaming(false);
+              setStreamingSessionId(null);
+              handlers.onClose?.();
+            },
+            onerror(err) {
+              if (controller.signal.aborted) {
+                setStreaming(false);
+                setStreamingSessionId(null);
+                handlers.onClose?.();
+                return;
+              }
+              setStreaming(false);
+              setStreamingSessionId(null);
+              handlers.onClose?.();
+              throw err;
+            },
+          },
+        );
+      } catch (err) {
+        if (!controller.signal.aborted) {
+          handlers.onError?.(String(err), "");
+        }
         setStreaming(false);
         setStreamingSessionId(null);
       }
@@ -667,6 +812,7 @@ export function useStream(apiPrefix: string = "chat") {
     startRegenerateStream,
     startEditStream,
     stopStream,
+    startReconnect,
   };
 }
 

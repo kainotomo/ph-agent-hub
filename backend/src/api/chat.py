@@ -32,6 +32,12 @@ from ..agents.runner import (
     run_agent,
     run_agent_stream,
 )
+from ..agents.stream_bridge import (
+    StreamBridge,
+    get_bridge,
+    register_bridge,
+    remove_bridge,
+)
 from ..core.config import settings
 from ..core.dependencies import get_current_user, get_db
 from ..core.exceptions import (
@@ -41,10 +47,15 @@ from ..core.exceptions import (
 )
 from ..core.redis import (
     append_temp_message,
+    check_stream_active,
+    check_stream_cancel,
+    clear_stream_active,
     clear_stream_cancel,
     delete_temp_session,
     get_temp_messages,
     get_temp_session,
+    refresh_stream_active,
+    set_stream_active,
     set_stream_cancel,
     store_temp_session,
 )
@@ -1238,8 +1249,197 @@ async def _generate_title_async(
 
 
 # ---------------------------------------------------------------------------
-# Streaming helpers (Phase 7)
+# Streaming helpers — Issue #455 (detach agent from SSE)
 # ---------------------------------------------------------------------------
+# The agent now runs as an independent background task
+# (``asyncio.create_task``).  The SSE connection is a read-only viewport —
+# breaking it does NOT affect the agent.  Events flow through a
+# ``StreamBridge`` that supports multiple concurrent subscribers so the
+# frontend can reconnect mid-stream after navigation.
+# ---------------------------------------------------------------------------
+
+
+async def _run_agent_background(
+    session_id: str,
+    data: dict[str, Any],
+    user_message: str,
+    current_user: UserORM,
+    message_id: str,
+    bridge: StreamBridge,
+    file_ids: list[str] | None = None,
+) -> None:
+    """Run the agent in the background, writing events to *bridge*.
+
+    Runs ``run_agent_stream()`` and pushes each event into the bridge
+    instead of yielding it.  This lets the agent survive SSE disconnects.
+
+    Cleanup on completion (``finally``):
+      - Persists the assistant message
+      - Writes usage logs and deducts balance
+      - Clears the Redis ``stream:active:`` flag
+      - Closes and removes the bridge
+    """
+    from ..db.base import AsyncSessionLocal
+
+    _file_ids = file_ids or []
+
+    async with AsyncSessionLocal() as stream_db:
+        try:
+            # Periodic Redis keepalive so the frontend can check status.
+            keepalive_task = asyncio.ensure_future(
+                _keep_stream_active_loop(session_id, bridge)
+            )
+
+            async for event_dict in run_agent_stream(
+                session_data=data,
+                user_message=user_message,
+                db=stream_db,
+                current_user=current_user,
+                message_id=message_id,
+                file_ids=_file_ids,
+            ):
+                # Swallow httpx ContextVar cleanup errors at stream end.
+                if (
+                    event_dict.get("event") == "error"
+                    and "inner_response_telemetry_captured_fields"
+                    in str(event_dict.get("data", ""))
+                ):
+                    logger.warning(
+                        "Swallowing httpx ContextVar error — tokens already delivered"
+                    )
+                    await bridge.put(
+                        {"event": "message_complete", "data": "{}"}
+                    )
+                    return
+
+                await bridge.put(event_dict)
+
+                # Check cancellation flag (same as before).
+                if await check_stream_cancel(session_id):
+                    logger.info(
+                        "Stream cancelled for session %s — agent will stop",
+                        session_id,
+                    )
+                    break
+
+        except asyncio.CancelledError:
+            logger.info(
+                "Background agent task cancelled for session %s",
+                session_id,
+            )
+        except Exception:
+            logger.exception(
+                "Background agent task failed for session %s",
+                session_id,
+            )
+            await bridge.put({
+                "event": "error",
+                "data": json.dumps({
+                    "code": "agent_error",
+                    "message": "Agent execution failed",
+                    "session_id": session_id,
+                    "message_id": message_id,
+                }),
+            })
+        finally:
+            # Stop the keepalive loop.
+            keepalive_task.cancel()
+            try:
+                await keepalive_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+            # Clean up Redis active flag.
+            await clear_stream_active(session_id)
+
+            # Clean up Redis cancel flag if set.
+            await clear_stream_cancel(session_id)
+
+            # Close the bridge — signals all subscribers to stop.
+            await bridge.close()
+
+            # Remove from registry.
+            remove_bridge(session_id)
+
+            # Ensure DB connection is returned to pool.
+            try:
+                await asyncio.shield(stream_db.rollback())
+            except (asyncio.CancelledError, Exception):
+                pass
+            try:
+                await asyncio.shield(stream_db.close())
+            except (asyncio.CancelledError, Exception):
+                pass
+
+            logger.info(
+                "Background agent task finished for session %s",
+                session_id,
+            )
+
+
+async def _keep_stream_active_loop(
+    session_id: str,
+    bridge: StreamBridge,
+    interval: int = 60,
+) -> None:
+    """Periodically refresh the Redis ``stream:active:`` flag while the
+    agent is running.
+
+    Runs as a background task alongside the agent.  Stops when the
+    bridge is closed.
+    """
+    while not bridge.is_closed:
+        await refresh_stream_active(session_id)
+        try:
+            await asyncio.wait_for(
+                _wait_for_bridge_close(bridge),
+                timeout=interval,
+            )
+            # Bridge closed — exit.
+            return
+        except asyncio.TimeoutError:
+            # Interval elapsed — refresh again.
+            continue
+
+
+async def _wait_for_bridge_close(bridge: StreamBridge) -> None:
+    """Wait until the bridge is closed."""
+    while not bridge.is_closed:
+        await asyncio.sleep(1)
+
+
+def _spawn_agent_background(
+    session_id: str,
+    data: dict,
+    user_message: str,
+    current_user: UserORM,
+    message_id: str,
+    bridge: StreamBridge,
+    file_ids: list[str] | None = None,
+) -> asyncio.Task:
+    """Create and return a background ``asyncio.Task`` for agent execution.
+
+    Sets the Redis ``stream:active:`` flag and registers the bridge
+    before spawning the task.
+    """
+    # Set Redis active flag so the frontend can detect a running agent.
+    asyncio.ensure_future(set_stream_active(session_id))
+
+    # Register the bridge for reconnect subscribers.
+    register_bridge(session_id, bridge)
+
+    task = asyncio.create_task(
+        _run_agent_background(
+            session_id=session_id,
+            data=data,
+            user_message=user_message,
+            current_user=current_user,
+            message_id=message_id,
+            bridge=bridge,
+            file_ids=file_ids,
+        )
+    )
+    return task
 
 
 async def _handle_streaming_message(
@@ -1251,111 +1451,69 @@ async def _handle_streaming_message(
     modified_message: str = "",
     valid_file_ids: list[str] | None = None,
 ) -> EventSourceResponse:
-    """Assemble and return an SSE EventSourceResponse for a streaming agent run.
+    """Send a message and run the agent in the background, returning SSE.
 
-    NOTE: FastAPI closes the dependency-injected ``db`` session as soon as
-    this function returns the ``EventSourceResponse`` — well before the
-    streaming generator finishes.  We therefore create a **dedicated**
-    session here so the generator's ``finally`` block can persist the
-    assistant message, write usage logs, deduct balance, etc. without
-    hitting ``ResourceClosedError: This transaction is closed``.
+    The agent runs as an ``asyncio.create_task``.  The SSE response reads
+    events from a ``StreamBridge`` — if the SSE client disconnects, the
+    agent continues uninterrupted.
     """
-    from ..db.base import AsyncSessionLocal
-
     message_id = str(uuid.uuid4())
     _valid_file_ids = valid_file_ids or []
     _user_message = modified_message or body.content
 
-    async def inner_gen() -> AsyncIterator[dict]:
-        """The inner generator that yields SSE event dicts."""
-        async with AsyncSessionLocal() as stream_db:
-            try:
-                async for event_dict in run_agent_stream(
-                    session_data=data,
-                    user_message=_user_message,
-                    db=stream_db,
-                    current_user=current_user,
-                    message_id=message_id,
-                    file_ids=_valid_file_ids,
-                ):
-                    # Swallow httpx ContextVar cleanup errors at stream end
-                    if (
-                        event_dict.get("event") == "error"
-                        and "inner_response_telemetry_captured_fields"
-                        in str(event_dict.get("data", ""))
-                    ):
-                        logger.warning(
-                            "Swallowing httpx ContextVar error — tokens already delivered"
-                        )
-                        yield {"event": "message_complete", "data": "{}"}
-                        return
-                    yield event_dict
-            finally:
-                # Ensure DB connection is cleanly returned to the pool even
-                # when the client disconnects mid-stream (asyncio.CancelledError).
-                try:
-                    await asyncio.shield(stream_db.rollback())
-                except (asyncio.CancelledError, Exception):
-                    pass
-                try:
-                    await asyncio.shield(stream_db.close())
-                except (asyncio.CancelledError, Exception):
-                    pass
+    # Create the bridge and spawn the background agent.
+    bridge = StreamBridge(session_id=session_id)
+    _spawn_agent_background(
+        session_id=session_id,
+        data=data,
+        user_message=_user_message,
+        current_user=current_user,
+        message_id=message_id,
+        bridge=bridge,
+        file_ids=_valid_file_ids,
+    )
 
-    # Wrap with heartbeat to keep proxy connections alive
-    gen = _stream_with_heartbeat(inner_gen(), interval=15)
-
-    return EventSourceResponse(gen, media_type="text/event-stream")
+    # Return SSE response that reads from the bridge.
+    return EventSourceResponse(
+        bridge.subscribe(), media_type="text/event-stream"
+    )
 
 
-async def _stream_with_heartbeat(
-    inner_gen: AsyncIterator[dict],
-    interval: int = 15,
-) -> AsyncIterator[dict]:
-    """Wrap an SSE event generator with heartbeat events.
+async def _handle_streaming_regenerate(
+    session_id: str,
+    data: dict[str, Any],
+    db: AsyncSession,
+    current_user: UserORM,
+    user_text: str,
+    file_ids: list[str] | None = None,
+) -> EventSourceResponse:
+    """Regenerate an assistant response in the background, returning SSE.
 
-    Emits ``{"event": "heartbeat", "data": "{}"}`` every *interval*
-    seconds when no other event has been emitted, to keep proxy
-    connections from closing due to idle timeout.
-
-    Uses ``asyncio.wait(..., timeout=interval)`` instead of
-    ``asyncio.wait_for`` so that the inner generator task is NOT
-    cancelled when the heartbeat fires.  Cancelling the inner task
-    would propagate ``CancelledError`` into any currently-running
-    tool (e.g. SEC filing extraction), silently aborting it.
+    Same pattern as ``_handle_streaming_message`` — the agent runs as a
+    background task and the SSE client reads from a ``StreamBridge``.
     """
-    while True:
-        try:
-            # Wrap __anext__ in a task so we can wait on it without
-            # cancelling it when the heartbeat timeout fires.
-            anext_task = asyncio.ensure_future(inner_gen.__anext__())
-            done, _pending = await asyncio.wait(
-                [anext_task], timeout=interval
-            )
-            if done:
-                try:
-                    event_dict = await anext_task
-                except StopAsyncIteration:
-                    break
-                yield event_dict
-            else:
-                # Heartbeat — inner task is still running, do NOT cancel it.
-                # Loop sending heartbeats until the inner task completes
-                # so the connection stays alive even during long tool calls.
-                while True:
-                    yield {"event": "heartbeat", "data": "{}"}
-                    done2, _pending2 = await asyncio.wait(
-                        [anext_task], timeout=interval
-                    )
-                    if done2:
-                        try:
-                            event_dict = await anext_task
-                        except StopAsyncIteration:
-                            return  # break out of outer loop too
-                        yield event_dict
-                        break  # back to outer loop for next event
-        except StopAsyncIteration:
-            break
+    message_id = str(uuid.uuid4())
+    _file_ids = file_ids or []
+
+    bridge = StreamBridge(session_id=session_id)
+    _spawn_agent_background(
+        session_id=session_id,
+        data=data,
+        user_message=user_text,
+        current_user=current_user,
+        message_id=message_id,
+        bridge=bridge,
+        file_ids=_file_ids,
+    )
+
+    return EventSourceResponse(
+        bridge.subscribe(), media_type="text/event-stream"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Cancel endpoint
+# ---------------------------------------------------------------------------
 
 
 @router.delete("/session/{session_id}/stream", status_code=204)
@@ -1375,6 +1533,80 @@ async def cancel_stream(
 
     await set_stream_cancel(session_id, ttl=60)
     return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# Reconnect endpoint — Issue #455
+# ---------------------------------------------------------------------------
+
+
+@router.get("/session/{session_id}/stream")
+async def reconnect_stream(
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(get_current_user),
+):
+    """Reconnect to an already-running agent stream.
+
+    If an agent is still running for *session_id*, opens an SSE stream
+    that replays buffered events and continues live.  If the agent has
+    already finished, returns a ``message_complete`` event with a
+    regular JSON body fallback.
+    """
+    data = await _load_session(db, session_id)
+    await _require_session_owner(data, current_user)
+
+    # Check if the agent is still running.
+    if not await check_stream_active(session_id):
+        # Agent already finished — return a single message_complete
+        # with the last persisted message.  The frontend will fall
+        # back to the normal message-fetch flow.
+        return Response(
+            content=json.dumps({
+                "active": False,
+                "session_id": session_id,
+            }),
+            media_type="application/json",
+        )
+
+    bridge = get_bridge(session_id)
+    if bridge is None:
+        # Race: agent finished between the Redis check and the bridge
+        # lookup.  Return inactive.
+        return Response(
+            content=json.dumps({
+                "active": False,
+                "session_id": session_id,
+            }),
+            media_type="application/json",
+        )
+
+    return EventSourceResponse(
+        bridge.subscribe(), media_type="text/event-stream"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Stream status endpoint — Issue #455
+# ---------------------------------------------------------------------------
+
+
+@router.get("/session/{session_id}/stream-status")
+async def stream_status(
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(get_current_user),
+):
+    """Lightweight check: is a background agent running for *session_id*?
+
+    Returns ``{"active": bool}`` using a Redis lookup — no DB query needed.
+    Used by the frontend on mount to decide whether to reconnect.
+    """
+    # We still need to verify ownership, but can skip the full session load
+    # and just check the Redis flag.  The cancel/reconnect endpoints do the
+    # full ownership check.
+    active = await check_stream_active(session_id)
+    return {"active": active}
 
 
 # =============================================================================
@@ -1718,72 +1950,6 @@ async def regenerate_assistant_message(
         content=response_text,
         model_id=model_id,
     )
-
-
-# ---------------------------------------------------------------------------
-# Regenerate streaming helper
-# ---------------------------------------------------------------------------
-
-
-async def _handle_streaming_regenerate(
-    session_id: str,
-    data: dict[str, Any],
-    db: AsyncSession,
-    current_user: UserORM,
-    user_text: str,
-    file_ids: list[str] | None = None,
-) -> EventSourceResponse:
-    """Assemble and return an SSE EventSourceResponse for a streaming regenerate.
-
-    NOTE: FastAPI closes the dependency-injected ``db`` session as soon as
-    this function returns the ``EventSourceResponse`` — well before the
-    streaming generator finishes.  We therefore create a **dedicated**
-    session here so the generator's ``finally`` block can persist the
-    assistant message without hitting ``ResourceClosedError``.
-    """
-    from ..db.base import AsyncSessionLocal
-
-    message_id = str(uuid.uuid4())
-    _file_ids = file_ids or []
-
-    async def inner_gen() -> AsyncIterator[dict]:
-        """The inner generator that yields SSE event dicts."""
-        async with AsyncSessionLocal() as stream_db:
-            try:
-                async for event_dict in run_agent_stream(
-                    session_data=data,
-                    user_message=user_text,
-                    db=stream_db,
-                    current_user=current_user,
-                    message_id=message_id,
-                    file_ids=_file_ids,
-                ):
-                    # Swallow httpx ContextVar cleanup errors at stream end
-                    if (
-                        event_dict.get("event") == "error"
-                        and "inner_response_telemetry_captured_fields"
-                        in str(event_dict.get("data", ""))
-                    ):
-                        logger.warning(
-                            "Swallowing httpx ContextVar error — tokens already delivered"
-                        )
-                        yield {"event": "message_complete", "data": "{}"}
-                        return
-                    yield event_dict
-            finally:
-                # Ensure DB connection is cleanly returned to the pool even
-                # when the client disconnects mid-stream (asyncio.CancelledError).
-                try:
-                    await asyncio.shield(stream_db.rollback())
-                except (asyncio.CancelledError, Exception):
-                    pass
-                try:
-                    await asyncio.shield(stream_db.close())
-                except (asyncio.CancelledError, Exception):
-                    pass
-
-    gen = _stream_with_heartbeat(inner_gen(), interval=15)
-    return EventSourceResponse(gen, media_type="text/event-stream")
 
 
 # =============================================================================

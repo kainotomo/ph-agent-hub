@@ -32,6 +32,7 @@ import {
   listAlwaysOnTools,
   getStreamStatus,
 } from "../services/chat";
+import { AutopilotPanel, INITIAL_AUTOPILOT_STATE } from "./AutopilotPanel";
 import { getDemoMessages } from "../services/demo";
 import { getWidgetMessages } from "../services/widget";
 import api, { getToken } from "../../../services/api";
@@ -215,6 +216,10 @@ export function ChatWindow({
   const [toolEvents, setToolEvents] = useState<Array<{type: string; data: Record<string, unknown>}>>([]);
   const [followUpQuestions, setFollowUpQuestions] = useState<string[]>([]);
   const [finalizing, setFinalizing] = useState(false);
+
+  // ---- Autopilot mode (Issue #446) ----------------------------------------
+  const [isAutopilotMode, setIsAutopilotMode] = useState(false);
+  const [autopilotState, setAutopilotState] = useState(INITIAL_AUTOPILOT_STATE);
 
   // ---- Pending session local state (Phase 2 — Issue #329) -------------
   // When the session doesn't exist yet (isPending), we accumulate settings
@@ -653,11 +658,12 @@ export function ChatWindow({
   // startRegenerateStream, or startEditStream.  Keeps 4 nearly-identical
   // handler sets in sync without code duplication.
   const buildStreamHandlers = useCallback(
-    (mode: 'send' | 'reconnect' | 'regenerate' | 'edit') => {
+    (mode: 'send' | 'reconnect' | 'regenerate' | 'edit' | 'autopilot') => {
       const isReconnect = mode === 'reconnect';
       const isRegenerate = mode === 'regenerate';
       const isEdit = mode === 'edit';
       const isSend = mode === 'send';
+      const isAutopilot = mode === 'autopilot';
 
       return {
         onToken: (token: string, msgId: string) => {
@@ -694,6 +700,32 @@ export function ChatWindow({
                 duration: 4,
               });
             },
+        // ---- Autopilot event handlers -----------------------------------
+        onAutopilotTurnStart: (data: { turn: number; max_turns: number }) => {
+          setAutopilotState((prev) => ({
+            ...prev,
+            currentTurn: data.turn,
+            maxTurns: data.max_turns,
+            status: "executing" as const,
+          }));
+        },
+        onAutopilotTurnComplete: (_data: { turn: number; max_turns: number }) => {
+          // Progress updated on next turn start; nothing extra needed.
+        },
+        onAutopilotComplete: (data: { summary: string; turn: number }) => {
+          setAutopilotState((prev) => ({
+            ...prev,
+            status: "complete" as const,
+            summary: data.summary,
+          }));
+        },
+        onAutopilotMaxTurns: (_data: { max_turns: number }) => {
+          setAutopilotState((prev) => ({
+            ...prev,
+            status: "max_turns" as const,
+          }));
+        },
+        // ------------------------------------------------------------------
         onSummarized: isReconnect
           ? () => { /* No notification during reconnect */ }
           : (data: { summarized_message_count: number }) => {
@@ -711,7 +743,7 @@ export function ChatWindow({
         }) => {
           if (isRegenerate) setRegeneratingMsgId(null);
           if (isSend || isEdit) setPendingUserMessage(null);
-          setToolEvents([]);
+          if (!isAutopilot) setToolEvents([]);
           if (data.tokens_in || data.tokens_out) {
             setStreamingTokens({
               tokens_in: data.tokens_in || 0,
@@ -734,6 +766,12 @@ export function ChatWindow({
           } else if (isReconnect) {
             // Reconnect: update tokens without clearing streaming state;
             // onClose handles the final cleanup.
+            queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+            queryClient.invalidateQueries({ queryKey: ["sessions"] });
+          } else if (isAutopilot) {
+            // Autopilot: don't clear streaming state between turns —
+            // the autopilot_turn_start/complete events handle the UI.
+            // Just invalidate queries so persisted per-turn messages appear.
             queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
             queryClient.invalidateQueries({ queryKey: ["sessions"] });
           } else {
@@ -768,7 +806,21 @@ export function ChatWindow({
           setStreamingMessageId(null);
           setToolEvents([]);
           setStreamingTokens(null);
-          if (!demo) {
+          if (isAutopilot) {
+            // Autopilot: onClose fires after all turns complete.
+            // Refetch messages to get the final persisted result.
+            queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+            queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+            queryClient.invalidateQueries({ queryKey: ["sessions"] });
+            queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
+            // Reset autopilot state to idle so the panel disappears
+            setAutopilotState((prev) => {
+              if (prev.status === "complete" || prev.status === "max_turns" || prev.status === "error") {
+                return prev; // keep final status visible
+              }
+              return { ...prev, status: "idle" };
+            });
+          } else if (!demo) {
             queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
             queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
             queryClient.invalidateQueries({ queryKey: ["sessions"] });
@@ -864,14 +916,32 @@ export function ChatWindow({
         }
       : undefined;
 
-    startStream(
-      sessionId,
-      content,
-      fileIds.length > 0 ? fileIds : undefined,
-      sessionTemperature ?? undefined,
-      sessionData,
-      buildStreamHandlers('send'),
-    );
+    if (isAutopilotMode) {
+      // ---- Autopilot mode: stream with autopilot flag ----------------------
+      setAutopilotState({
+        currentTurn: 0,
+        maxTurns: 20,
+        status: "executing",
+      });
+      startStream(
+        sessionId,
+        content,
+        fileIds.length > 0 ? fileIds : undefined,
+        sessionTemperature ?? undefined,
+        { ...(sessionData || {}), autopilot: true },
+        buildStreamHandlers('autopilot'),
+        true,
+      );
+    } else {
+      startStream(
+        sessionId,
+        content,
+        fileIds.length > 0 ? fileIds : undefined,
+        sessionTemperature ?? undefined,
+        sessionData,
+        buildStreamHandlers('send'),
+      );
+    }
   }, [inputValue, streaming, sessionId, startStream, queryClient, pendingFiles, editingMsgId, pendingFlag, pendModelId, pendTemplateId, pendSkillId, pendAutoRoute, pendAutoSelectTools, pendActiveToolIds, thinkingEnabled, sessionTemperature]);
 
   const handleStop = async () => {
@@ -890,6 +960,7 @@ export function ChatWindow({
     if (sessionId) {
       stoppedSessionsRef.current.add(sessionId);
     }
+    setAutopilotState(INITIAL_AUTOPILOT_STATE);
     await stopStream(sessionId);
   };
 
@@ -1345,6 +1416,10 @@ export function ChatWindow({
           components={{
             Header: () => (
               <>
+                <AutopilotPanel
+                  state={autopilotState}
+                  onStop={handleStop}
+                />
                 {reconnecting && (
                   <div style={{ padding: "0 16px" }}>
                     <Alert
@@ -1652,6 +1727,28 @@ export function ChatWindow({
         )}
 
         <div style={{ display: "flex", alignItems: "flex-end", gap: 8, width: "100%" }}>
+          {/* Autopilot mode toggle (Issue #446) — only for normal chat */}
+          {!demo && !widget && !editingMsgId && !isTemporary && (
+            <Space direction="vertical" size={0} style={{ alignItems: "center" }}>
+              <Button
+                size="small"
+                type={isAutopilotMode ? "primary" : "default"}
+                onClick={() => setIsAutopilotMode(!isAutopilotMode)}
+                title={isAutopilotMode ? "Switch to Chat mode" : "Switch to Autopilot mode"}
+                style={{
+                  fontSize: 11,
+                  padding: "0 6px",
+                  height: 22,
+                  lineHeight: "20px",
+                }}
+              >
+                {isAutopilotMode ? "🤖 AP" : "💬"}
+              </Button>
+              <Text style={{ fontSize: 9, lineHeight: "12px", color: "#888" }}>
+                {isAutopilotMode ? "Auto" : "Chat"}
+              </Text>
+            </Space>
+          )}
           {(featureFlags.file_upload ?? true) && (
             <Upload
               multiple
@@ -1686,6 +1783,8 @@ export function ChatWindow({
               placeholder={
                 editingMsgId
                   ? "Edit message…"
+                  : isAutopilotMode
+                  ? "Describe your goal… (autopilot)"
                   : isTemporary
                   ? "Type a message…"
                   : isMobile
@@ -1721,11 +1820,11 @@ export function ChatWindow({
           ) : (
             <Button
               type="primary"
-              icon={editingMsgId ? <EditOutlined /> : <SendOutlined />}
+              icon={editingMsgId ? <EditOutlined /> : isAutopilotMode ? <RobotOutlined /> : <SendOutlined />}
               onClick={handleSend}
               disabled={!inputValue.trim()}
             >
-              {editingMsgId ? "Edit & Send" : "Send"}
+              {editingMsgId ? "Edit & Send" : isAutopilotMode ? "Start Autopilot" : "Send"}
             </Button>
           )}
         </div>

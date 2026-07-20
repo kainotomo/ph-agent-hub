@@ -148,6 +148,42 @@ export interface HeartbeatEvent {
   data: Record<string, never>;
 }
 
+// ---- Autopilot events (Issue #446) ---------------------------------------
+
+export interface AutopilotTurnStartEvent {
+  event: "autopilot_turn_start";
+  data: {
+    turn: number;
+    max_turns: number;
+    message?: string;
+  };
+}
+
+export interface AutopilotTurnCompleteEvent {
+  event: "autopilot_turn_complete";
+  data: {
+    turn: number;
+    max_turns: number;
+  };
+}
+
+export interface AutopilotCompleteEvent {
+  event: "autopilot_complete";
+  data: {
+    summary: string;
+    turn: number;
+  };
+}
+
+export interface AutopilotMaxTurnsEvent {
+  event: "autopilot_max_turns";
+  data: {
+    max_turns: number;
+    session_id: string;
+    message: string;
+  };
+}
+
 export type StreamEvent =
   | TokenEvent
   | ToolStartEvent
@@ -159,6 +195,10 @@ export type StreamEvent =
   | FollowUpQuestionsEvent
   | SummarizedEvent
   | TagsUpdatedEvent
+  | AutopilotTurnStartEvent
+  | AutopilotTurnCompleteEvent
+  | AutopilotCompleteEvent
+  | AutopilotMaxTurnsEvent
   | ErrorEvent
   | HeartbeatEvent;
 
@@ -216,9 +256,14 @@ export function useStream(apiPrefix: string = "chat") {
         onFollowUpQuestions?: (questions: string[]) => void;
         onSummarized?: (data: SummarizedEvent["data"]) => void;
         onTagsUpdated?: (data: TagsUpdatedEvent["data"]) => void;
+        onAutopilotTurnStart?: (data: AutopilotTurnStartEvent["data"]) => void;
+        onAutopilotTurnComplete?: (data: AutopilotTurnCompleteEvent["data"]) => void;
+        onAutopilotComplete?: (data: AutopilotCompleteEvent["data"]) => void;
+        onAutopilotMaxTurns?: (data: AutopilotMaxTurnsEvent["data"]) => void;
         onError?: (error: string, messageId: string) => void;
         onClose?: () => void;
       },
+      autopilot?: boolean,
     ) => {
       const controller = new AbortController();
       abortRef.current = controller;
@@ -250,6 +295,7 @@ export function useStream(apiPrefix: string = "chat") {
               file_ids: fileIds || [],
               ...(temperature !== undefined ? { temperature } : {}),
               ...(sessionData ? { session_data: sessionData } : {}),
+              ...(autopilot ? { autopilot: true } : {}),
             }),
           });
           if (!res.ok) {
@@ -294,6 +340,7 @@ export function useStream(apiPrefix: string = "chat") {
               file_ids: fileIds || [],
               ...(temperature !== undefined ? { temperature } : {}),
               ...(sessionData ? { session_data: sessionData } : {}),
+              ...(autopilot ? { autopilot: true } : {}),
             }),
             openWhenHidden: true,
             signal: controller.signal,
@@ -343,6 +390,18 @@ export function useStream(apiPrefix: string = "chat") {
                     break;
                   case "tags_updated":
                     handlers.onTagsUpdated?.(parsed);
+                    break;
+                  case "autopilot_turn_start":
+                    handlers.onAutopilotTurnStart?.(parsed);
+                    break;
+                  case "autopilot_turn_complete":
+                    handlers.onAutopilotTurnComplete?.(parsed);
+                    break;
+                  case "autopilot_complete":
+                    handlers.onAutopilotComplete?.(parsed);
+                    break;
+                  case "autopilot_max_turns":
+                    handlers.onAutopilotMaxTurns?.(parsed);
                     break;
                   case "error":
                     handlers.onError?.(parsed.message || parsed.error || "Unknown error", parsed.message_id);
@@ -447,6 +506,10 @@ export function useStream(apiPrefix: string = "chat") {
         onFollowUpQuestions?: (questions: string[]) => void;
         onSummarized?: (data: SummarizedEvent["data"]) => void;
         onTagsUpdated?: (data: TagsUpdatedEvent["data"]) => void;
+        onAutopilotTurnStart?: (data: AutopilotTurnStartEvent["data"]) => void;
+        onAutopilotTurnComplete?: (data: AutopilotTurnCompleteEvent["data"]) => void;
+        onAutopilotComplete?: (data: AutopilotCompleteEvent["data"]) => void;
+        onAutopilotMaxTurns?: (data: AutopilotMaxTurnsEvent["data"]) => void;
         onError?: (error: string, messageId: string) => void;
         onClose?: () => void;
       },
@@ -599,6 +662,10 @@ export function useStream(apiPrefix: string = "chat") {
         onFollowUpQuestions?: (questions: string[]) => void;
         onSummarized?: (data: SummarizedEvent["data"]) => void;
         onTagsUpdated?: (data: TagsUpdatedEvent["data"]) => void;
+        onAutopilotTurnStart?: (data: AutopilotTurnStartEvent["data"]) => void;
+        onAutopilotTurnComplete?: (data: AutopilotTurnCompleteEvent["data"]) => void;
+        onAutopilotComplete?: (data: AutopilotCompleteEvent["data"]) => void;
+        onAutopilotMaxTurns?: (data: AutopilotMaxTurnsEvent["data"]) => void;
         onError?: (error: string, messageId: string) => void;
         onClose?: () => void;
       },

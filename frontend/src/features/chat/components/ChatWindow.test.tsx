@@ -63,6 +63,8 @@ vi.mock("../hooks/useStream", () => ({
     stopStream: vi.fn(),
     startRegenerateStream: vi.fn(),
     startEditStream: vi.fn(),
+    startReconnect: vi.fn(),
+    resetStream: vi.fn(),
     isStreaming: false,
     streaming: false,
   }),

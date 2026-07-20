@@ -70,8 +70,8 @@ def _make_mock_db_session():
 
     We deliberately avoid ``AsyncMock`` for ``execute`` because ``await``
     on an AsyncMock returns ``return_value`` (not the mock itself), which
-    breaks the chain.  However, ``commit`` and ``rollback`` are awaited,
-    so they use AsyncMock.
+    breaks the chain.  However, ``commit``, ``flush``, and ``rollback``
+    are awaited, so they use AsyncMock.
     """
     session = MagicMock()
     session.__aenter__ = AsyncMock(return_value=session)
@@ -86,6 +86,7 @@ def _make_mock_db_session():
         return result
 
     session.execute = default_execute
+    session.flush = AsyncMock()
     session.commit = AsyncMock()
     session.rollback = AsyncMock()
     session.add = MagicMock()
@@ -347,6 +348,7 @@ class TestMemoryTools:
         db = _make_mock_db_session()
         existing = MagicMock()
         existing.value = "Bob"
+        existing.source = "automatic"
         result_mock = MagicMock()
         result_mock.scalar_one_or_none.return_value = existing
         async def mock_execute(*args, **kwargs):
@@ -378,6 +380,7 @@ class TestMemoryTools:
     async def test_delete_memory_automatic_success(self):
         db = _make_mock_db_session()
         existing = MagicMock()
+        existing.source = "automatic"
         existing.id = "mem-1"
         result_mock = MagicMock()
         result_mock.scalar_one_or_none.return_value = existing

@@ -176,10 +176,20 @@ export function useStream(apiPrefix: string = "chat") {
   // Issue #455 — share streaming state with sidebar via context.
   const { setStreamingSessionId: setContextStreaming } = useStreamingContext();
 
-  // Sync local streamingSessionId to context whenever it changes,
-  // so the sidebar can show a spinner on the running session.
+  // Sync streamingSessionId to context.  We always sync (even null) so that
+  // onclose/onerror properly clear the sidebar spinner when a stream ends.
+  // The exception is when the abort comes from resetStream() (navigation) —
+  // see `_abortingForNavigation` below.
+  const _abortingForNavigationRef = useRef(false);
+
   useEffect(() => {
-    setContextStreaming(streamingSessionId);
+    if (_abortingForNavigationRef.current) {
+      // The abort came from resetStream — don't clear context because the
+      // sidebar spinner should persist (the agent is still running).
+      _abortingForNavigationRef.current = false;
+    } else {
+      setContextStreaming(streamingSessionId);
+    }
   }, [streamingSessionId, setContextStreaming]);
 
   // Abort any in-flight SSE stream when the hook unmounts. Without this,
@@ -189,11 +199,19 @@ export function useStream(apiPrefix: string = "chat") {
   // Issue #455: We intentionally do NOT call stopStream here — the agent
   // should keep running in the background.  We only abort the local SSE
   // subscription so the component doesn't leak memory.
+  //
+  // IMPORTANT: We also clear the streaming context on unmount because
+  // the onclose/onerror callbacks that normally set streamingSessionId=null
+  // fire during React's unmount phase, where state updates are suppressed
+  // and the sync useEffect never runs.  Without this explicit cleanup,
+  // the context retains the old session ID, causing the sidebar to show
+  // a stale spinner and other ChatWindows to attempt reconnect.
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
+      setContextStreaming(null);
     };
-  }, []);
+  }, [setContextStreaming]);
 
   const startStream = useCallback(
     async (
@@ -442,9 +460,15 @@ export function useStream(apiPrefix: string = "chat") {
     ): Promise<void> => {
       const controller = new AbortController();
       abortRef.current = controller;
-      setStreaming(true);
-      setStreamingSessionId(sessionId);
 
+      // IMPORTANT: Do NOT set streaming=true here — wait until onopen
+      // confirms the SSE connection is live.  This prevents a race where
+      // startReconnect sets streaming=true, then immediately an onerror/
+      // onclose fires (because the agent finished between getStreamStatus
+      // and the reconnect request), leaving streaming=true with no actual
+      // SSE stream.
+      //
+      // We also do NOT set streamingSessionId yet — it's set inside onopen.
       const token = getToken();
 
       try {
@@ -465,13 +489,14 @@ export function useStream(apiPrefix: string = "chat") {
                   .get("content-type")
                   ?.includes(EventStreamContentType)
               ) {
+                // SSE connection confirmed — now signal that streaming is live.
+                setStreaming(true);
+                setStreamingSessionId(sessionId);
                 return;
               }
               // If the stream is not available (agent already finished),
               // treat it as a normal close.
               if (response.status === 404 || response.status === 400) {
-                setStreaming(false);
-                setStreamingSessionId(null);
                 handlers.onClose?.();
                 return;
               }
@@ -805,9 +830,40 @@ export function useStream(apiPrefix: string = "chat") {
     [],
   );
 
+  // Issue #455: when the parent component reuses this hook across session
+  // navigations (same route, different param), the old fetchEventSource is
+  // still alive (the cleanup effect only fires on unmount, not on session
+  // change).  This creates TWO connections to the same bridge, competing
+  // on asyncio.Queue, and stale onclose/onerror callbacks override the
+  // new streaming state.
+  //
+  // We therefore abort the old SSE connection here.  This is safe: it only
+  // closes the LOCAL fetchEventSource — the background agent task on the
+  // backend continues running independently.
+  //
+  // The _abortingForNavigationRef flag prevents the subsequent onerror/
+  // onclose callbacks from clearing the streaming context.  The sidebar
+  // spinner must persist because the agent is still running.
+  //
+  // IMPORTANT: Only set the flag and abort if there IS a controller.
+  // If abortRef.current is null (initial mount, or stream already ended
+  // cleanly), setting the flag would leave it stuck at true — the sync
+  // useEffect never fires (streamingSessionId doesn't change), so the
+  // flag is never cleared, and future startStream calls can never set
+  // the context.  This is why the sidebar spinner disappeared.
+  const resetStream = useCallback(() => {
+    if (abortRef.current) {
+      _abortingForNavigationRef.current = true;
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
+    setStreaming(false);
+  }, []);
+
   return {
     streaming,
     streamingSessionId,
+    resetStream,
     startStream,
     startRegenerateStream,
     startEditStream,

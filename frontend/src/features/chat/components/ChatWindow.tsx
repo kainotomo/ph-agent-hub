@@ -413,7 +413,7 @@ export function ChatWindow({
     "Summarize a document",
   ];
 
-  const { streaming, startStream, startRegenerateStream, startEditStream, stopStream, startReconnect } = useStream(
+  const { streaming, startStream, startRegenerateStream, startEditStream, stopStream, startReconnect, resetStream } = useStream(
     demo ? "demo" : widget ? "widget" : "chat"
   );
 
@@ -507,7 +507,14 @@ export function ChatWindow({
   // next message the user sends (Issue #124).  Stream abort on unmount is
   // handled inside useStream.ts, and stale session–switch state is cleared
   // by the state‑reset effect below.
+  //
+  // Issue #455: Because React reuses the same ChatWindow when navigating
+  // between sessions in the same route, the useStream hook's internal
+  // streaming state would persist across navigations.  We call
+  // resetStream() to clear it without cancelling the background agent.
   useEffect(() => {
+    resetStream();
+    reconnectAttemptedRef.current = false;
     setStreamingContent("");
     setStreamingReasoningContent("");
     setStreamingMessageId(null);
@@ -521,7 +528,7 @@ export function ChatWindow({
     setSessionTemperature(temperature ?? null);
     setLocalCrossSessionMemory(crossSessionMemoryEnabled ?? null);
     queryClient.invalidateQueries({ queryKey: ["memory"] });
-  }, [sessionId, temperature, crossSessionMemoryEnabled, queryClient]);
+  }, [sessionId, temperature, crossSessionMemoryEnabled, queryClient, resetStream]);
 
   // ---- Issue #455: Reconnect to a running agent on mount -----------------
   // When navigating back to a session where the agent is still running,

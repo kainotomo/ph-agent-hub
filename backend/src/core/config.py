@@ -98,6 +98,9 @@ class Settings(BaseSettings):
     """Maximum number of agent-invocation turns before the autopilot
     controller forces a summary.  Protects against runaway autonomous
     sessions that don't call ``task_complete``."""
+    AUTOPILOT_MAX_TOKENS: int = 0
+    """Maximum cumulative tokens (input + output) before the autopilot
+    stops.  ``0`` means no limit (default)."""
 
     # --- Parallel tool execution (Issue #447) ---
     AGENT_PARALLEL_TOOLS_ENABLED: bool = True

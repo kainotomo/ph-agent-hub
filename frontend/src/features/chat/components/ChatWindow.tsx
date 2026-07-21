@@ -1649,6 +1649,7 @@ export function ChatWindow({
       <AutopilotPanel
         state={autopilotState}
         onStop={handleStop}
+        sessionId={sessionId}
       />
 
       {/* Demo CTA banner — shown after 3+ user messages */}

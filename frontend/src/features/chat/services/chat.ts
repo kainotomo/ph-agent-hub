@@ -535,3 +535,19 @@ export async function reconnectStream(
   }
   return res;
 }
+
+/**
+ * Send a steering instruction to a paused autopilot.
+ */
+export async function autopilotSteer(
+  sessionId: string,
+  instruction: string,
+): Promise<{ status: string; run_id: string }> {
+  return api<{ status: string; run_id: string }>(
+    `/chat/session/${sessionId}/autopilot/steer`,
+    {
+      method: "POST",
+      body: JSON.stringify({ instruction }),
+    },
+  );
+}

@@ -32,6 +32,7 @@ from .app_settings import AppSetting
 from .a2a_call_logs import A2aCallLog
 from .a2a_tasks import A2aTask
 from .embed_configs import EmbedConfig
+from .autopilot_runs import AutopilotRun
 
 __all__ = [
     "A2aCallLog",

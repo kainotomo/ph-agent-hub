@@ -1437,6 +1437,14 @@ async def _run_autopilot_background(
 
     async with AsyncSessionLocal() as stream_db:
         try:
+            # Create AutopilotRun record for persistence (Phase 3)
+            from ..services.autopilot_service import create_autopilot_run as _ap_create
+
+            autopilot_run = await _ap_create(
+                stream_db, session_id, user_message, max_turns or 20,
+            )
+            autopilot_run_id = autopilot_run.id
+
             # Periodic Redis keepalive so the frontend can check status.
             keepalive_task = asyncio.ensure_future(
                 _keep_stream_active_loop(session_id, bridge)
@@ -1451,6 +1459,7 @@ async def _run_autopilot_background(
                 current_user=current_user,
                 bridge=bridge,
                 max_turns=max_turns,
+                autopilot_run_id=autopilot_run_id,
             )
 
         except asyncio.CancelledError:
@@ -1458,11 +1467,26 @@ async def _run_autopilot_background(
                 "Background autopilot task cancelled for session %s",
                 session_id,
             )
+            try:
+                from ..services.autopilot_service import set_state as _ap_set_state
+                async with AsyncSessionLocal() as _cancel_db:
+                    await _ap_set_state(_cancel_db, autopilot_run_id, "CANCELLED")
+            except Exception:
+                pass
         except Exception:
             logger.exception(
                 "Background autopilot task failed for session %s",
                 session_id,
             )
+            try:
+                from ..services.autopilot_service import set_state as _ap_set_state
+                async with AsyncSessionLocal() as _err_db:
+                    await _ap_set_state(
+                        _err_db, autopilot_run_id, "FAILED",
+                        error_message="Autopilot execution failed",
+                    )
+            except Exception:
+                pass
             await bridge.put({
                 "event": "error",
                 "data": json.dumps({
@@ -1816,6 +1840,49 @@ async def stream_status(
         if bridge is not None:
             autopilot = bridge.is_autopilot
     return {"active": active, "autopilot": autopilot}
+
+
+# ---------------------------------------------------------------------------
+# Autopilot steer endpoint — Issue #446 Phase 3
+# ---------------------------------------------------------------------------
+
+
+class SteerRequest(BaseModel):
+    instruction: str
+
+
+@router.post("/session/{session_id}/autopilot/steer")
+async def autopilot_steer(
+    session_id: str,
+    body: SteerRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(get_current_user),
+):
+    """Provide a steering instruction to a paused autopilot and resume it.
+
+    The instruction is stored in the ``AutopilotRun`` record and will
+    be injected into the next turn's context when the autopilot resumes.
+    """
+    data = await _load_session(db, session_id)
+    await _require_session_owner(data, current_user)
+
+    from ..services.autopilot_service import (
+        get_run_by_session as _ap_get_run,
+        set_state as _ap_set_state,
+        set_steering_instruction as _ap_set_steer,
+    )
+
+    run = await _ap_get_run(db, session_id)
+    if run is None:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="No autopilot run found for this session")
+
+    await _ap_set_steer(db, run.id, body.instruction)
+    # After storing the instruction, set back to EXECUTING so the
+    # controller's next poll sees it should continue.
+    await _ap_set_state(db, run.id, "EXECUTING")
+
+    return {"status": "ok", "run_id": run.id}
 
 
 # =============================================================================

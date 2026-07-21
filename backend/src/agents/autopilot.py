@@ -180,6 +180,7 @@ async def run_autopilot_stream(
     current_user: UserORM,
     bridge: Any,
     max_turns: int | None = None,
+    autopilot_run_id: str | None = None,
 ) -> None:
     """Execute an agent autonomously across multiple turns, writing SSE
     events to *bridge* for live streaming to the frontend.
@@ -198,18 +199,45 @@ async def run_autopilot_stream(
         bridge: A ``StreamBridge`` instance to write SSE events into.
         max_turns: Maximum number of agent invocations before forcing
             a summary (default: ``settings.AUTOPILOT_MAX_TURNS``).
+        autopilot_run_id: Optional ``AutopilotRun.id`` for persisting
+            state across turns (Phase 3 resilience).
     """
     if max_turns is None:
         max_turns = settings.AUTOPILOT_MAX_TURNS
+    max_tokens = settings.AUTOPILOT_MAX_TOKENS
 
     completion_state: dict[str, Any] = {"done": False, "summary": ""}
+    cumulative_tokens_in = 0
+    cumulative_tokens_out = 0
 
     from ..tools.task_complete import task_complete
 
     task_complete_tools = [task_complete]
     session_id = session_data.get("id", "?")
+    findings: list[dict] = []
 
     for turn in range(1, max_turns + 1):
+        # ---- Token budget check -----------------------------------------
+        if max_tokens > 0 and (cumulative_tokens_in + cumulative_tokens_out) >= max_tokens:
+            logger.warning(
+                "Autopilot token budget exceeded (%d >= %d) for session %s",
+                cumulative_tokens_in + cumulative_tokens_out, max_tokens, session_id,
+            )
+            await bridge.put({
+                "event": "autopilot_error",
+                "data": json.dumps({
+                    "message": f"Token budget of {max_tokens} exceeded",
+                    "turn": turn,
+                }),
+            })
+            if autopilot_run_id:
+                from ..services.autopilot_service import set_state as _ap_set_state
+                await _ap_set_state(
+                    db, autopilot_run_id, "FAILED",
+                    error_message=f"Token budget of {max_tokens} exceeded",
+                )
+            return
+
         # ---- Prepare the user message and tools for this turn ----------
         # Turn 1: do NOT give task_complete so the agent must report
         # intermediate progress before it can declare the task done.
@@ -247,6 +275,9 @@ async def run_autopilot_stream(
 
         from .runner import run_agent_stream
 
+        turn_tokens_in = 0
+        turn_tokens_out = 0
+
         async for event_dict in run_agent_stream(
             session_data=session_data,
             user_message=turn_message,
@@ -256,7 +287,29 @@ async def run_autopilot_stream(
             extra_tools=turn_extra_tools,
             function_invocation_kwargs=turn_fn_kwargs,
         ):
+            # Extract token counts from message_complete events
+            if event_dict.get("event") == "message_complete":
+                data = event_dict.get("data", "{}")
+                if isinstance(data, str):
+                    try:
+                        parsed = json.loads(data)
+                        turn_tokens_in = parsed.get("tokens_in", 0) or 0
+                        turn_tokens_out = parsed.get("tokens_out", 0) or 0
+                    except (json.JSONDecodeError, TypeError):
+                        pass
             await bridge.put(event_dict)
+
+        cumulative_tokens_in += turn_tokens_in
+        cumulative_tokens_out += turn_tokens_out
+
+        # ---- Persist findings and turn progress -------------------------
+        if turn > 1 and autopilot_run_id:
+            from ..services.autopilot_service import update_turn as _ap_update_turn
+            await _ap_update_turn(
+                db, autopilot_run_id, turn,
+                tokens_in=turn_tokens_in,
+                tokens_out=turn_tokens_out,
+            )
 
         # ---- Emit autopilot_turn_complete event -------------------------
         await bridge.put({
@@ -275,6 +328,22 @@ async def run_autopilot_stream(
                 turn, max_turns, session_id,
                 len(completion_state["summary"]),
             )
+            # Persist final state
+            if autopilot_run_id:
+                from ..services.autopilot_service import (
+                    set_state as _ap_set_state,
+                    update_turn as _ap_update_turn,
+                )
+                await _ap_update_turn(
+                    db, autopilot_run_id, turn,
+                    tokens_in=turn_tokens_in,
+                    tokens_out=turn_tokens_out,
+                    finding={
+                        "turn": turn,
+                        "summary": completion_state["summary"][:500],
+                    },
+                )
+                await _ap_set_state(db, autopilot_run_id, "COMPLETED")
             await bridge.put({
                 "event": "autopilot_complete",
                 "data": json.dumps({
@@ -289,6 +358,12 @@ async def run_autopilot_stream(
         "Autopilot stream reached max turns (%d) for session %s",
         max_turns, session_id,
     )
+    if autopilot_run_id:
+        from ..services.autopilot_service import set_state as _ap_set_state
+        await _ap_set_state(
+            db, autopilot_run_id, "FAILED",
+            error_message=f"Reached max turns ({max_turns})",
+        )
     await bridge.put({
         "event": "autopilot_max_turns",
         "data": json.dumps({

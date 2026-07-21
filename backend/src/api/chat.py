@@ -1435,17 +1435,24 @@ async def _run_autopilot_background(
     """
     from ..db.base import AsyncSessionLocal
 
-    async with AsyncSessionLocal() as stream_db:
+    # Create a DEDICATED session for run_agent_stream() so its internal
+    # commits don't conflict with any autopilot persistence calls.
+    # The autopilot service calls (create, update, delete) use their own
+    # separate AsyncSessionLocal() instances.
+    async with AsyncSessionLocal() as agent_db:
         try:
-            # Create AutopilotRun record for persistence (Phase 3)
-            from ..services.autopilot_service import create_autopilot_run as _ap_create
+            # Create AutopilotRun using a separate session.
+            autopilot_run_id = None
+            try:
+                from ..services.autopilot_service import create_autopilot_run as _ap_create
+                async with AsyncSessionLocal() as _ap_create_db:
+                    autopilot_run = await _ap_create(
+                        _ap_create_db, session_id, user_message, max_turns or 20,
+                    )
+                    autopilot_run_id = autopilot_run.id
+            except Exception:
+                logger.warning("Failed to create AutopilotRun — continuing without persistence")
 
-            autopilot_run = await _ap_create(
-                stream_db, session_id, user_message, max_turns or 20,
-            )
-            autopilot_run_id = autopilot_run.id
-
-            # Periodic Redis keepalive so the frontend can check status.
             keepalive_task = asyncio.ensure_future(
                 _keep_stream_active_loop(session_id, bridge)
             )
@@ -1455,7 +1462,7 @@ async def _run_autopilot_background(
             await run_autopilot_stream(
                 session_data=data,
                 goal=user_message,
-                db=stream_db,
+                db=agent_db,
                 current_user=current_user,
                 bridge=bridge,
                 max_turns=max_turns,
@@ -1515,13 +1522,10 @@ async def _run_autopilot_background(
             # Remove from registry.
             remove_bridge(session_id)
 
-            # Ensure DB connection is returned to pool.
+            # Close the agent DB session (no rollback needed —
+            # run_agent_stream() manages its own transactions).
             try:
-                await asyncio.shield(stream_db.rollback())
-            except (asyncio.CancelledError, Exception):
-                pass
-            try:
-                await asyncio.shield(stream_db.close())
+                await asyncio.shield(agent_db.close())
             except (asyncio.CancelledError, Exception):
                 pass
 

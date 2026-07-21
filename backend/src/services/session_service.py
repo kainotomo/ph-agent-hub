@@ -15,6 +15,7 @@ from ..db.orm.messages import Message
 from ..db.orm.sessions import Session, SessionActiveTool
 from ..db.orm.tools import Tool
 from ..db.orm.users import User
+from ..db.orm.autopilot_runs import AutopilotRun
 from ..db.orm.skills import Skill, SkillAllowedTool
 from ..services.model_service import list_models as _svc_list_models
 
@@ -334,7 +335,13 @@ async def delete_session(db: AsyncSession, session_id: str) -> None:
     )
     message_ids = [row[0] for row in result.all()]
 
-    # 0. Delete file uploads BEFORE messages (otherwise FK constraint fails)
+    # 0. Delete autopilot runs (Phase 3 — FK has ON DELETE CASCADE but
+    #    SQLAlchemy tries to SET NULL which fails on NOT NULL column).
+    await db.execute(
+        sa_delete(AutopilotRun).where(AutopilotRun.session_id == session_id)
+    )
+
+    # 1. Delete file uploads BEFORE messages (otherwise FK constraint fails)
     from ..services import upload_service
 
     await upload_service.delete_uploads_for_session(db, session_id)

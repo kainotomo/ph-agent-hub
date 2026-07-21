@@ -69,7 +69,7 @@ async def update_turn(
             else:
                 current_findings = list(run.findings)
         current_findings.append(finding)
-        run.findings = current_findings
+        run.findings = json.dumps(current_findings)
 
     await db.commit()
 

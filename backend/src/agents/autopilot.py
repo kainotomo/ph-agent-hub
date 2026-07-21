@@ -271,33 +271,40 @@ async def run_autopilot_stream(
         })
 
         # ---- Run the agent for this turn (streaming) --------------------
+        # Each turn gets its own DB session so run_agent_stream()'s
+        # internal commits don't invalidate the session for the next turn.
         turn_message_id = str(uuid.uuid4())
 
         from .runner import run_agent_stream
+        from ..db.base import AsyncSessionLocal as _AsyncSessionLocal
 
         turn_tokens_in = 0
         turn_tokens_out = 0
 
-        async for event_dict in run_agent_stream(
-            session_data=session_data,
-            user_message=turn_message,
-            db=db,
-            current_user=current_user,
-            message_id=turn_message_id,
-            extra_tools=turn_extra_tools,
-            function_invocation_kwargs=turn_fn_kwargs,
-        ):
-            # Extract token counts from message_complete events
-            if event_dict.get("event") == "message_complete":
-                data = event_dict.get("data", "{}")
-                if isinstance(data, str):
-                    try:
-                        parsed = json.loads(data)
-                        turn_tokens_in = parsed.get("tokens_in", 0) or 0
-                        turn_tokens_out = parsed.get("tokens_out", 0) or 0
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-            await bridge.put(event_dict)
+        if turn > 1:
+            pass  # will be used for tracking control messages
+
+        async with _AsyncSessionLocal() as turn_db:
+            async for event_dict in run_agent_stream(
+                session_data=session_data,
+                user_message=turn_message,
+                db=turn_db,
+                current_user=current_user,
+                message_id=turn_message_id,
+                extra_tools=turn_extra_tools,
+                function_invocation_kwargs=turn_fn_kwargs,
+            ):
+                # Extract token counts from message_complete events
+                if event_dict.get("event") == "message_complete":
+                    data = event_dict.get("data", "{}")
+                    if isinstance(data, str):
+                        try:
+                            parsed = json.loads(data)
+                            turn_tokens_in = parsed.get("tokens_in", 0) or 0
+                            turn_tokens_out = parsed.get("tokens_out", 0) or 0
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                await bridge.put(event_dict)
 
         cumulative_tokens_in += turn_tokens_in
         cumulative_tokens_out += turn_tokens_out
@@ -305,11 +312,15 @@ async def run_autopilot_stream(
         # ---- Persist findings and turn progress -------------------------
         if turn > 1 and autopilot_run_id:
             from ..services.autopilot_service import update_turn as _ap_update_turn
-            await _ap_update_turn(
-                db, autopilot_run_id, turn,
-                tokens_in=turn_tokens_in,
-                tokens_out=turn_tokens_out,
-            )
+            # Use a separate DB session to avoid transaction conflicts with
+            # run_agent_stream() which commits messages in the same session.
+            from ..db.base import AsyncSessionLocal as _AsyncSessionLocal
+            async with _AsyncSessionLocal() as _ap_db:
+                await _ap_update_turn(
+                    _ap_db, autopilot_run_id, turn,
+                    tokens_in=turn_tokens_in,
+                    tokens_out=turn_tokens_out,
+                )
 
         # ---- Emit autopilot_turn_complete event -------------------------
         await bridge.put({
@@ -328,22 +339,24 @@ async def run_autopilot_stream(
                 turn, max_turns, session_id,
                 len(completion_state["summary"]),
             )
-            # Persist final state
+            # Persist final state using a separate DB session
             if autopilot_run_id:
                 from ..services.autopilot_service import (
                     set_state as _ap_set_state,
                     update_turn as _ap_update_turn,
                 )
-                await _ap_update_turn(
-                    db, autopilot_run_id, turn,
-                    tokens_in=turn_tokens_in,
-                    tokens_out=turn_tokens_out,
-                    finding={
-                        "turn": turn,
-                        "summary": completion_state["summary"][:500],
-                    },
-                )
-                await _ap_set_state(db, autopilot_run_id, "COMPLETED")
+                from ..db.base import AsyncSessionLocal as _AsyncSessionLocal
+                async with _AsyncSessionLocal() as _ap_db:
+                    await _ap_update_turn(
+                        _ap_db, autopilot_run_id, turn,
+                        tokens_in=turn_tokens_in,
+                        tokens_out=turn_tokens_out,
+                        finding={
+                            "turn": turn,
+                            "summary": completion_state["summary"][:500],
+                        },
+                    )
+                    await _ap_set_state(_ap_db, autopilot_run_id, "COMPLETED")
             await bridge.put({
                 "event": "autopilot_complete",
                 "data": json.dumps({
@@ -351,6 +364,19 @@ async def run_autopilot_stream(
                     "turn": turn,
                 }),
             })
+            # Clean up autopilot control user messages (turn 2+ Continue prompts)
+            from ..db.base import AsyncSessionLocal as _AsyncSessionLocal
+            async with _AsyncSessionLocal() as _cleanup_db:
+                from sqlalchemy import delete as sa_delete
+                from ..db.orm.messages import Message
+                await _cleanup_db.execute(
+                    sa_delete(Message).where(
+                        Message.session_id == session_data.get("id"),
+                        Message.sender == "user",
+                        Message.content.like('%"Continue working toward%'),
+                    )
+                )
+                await _cleanup_db.commit()
             return
 
     # ---- Max turns reached — emit a summary event -----------------------
@@ -360,10 +386,12 @@ async def run_autopilot_stream(
     )
     if autopilot_run_id:
         from ..services.autopilot_service import set_state as _ap_set_state
-        await _ap_set_state(
-            db, autopilot_run_id, "FAILED",
-            error_message=f"Reached max turns ({max_turns})",
-        )
+        from ..db.base import AsyncSessionLocal as _AsyncSessionLocal
+        async with _AsyncSessionLocal() as _ap_db:
+            await _ap_set_state(
+                _ap_db, autopilot_run_id, "FAILED",
+                error_message=f"Reached max turns ({max_turns})",
+            )
     await bridge.put({
         "event": "autopilot_max_turns",
         "data": json.dumps({
@@ -375,3 +403,16 @@ async def run_autopilot_stream(
             ),
         }),
     })
+    # Clean up autopilot control user messages (turn 2+ Continue prompts)
+    from ..db.base import AsyncSessionLocal as _AsyncSessionLocal
+    async with _AsyncSessionLocal() as _cleanup_db:
+        from sqlalchemy import delete as sa_delete
+        from ..db.orm.messages import Message
+        await _cleanup_db.execute(
+            sa_delete(Message).where(
+                Message.session_id == session_data.get("id"),
+                Message.sender == "user",
+                Message.content.like('%"Continue working toward%'),
+            )
+        )
+        await _cleanup_db.commit()

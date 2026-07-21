@@ -89,32 +89,29 @@ async def run_autopilot(
             turn, max_turns, session_data.get("id", "?"),
         )
 
-        # ---- Prepare the user message for this turn ---------------------
+        # ---- Prepare the user message and tools for this turn ----------
+        # Turn 1: do NOT give task_complete so the agent must report
+        # intermediate progress before it can declare the task done.
         if turn == 1:
-            # First turn: the goal is the user message.  The system prompt
-            # already contains instructions on tool usage; we reinforce the
-            # autopilot context.
             turn_message = (
                 f"## Goal\n\n{goal}\n\n"
                 "Work autonomously toward this goal using the available tools. "
-                "When you have fully achieved the objective call "
-                "`task_complete()` with a comprehensive summary of what was "
-                "accomplished."
+                "Make progress and report what you have done. "
+                "You will be asked to continue if more work remains."
             )
+            turn_extra_tools: list = []
+            turn_fn_kwargs: dict | None = None
         else:
-            # Subsequent turns: brief continuation prompt.  The full
-            # conversation history (previous turns' messages) is available
-            # in the session context, so the agent knows what it did before.
             turn_message = (
                 "Continue working toward the original goal. "
                 "Use the available tools to make further progress. "
-                "Call `task_complete(summary=...)` only when the entire "
-                "goal has been fully achieved."
+                "When you have fully achieved the objective call "
+                "`task_complete(summary=...)` to signal completion."
             )
+            turn_extra_tools = task_complete_tools
+            turn_fn_kwargs = {"completion_state": completion_state}
 
         # ---- Run the agent for this turn --------------------------------
-        # We import here to avoid circular imports — autopilot is called
-        # from chat.py which is many layers above the runner.
         from .runner import run_agent
 
         response_text, message_id = await run_agent(
@@ -122,10 +119,8 @@ async def run_autopilot(
             user_message=turn_message,
             db=db,
             current_user=current_user,
-            extra_tools=task_complete_tools,
-            function_invocation_kwargs={
-                "completion_state": completion_state,
-            },
+            extra_tools=turn_extra_tools,
+            function_invocation_kwargs=turn_fn_kwargs,
         )
 
         last_response_text = response_text
@@ -215,22 +210,27 @@ async def run_autopilot_stream(
     session_id = session_data.get("id", "?")
 
     for turn in range(1, max_turns + 1):
-        # ---- Prepare the user message for this turn ---------------------
+        # ---- Prepare the user message and tools for this turn ----------
+        # Turn 1: do NOT give task_complete so the agent must report
+        # intermediate progress before it can declare the task done.
         if turn == 1:
             turn_message = (
                 f"## Goal\n\n{goal}\n\n"
                 "Work autonomously toward this goal using the available tools. "
-                "When you have fully achieved the objective call "
-                "`task_complete()` with a comprehensive summary of what was "
-                "accomplished."
+                "Make progress and report what you have done. "
+                "You will be asked to continue if more work remains."
             )
+            turn_extra_tools: list = []
+            turn_fn_kwargs: dict | None = None
         else:
             turn_message = (
                 "Continue working toward the original goal. "
                 "Use the available tools to make further progress. "
-                "Call `task_complete(summary=...)` only when the entire "
-                "goal has been fully achieved."
+                "When you have fully achieved the objective call "
+                "`task_complete(summary=...)` to signal completion."
             )
+            turn_extra_tools = task_complete_tools
+            turn_fn_kwargs = {"completion_state": completion_state}
 
         # ---- Emit autopilot_turn_start event ----------------------------
         await bridge.put({
@@ -243,7 +243,6 @@ async def run_autopilot_stream(
         })
 
         # ---- Run the agent for this turn (streaming) --------------------
-        # Generate a unique message_id for this turn's conversation bubble.
         turn_message_id = str(uuid.uuid4())
 
         from .runner import run_agent_stream
@@ -254,10 +253,8 @@ async def run_autopilot_stream(
             db=db,
             current_user=current_user,
             message_id=turn_message_id,
-            extra_tools=task_complete_tools,
-            function_invocation_kwargs={
-                "completion_state": completion_state,
-            },
+            extra_tools=turn_extra_tools,
+            function_invocation_kwargs=turn_fn_kwargs,
         ):
             await bridge.put(event_dict)
 

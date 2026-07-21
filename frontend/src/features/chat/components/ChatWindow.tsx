@@ -758,7 +758,7 @@ export function ChatWindow({
           tokens_out?: number;
         }) => {
           if (isRegenerate) setRegeneratingMsgId(null);
-          if (isSend || isEdit) setPendingUserMessage(null);
+          if (isSend || isEdit || isAutopilot) setPendingUserMessage(null);
           if (!isAutopilot) setToolEvents([]);
           if (data.tokens_in || data.tokens_out) {
             setStreamingTokens({

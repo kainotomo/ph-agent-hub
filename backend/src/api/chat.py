@@ -1422,6 +1422,7 @@ async def _run_autopilot_background(
     current_user: UserORM,
     bridge: StreamBridge,
     max_turns: int | None = None,
+    resume_from_turn: int | None = None,
 ) -> None:
     """Run the autopilot in the background, writing events to *bridge*.
 
@@ -1429,29 +1430,43 @@ async def _run_autopilot_background(
     ``run_autopilot_stream()`` instead of ``run_agent_stream()``.
     The meta-loop handles multiple turns autonomously.
 
+    When *resume_from_turn* is provided, the existing ``AutopilotRun``
+    for this session is reused (no new record created) and the loop
+    starts from that turn.
+
     Cleanup on completion (``finally``):
       - Clears the Redis ``stream:active:`` flag
       - Closes and removes the bridge
     """
     from ..db.base import AsyncSessionLocal
 
-    # Create a DEDICATED session for run_agent_stream() so its internal
-    # commits don't conflict with any autopilot persistence calls.
-    # The autopilot service calls (create, update, delete) use their own
-    # separate AsyncSessionLocal() instances.
     async with AsyncSessionLocal() as agent_db:
         try:
-            # Create AutopilotRun using a separate session.
+            # Create or fetch AutopilotRun using a separate session.
             autopilot_run_id = None
+            start_turn = 1
             try:
-                from ..services.autopilot_service import create_autopilot_run as _ap_create
-                async with AsyncSessionLocal() as _ap_create_db:
-                    autopilot_run = await _ap_create(
-                        _ap_create_db, session_id, user_message, max_turns or 20,
-                    )
-                    autopilot_run_id = autopilot_run.id
+                if resume_from_turn is not None:
+                    # Reuse the existing run.
+                    from ..services.autopilot_service import get_run_by_session as _ap_get
+                    async with AsyncSessionLocal() as _ap_fetch_db:
+                        existing_run = await _ap_get(_ap_fetch_db, session_id)
+                        if existing_run:
+                            autopilot_run_id = existing_run.id
+                            start_turn = resume_from_turn
+                            logger.info(
+                                "Resuming autopilot %s for session %s from turn %d",
+                                autopilot_run_id, session_id, start_turn,
+                            )
+                else:
+                    from ..services.autopilot_service import create_autopilot_run as _ap_create
+                    async with AsyncSessionLocal() as _ap_create_db:
+                        autopilot_run = await _ap_create(
+                            _ap_create_db, session_id, user_message, max_turns or 20,
+                        )
+                        autopilot_run_id = autopilot_run.id
             except Exception:
-                logger.warning("Failed to create AutopilotRun — continuing without persistence")
+                logger.warning("Failed to create/fetch AutopilotRun — continuing without persistence")
 
             keepalive_task = asyncio.ensure_future(
                 _keep_stream_active_loop(session_id, bridge)
@@ -1467,6 +1482,7 @@ async def _run_autopilot_background(
                 bridge=bridge,
                 max_turns=max_turns,
                 autopilot_run_id=autopilot_run_id,
+                start_turn=start_turn,
             )
 
         except asyncio.CancelledError:
@@ -1616,11 +1632,15 @@ def _spawn_autopilot_background(
     current_user: UserORM,
     bridge: StreamBridge,
     max_turns: int | None = None,
+    resume_from_turn: int | None = None,
 ) -> asyncio.Task:
     """Create and return a background ``asyncio.Task`` for autopilot execution.
 
     Same pattern as ``_spawn_agent_background`` — registers the bridge,
     sets the Redis active flag, and spawns via ``asyncio.create_task``.
+
+    When *resume_from_turn* is provided, the existing ``AutopilotRun``
+    is reused (no new record created).
     """
     register_bridge(session_id, bridge)
     asyncio.ensure_future(set_stream_active(session_id))
@@ -1633,6 +1653,7 @@ def _spawn_autopilot_background(
             current_user=current_user,
             bridge=bridge,
             max_turns=max_turns,
+            resume_from_turn=resume_from_turn,
         )
     )
     return task
@@ -1855,6 +1876,34 @@ class SteerRequest(BaseModel):
     instruction: str
 
 
+@router.post("/session/{session_id}/autopilot/pause")
+async def autopilot_pause(
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(get_current_user),
+):
+    """Pause a running autopilot.
+
+    Sets the ``AutopilotRun.state`` to ``PAUSED``.  The running
+    autopilot loop detects this between turns and stops.
+    """
+    data = await _load_session(db, session_id)
+    await _require_session_owner(data, current_user)
+
+    from ..services.autopilot_service import (
+        get_run_by_session as _ap_get_run,
+        set_state as _ap_set_state,
+    )
+
+    run = await _ap_get_run(db, session_id)
+    if run is None:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="No autopilot run found for this session")
+
+    await _ap_set_state(db, run.id, "PAUSED")
+    return {"status": "paused", "run_id": run.id}
+
+
 @router.post("/session/{session_id}/autopilot/steer")
 async def autopilot_steer(
     session_id: str,
@@ -1864,8 +1913,9 @@ async def autopilot_steer(
 ):
     """Provide a steering instruction to a paused autopilot and resume it.
 
-    The instruction is stored in the ``AutopilotRun`` record and will
-    be injected into the next turn's context when the autopilot resumes.
+    The instruction is stored in the ``AutopilotRun`` record and
+    a new background task is spawned to continue execution from
+    the current turn.
     """
     data = await _load_session(db, session_id)
     await _require_session_owner(data, current_user)
@@ -1886,7 +1936,18 @@ async def autopilot_steer(
     # controller's next poll sees it should continue.
     await _ap_set_state(db, run.id, "EXECUTING")
 
-    return {"status": "ok", "run_id": run.id}
+    # Spawn a new background task with a new bridge to continue execution.
+    resumed_bridge = StreamBridge(session_id=session_id, autopilot=True)
+    _spawn_autopilot_background(
+        session_id=session_id,
+        data=data,
+        user_message=run.goal,
+        current_user=current_user,
+        bridge=resumed_bridge,
+        resume_from_turn=run.current_turn + 1,
+    )
+
+    return {"status": "resumed", "run_id": run.id}
 
 
 # =============================================================================

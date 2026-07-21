@@ -741,6 +741,22 @@ export function ChatWindow({
             status: "max_turns" as const,
           }));
         },
+        onAutopilotPause: (data: { reason: string; turn: number }) => {
+          setAutopilotState((prev) => ({
+            ...prev,
+            status: "paused" as const,
+            pauseReason: data.reason,
+            currentTurn: data.turn,
+          }));
+        },
+        onAutopilotResume: (data: { turn: number; max_turns: number }) => {
+          setAutopilotState((prev) => ({
+            ...prev,
+            currentTurn: data.turn,
+            maxTurns: data.max_turns,
+            status: "executing" as const,
+          }));
+        },
         // ------------------------------------------------------------------
         onSummarized: isReconnect
           ? () => { /* No notification during reconnect */ }
@@ -974,6 +990,17 @@ export function ChatWindow({
     setAutopilotState(INITIAL_AUTOPILOT_STATE);
     await stopStream(sessionId);
   };
+
+  const handleAutopilotResume = useCallback((sid: string) => {
+    if (!sid) return;
+    // After steer resumes the autopilot, reconnect to the new stream.
+    setAutopilotState((prev) => ({
+      ...prev,
+      status: "executing" as const,
+    }));
+    const reconnectHandlers = buildStreamHandlers('autopilot');
+    startReconnect(sid, reconnectHandlers);
+  }, [startReconnect]);
 
   const handleEdit = useCallback((messageId: string) => {
     const msg = (messages || []).find((m) => m.id === messageId);
@@ -1650,6 +1677,7 @@ export function ChatWindow({
         state={autopilotState}
         onStop={handleStop}
         sessionId={sessionId}
+        onResume={handleAutopilotResume}
       />
 
       {/* Demo CTA banner — shown after 3+ user messages */}

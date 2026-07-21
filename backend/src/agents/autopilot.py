@@ -74,11 +74,13 @@ async def run_autopilot(
     # Mutable container shared with task_complete tool via
     # function_invocation_kwargs.  The tool sets done=True on completion.
     completion_state: dict[str, Any] = {"done": False, "summary": ""}
+    pause_state: dict[str, Any] = {"paused": False, "summary": ""}
 
-    # Build the task_complete tool once and reuse it on every turn.
+    # Build the task_complete and pause_and_report tools once and reuse on every turn.
     from ..tools.task_complete import task_complete
+    from ..tools.pause_and_report import pause_and_report
 
-    task_complete_tools = [task_complete]
+    task_complete_tools = [task_complete, pause_and_report]
 
     last_response_text = ""
     last_message_id = ""
@@ -109,7 +111,7 @@ async def run_autopilot(
                 "`task_complete(summary=...)` to signal completion."
             )
             turn_extra_tools = task_complete_tools
-            turn_fn_kwargs = {"completion_state": completion_state}
+            turn_fn_kwargs = {"completion_state": completion_state, "pause_state": pause_state}
 
         # ---- Run the agent for this turn --------------------------------
         from .runner import run_agent
@@ -125,6 +127,16 @@ async def run_autopilot(
 
         last_response_text = response_text
         last_message_id = message_id
+
+        # ---- Check if the agent signalled pause ---------------------------
+        if pause_state["paused"]:
+            logger.info(
+                "Autopilot paused on turn %d/%d via pause_and_report tool "
+                "for session %s (summary length=%d)",
+                turn, max_turns, session_data.get("id", "?"),
+                len(pause_state["summary"]),
+            )
+            return response_text, message_id
 
         # ---- Check if the agent signalled completion --------------------
         if completion_state["done"]:
@@ -181,6 +193,7 @@ async def run_autopilot_stream(
     bridge: Any,
     max_turns: int | None = None,
     autopilot_run_id: str | None = None,
+    start_turn: int = 1,
 ) -> None:
     """Execute an agent autonomously across multiple turns, writing SSE
     events to *bridge* for live streaming to the frontend.
@@ -188,8 +201,12 @@ async def run_autopilot_stream(
     Same meta-loop as :func:`run_autopilot` but uses
     :func:`run_agent_stream` for each turn and forwards all agent events
     (token, tool_start, tool_result, etc.) to the bridge.  Autopilot
-    lifecycle events (turn_start, turn_complete, complete) are also
+    lifecycle events (turn_start, turn_complete, complete, pause) are also
     written to the bridge.
+
+    When *start_turn* > 1 (resume from pause), the steering instruction
+    from the ``AutopilotRun`` is injected and the turn-1 restrictions
+    (no task_complete/pause_and_report tools) are skipped.
 
     Args:
         session_data: Unified session dict (from DB or Redis).
@@ -201,22 +218,47 @@ async def run_autopilot_stream(
             a summary (default: ``settings.AUTOPILOT_MAX_TURNS``).
         autopilot_run_id: Optional ``AutopilotRun.id`` for persisting
             state across turns (Phase 3 resilience).
+        start_turn: The turn number to start from (1 = fresh run,
+            >1 = resume from pause).
     """
     if max_turns is None:
         max_turns = settings.AUTOPILOT_MAX_TURNS
     max_tokens = settings.AUTOPILOT_MAX_TOKENS
 
     completion_state: dict[str, Any] = {"done": False, "summary": ""}
+    pause_state: dict[str, Any] = {"paused": False, "summary": ""}
     cumulative_tokens_in = 0
     cumulative_tokens_out = 0
 
     from ..tools.task_complete import task_complete
+    from ..tools.pause_and_report import pause_and_report
 
-    task_complete_tools = [task_complete]
+    task_complete_tools = [task_complete, pause_and_report]
     session_id = session_data.get("id", "?")
     findings: list[dict] = []
 
-    for turn in range(1, max_turns + 1):
+    # ---- Inject steering instruction on resume ----------------------------
+    steering_instruction: str | None = None
+    if start_turn > 1 and autopilot_run_id:
+        from ..services.autopilot_service import get_run as _ap_get_run
+        from ..db.base import AsyncSessionLocal as _AsyncSessionLocal
+        async with _AsyncSessionLocal() as _ap_db:
+            _run = await _ap_get_run(_ap_db, autopilot_run_id)
+            if _run and _run.steering_instruction:
+                steering_instruction = _run.steering_instruction
+                logger.info(
+                    "Resuming autopilot %s from turn %d with steering: %.80s",
+                    autopilot_run_id, start_turn, steering_instruction,
+                )
+        await bridge.put({
+            "event": "autopilot_resume",
+            "data": json.dumps({
+                "turn": start_turn,
+                "max_turns": max_turns,
+            }),
+        })
+
+    for turn in range(start_turn, max_turns + 1):
         # ---- Token budget check -----------------------------------------
         if max_tokens > 0 and (cumulative_tokens_in + cumulative_tokens_out) >= max_tokens:
             logger.warning(
@@ -238,10 +280,30 @@ async def run_autopilot_stream(
                 )
             return
 
+        # ---- Check for user-initiated pause (DB state) --------------------
+        if autopilot_run_id:
+            from ..services.autopilot_service import get_run as _ap_get_run
+            from ..db.base import AsyncSessionLocal as _AsyncSessionLocal
+            async with _AsyncSessionLocal() as _check_db:
+                _current_run = await _ap_get_run(_check_db, autopilot_run_id)
+                if _current_run and _current_run.state == "PAUSED":
+                    logger.info(
+                        "User-initiated pause detected for session %s at turn %d",
+                        session_id, turn,
+                    )
+                    await bridge.put({
+                        "event": "autopilot_pause",
+                        "data": json.dumps({
+                            "reason": "User paused the autopilot",
+                            "turn": turn,
+                        }),
+                    })
+                    return
+
         # ---- Prepare the user message and tools for this turn ----------
-        # Turn 1: do NOT give task_complete so the agent must report
-        # intermediate progress before it can declare the task done.
-        if turn == 1:
+        # Turn 1 (original run only): do NOT give task_complete so the
+        # agent must report intermediate progress before it can complete.
+        if turn == 1 and start_turn == 1:
             turn_message = (
                 f"## Goal\n\n{goal}\n\n"
                 "Work autonomously toward this goal using the available tools. "
@@ -258,7 +320,7 @@ async def run_autopilot_stream(
                 "`task_complete(summary=...)` to signal completion."
             )
             turn_extra_tools = task_complete_tools
-            turn_fn_kwargs = {"completion_state": completion_state}
+            turn_fn_kwargs = {"completion_state": completion_state, "pause_state": pause_state}
 
         # ---- Emit autopilot_turn_start event ----------------------------
         await bridge.put({
@@ -310,7 +372,7 @@ async def run_autopilot_stream(
         cumulative_tokens_out += turn_tokens_out
 
         # ---- Persist findings and turn progress -------------------------
-        if turn > 1 and autopilot_run_id:
+        if autopilot_run_id and turn >= 1:
             from ..services.autopilot_service import update_turn as _ap_update_turn
             # Use a separate DB session to avoid transaction conflicts with
             # run_agent_stream() which commits messages in the same session.
@@ -330,6 +392,40 @@ async def run_autopilot_stream(
                 "max_turns": max_turns,
             }),
         })
+
+        # ---- Check if the agent signalled pause (agent-initiated) --------
+        if pause_state["paused"]:
+            logger.info(
+                "Autopilot paused on turn %d/%d via pause_and_report tool "
+                "for session %s (summary length=%d)",
+                turn, max_turns, session_id,
+                len(pause_state["summary"]),
+            )
+            if autopilot_run_id:
+                from ..services.autopilot_service import (
+                    set_state as _ap_set_state,
+                    update_turn as _ap_update_turn,
+                )
+                from ..db.base import AsyncSessionLocal as _AsyncSessionLocal
+                async with _AsyncSessionLocal() as _ap_db:
+                    await _ap_update_turn(
+                        _ap_db, autopilot_run_id, turn,
+                        tokens_in=turn_tokens_in,
+                        tokens_out=turn_tokens_out,
+                        finding={
+                            "turn": turn,
+                            "summary": pause_state["summary"][:500],
+                        },
+                    )
+                    await _ap_set_state(_ap_db, autopilot_run_id, "PAUSED")
+            await bridge.put({
+                "event": "autopilot_pause",
+                "data": json.dumps({
+                    "reason": pause_state["summary"],
+                    "turn": turn,
+                }),
+            })
+            return
 
         # ---- Check if the agent signalled completion --------------------
         if completion_state["done"]:

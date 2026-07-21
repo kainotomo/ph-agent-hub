@@ -184,6 +184,22 @@ export interface AutopilotMaxTurnsEvent {
   };
 }
 
+export interface AutopilotPauseEvent {
+  event: "autopilot_pause";
+  data: {
+    reason: string;
+    turn: number;
+  };
+}
+
+export interface AutopilotResumeEvent {
+  event: "autopilot_resume";
+  data: {
+    turn: number;
+    max_turns: number;
+  };
+}
+
 export type StreamEvent =
   | TokenEvent
   | ToolStartEvent
@@ -199,6 +215,8 @@ export type StreamEvent =
   | AutopilotTurnCompleteEvent
   | AutopilotCompleteEvent
   | AutopilotMaxTurnsEvent
+  | AutopilotPauseEvent
+  | AutopilotResumeEvent
   | ErrorEvent
   | HeartbeatEvent;
 
@@ -260,6 +278,8 @@ export function useStream(apiPrefix: string = "chat") {
         onAutopilotTurnComplete?: (data: AutopilotTurnCompleteEvent["data"]) => void;
         onAutopilotComplete?: (data: AutopilotCompleteEvent["data"]) => void;
         onAutopilotMaxTurns?: (data: AutopilotMaxTurnsEvent["data"]) => void;
+        onAutopilotPause?: (data: AutopilotPauseEvent["data"]) => void;
+        onAutopilotResume?: (data: AutopilotResumeEvent["data"]) => void;
         onError?: (error: string, messageId: string) => void;
         onClose?: () => void;
       },
@@ -403,6 +423,12 @@ export function useStream(apiPrefix: string = "chat") {
                   case "autopilot_max_turns":
                     handlers.onAutopilotMaxTurns?.(parsed);
                     break;
+                  case "autopilot_pause":
+                    handlers.onAutopilotPause?.(parsed);
+                    break;
+                  case "autopilot_resume":
+                    handlers.onAutopilotResume?.(parsed);
+                    break;
                   case "error":
                     handlers.onError?.(parsed.message || parsed.error || "Unknown error", parsed.message_id);
                     break;
@@ -510,6 +536,8 @@ export function useStream(apiPrefix: string = "chat") {
         onAutopilotTurnComplete?: (data: AutopilotTurnCompleteEvent["data"]) => void;
         onAutopilotComplete?: (data: AutopilotCompleteEvent["data"]) => void;
         onAutopilotMaxTurns?: (data: AutopilotMaxTurnsEvent["data"]) => void;
+        onAutopilotPause?: (data: AutopilotPauseEvent["data"]) => void;
+        onAutopilotResume?: (data: AutopilotResumeEvent["data"]) => void;
         onError?: (error: string, messageId: string) => void;
         onClose?: () => void;
       },

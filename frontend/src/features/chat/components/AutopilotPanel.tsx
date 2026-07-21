@@ -6,14 +6,15 @@
 // Collapses automatically when the autopilot completes.
 // =============================================================================
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Card, Progress, Tag, Space, Typography, Collapse, Spin, Button, Input, message } from "antd";
 import {
   CheckCircleOutlined,
   LoadingOutlined,
   PauseCircleOutlined,
+  CaretRightOutlined,
 } from "@ant-design/icons";
-import { autopilotSteer } from "../services/chat";
+import { autopilotSteer, autopilotPause } from "../services/chat";
 
 const { Text } = Typography;
 const { TextArea } = Input;
@@ -63,12 +64,23 @@ interface AutopilotPanelProps {
   onStop?: () => void;
   /** Session ID for API calls (pause/steer). */
   sessionId?: string;
+  /** Called after a successful steer to reconnect the frontend stream. */
+  onResume?: (sessionId: string) => void;
 }
 
-export function AutopilotPanel({ state, onStop, sessionId }: AutopilotPanelProps) {
+export function AutopilotPanel({ state, onStop, sessionId, onResume }: AutopilotPanelProps) {
   const { currentTurn, maxTurns, status, summary, findings, cumulativeTokens, errorMessage, pauseReason } = state;
   const [steerInput, setSteerInput] = useState("");
   const [steering, setSteering] = useState(false);
+  const [pausing, setPausing] = useState(false);
+
+  // Clear pausing indicator when the pause event actually arrives.
+  // Must be before the early return to keep hook count consistent.
+  useEffect(() => {
+    if (status !== "idle" && status !== "executing") {
+      setPausing(false);
+    }
+  }, [status]);
 
   // Don't render when idle.
   if (status === "idle") {
@@ -76,10 +88,23 @@ export function AutopilotPanel({ state, onStop, sessionId }: AutopilotPanelProps
   }
   const isFinished = status === "complete" || status === "max_turns" || status === "error";
   const isPaused = status === "paused";
+  const isExecuting = status === "executing";
 
   const progressPercent = maxTurns > 0
     ? Math.min(Math.round((currentTurn / maxTurns) * 100), 100)
     : 0;
+
+  const handlePause = async () => {
+    if (!sessionId) return;
+    setPausing(true);
+    try {
+      await autopilotPause(sessionId);
+    } catch {
+      message.error("Failed to pause autopilot");
+      setPausing(false);
+    }
+    // Don't reset pausing here — it will be cleared when autopilot_pause event arrives
+  };
 
   const handleSteer = async () => {
     if (!sessionId || !steerInput.trim()) return;
@@ -88,8 +113,24 @@ export function AutopilotPanel({ state, onStop, sessionId }: AutopilotPanelProps
       await autopilotSteer(sessionId, steerInput.trim());
       message.success("Steering instruction sent — resuming autopilot");
       setSteerInput("");
+      // Trigger stream reconnection so the frontend picks up the resumed bridge.
+      onResume?.(sessionId);
     } catch {
       message.error("Failed to send steering instruction");
+    } finally {
+      setSteering(false);
+    }
+  };
+
+  const handleResumeWithoutInstruction = async () => {
+    if (!sessionId) return;
+    setSteering(true);
+    try {
+      await autopilotSteer(sessionId, "");
+      message.success("Autopilot resumed");
+      onResume?.(sessionId);
+    } catch {
+      message.error("Failed to resume autopilot");
     } finally {
       setSteering(false);
     }
@@ -118,6 +159,10 @@ export function AutopilotPanel({ state, onStop, sessionId }: AutopilotPanelProps
               <CheckCircleOutlined style={{ color: "#faad14", fontSize: 16 }} />
             ) : isPaused ? (
               <PauseCircleOutlined style={{ color: "#faad14", fontSize: 16 }} />
+            ) : pausing ? (
+              <Spin
+                indicator={<LoadingOutlined style={{ fontSize: 16, color: "#faad14" }} />}
+              />
             ) : (
               <Spin
                 indicator={<LoadingOutlined style={{ fontSize: 16, color: "#1677ff" }} />}
@@ -128,18 +173,31 @@ export function AutopilotPanel({ state, onStop, sessionId }: AutopilotPanelProps
                 ? "Autopilot finished"
                 : isPaused
                 ? "Autopilot paused — waiting for your input"
+                : pausing
+                ? "Pausing…"
                 : `Working on turn ${currentTurn} of ${maxTurns}…`}
             </Text>
           </Space>
-          {onStop && !isFinished && (
-            <Tag
-              color="error"
-              style={{ cursor: "pointer" }}
-              onClick={onStop}
-            >
-              {isPaused ? "Cancel" : "Stop"}
-            </Tag>
-          )}
+          <Space size={4}>
+            {isExecuting && onStop && (
+              <Tag
+                color="warning"
+                style={{ cursor: "pointer" }}
+                onClick={handlePause}
+              >
+                Pause
+              </Tag>
+            )}
+            {onStop && !isFinished && (
+              <Tag
+                color="error"
+                style={{ cursor: "pointer" }}
+                onClick={onStop}
+              >
+                {isPaused ? "Cancel" : "Stop"}
+              </Tag>
+            )}
+          </Space>
         </div>
 
         {/* Progress bar */}
@@ -183,6 +241,14 @@ export function AutopilotPanel({ state, onStop, sessionId }: AutopilotPanelProps
                   disabled={!steerInput.trim()}
                 >
                   Resume with instruction
+                </Button>
+                <Button
+                  size="small"
+                  onClick={handleResumeWithoutInstruction}
+                  loading={steering}
+                  icon={<CaretRightOutlined />}
+                >
+                  Resume
                 </Button>
               </Space>
             </Space>

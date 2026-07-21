@@ -537,6 +537,18 @@ export async function reconnectStream(
 }
 
 /**
+ * Pause a running autopilot.
+ */
+export async function autopilotPause(
+  sessionId: string,
+): Promise<{ status: string; run_id: string }> {
+  return api<{ status: string; run_id: string }>(
+    `/chat/session/${sessionId}/autopilot/pause`,
+    { method: "POST" },
+  );
+}
+
+/**
  * Send a steering instruction to a paused autopilot.
  */
 export async function autopilotSteer(

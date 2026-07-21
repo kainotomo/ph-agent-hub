@@ -364,11 +364,14 @@ async def run_autopilot_stream(
                     "turn": turn,
                 }),
             })
-            # Clean up autopilot control user messages (turn 2+ Continue prompts)
+            # Clean up and rewrite autopilot messages for clean UX
             from ..db.base import AsyncSessionLocal as _AsyncSessionLocal
             async with _AsyncSessionLocal() as _cleanup_db:
-                from sqlalchemy import delete as sa_delete
+                from sqlalchemy import delete as sa_delete, update as sa_update
+                from sqlalchemy import select as sa_select
                 from ..db.orm.messages import Message
+
+                # 1. Delete control user messages ("Continue working toward...")
                 await _cleanup_db.execute(
                     sa_delete(Message).where(
                         Message.session_id == session_data.get("id"),
@@ -376,6 +379,21 @@ async def run_autopilot_stream(
                         Message.content.like('%"Continue working toward%'),
                     )
                 )
+
+                # 2. Rewrite the first user message to show only the original goal
+                first_user = await _cleanup_db.execute(
+                    sa_select(Message)
+                    .where(
+                        Message.session_id == session_data.get("id"),
+                        Message.sender == "user",
+                    )
+                    .order_by(Message.created_at.asc())
+                    .limit(1)
+                )
+                first_msg = first_user.scalar_one_or_none()
+                if first_msg:
+                    first_msg.content = [{"type": "text", "text": goal}]
+
                 await _cleanup_db.commit()
             return
 
@@ -415,4 +433,18 @@ async def run_autopilot_stream(
                 Message.content.like('%"Continue working toward%'),
             )
         )
+        # Also rewrite first user message to original goal
+        from sqlalchemy import select as sa_select, update as sa_update
+        first_user = await _cleanup_db.execute(
+            sa_select(Message)
+            .where(
+                Message.session_id == session_data.get("id"),
+                Message.sender == "user",
+            )
+            .order_by(Message.created_at.asc())
+            .limit(1)
+        )
+        first_msg = first_user.scalar_one_or_none()
+        if first_msg:
+            first_msg.content = [{"type": "text", "text": goal}]
         await _cleanup_db.commit()

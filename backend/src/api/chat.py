@@ -1665,7 +1665,7 @@ async def _handle_streaming_autopilot(
     """
     _user_message = modified_message or body.content
 
-    bridge = StreamBridge(session_id=session_id)
+    bridge = StreamBridge(session_id=session_id, autopilot=True)
     _spawn_autopilot_background(
         session_id=session_id,
         data=data,
@@ -1810,7 +1810,12 @@ async def stream_status(
     await _require_session_owner(data, current_user)
 
     active = await check_stream_active(session_id)
-    return {"active": active}
+    autopilot = False
+    if active:
+        bridge = get_bridge(session_id)
+        if bridge is not None:
+            autopilot = bridge.is_autopilot
+    return {"active": active, "autopilot": autopilot}
 
 
 # =============================================================================

@@ -533,6 +533,8 @@ export function ChatWindow({
     setRegeneratingMsgId(null);
     setSessionTemperature(temperature ?? null);
     setLocalCrossSessionMemory(crossSessionMemoryEnabled ?? null);
+    setAutopilotState(INITIAL_AUTOPILOT_STATE);
+    setIsAutopilotMode(false);
     queryClient.invalidateQueries({ queryKey: ["memory"] });
   }, [sessionId, temperature, crossSessionMemoryEnabled, queryClient, resetStream]);
 
@@ -560,11 +562,24 @@ export function ChatWindow({
           setReconnecting(true);
           reconnectAttemptedRef.current = true;
           const reconnectHandlers = buildStreamHandlers('reconnect');
+          // If the active stream is an autopilot, pre-set the panel state
+          // immediately (before autopilot_turn_start arrives) so the panel
+          // shows even if that event already scrolled past the buffer.
+          if (status.autopilot) {
+            setAutopilotState({
+              currentTurn: 1,
+              maxTurns: 20,
+              status: "executing",
+            });
+            setIsAutopilotMode(true);
+          }
           await startReconnect(sessionId, {
             ...reconnectHandlers,
             onClose: () => {
               if (!cancelled) {
                 setReconnecting(false);
+                setAutopilotState(INITIAL_AUTOPILOT_STATE);
+                setIsAutopilotMode(false);
                 reconnectHandlers.onClose();
               }
             },
@@ -708,6 +723,7 @@ export function ChatWindow({
             maxTurns: data.max_turns,
             status: "executing" as const,
           }));
+          setIsAutopilotMode(true);
         },
         onAutopilotTurnComplete: (_data: { turn: number; max_turns: number }) => {
           // Progress updated on next turn start; nothing extra needed.
@@ -808,18 +824,13 @@ export function ChatWindow({
           setStreamingTokens(null);
           if (isAutopilot) {
             // Autopilot: onClose fires after all turns complete.
-            // Refetch messages to get the final persisted result.
+            // Reset autopilot state so the panel disappears and messages
+            // refetch shows the final result.
+            setAutopilotState(INITIAL_AUTOPILOT_STATE);
             queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
             queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
             queryClient.invalidateQueries({ queryKey: ["sessions"] });
             queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
-            // Reset autopilot state to idle so the panel disappears
-            setAutopilotState((prev) => {
-              if (prev.status === "complete" || prev.status === "max_turns" || prev.status === "error") {
-                return prev; // keep final status visible
-              }
-              return { ...prev, status: "idle" };
-            });
           } else if (!demo) {
             queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
             queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
@@ -942,7 +953,7 @@ export function ChatWindow({
         buildStreamHandlers('send'),
       );
     }
-  }, [inputValue, streaming, sessionId, startStream, queryClient, pendingFiles, editingMsgId, pendingFlag, pendModelId, pendTemplateId, pendSkillId, pendAutoRoute, pendAutoSelectTools, pendActiveToolIds, thinkingEnabled, sessionTemperature]);
+  }, [inputValue, streaming, sessionId, startStream, queryClient, pendingFiles, editingMsgId, pendingFlag, pendModelId, pendTemplateId, pendSkillId, pendAutoRoute, pendAutoSelectTools, pendActiveToolIds, thinkingEnabled, sessionTemperature, isAutopilotMode, setAutopilotState]);
 
   const handleStop = async () => {
     // Clear the streaming ghost bubble immediately for instant UX.
@@ -1416,10 +1427,6 @@ export function ChatWindow({
           components={{
             Header: () => (
               <>
-                <AutopilotPanel
-                  state={autopilotState}
-                  onStop={handleStop}
-                />
                 {reconnecting && (
                   <div style={{ padding: "0 16px" }}>
                     <Alert
@@ -1637,6 +1644,12 @@ export function ChatWindow({
         />
       )}
       </div>
+
+      {/* Autopilot progress panel — outside Virtuoso so it's always visible (Issue #446) */}
+      <AutopilotPanel
+        state={autopilotState}
+        onStop={handleStop}
+      />
 
       {/* Demo CTA banner — shown after 3+ user messages */}
       {demo && userMessageCount >= 3 && !ctaDismissed && (

@@ -55,16 +55,17 @@ interface AutopilotPanelProps {
 export function AutopilotPanel({ state, onStop }: AutopilotPanelProps) {
   const { currentTurn, maxTurns, status, summary } = state;
 
-  // Don't render when idle or complete (final result shows as normal message)
-  if (status === "idle" || status === "complete") {
+  // Don't render when idle.
+  // When complete, show finished state for a brief moment then auto-hide
+  // (reactivated by onClose resetting to idle).
+  if (status === "idle") {
     return null;
   }
+  const isFinished = status === "complete" || status === "max_turns" || status === "error";
 
   const progressPercent = maxTurns > 0
     ? Math.min(Math.round((currentTurn / maxTurns) * 100), 100)
     : 0;
-
-  const isFinished = status === "max_turns" || status === "error";
 
   return (
     <div style={{ padding: "0 16px 12px" }}>

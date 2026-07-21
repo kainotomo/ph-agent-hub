@@ -499,6 +499,7 @@ export function listSessionsByTag(tag: string): Promise<SessionData[]> {
 
 export interface StreamStatusResponse {
   active: boolean;
+  autopilot?: boolean;
 }
 
 /**

@@ -371,6 +371,40 @@ async def run_autopilot_stream(
         cumulative_tokens_in += turn_tokens_in
         cumulative_tokens_out += turn_tokens_out
 
+        # ---- Check for user-initiated pause right after the agent run ----
+        # Catches the case where the user clicked Pause during the agent's
+        # execution.  Only pause if the agent did NOT already complete —
+        # task_complete takes priority over a delayed pause request.
+        if autopilot_run_id and not completion_state["done"]:
+            from ..services.autopilot_service import get_run as _ap_get_run
+            from ..db.base import AsyncSessionLocal as _AsyncSessionLocal
+            async with _AsyncSessionLocal() as _check_db:
+                _current_run = await _ap_get_run(_check_db, autopilot_run_id)
+                if _current_run and _current_run.state == "PAUSED":
+                    logger.info(
+                        "User-initiated pause detected for session %s "
+                        "at turn %d (after agent run)",
+                        session_id, turn,
+                    )
+                    if autopilot_run_id:
+                        from ..services.autopilot_service import (
+                            update_turn as _ap_update_turn,
+                        )
+                        async with _AsyncSessionLocal() as _ap_db:
+                            await _ap_update_turn(
+                                _ap_db, autopilot_run_id, turn,
+                                tokens_in=turn_tokens_in,
+                                tokens_out=turn_tokens_out,
+                            )
+                    await bridge.put({
+                        "event": "autopilot_pause",
+                        "data": json.dumps({
+                            "reason": "User paused the autopilot",
+                            "turn": turn,
+                        }),
+                    })
+                    return
+
         # ---- Persist findings and turn progress -------------------------
         if autopilot_run_id and turn >= 1:
             from ..services.autopilot_service import update_turn as _ap_update_turn

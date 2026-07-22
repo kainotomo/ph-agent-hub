@@ -174,7 +174,7 @@ export function AutopilotPanel({ state, onStop, sessionId, onResume }: Autopilot
                 : isPaused
                 ? "Autopilot paused — waiting for your input"
                 : pausing
-                ? "Pausing…"
+                ? "Pausing after current turn…"
                 : `Working on turn ${currentTurn} of ${maxTurns}…`}
             </Text>
           </Space>

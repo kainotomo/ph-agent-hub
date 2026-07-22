@@ -977,7 +977,7 @@ async def list_messages(
                 Message.session_id == session_id,
                 Message.is_deleted == False,  # noqa: E712
             )
-            .order_by(Message.created_at)
+            .order_by(Message.created_at, Message.id)
         )
         messages = result.scalars().all()
         return [

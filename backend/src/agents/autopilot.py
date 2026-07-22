@@ -402,6 +402,7 @@ async def run_autopilot_stream(
                 function_invocation_kwargs=turn_fn_kwargs,
                 # Turn 1's user message was already persisted by
                 # _handle_streaming_autopilot — skip the duplicate.
+                # Turns 2+ are persisted by run_agent_stream (below).
                 skip_user_persist=(turn == 1 and start_turn == 1),
             ):
                 # Extract token counts and response text from
@@ -547,7 +548,9 @@ async def run_autopilot_stream(
                 }),
             })
             # Rewrite the first user message to show only the original goal
-            # (remove autopilot boilerplate instructions)
+            # (remove autopilot boilerplate instructions).  Only rewrite
+            # if the message actually contains boilerplate ("## Goal") —
+            # not when it was a prior normal chat in the same session.
             from ..db.base import AsyncSessionLocal as _AsyncSessionLocal
             async with _AsyncSessionLocal() as _cleanup_db:
                 from sqlalchemy import select as sa_select
@@ -563,7 +566,16 @@ async def run_autopilot_stream(
                 )
                 first_msg = first_user.scalar_one_or_none()
                 if first_msg:
-                    first_msg.content = [{"type": "text", "text": goal}]
+                    text = ""
+                    if isinstance(first_msg.content, list):
+                        for block in first_msg.content:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                text = block.get("text", "")
+                                break
+                    # Only rewrite if the message contains autopilot
+                    # boilerplate ("## Goal") — not a plain user prompt.
+                    if "## Goal" in text:
+                        first_msg.content = [{"type": "text", "text": goal}]
                 await _cleanup_db.commit()
             return
 
@@ -591,7 +603,9 @@ async def run_autopilot_stream(
             ),
         }),
     })
-    # Rewrite the first user message to show only the original goal
+    # Rewrite the first user message to show only the original goal.
+    # Only rewrite if the message contains autopilot boilerplate
+    # ("## Goal") — not a prior normal chat message.
     from ..db.base import AsyncSessionLocal as _AsyncSessionLocal
     async with _AsyncSessionLocal() as _cleanup_db:
         from sqlalchemy import select as sa_select
@@ -607,5 +621,12 @@ async def run_autopilot_stream(
         )
         first_msg = first_user.scalar_one_or_none()
         if first_msg:
-            first_msg.content = [{"type": "text", "text": goal}]
+            text = ""
+            if isinstance(first_msg.content, list):
+                for block in first_msg.content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text = block.get("text", "")
+                        break
+            if "## Goal" in text:
+                first_msg.content = [{"type": "text", "text": goal}]
         await _cleanup_db.commit()

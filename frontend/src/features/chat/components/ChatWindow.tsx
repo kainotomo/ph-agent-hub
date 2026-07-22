@@ -335,6 +335,7 @@ export function ChatWindow({
   const prevLoadingRef = useRef(true);
   const queryClient = useQueryClient();
   const screens = useBreakpoint();
+
   const isMobile = !screens.md;
 
   // Handle finalizing a temporary session to permanent
@@ -425,11 +426,7 @@ export function ChatWindow({
 
   const { data: messages, isLoading: loadingMessages } = useQuery({
     queryKey: ["messages", sessionId],
-    // Only enable after the session exists (pendingFlag cleared).  Until
-    // then the session is lazy and hasn't been persisted yet, so any
-    // query would 404 and flood the console.
-    // pendingFlag transitions to false in handleSend's onStreamStart.
-    enabled: !!sessionId && !pendingFlag,
+    enabled: !!sessionId && (!isPending || demo || widget),
     retry: false,
     queryFn: () =>
       demo
@@ -722,14 +719,14 @@ export function ChatWindow({
         onToken: (token: string, msgId: string) => {
           setStreamingMessageId((prev) => {
             if (prev === null && isAutopilot) {
-              // First token of a new turn — the backend has already
-              // persisted this turn's user message (run_agent_stream
-              // does it before yielding events).  Invalidate now so
-              // it appears in the chat immediately, and clear the
-              // optimistic pendingUserMessage since the DB message
-              // is now available via the refetch.
+              // First token of a new turn — invalidate messages so
+              // this turn's persisted user message appears from the DB.
+              // Don't clear pendingUserMessage here — the onStreamStart
+              // handler already invalidated messages when the SSE
+              // connection opened, so the refetch should arrive soon.
+              // pendingUserMessage will be cleared naturally by the
+              // onMessageComplete / onAutopilotTurnStart refetch cycle.
               queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
-              setPendingUserMessage(null);
             }
             return prev ?? msgId;
           });
@@ -1047,8 +1044,14 @@ export function ChatWindow({
           onStreamStart: () => {
             // Backend confirmed session creation — invalidate sidebar so
             // the new session appears immediately.  Clear pendingFlag so
-            // the messages query becomes active.
+            // the messages query becomes active.  Also invalidate messages
+            // so the DB-persisted user message is fetched right away
+            // (the backend persists it before opening the SSE connection).
+            // Also invalidate the session detail so the parent ChatPage
+            // refetches it and sets isPending=false for the messages query.
             queryClient.invalidateQueries({ queryKey: ["sessions"] });
+            queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+            queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
             setPendingFlag(false);
             // Keep pendingUserMessage — it's the optimistic bubble shown
             // until message_complete clears it.  Clearing it here would
@@ -1072,6 +1075,7 @@ export function ChatWindow({
             // the new session appears immediately.  Clear pendingFlag so
             // the messages query becomes active.
             queryClient.invalidateQueries({ queryKey: ["sessions"] });
+            queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
             setPendingFlag(false);
             // Keep pendingUserMessage — it's the optimistic bubble shown
             // until message_complete clears it.  Clearing it here would
@@ -1210,8 +1214,14 @@ export function ChatWindow({
     (m) => m.id !== regeneratingMsgId && m.id !== editingMsgId,
   );
 
-  // Show the user's message immediately at the bottom (optimistic UI)
-  if (pendingUserMessage) {
+  // Show the user's message immediately at the bottom (optimistic UI).
+  // Skip if the DB already has a user message with the same text — this
+  // prevents a brief duplicate when the onStreamStart refetch returns
+  // the persisted message before pendingUserMessage is cleared.
+  const skipPending = pendingUserMessage && (messages || []).some(
+    (m: any) => m.sender === "user" && m.content?.[0]?.text === pendingUserMessage.content,
+  );
+  if (pendingUserMessage && !skipPending) {
     displayMessages.push({
       id: pendingUserMessage.id,
       session_id: sessionId,

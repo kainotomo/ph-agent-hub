@@ -500,6 +500,8 @@ export function listSessionsByTag(tag: string): Promise<SessionData[]> {
 export interface StreamStatusResponse {
   active: boolean;
   autopilot?: boolean;
+  /** True when the autopilot is paused (stream ended but run exists). */
+  paused?: boolean;
 }
 
 /**
@@ -559,7 +561,7 @@ export async function autopilotSteer(
     `/chat/session/${sessionId}/autopilot/steer`,
     {
       method: "POST",
-      body: JSON.stringify({ instruction }),
+      body: { instruction },
     },
   );
 }

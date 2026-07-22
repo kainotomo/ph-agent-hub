@@ -220,8 +220,10 @@ export function ChatWindow({
   // ---- Autopilot mode (Issue #446) ----------------------------------------
   const [isAutopilotMode, setIsAutopilotMode] = useState(false);
   const [autopilotState, setAutopilotState] = useState(INITIAL_AUTOPILOT_STATE);
+  // Tracks whether the autopilot is in paused state.
+  // Set to true in onAutopilotPause, cleared in onAutopilotResume/handleAutopilotResume.
+  const autopilotPausedRef = useRef(false);
 
-  // ---- Pending session local state (Phase 2 — Issue #329) -------------
   // When the session doesn't exist yet (isPending), we accumulate settings
   // changes locally and submit them as session_data on the first message.
   const [pendModelId, setPendModelId] = useState<string | undefined>(undefined);
@@ -584,6 +586,16 @@ export function ChatWindow({
               }
             },
           });
+        } else if (status.paused) {
+          // Stream ended but autopilot is paused — restore the paused
+          // state so the panel with resume buttons shows when navigating
+          // back to this session (Issue #446).
+          setIsAutopilotMode(true);
+          setAutopilotState((prev) => ({
+            ...prev,
+            status: "paused",
+            pauseReason: "Autopilot was paused",
+          }));
         }
       } catch {
         // Stream status check failed — session may not exist yet.
@@ -734,14 +746,23 @@ export function ChatWindow({
             status: "complete" as const,
             summary: data.summary,
           }));
+          queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+          queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+          queryClient.invalidateQueries({ queryKey: ["sessions"] });
+          queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
         },
         onAutopilotMaxTurns: (_data: { max_turns: number }) => {
           setAutopilotState((prev) => ({
             ...prev,
             status: "max_turns" as const,
           }));
+          queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+          queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+          queryClient.invalidateQueries({ queryKey: ["sessions"] });
+          queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
         },
         onAutopilotPause: (data: { reason: string; turn: number }) => {
+          autopilotPausedRef.current = true;
           setAutopilotState((prev) => ({
             ...prev,
             status: "paused" as const,
@@ -750,6 +771,7 @@ export function ChatWindow({
           }));
         },
         onAutopilotResume: (data: { turn: number; max_turns: number }) => {
+          autopilotPausedRef.current = false;
           setAutopilotState((prev) => ({
             ...prev,
             currentTurn: data.turn,
@@ -839,14 +861,17 @@ export function ChatWindow({
           setToolEvents([]);
           setStreamingTokens(null);
           if (isAutopilot) {
-            // Autopilot: onClose fires after all turns complete.
-            // Reset autopilot state so the panel disappears and messages
-            // refetch shows the final result.
-            setAutopilotState(INITIAL_AUTOPILOT_STATE);
-            queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
-            queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
-            queryClient.invalidateQueries({ queryKey: ["sessions"] });
-            queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
+            // Do NOT reset autopilotState to INITIAL here.  The individual
+            // event handlers (onAutopilotPause, onAutopilotComplete,
+            // onAutopilotMaxTurns, onError) already set the correct final
+            // status.  Resetting here races with those handlers because
+            // React 18 batches state updates across microtask boundaries
+            // (the SSE onmessage → onclose gap in fetch-event-source).
+            // The user explicitly cancels via handleStop which calls
+            // setAutopilotState(INITIAL_AUTOPILOT_STATE) directly.
+            // Query invalidation is handled by the individual event
+            // handlers (onAutopilotComplete, onAutopilotMaxTurns,
+            // onMessageComplete) — no need to repeat it here.
           } else if (!demo) {
             queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
             queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
@@ -994,6 +1019,7 @@ export function ChatWindow({
   const handleAutopilotResume = useCallback((sid: string) => {
     if (!sid) return;
     // After steer resumes the autopilot, reconnect to the new stream.
+    autopilotPausedRef.current = false;
     setAutopilotState((prev) => ({
       ...prev,
       status: "executing" as const,

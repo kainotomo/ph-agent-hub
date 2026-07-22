@@ -1860,11 +1860,22 @@ async def stream_status(
 
     active = await check_stream_active(session_id)
     autopilot = False
+    paused = False
     if active:
         bridge = get_bridge(session_id)
         if bridge is not None:
             autopilot = bridge.is_autopilot
-    return {"active": active, "autopilot": autopilot}
+    else:
+        # Stream inactive — check DB for a paused autopilot run
+        # so the frontend can restore the paused panel on navigation back.
+        from ..services.autopilot_service import (
+            get_run_by_session as _ap_get_run,
+        )
+        run = await _ap_get_run(db, session_id)
+        if run is not None and run.state == "PAUSED":
+            autopilot = True
+            paused = True
+    return {"active": active, "autopilot": autopilot, "paused": paused}
 
 
 # ---------------------------------------------------------------------------

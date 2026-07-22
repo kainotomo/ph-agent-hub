@@ -670,6 +670,24 @@ export function useStream(apiPrefix: string = "chat") {
                   case "tags_updated":
                     handlers.onTagsUpdated?.(parsed);
                     break;
+                  case "autopilot_turn_start":
+                    handlers.onAutopilotTurnStart?.(parsed);
+                    break;
+                  case "autopilot_turn_complete":
+                    handlers.onAutopilotTurnComplete?.(parsed);
+                    break;
+                  case "autopilot_complete":
+                    handlers.onAutopilotComplete?.(parsed);
+                    break;
+                  case "autopilot_max_turns":
+                    handlers.onAutopilotMaxTurns?.(parsed);
+                    break;
+                  case "autopilot_pause":
+                    handlers.onAutopilotPause?.(parsed);
+                    break;
+                  case "autopilot_resume":
+                    handlers.onAutopilotResume?.(parsed);
+                    break;
                   case "error":
                     handlers.onError?.(parsed.message || parsed.error || "Unknown error", parsed.message_id);
                     break;

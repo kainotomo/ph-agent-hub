@@ -260,7 +260,7 @@ async def run_autopilot_stream(
 
     # ---- Inject steering instruction on resume ----------------------------
     steering_instruction: str | None = None
-    if start_turn > 1 and autopilot_run_id:
+    if autopilot_run_id:
         from ..services.autopilot_service import get_run as _ap_get_run
         from ..db.base import AsyncSessionLocal as _AsyncSessionLocal
         async with _AsyncSessionLocal() as _ap_db:
@@ -271,6 +271,10 @@ async def run_autopilot_stream(
                     "Resuming autopilot %s from turn %d with steering: %.80s",
                     autopilot_run_id, start_turn, steering_instruction,
                 )
+    # Emit autopilot_resume on any resume — start_turn > 1 means a
+    # previous turn completed, steering_instruction means a resume
+    # even if start_turn wrapped back to 1 (pause before first turn).
+    if start_turn > 1 or steering_instruction:
         await bridge.put({
             "event": "autopilot_resume",
             "data": json.dumps({
@@ -322,13 +326,20 @@ async def run_autopilot_stream(
                     return
 
         # ---- Prepare the user message and tools for this turn ----------
-        # Turn 1 (original run only): do NOT give task_complete so the
-        # agent must report intermediate progress before it can complete.
-        if turn == 1 and start_turn == 1:
-            # Turn 1: the user's original message was already persisted
-            # by _handle_streaming_autopilot, so we pass the instructions
-            # as a user message but skip DB persistence (skip_user_persist).
-            # This prevents a duplicate user message in the conversation.
+        # Determine whether this is a fresh start or a resume.
+        # A resume can have start_turn==1 when the user paused before
+        # any turn completed (current_turn was 0 in the DB), but still
+        # has a steering_instruction that must be injected.
+        _is_resume = start_turn > 1 or bool(steering_instruction)
+
+        if turn == 1 and not _is_resume:
+            # Fresh autopilot start, turn 1: the user's original message
+            # was already persisted by _handle_streaming_autopilot, so we
+            # pass the instructions as a user message but skip DB
+            # persistence (skip_user_persist).  This prevents a duplicate
+            # user message in the conversation.
+            # Also do NOT give task_complete so the agent must report
+            # intermediate progress before it can complete.
             turn_message = (
                 f"## Goal\n\n{goal}\n\n"
                 "Work autonomously toward this goal using the available tools. "
@@ -400,10 +411,12 @@ async def run_autopilot_stream(
                 message_id=turn_message_id,
                 extra_tools=turn_extra_tools,
                 function_invocation_kwargs=turn_fn_kwargs,
-                # Turn 1's user message was already persisted by
-                # _handle_streaming_autopilot — skip the duplicate.
-                # Turns 2+ are persisted by run_agent_stream (below).
-                skip_user_persist=(turn == 1 and start_turn == 1),
+                # Turn 1 of a fresh run: the user's original message was
+                # already persisted by _handle_streaming_autopilot, so
+                # skip the duplicate.  On resume the turn message (which
+                # includes the steering instruction) is new and must be
+                # persisted.
+                skip_user_persist=(turn == 1 and not _is_resume),
             ):
                 # Extract token counts and response text from
                 # message_complete events for the next turn's prompt.

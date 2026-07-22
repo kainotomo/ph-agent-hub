@@ -344,7 +344,7 @@ export function ChatWindow({
     try {
       const permanent = await finalizeSession(sessionId);
       queryClient.setQueryData(["session", sessionId], permanent);
-      queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+      // Removed: session query not needed for lazy sessions
       queryClient.invalidateQueries({ queryKey: ["sessions"] });
       message.success("Chat saved permanently");
     } catch (err) {
@@ -425,7 +425,12 @@ export function ChatWindow({
 
   const { data: messages, isLoading: loadingMessages } = useQuery({
     queryKey: ["messages", sessionId],
-    enabled: !pendingFlag,
+    // Only enable after the session exists (pendingFlag cleared).  Until
+    // then the session is lazy and hasn't been persisted yet, so any
+    // query would 404 and flood the console.
+    // pendingFlag transitions to false in handleSend's onStreamStart.
+    enabled: !!sessionId && !pendingFlag,
+    retry: false,
     queryFn: () =>
       demo
         ? getDemoMessages().then((msgs) =>
@@ -520,6 +525,11 @@ export function ChatWindow({
   // resetStream() to clear it without cancelling the background agent.
   useEffect(() => {
     resetStream();
+    // Reset reconnect guard so navigating back to this session can
+    // re-establish the SSE connection.  Only on sessionId change —
+    // NOT when temperature/crossSessionMemory props change during
+    // the isPending→session-loaded transition (which would race with
+    // handleSend's reconnectAttemptedRef.current=true guard).
     reconnectAttemptedRef.current = false;
     // Clear stopped-session tracking so a new session can reconnect.
     stoppedSessionsRef.current.clear();
@@ -538,7 +548,24 @@ export function ChatWindow({
     setAutopilotState(INITIAL_AUTOPILOT_STATE);
     setIsAutopilotMode(false);
     queryClient.invalidateQueries({ queryKey: ["memory"] });
-  }, [sessionId, temperature, crossSessionMemoryEnabled, queryClient, resetStream]);
+  }, [sessionId, queryClient, resetStream]);
+
+  // Sync sessionTemperature and localCrossSessionMemory when their props
+  // change (e.g., during the isPending→session-loaded transition).
+  // Kept SEPARATE from the reset effect above so prop changes don't
+  // reset reconnectAttemptedRef and race with handleSend.
+  useEffect(() => {
+    setSessionTemperature((prev) => {
+      const next = temperature ?? null;
+      return prev !== next ? next : prev;
+    });
+  }, [temperature]);
+  useEffect(() => {
+    setLocalCrossSessionMemory((prev) => {
+      const next = crossSessionMemoryEnabled ?? null;
+      return prev !== next ? next : prev;
+    });
+  }, [crossSessionMemoryEnabled]);
 
   // ---- Issue #455: Reconnect to a running agent on mount -----------------
   // When navigating back to a session where the agent is still running,
@@ -562,15 +589,14 @@ export function ChatWindow({
         if (cancelled) return;
         if (status.active) {
           setReconnecting(true);
-          reconnectAttemptedRef.current = true;
           const reconnectHandlers = buildStreamHandlers('reconnect');
           // If the active stream is an autopilot, pre-set the panel state
           // immediately (before autopilot_turn_start arrives) so the panel
           // shows even if that event already scrolled past the buffer.
           if (status.autopilot) {
             setAutopilotState({
-              currentTurn: 1,
-              maxTurns: 20,
+              currentTurn: status.current_turn ?? 1,
+              maxTurns: status.max_turns ?? 20,
               status: "executing",
             });
             setIsAutopilotMode(true);
@@ -694,7 +720,19 @@ export function ChatWindow({
 
       return {
         onToken: (token: string, msgId: string) => {
-          setStreamingMessageId((prev) => prev ?? msgId);
+          setStreamingMessageId((prev) => {
+            if (prev === null && isAutopilot) {
+              // First token of a new turn — the backend has already
+              // persisted this turn's user message (run_agent_stream
+              // does it before yielding events).  Invalidate now so
+              // it appears in the chat immediately, and clear the
+              // optimistic pendingUserMessage since the DB message
+              // is now available via the refetch.
+              queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+              setPendingUserMessage(null);
+            }
+            return prev ?? msgId;
+          });
           setStreamingContent((prev) => prev + token);
         },
         onReasoningToken: (delta: string, msgId: string) => {
@@ -729,6 +767,20 @@ export function ChatWindow({
             },
         // ---- Autopilot event handlers -----------------------------------
         onAutopilotTurnStart: (data: { turn: number; max_turns: number }) => {
+          // Clear streaming state so each turn appears as its own
+          // user → assistant message pair (the DB already has separate
+          // messages per turn; the refetch on message_complete will
+          // show the previous turn's exchange cleanly).
+          setStreamingContent("");
+          setStreamingReasoningContent("");
+          setStreamingMessageId(null);
+          setToolEvents([]);
+          // Invalidate now so the PREVIOUS turn's persisted messages
+          // (user + assistant) appear from the DB.  The NEW turn's user
+          // message is being persisted by run_agent_stream right after
+          // this event was emitted — by the time the refetch arrives
+          // the DB will have it too.
+          queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
           setAutopilotState((prev) => ({
             ...prev,
             currentTurn: data.turn,
@@ -747,7 +799,7 @@ export function ChatWindow({
             summary: data.summary,
           }));
           queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
-          queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+          // Removed: session query not needed for lazy sessions
           queryClient.invalidateQueries({ queryKey: ["sessions"] });
           queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
         },
@@ -757,7 +809,7 @@ export function ChatWindow({
             status: "max_turns" as const,
           }));
           queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
-          queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+          // Removed: session query not needed for lazy sessions
           queryClient.invalidateQueries({ queryKey: ["sessions"] });
           queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
         },
@@ -810,7 +862,7 @@ export function ChatWindow({
             setStreamingReasoningContent("");
             setStreamingMessageId(null);
             queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
-            queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+            // Removed: session query not needed for lazy sessions
             queryClient.invalidateQueries({ queryKey: ["sessions"] });
             queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
           } else if (isSend && demo) {
@@ -834,7 +886,7 @@ export function ChatWindow({
             setStreamingReasoningContent("");
             setStreamingMessageId(null);
             queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
-            queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+            // Removed: session query not needed for lazy sessions
             queryClient.invalidateQueries({ queryKey: ["sessions"] });
             queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
           }
@@ -874,7 +926,7 @@ export function ChatWindow({
             // onMessageComplete) — no need to repeat it here.
           } else if (!demo) {
             queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
-            queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+            // Removed: session query not needed for lazy sessions
             queryClient.invalidateQueries({ queryKey: ["sessions"] });
             queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
           } else {
@@ -935,7 +987,7 @@ export function ChatWindow({
             setStreamingTokens({ tokens_in: data.tokens_in || 0, tokens_out: data.tokens_out || 0 });
           }
           queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
-          queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+          // Removed: session query not needed for lazy sessions
           queryClient.invalidateQueries({ queryKey: ["sessions"] });
           queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
         },
@@ -968,30 +1020,64 @@ export function ChatWindow({
         }
       : undefined;
 
+    // Prevent the mount-time reconnect effect from firing after
+    // we just sent a message.  Without this guard, the effect re-runs
+    // when pendingFlag transitions from true → false (lazy session
+    // creation) and finds the stream already active via getStreamStatus,
+    // causing a spurious "Reconnecting to live session" flash and a
+    // duplicate SSE subscription to the bridge.
+    reconnectAttemptedRef.current = true;
+
     if (isAutopilotMode) {
       // ---- Autopilot mode: stream with autopilot flag ----------------------
       setAutopilotState({
-        currentTurn: 0,
+        currentTurn: 1,
         maxTurns: 20,
         status: "executing",
       });
+      const apHandlers = buildStreamHandlers('autopilot');
       startStream(
         sessionId,
         content,
         fileIds.length > 0 ? fileIds : undefined,
         sessionTemperature ?? undefined,
         { ...(sessionData || {}), autopilot: true },
-        buildStreamHandlers('autopilot'),
+        {
+          ...apHandlers,
+          onStreamStart: () => {
+            // Backend confirmed session creation — invalidate sidebar so
+            // the new session appears immediately.  Clear pendingFlag so
+            // the messages query becomes active.
+            queryClient.invalidateQueries({ queryKey: ["sessions"] });
+            setPendingFlag(false);
+            // Keep pendingUserMessage — it's the optimistic bubble shown
+            // until message_complete clears it.  Clearing it here would
+            // leave a brief gap before the DB refetch arrives.
+          },
+        },
         true,
       );
     } else {
+      const sendHandlers = buildStreamHandlers('send');
       startStream(
         sessionId,
         content,
         fileIds.length > 0 ? fileIds : undefined,
         sessionTemperature ?? undefined,
         sessionData,
-        buildStreamHandlers('send'),
+        {
+          ...sendHandlers,
+          onStreamStart: () => {
+            // Backend confirmed session creation — invalidate sidebar so
+            // the new session appears immediately.  Clear pendingFlag so
+            // the messages query becomes active.
+            queryClient.invalidateQueries({ queryKey: ["sessions"] });
+            setPendingFlag(false);
+            // Keep pendingUserMessage — it's the optimistic bubble shown
+            // until message_complete clears it.  Clearing it here would
+            // leave a brief gap before the DB refetch arrives.
+          },
+        },
       );
     }
   }, [inputValue, streaming, sessionId, startStream, queryClient, pendingFiles, editingMsgId, pendingFlag, pendModelId, pendTemplateId, pendSkillId, pendAutoRoute, pendAutoSelectTools, pendActiveToolIds, thinkingEnabled, sessionTemperature, isAutopilotMode, setAutopilotState]);
@@ -1019,6 +1105,9 @@ export function ChatWindow({
   const handleAutopilotResume = useCallback((sid: string) => {
     if (!sid) return;
     // After steer resumes the autopilot, reconnect to the new stream.
+    // Also invalidate queries so fresh messages + autopilot run state
+    // are fetched — this handles the case where the agent already
+    // finished before the reconnect SSE could be established.
     autopilotPausedRef.current = false;
     setAutopilotState((prev) => ({
       ...prev,
@@ -1026,7 +1115,12 @@ export function ChatWindow({
     }));
     const reconnectHandlers = buildStreamHandlers('autopilot');
     startReconnect(sid, reconnectHandlers);
-  }, [startReconnect]);
+    // Invalidate regardless of reconnect success — the agent may have
+    // already completed and the DB has the final messages + run state.
+    queryClient.invalidateQueries({ queryKey: ["messages", sid] });
+    queryClient.invalidateQueries({ queryKey: ["session", sid] });
+    queryClient.invalidateQueries({ queryKey: ["sessions"] });
+  }, [startReconnect, queryClient]);
 
   const handleEdit = useCallback((messageId: string) => {
     const msg = (messages || []).find((m) => m.id === messageId);

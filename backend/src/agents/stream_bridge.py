@@ -53,7 +53,7 @@ class StreamBridge:
     def __init__(
         self,
         session_id: str,
-        max_buffer: int = 200,
+        max_buffer: int = 1000,
         heartbeat_interval: int = 15,
         autopilot: bool = False,
     ) -> None:

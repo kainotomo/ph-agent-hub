@@ -104,7 +104,23 @@ async def run_autopilot(
             turn_extra_tools: list = []
             turn_fn_kwargs: dict | None = None
         else:
+            # Build a context-aware prompt from the agent's own last response.
+            # Extracts the tail of the previous turn so the agent can pick
+            # up where it left off instead of re-orienting from scratch.
+            _last_tail = (
+                last_response_text[-600:].strip()
+                if last_response_text
+                else ""
+            )
+            if _last_tail:
+                _context_hint = (
+                    f"Your previous response ended with:\n\n"
+                    f"… {_last_tail}\n\n"
+                )
+            else:
+                _context_hint = ""
             turn_message = (
+                f"{_context_hint}"
                 "Continue working toward the original goal. "
                 "Use the available tools to make further progress. "
                 "When you have fully achieved the objective call "
@@ -237,6 +253,11 @@ async def run_autopilot_stream(
     session_id = session_data.get("id", "?")
     findings: list[dict] = []
 
+    # ---- Track previous turn output for context-aware prompts -------------
+    # Initialised here (before the loop) so the else branch on the first
+    # iteration (including resume) doesn't raise UnboundLocalError.
+    _last_turn_response = ""
+
     # ---- Inject steering instruction on resume ----------------------------
     steering_instruction: str | None = None
     if start_turn > 1 and autopilot_run_id:
@@ -304,6 +325,10 @@ async def run_autopilot_stream(
         # Turn 1 (original run only): do NOT give task_complete so the
         # agent must report intermediate progress before it can complete.
         if turn == 1 and start_turn == 1:
+            # Turn 1: the user's original message was already persisted
+            # by _handle_streaming_autopilot, so we pass the instructions
+            # as a user message but skip DB persistence (skip_user_persist).
+            # This prevents a duplicate user message in the conversation.
             turn_message = (
                 f"## Goal\n\n{goal}\n\n"
                 "Work autonomously toward this goal using the available tools. "
@@ -313,7 +338,30 @@ async def run_autopilot_stream(
             turn_extra_tools: list = []
             turn_fn_kwargs: dict | None = None
         else:
+            # Build a context-aware prompt from the previous turn's output.
+            # Captured from the message_complete event (see below).
+            _last_tail = (
+                _last_turn_response[-600:].strip()
+                if _last_turn_response
+                else ""
+            )
+            if _last_tail:
+                _context_hint = (
+                    f"Your previous response ended with:\n\n"
+                    f"… {_last_tail}\n\n"
+                )
+            else:
+                _context_hint = ""
+            # Inject the user's steering instruction on the first resume turn.
+            _steer_hint = (
+                f"\nThe user provided this steering instruction:\n"
+                f"{steering_instruction}\n\n"
+                if steering_instruction and turn == start_turn
+                else ""
+            )
             turn_message = (
+                f"{_context_hint}"
+                f"{_steer_hint}"
                 "Continue working toward the original goal. "
                 "Use the available tools to make further progress. "
                 "When you have fully achieved the objective call "
@@ -343,9 +391,6 @@ async def run_autopilot_stream(
         turn_tokens_in = 0
         turn_tokens_out = 0
 
-        if turn > 1:
-            pass
-
         async with _AsyncSessionLocal() as turn_db:
             async for event_dict in run_agent_stream(
                 session_data=session_data,
@@ -355,8 +400,12 @@ async def run_autopilot_stream(
                 message_id=turn_message_id,
                 extra_tools=turn_extra_tools,
                 function_invocation_kwargs=turn_fn_kwargs,
+                # Turn 1's user message was already persisted by
+                # _handle_streaming_autopilot — skip the duplicate.
+                skip_user_persist=(turn == 1 and start_turn == 1),
             ):
-                # Extract token counts from message_complete events
+                # Extract token counts and response text from
+                # message_complete events for the next turn's prompt.
                 if event_dict.get("event") == "message_complete":
                     data = event_dict.get("data", "{}")
                     if isinstance(data, str):
@@ -364,6 +413,9 @@ async def run_autopilot_stream(
                             parsed = json.loads(data)
                             turn_tokens_in = parsed.get("tokens_in", 0) or 0
                             turn_tokens_out = parsed.get("tokens_out", 0) or 0
+                            _last_turn_response = (
+                                parsed.get("content", "") or ""
+                            )
                         except (json.JSONDecodeError, TypeError):
                             pass
                 await bridge.put(event_dict)

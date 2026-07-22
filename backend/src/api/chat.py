@@ -125,6 +125,10 @@ class SessionResponse(BaseModel):
     auto_route_enabled: bool = False
     auto_select_tools: bool = True
     tags: list[TagResponse] = []
+    last_message: str | None = None
+    """Preview text of the most recent user or assistant message in the
+    session.  Populated by ``list_sessions()``.  Shown in the sidebar
+    so the user can identify sessions at a glance."""
     created_at: datetime
     updated_at: datetime
 
@@ -620,12 +624,59 @@ async def list_sessions(
     db: AsyncSession = Depends(get_db),
     current_user: UserORM = Depends(get_current_user),
 ):
-    """List the current user's permanent sessions (temp sessions excluded)."""
+    """List the current user's permanent sessions (temp sessions excluded).
+
+    The response includes a ``last_message`` preview — the text of the
+    most recent message — so the sidebar can show a snippet at a glance.
+    """
     sessions = await session_service.list_sessions_for_user(
         db=db,
         user_id=current_user.id,
         tenant_id=current_user.tenant_id,
     )
+
+    # Fetch the last message content for each session.
+    if sessions:
+        from ..db.orm.messages import Message as MsgORM
+
+        session_ids = [s.id for s in sessions]
+        # Fetch all non-deleted messages for these sessions, ordered by
+        # time descending, then keep the first (latest) per session_id.
+        all_msgs_sql = (
+            select(
+                MsgORM.session_id,
+                MsgORM.content,
+                MsgORM.created_at,
+            )
+            .where(
+                MsgORM.session_id.in_(session_ids),
+                MsgORM.is_deleted == False,  # noqa: E712
+            )
+            .order_by(MsgORM.created_at.desc())
+        )
+        all_msgs = await db.execute(all_msgs_sql)
+        last_msg_map: dict[str, str | None] = {}
+        seen: set[str] = set()
+        for row in all_msgs:
+            if row.session_id in seen:
+                continue
+            seen.add(row.session_id)
+            content_list = row.content or []
+            preview = None
+            if isinstance(content_list, list):
+                for block in content_list:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        preview = block.get("text", "")[:120].strip()
+                        break
+            last_msg_map[row.session_id] = preview or None
+
+        result = []
+        for s in sessions:
+            resp = SessionResponse.model_validate(s)
+            resp.last_message = last_msg_map.get(s.id)
+            result.append(resp)
+        return result
+
     return [SessionResponse.model_validate(s) for s in sessions]
 
 
@@ -975,7 +1026,17 @@ async def send_message(
         await _require_session_owner(data, current_user)
     except NotFoundError:
         if body.session_data is None:
-            raise
+            # Frontend didn't send session creation data (e.g. pendingFlag
+            # race).  Create the session with defaults instead of returning
+            # 404, which would trigger a fetchEventSource retry loop.
+            logger.info(
+                "Lazy-creating session %s with defaults (no session_data)",
+                session_id,
+            )
+            body.session_data = SessionCreate(
+                title="New Chat",
+                auto_route_enabled=True,
+            )
         logger.info(
             "Lazy-creating session %s on first message", session_id,
         )
@@ -1318,11 +1379,26 @@ async def _run_agent_background(
       - Closes and removes the bridge
     """
     from ..db.base import AsyncSessionLocal
+    from sqlalchemy import select as _sa_select
 
     _file_ids = file_ids or []
 
     async with AsyncSessionLocal() as stream_db:
+        # Initialise early so finally blocks don't UnboundLocalError if
+        # the refresh query below fails (detached current_user).
+        keepalive_task: asyncio.Task | None = None
+        local_user = current_user
         try:
+            # Refresh current_user in this session's context using the
+            # user_id from session_data (a plain dict, no ORM access).
+            _uid = data.get("user_id") or current_user.id
+            _user = await stream_db.execute(
+                _sa_select(UserORM).where(UserORM.id == _uid)
+            )
+            _row = _user.scalar_one_or_none()
+            if _row is not None:
+                local_user = _row
+
             # Periodic Redis keepalive so the frontend can check status.
             keepalive_task = asyncio.ensure_future(
                 _keep_stream_active_loop(session_id, bridge)
@@ -1332,7 +1408,7 @@ async def _run_agent_background(
                 session_data=data,
                 user_message=user_message,
                 db=stream_db,
-                current_user=current_user,
+                current_user=local_user,
                 message_id=message_id,
                 file_ids=_file_ids,
             ):
@@ -1381,11 +1457,12 @@ async def _run_agent_background(
             })
         finally:
             # Stop the keepalive loop.
-            keepalive_task.cancel()
-            try:
-                await keepalive_task
-            except (asyncio.CancelledError, Exception):
-                pass
+            if keepalive_task is not None:
+                keepalive_task.cancel()
+                try:
+                    await keepalive_task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
             # Clean up Redis active flag.
             await clear_stream_active(session_id)
@@ -1441,7 +1518,21 @@ async def _run_autopilot_background(
     from ..db.base import AsyncSessionLocal
 
     async with AsyncSessionLocal() as agent_db:
+        # Initialise early so finally blocks don't UnboundLocalError.
+        keepalive_task: asyncio.Task | None = None
+        local_user = current_user
         try:
+            # Refresh current_user in this session's context using the
+            # user_id from data (a plain dict, no ORM access).
+            from sqlalchemy import select as _sa_select
+            _uid = data.get("user_id") or current_user.id
+            _user = await agent_db.execute(
+                _sa_select(UserORM).where(UserORM.id == _uid)
+            )
+            _row = _user.scalar_one_or_none()
+            if _row is not None:
+                local_user = _row
+
             # Create or fetch AutopilotRun using a separate session.
             autopilot_run_id = None
             start_turn = 1
@@ -1478,7 +1569,7 @@ async def _run_autopilot_background(
                 session_data=data,
                 goal=user_message,
                 db=agent_db,
-                current_user=current_user,
+                current_user=local_user,
                 bridge=bridge,
                 max_turns=max_turns,
                 autopilot_run_id=autopilot_run_id,
@@ -1519,12 +1610,13 @@ async def _run_autopilot_background(
                 }),
             })
         finally:
-            # Stop the keepalive loop.
-            keepalive_task.cancel()
-            try:
-                await keepalive_task
-            except (asyncio.CancelledError, Exception):
-                pass
+            # Stop the keepalive loop (may be None if setup failed).
+            if keepalive_task is not None:
+                keepalive_task.cancel()
+                try:
+                    await keepalive_task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
             # Clean up Redis active flag.
             await clear_stream_active(session_id)
@@ -1711,8 +1803,25 @@ async def _handle_streaming_autopilot(
     a background task and the SSE client reads from a ``StreamBridge``.
     If the SSE client disconnects, the autopilot continues uninterrupted
     (same resilience guarantee as normal streaming chat).
+
+    **Important**: The user's original message is persisted to the DB
+    **before** the background task starts so it is immediately visible
+    in the sidebar and survives page refresh / navigation away.
     """
     _user_message = modified_message or body.content
+
+    # Persist the user's original message immediately so it's in the DB
+    # before any autopilot turn starts.  This ensures the session title
+    # is set (auto-title in ``send_message``) and the message survives
+    # page refresh / navigation.
+    from ..agents.runner import _persist_user_message
+
+    await _persist_user_message(
+        db=db,
+        session_id=session_id,
+        is_temporary=data.get("is_temporary", False),
+        user_message=_user_message,
+    )
 
     bridge = StreamBridge(session_id=session_id, autopilot=True)
     _spawn_autopilot_background(
@@ -1807,13 +1916,20 @@ async def reconnect_stream(
 
     # Check if the agent is still running.
     if not await check_stream_active(session_id):
-        # Agent already finished — return a single message_complete
-        # with the last persisted message.  The frontend will fall
-        # back to the normal message-fetch flow.
+        # Agent already finished — return state so the frontend can
+        # update the autopilot panel instead of staying stuck.
+        _autopilot_state = None
+        from ..services.autopilot_service import (
+            get_run_by_session as _ap_get_run,
+        )
+        _run = await _ap_get_run(db, session_id)
+        if _run is not None:
+            _autopilot_state = _run.state
         return Response(
             content=json.dumps({
                 "active": False,
                 "session_id": session_id,
+                "autopilot_state": _autopilot_state,
             }),
             media_type="application/json",
         )
@@ -1822,10 +1938,18 @@ async def reconnect_stream(
     if bridge is None:
         # Race: agent finished between the Redis check and the bridge
         # lookup.  Return inactive.
+        _autopilot_state = None
+        from ..services.autopilot_service import (
+            get_run_by_session as _ap_get_run,
+        )
+        _run = await _ap_get_run(db, session_id)
+        if _run is not None:
+            _autopilot_state = _run.state
         return Response(
             content=json.dumps({
                 "active": False,
                 "session_id": session_id,
+                "autopilot_state": _autopilot_state,
             }),
             media_type="application/json",
         )
@@ -1861,21 +1985,36 @@ async def stream_status(
     active = await check_stream_active(session_id)
     autopilot = False
     paused = False
+    current_turn: int | None = None
+    max_turns: int | None = None
     if active:
         bridge = get_bridge(session_id)
         if bridge is not None:
             autopilot = bridge.is_autopilot
-    else:
-        # Stream inactive — check DB for a paused autopilot run
-        # so the frontend can restore the paused panel on navigation back.
-        from ..services.autopilot_service import (
-            get_run_by_session as _ap_get_run,
-        )
-        run = await _ap_get_run(db, session_id)
-        if run is not None and run.state == "PAUSED":
+            # If no bridge info available, try the DB for turn info.
+    # Fetch autopilot run details for turn info regardless of active state
+    # (on reconnect the frontend needs current_turn/max_turns to restore
+    # the autopilot panel accurately).
+    from ..services.autopilot_service import (
+        get_run_by_session as _ap_get_run,
+    )
+    run = await _ap_get_run(db, session_id)
+    if run is not None:
+        if run.state == "PAUSED":
             autopilot = True
             paused = True
-    return {"active": active, "autopilot": autopilot, "paused": paused}
+        current_turn = run.current_turn
+        max_turns = run.max_turns
+    elif not active:
+        # Stream inactive, no autopilot run — normal session, nothing extra.
+        pass
+    return {
+        "active": active,
+        "autopilot": autopilot,
+        "paused": paused,
+        "current_turn": current_turn,
+        "max_turns": max_turns,
+    }
 
 
 # ---------------------------------------------------------------------------

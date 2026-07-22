@@ -282,6 +282,9 @@ export function useStream(apiPrefix: string = "chat") {
         onAutopilotResume?: (data: AutopilotResumeEvent["data"]) => void;
         onError?: (error: string, messageId: string) => void;
         onClose?: () => void;
+        /** Fires inside the SSE onopen handler — the backend has confirmed
+         *  the session exists and processing has started. */
+        onStreamStart?: () => void;
       },
       autopilot?: boolean,
     ) => {
@@ -319,7 +322,7 @@ export function useStream(apiPrefix: string = "chat") {
             }),
           });
           if (!res.ok) {
-            throw new Error(`Request failed with status ${res.status}`);
+            handlers.onClose?.();
           }
           const data = await res.json();
           // Call onMessageComplete first so it finalizes the message
@@ -371,11 +374,18 @@ export function useStream(apiPrefix: string = "chat") {
                   .get("content-type")
                   ?.includes(EventStreamContentType)
               ) {
+                // Backend has confirmed the connection — session exists
+                // and message was persisted.  Fire the callback so
+                // callers can invalidate sidebar, etc.
+                handlers.onStreamStart?.();
                 return;
               }
-              throw new Error(
-                `Stream failed with status ${response.status}`,
-              );
+              // Not an SSE response (e.g. 404 for lazy session) — close
+              // gracefully instead of throwing, which would trigger a
+              // fetchEventSource retry loop that floods the console.
+              // The agent is still running in the background; results
+              // will be persisted and visible on next page load.
+              handlers.onClose?.();
             },
             onmessage(ev) {
               try {
@@ -441,17 +451,18 @@ export function useStream(apiPrefix: string = "chat") {
               }
             },
             onclose() {
-              // Only remove from active set on NATURAL stream end.
-              // When the controller is aborted (resetStream/navigation),
-              // the agent is still running — keep the session active.
-              if (!controller.signal.aborted) {
-                removeStreamingSession(sessionId);
-              }
+              // Always remove from active set — the stream has ended
+              // regardless of how (natural end, abort, or error).
+              removeStreamingSession(sessionId);
               setStreaming(false);
               setStreamingSessionId(null);
               handlers.onClose?.();
             },
             onerror(err) {
+              // Abort during normal stream end (component re-render,
+              // isPending transition) is expected — do NOT throw so
+              // fetchEventSource doesn't retry with a GET request
+              // that also fails and confuses the user.
               if (controller.signal.aborted) {
                 setStreaming(false);
                 setStreamingSessionId(null);
@@ -462,7 +473,7 @@ export function useStream(apiPrefix: string = "chat") {
               setStreaming(false);
               setStreamingSessionId(null);
               handlers.onClose?.();
-              throw err;
+              // Don't throw — prevents fetchEventSource retry loop.
             },
           },
         );
@@ -581,8 +592,39 @@ export function useStream(apiPrefix: string = "chat") {
               }
               // Agent finished between status check and reconnect request.
               // Backend returns 200 OK with {"active": false} as JSON.
+              // May also include autopilot_state for panel recovery.
               if (response.ok) {
-                // Silently close — no error shown to user.
+                // Try to read the response body for autopilot state.
+                response.clone().json().then(body => {
+                  if (body && body.autopilot_state) {
+                    // Map backend state to frontend panel status.
+                    const statusMap: Record<string, string> = {
+                      COMPLETED: "complete",
+                      FAILED: "error",
+                      CANCELLED: "error",
+                      PAUSED: "paused",
+                    };
+                    const panelStatus = statusMap[body.autopilot_state] || "complete";
+                    // Fire a synthetic autopilot_complete event so the
+                    // panel transitions to the correct final state.
+                    handlers.onAutopilotComplete?.({
+                      summary: "",
+                      turn: 0,
+                    });
+                    // Override status to match the actual backend state.
+                    // onAutopilotComplete sets status to "complete";
+                    // if it was an error, we override.
+                    if (panelStatus !== "complete") {
+                      handlers.onAutopilotMaxTurns?.({
+                        max_turns: 0,
+                        session_id: body.session_id || "",
+                        message: `Autopilot ${body.autopilot_state.toLowerCase()}`,
+                      });
+                    }
+                  }
+                }).catch(() => {
+                  // Ignore parse errors — fall through to normal close.
+                });
                 handlers.onClose?.();
                 return;
               }
@@ -592,9 +634,7 @@ export function useStream(apiPrefix: string = "chat") {
                 handlers.onClose?.();
                 return;
               }
-              throw new Error(
-                `Reconnect stream failed with status ${response.status}`,
-              );
+              handlers.onClose?.();
             },
             onmessage(ev) {
               try {
@@ -659,7 +699,7 @@ export function useStream(apiPrefix: string = "chat") {
               setStreaming(false);
               setStreamingSessionId(null);
               handlers.onClose?.();
-              throw err;
+              // Don't throw — prevents fetchEventSource retry loop.
             },
           },
         );
@@ -727,9 +767,6 @@ export function useStream(apiPrefix: string = "chat") {
               ) {
                 return;
               }
-              throw new Error(
-                `Stream failed with status ${response.status}`,
-              );
             },
             onmessage(ev) {
               try {
@@ -794,7 +831,7 @@ export function useStream(apiPrefix: string = "chat") {
               setStreaming(false);
               setStreamingSessionId(null);
               handlers.onClose?.();
-              throw err;
+              // Don't throw — prevents fetchEventSource retry loop.
             },
           },
         );
@@ -863,9 +900,6 @@ export function useStream(apiPrefix: string = "chat") {
               ) {
                 return;
               }
-              throw new Error(
-                `Stream failed with status ${response.status}`,
-              );
             },
             onmessage(ev) {
               try {
@@ -927,7 +961,7 @@ export function useStream(apiPrefix: string = "chat") {
               setStreaming(false);
               setStreamingSessionId(null);
               handlers.onClose?.();
-              throw err;
+              // Don't throw — prevents fetchEventSource retry loop.
             },
           },
         );

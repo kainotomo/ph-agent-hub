@@ -502,6 +502,10 @@ export interface StreamStatusResponse {
   autopilot?: boolean;
   /** True when the autopilot is paused (stream ended but run exists). */
   paused?: boolean;
+  /** Current turn number when autopilot is active (1-based). */
+  current_turn?: number;
+  /** Maximum turns configured for the autopilot run. */
+  max_turns?: number;
 }
 
 /**

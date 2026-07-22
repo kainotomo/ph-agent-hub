@@ -809,7 +809,12 @@ async def run_agent(
     Returns:
         A tuple of (assistant response text, assistant message ID).
     """
-    tenant_id = current_user.tenant_id if current_user else session_data.get("tenant_id", "")
+    # Use session_data for tenant_id — current_user may be a detached ORM
+    # object in the background task context, and accessing its attributes
+    # triggers a MissingGreenlet error (async lazy load in wrong session).
+    tenant_id = session_data.get("tenant_id", "") or (
+        current_user.tenant_id if current_user else ""
+    )
     session_id = session_data["id"]
     is_temporary = session_data.get("is_temporary", False)
 
@@ -2779,6 +2784,7 @@ async def run_agent_stream(
     file_ids: list[str] | None = None,
     extra_tools: list | None = None,
     function_invocation_kwargs: dict | None = None,
+    skip_user_persist: bool = False,
 ) -> AsyncIterator[dict]:
     """Assemble and run a MAF agent, yielding typed SSE event dicts.
 
@@ -2798,12 +2804,21 @@ async def run_agent_stream(
             to inject beyond those resolved from the session configuration.
         function_invocation_kwargs: Optional kwargs forwarded to tool invocation
             layers (used by autopilot ``task_complete`` tool).
+        skip_user_persist: When True, skip persisting the user message to
+            the DB.  Used by the autopilot controller on turn 1 when the
+            user's original message was already persisted by the caller
+            (``_handle_streaming_autopilot``) before the background task
+            started.
 
     Yields:
         Dicts with ``event`` and ``data`` keys suitable for
         ``EventSourceResponse``.
     """
-    tenant_id = current_user.tenant_id if current_user else session_data.get("tenant_id", "")
+    # Use session_data for tenant_id — current_user may be a detached ORM
+    # object in the background task context (MissingGreenlet fix).
+    tenant_id = session_data.get("tenant_id", "") or (
+        current_user.tenant_id if current_user else ""
+    )
     session_id = session_data["id"]
     is_temporary = session_data.get("is_temporary", False)
 
@@ -2817,12 +2832,17 @@ async def run_agent_stream(
 
     # Persist the user message immediately so it's always visible,
     # even if the agent run fails.
-    user_msg_id = await _persist_user_message(
-        db=db,
-        session_id=session_id,
-        is_temporary=is_temporary,
-        user_message=user_message,
-    )
+    # Can be skipped when the caller already persisted it (autopilot
+    # turn 1 — see ``_handle_streaming_autopilot``).
+    if skip_user_persist:
+        user_msg_id = ""
+    else:
+        user_msg_id = await _persist_user_message(
+            db=db,
+            session_id=session_id,
+            is_temporary=is_temporary,
+            user_message=user_message,
+        )
 
     # Link file uploads to the user message
     if file_ids and not is_temporary and current_user is not None:

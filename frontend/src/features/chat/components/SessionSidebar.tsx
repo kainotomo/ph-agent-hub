@@ -528,6 +528,15 @@ export function SessionSidebar() {
                   description={
                     !collapsed ? (
                       <div>
+                        {(item as any).last_message ? (
+                          <Text
+                            type="secondary"
+                            style={{ fontSize: 11, display: "block", marginBottom: 2 }}
+                            ellipsis
+                          >
+                            {(item as any).last_message}
+                          </Text>
+                        ) : null}
                         <Text
                           type="secondary"
                           style={{ fontSize: 11 }}

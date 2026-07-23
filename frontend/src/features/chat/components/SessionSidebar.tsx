@@ -490,105 +490,18 @@ export function SessionSidebar() {
                       ? "3px solid #1677ff"
                       : "3px solid transparent",
                 }}
-                actions={
-                  selectMode
-                    ? []
-                    : [
-                  <Tooltip title="Edit" key="edit">
-                    <Button
-                      type="text"
-                      size="small"
-                      icon={<EditOutlined />}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setEditingSession(item);
-                        setEditTitle(item.title);
-                      }}
-                    />
-                  </Tooltip>,
-                  <Tooltip
-                    title={item.is_pinned ? "Unpin" : "Pin"}
-                    key="pin"
-                  >
-                    <Button
-                      type="text"
-                      size="small"
-                      icon={
-                        item.is_pinned ? (
-                          <PushpinFilled />
-                        ) : (
-                          <PushpinOutlined />
-                        )
-                      }
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        pinMutation.mutate({
-                          id: item.id,
-                          is_pinned: !item.is_pinned,
-                        });
-                      }}
-                    />
-                  </Tooltip>,
-                  <Dropdown
-                    key="export"
-                    menu={{
-                      items: [
-                        {
-                          key: "json",
-                          icon: <FileTextOutlined />,
-                          label: "Download as JSON",
-                          onClick: (e) => {
-                            e.domEvent.stopPropagation();
-                            exportSession(item.id, "json");
-                          },
-                        },
-                        {
-                          key: "txt",
-                          icon: <FileOutlined />,
-                          label: "Download as Text",
-                          onClick: (e) => {
-                            e.domEvent.stopPropagation();
-                            exportSession(item.id, "txt");
-                          },
-                        },
-                      ],
-                    }}
-                    trigger={["click"]}
-                  >
-                    <Tooltip title="Export">
-                      <Button
-                        type="text"
-                        size="small"
-                        icon={<DownloadOutlined />}
-                        onClick={(e) => e.stopPropagation()}
-                      />
-                    </Tooltip>
-                  </Dropdown>,
-                  <Popconfirm
-                    key="delete"
-                    title="Delete this session?"
-                    description="This will permanently delete the session and all its messages."
-                    onConfirm={() => deleteMutation.mutate(item.id)}
-                    okText="Delete"
-                    cancelText="Cancel"
-                    okButtonProps={{ danger: true }}
-                  >
-                    <Tooltip title="Delete">
-                      <Button
-                        type="text"
-                        size="small"
-                        danger
-                        icon={<DeleteOutlined />}
-                        onClick={(e) => e.stopPropagation()}
-                      />
-                    </Tooltip>
-                  </Popconfirm>,
-                ]
-                }
               >
-                <List.Item.Meta
-                  avatar={
-                    selectMode ? (
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    width: "100%",
+                    gap: 2,
+                  }}
+                >
+                  {/* Row 1: Title + Checkbox + streaming spinner */}
+                  <div style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 0 }}>
+                    {selectMode && (
                       <Checkbox
                         checked={selectedIds.has(item.id)}
                         disabled={streamingSessionIds.has(item.id)}
@@ -605,62 +518,147 @@ export function SessionSidebar() {
                           });
                         }}
                       />
-                    ) : undefined
-                  }
-                  title={
-                    <Space size={4} style={{ display: "flex", alignItems: "center" }}>
-                      {streamingSessionIds.has(item.id) && (
-                        <Tooltip title="Agent is running...">
-                          <Spin size="small" style={{ flexShrink: 0 }} />
-                        </Tooltip>
-                      )}
+                    )}
+                    {streamingSessionIds.has(item.id) && (
+                      <Tooltip title="Agent is running...">
+                        <Spin size="small" style={{ flexShrink: 0 }} />
+                      </Tooltip>
+                    )}
+                    <Tooltip title={item.title || "New Chat"}>
                       <Text
                         ellipsis
                         style={{
-                          maxWidth: collapsed ? 0 : 140,
+                          maxWidth: collapsed ? 0 : 180,
                           display: "inline-block",
+                          fontSize: 13,
+                          lineHeight: "18px",
                         }}
                       >
                         {item.is_temporary && "⚡ "}
                         {item.title || "New Chat"}
                       </Text>
-                    </Space>
-                  }
-                  description={
-                    !collapsed ? (
-                      <div>
-                        {(item as any).last_message ? (
-                          <Text
-                            type="secondary"
-                            style={{ fontSize: 11, display: "block", marginBottom: 2 }}
-                            ellipsis
+                    </Tooltip>
+                  </div>
+                  {!collapsed && (
+                    <>
+                      {/* Row 2: Date (no wrap) */}
+                      <Text
+                        type="secondary"
+                        style={{ fontSize: 11, whiteSpace: "nowrap", lineHeight: "16px" }}
+                      >
+                        {new Date(item.updated_at).toLocaleString("en-US", {
+                          month: "short",
+                          day: "numeric",
+                          hour: "numeric",
+                          minute: "2-digit",
+                        })}
+                      </Text>
+                      {/* Row 3: Tags (side by side) */}
+                      {(item.tags || []).length > 0 && (
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 2 }}>
+                          {(item.tags || []).slice(0, 3).map((t) => (
+                            <Tag
+                              key={t.id}
+                              style={{ fontSize: 10, lineHeight: "14px" }}
+                              color={t.color || "default"}
+                            >
+                              {t.name}
+                            </Tag>
+                          ))}
+                        </div>
+                      )}
+                      {/* Row 4: Action buttons at bottom */}
+                      {!selectMode && (
+                        <div style={{ display: "flex", gap: 2, marginTop: 4 }}>
+                          <Tooltip title="Edit">
+                            <Button
+                              type="text"
+                              size="small"
+                              icon={<EditOutlined />}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setEditingSession(item);
+                                setEditTitle(item.title);
+                              }}
+                            />
+                          </Tooltip>
+                          <Tooltip title={item.is_pinned ? "Unpin" : "Pin"}>
+                            <Button
+                              type="text"
+                              size="small"
+                              icon={
+                                item.is_pinned ? (
+                                  <PushpinFilled />
+                                ) : (
+                                  <PushpinOutlined />
+                                )
+                              }
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                pinMutation.mutate({
+                                  id: item.id,
+                                  is_pinned: !item.is_pinned,
+                                });
+                              }}
+                            />
+                          </Tooltip>
+                          <Dropdown
+                            menu={{
+                              items: [
+                                {
+                                  key: "json",
+                                  icon: <FileTextOutlined />,
+                                  label: "Download as JSON",
+                                  onClick: (e) => {
+                                    e.domEvent.stopPropagation();
+                                    exportSession(item.id, "json");
+                                  },
+                                },
+                                {
+                                  key: "txt",
+                                  icon: <FileOutlined />,
+                                  label: "Download as Text",
+                                  onClick: (e) => {
+                                    e.domEvent.stopPropagation();
+                                    exportSession(item.id, "txt");
+                                  },
+                                },
+                              ],
+                            }}
+                            trigger={["click"]}
                           >
-                            {(item as any).last_message}
-                          </Text>
-                        ) : null}
-                        <Text
-                          type="secondary"
-                          style={{ fontSize: 11 }}
-                        >
-                          {new Date(item.updated_at).toLocaleString()}
-                        </Text>
-                        {(item.tags || []).length > 0 && (
-                          <div style={{ marginTop: 2 }}>
-                            {(item.tags || []).slice(0, 3).map((t) => (
-                              <Tag
-                                key={t.id}
-                                style={{ fontSize: 10, lineHeight: "14px", marginBottom: 2 }}
-                                color={t.color || "default"}
-                              >
-                                {t.name}
-                              </Tag>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    ) : null
-                  }
-                />
+                            <Tooltip title="Export">
+                              <Button
+                                type="text"
+                                size="small"
+                                icon={<DownloadOutlined />}
+                                onClick={(e) => e.stopPropagation()}
+                              />
+                            </Tooltip>
+                          </Dropdown>
+                          <Popconfirm
+                            title="Delete this session?"
+                            description="This will permanently delete the session and all its messages."
+                            onConfirm={() => deleteMutation.mutate(item.id)}
+                            okText="Delete"
+                            cancelText="Cancel"
+                            okButtonProps={{ danger: true }}
+                          >
+                            <Tooltip title="Delete">
+                              <Button
+                                type="text"
+                                size="small"
+                                danger
+                                icon={<DeleteOutlined />}
+                                onClick={(e) => e.stopPropagation()}
+                              />
+                            </Tooltip>
+                          </Popconfirm>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
               </List.Item>
             )}
           />

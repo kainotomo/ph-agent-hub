@@ -33,7 +33,7 @@ class Skill(Base):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     execution_type: Mapped[str] = mapped_column(
-        Enum("agent", "workflow", "prompt_based", "workflow_based", name="skill_execution_enum"), nullable=False
+        Enum("agent", "workflow", "prompt_based", "workflow_based", "goal_based", name="skill_execution_enum"), nullable=False
     )
     maf_target_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     template_id: Mapped[str | None] = mapped_column(

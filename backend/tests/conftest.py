@@ -14,6 +14,9 @@ from datetime import datetime, timezone
 # relative imports in src/db/base.py etc. resolve correctly)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+# Disable background scheduler and other lifespan tasks during tests
+os.environ["TESTING"] = "true"
+
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession

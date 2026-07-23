@@ -10,6 +10,7 @@ import { RouteGuard } from "../shared/components/RouteGuard";
 import LoginPage from "../features/auth/LoginPage";
 import ChatPage from "../features/chat/routes/ChatPage";
 import { BackgroundTasksPage } from "../features/chat/routes/BackgroundTasksPage";
+import { ScheduledTasksPage } from "../features/chat/routes/ScheduledTasksPage";
 import { DemoPage } from "../features/chat/routes/DemoPage";
 import { WidgetPage } from "../features/chat/routes/WidgetPage";
 import { AccountSettingsPage } from "../features/account/AccountSettingsPage";
@@ -42,6 +43,10 @@ export const router = createBrowserRouter([
       {
         path: "/background-tasks",
         element: <BackgroundTasksPage />,
+      },
+      {
+        path: "/scheduled-tasks",
+        element: <ScheduledTasksPage />,
       },
       {
         path: "/settings",

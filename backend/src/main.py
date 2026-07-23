@@ -24,6 +24,7 @@ from .api.memory import router as memory_router
 from .api.models import router as models_router
 from .api.notifications import router as notifications_router
 from .api.prompts import router as prompts_router
+from .api.scheduled_tasks import router as scheduled_tasks_router
 from .api.skills import router as skills_router
 from .api.templates import router as templates_router
 from .api.users import router as users_router
@@ -126,6 +127,74 @@ async def _timeout_background_tasks() -> None:
             pass  # Best-effort
 
 
+async def _run_scheduler_loop() -> None:
+    """Periodic background task: poll for due scheduled tasks and execute
+    them (Issue #297 — Scheduled & Recurring Agent Tasks).
+
+    Runs every ``SCHEDULER_POLL_INTERVAL_SECONDS`` (default 30s).
+    Sets ``next_run_at = None`` immediately on retrieval to prevent
+    double-execution if execution takes longer than the poll interval.
+    """
+    from .db.base import AsyncSessionLocal
+    from .services.scheduled_task_service import get_due_tasks as _get_due
+    from .services.scheduled_task_service import update_scheduled_task as _update_task
+
+    interval = settings.SCHEDULER_POLL_INTERVAL_SECONDS
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            async with AsyncSessionLocal() as _db:
+                due_tasks = await _get_due(_db)
+                if not due_tasks:
+                    continue
+
+                for task in due_tasks:
+                    task_id = task.id
+                    # Dedup guard: clear next_run_at before spawning so
+                    # the next poll does NOT pick up the same task.
+                    # If the execution succeeds, record_run_result will
+                    # recompute the next_run_at.
+                    task.next_run_at = None
+                    await _db.commit()
+
+                    # Spawn execution — don't block the poll loop.
+                    asyncio.create_task(
+                        _execute_scheduled_task_wrapper(task_id)
+                    )
+        except Exception:
+            import logging as _lg
+            _lg.getLogger(__name__).exception(
+                "Error in scheduler polling loop"
+            )
+
+
+async def _execute_scheduled_task_wrapper(task_id: str) -> None:
+    """Wrapper that re-fetches the ScheduledTask and executes it.
+
+    Re-fetched within a fresh DB session because the original ORM
+    object may be stale or detached.
+    """
+    from .db.base import AsyncSessionLocal
+    from .db.orm.scheduled_tasks import ScheduledTask
+    from .services.scheduler_executor import execute_scheduled_task
+
+    try:
+        async with AsyncSessionLocal() as _fetch_db:
+            task = await _fetch_db.get(ScheduledTask, task_id)
+            if task is None:
+                return
+            # Re-check: state may have changed between poll and execution
+            if task.state != ScheduledTask.STATE_ACTIVE:
+                return
+        await execute_scheduled_task(task)
+    except Exception:
+        import logging as _lg
+        _lg.getLogger(__name__).exception(
+            "Fatal error in scheduled task executor for task %s",
+            task_id,
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup: scan MAF registry, load agent identity, start cleanup task."""
@@ -174,11 +243,20 @@ async def lifespan(app: FastAPI):
     # Start background task timeout cleanup (Issue #449)
     _bg_timeout_task = asyncio.create_task(_timeout_background_tasks())
 
+    # Start scheduler polling loop (Issue #297) — skip in test mode
+    if not settings.TESTING:
+        _scheduler_task = asyncio.create_task(_run_scheduler_loop())
+    else:
+        _scheduler_task = None
+        logger.info("Scheduler disabled (TESTING=True)")
+
     yield
 
     orphan_cleanup_task.cancel()
     demo_cleanup_task.cancel()
     _bg_timeout_task.cancel()
+    if _scheduler_task is not None:
+        _scheduler_task.cancel()
 
 
 app = FastAPI(title="PH Agent Hub", version="2.0.0", lifespan=lifespan)
@@ -231,6 +309,7 @@ app.include_router(credentials_router, prefix="/api")
 app.include_router(demo_router, prefix="/api")
 app.include_router(background_tasks_router, prefix="/api")
 app.include_router(notifications_router, prefix="/api")
+app.include_router(scheduled_tasks_router, prefix="/api")
 
 
 @app.get("/health")

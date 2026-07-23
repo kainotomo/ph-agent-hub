@@ -46,6 +46,7 @@ import {
   FileTextOutlined,
   FileOutlined,
   FolderOpenOutlined,
+  ClockCircleOutlined,
 } from "@ant-design/icons";
 import { Logo } from "../../../shared/components/Logo";
 import { useNavigate, useParams } from "react-router-dom";
@@ -330,6 +331,14 @@ export function SessionSidebar() {
                   icon={<FolderOpenOutlined />}
                   size="small"
                   onClick={() => navigate("/background-tasks")}
+                />
+              </Tooltip>
+              <Tooltip title="Scheduled">
+                <Button
+                  type="text"
+                  icon={<ClockCircleOutlined />}
+                  size="small"
+                  onClick={() => navigate("/scheduled-tasks")}
                 />
               </Tooltip>
               <Tooltip title="Refresh">

@@ -29,6 +29,8 @@ class Notification(Base):
     TYPE_TASK_COMPLETED = "TASK_COMPLETED"
     TYPE_TASK_FAILED = "TASK_FAILED"
     TYPE_TASK_CANCELLED = "TASK_CANCELLED"
+    TYPE_TASK_SCHEDULED_COMPLETED = "TASK_SCHEDULED_COMPLETED"
+    TYPE_TASK_SCHEDULED_FAILED = "TASK_SCHEDULED_FAILED"
 
     # --- Identity ---
     id: Mapped[str] = mapped_column(
@@ -50,7 +52,7 @@ class Notification(Base):
     # --- Content ---
     type: Mapped[str] = mapped_column(
         String(32), nullable=False, index=True,
-        comment="Notification type: TASK_COMPLETED, TASK_FAILED, TASK_CANCELLED",
+        comment="Notification type: TASK_COMPLETED, TASK_FAILED, TASK_CANCELLED, TASK_SCHEDULED_COMPLETED, TASK_SCHEDULED_FAILED",
     )
     title: Mapped[str] = mapped_column(
         String(255), nullable=False,

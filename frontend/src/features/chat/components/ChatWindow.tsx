@@ -634,7 +634,7 @@ export function ChatWindow({
             currentTurn: status.current_turn ?? prev.currentTurn,
             maxTurns: status.max_turns ?? prev.maxTurns,
             status: terminalStatus as AutopilotState["status"],
-            errorMessage: terminalStatus === "error"
+            errorMessage: terminalStatus === "error" && status.run_state
               ? `Autopilot ${status.run_state.toLowerCase()}`
               : undefined,
           }));

@@ -458,7 +458,7 @@ export function useStream(apiPrefix: string = "chat") {
               setStreamingSessionId(null);
               handlers.onClose?.();
             },
-            onerror(err) {
+            onerror(_err) {
               // Abort during normal stream end (component re-render,
               // isPending transition) is expected — do NOT throw so
               // fetchEventSource doesn't retry with a GET request
@@ -703,7 +703,7 @@ export function useStream(apiPrefix: string = "chat") {
               setStreamingSessionId(null);
               handlers.onClose?.();
             },
-            onerror(err) {
+            onerror(_err) {
               if (controller.signal.aborted) {
                 setStreaming(false);
                 setStreamingSessionId(null);
@@ -835,7 +835,7 @@ export function useStream(apiPrefix: string = "chat") {
               setStreamingSessionId(null);
               handlers.onClose?.();
             },
-            onerror(err) {
+            onerror(_err) {
               if (controller.signal.aborted) {
                 setStreaming(false);
                 setStreamingSessionId(null);
@@ -965,7 +965,7 @@ export function useStream(apiPrefix: string = "chat") {
               setStreamingSessionId(null);
               handlers.onClose?.();
             },
-            onerror(err) {
+            onerror(_err) {
               if (controller.signal.aborted) {
                 setStreaming(false);
                 setStreamingSessionId(null);

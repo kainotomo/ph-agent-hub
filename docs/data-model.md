@@ -585,6 +585,62 @@ Tracks administrative and sensitive actions across the platform. Written on ever
 
 ---
 
+## 6.4 Scheduled Tasks
+
+Stores time-based autonomous agent executions (Issue #297). Tasks can be one-shot (run at a specific datetime) or recurring (cron-like schedule).
+
+**Table: scheduled_tasks**
+- id (UUID, PK)
+- tenant_id (UUID, FK → tenants.id)
+- user_id (UUID, FK → users.id)
+- goal (text) — the agent goal to execute
+- schedule_description (string) — human-readable description (e.g. "Every Friday at 8pm")
+- cron_expression (string) — standard cron expression (e.g. "0 20 * * 5")
+- timezone (string, default: "UTC") — IANA timezone name
+- state (enum: ACTIVE, PAUSED, DELETED)
+- next_run_at (timestamp, nullable, indexed)
+- last_run_at (timestamp, nullable)
+- last_run_status (string, nullable: SUCCESS / FAILED)
+- last_run_session_id (UUID, nullable, FK → sessions.id)
+- last_run_error (text, nullable)
+- template_session_id (UUID, nullable, FK → sessions.id)
+- run_count (integer, default: 0)
+- created_at (timestamp)
+- updated_at (timestamp)
+
+## 6.5 Notifications
+
+Persistent in-app notification records. Created when background tasks complete/fail and when scheduled tasks execute.
+
+**Table: notifications**
+- id (UUID, PK)
+- user_id (UUID, FK → users.id, indexed)
+- tenant_id (UUID, FK → tenants.id, indexed)
+- type (string: TASK_COMPLETED, TASK_FAILED, TASK_CANCELLED, TASK_SCHEDULED_COMPLETED, TASK_SCHEDULED_FAILED)
+- title (string) — short human-readable title
+- body (text, nullable) — optional description or result summary
+- reference_id (UUID, nullable) — ID of the related entity (e.g. AutopilotRun.id)
+- is_read (boolean, default: false)
+- created_at (timestamp)
+
+## 6.6 Autopilot Runs
+
+Tracks the full lifecycle of autopilot and background task executions. Each run is backed by a Session for conversation history.
+
+**Table: autopilot_runs**
+- id (UUID, PK)
+- session_id (UUID, FK → sessions.id, indexed)
+- goal (text) — the original user goal
+- state (enum: EXECUTING, COMPLETED, FAILED, CANCELLED, PAUSED, indexed)
+- current_turn (integer, default: 0) — 1-based, 0 = not started
+- max_turns (integer, default: 20)
+- cumulative_tokens (integer, default: 0) — total input + output tokens
+- findings (longtext, nullable) — JSON array of per-turn findings
+- created_at (timestamp)
+- updated_at (timestamp)
+
+---
+
 # 7. Relationships Summary
 
 ```

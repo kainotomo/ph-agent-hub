@@ -251,24 +251,24 @@ You can configure a warning threshold per tenant via the `PUT /admin/tenants/{id
 
 ## 5. Managing Users
 
-### 4.1 Create a User
+### 5.1 Create a User
 
 1. Go to **Admin Area → Users**
 2. Click **Create**
 3. Fill in email, display name, role, and select a tenant
 4. The user can log in immediately with the password you set
 
-### 4.2 User Roles
+### 5.2 User Roles
 
 - **admin**: Platform superuser. Assign sparingly.
 - **manager**: Tenant operator. Can manage their tenant's resources and users.
 - **user**: End user. Chat access only.
 
-### 4.3 Deactivate a User
+### 5.3 Deactivate a User
 
 Toggle the user's **Active** status off. Deactivated users cannot log in. Their data is preserved.
 
-### 4.4 Reset a User's Password
+### 5.4 Reset a User's Password
 
 1. Go to the user's edit screen
 2. Enter a new password
@@ -634,11 +634,9 @@ Call logs are immutable append-only records that survive A2A server deletion. Th
 
 ## 10. Configuring OAuth for Personal Accounts (Issue #312)
 
-<!-- existing OAuth section follows -->
-
 Some tools (Email, Calendar, Tasks, GitHub, ERPNext) support **per-user credentials** — each user connects their own account (Gmail, Outlook, GitHub PAT, etc.) instead of sharing a single tenant-level configuration.
 
-### 9.1 How It Works
+### 10.1 How It Works
 
 1. **Admin creates one tool** per type (e.g., one "Email" tool, one "Calendar" tool)
 2. **Users connect their own accounts** in Account Settings (gear icon in the chat sidebar)
@@ -653,7 +651,7 @@ Some tools (Email, Calendar, Tasks, GitHub, ERPNext) support **per-user credenti
 
 Tools with connected accounts are **always available** in the agent's tool set, regardless of auto-selection keyword matching.
 
-### 9.2 Google OAuth Setup
+### 10.2 Google OAuth Setup
 
 To allow users to connect Gmail, Google Calendar, and Google Tasks:
 
@@ -676,7 +674,7 @@ API_BASE_URL=https://api.your-domain.com
 FRONTEND_URL=https://app.your-domain.com
 ```
 
-### 9.3 Microsoft OAuth Setup
+### 10.3 Microsoft OAuth Setup
 
 To allow users to connect Outlook, Outlook Calendar, and Microsoft To Do:
 
@@ -703,7 +701,7 @@ MS_CLIENT_ID=your-application-id
 MS_CLIENT_SECRET=your-client-secret
 ```
 
-### 9.4 User Setup (No Action Required from Admin)
+### 10.4 User Setup (No Action Required from Admin)
 
 Once OAuth is configured, users:
 1. Click the gear icon ⚙️ in the chat sidebar → **Account Settings**
@@ -715,9 +713,9 @@ Manual IMAP setup (for providers without OAuth) is available from Account Settin
 
 ---
 
-## 10. Managing Templates & Skills
+## 11. Managing Templates & Skills
 
-### 10.1 Templates
+### 11.1 Templates
 
 Templates define reusable system prompts and default configurations for agent sessions. They include:
 - System prompt text
@@ -727,7 +725,7 @@ Templates define reusable system prompts and default configurations for agent se
 
 Users select templates when creating or configuring chat sessions.
 
-### 9.2 Skills
+### 11.2 Skills
 
 Skills are named agent execution profiles that bundle model, template, and tool defaults. There are two types:
 
@@ -742,6 +740,11 @@ Skills are named agent execution profiles that bundle model, template, and tool 
 - Requires a **MAF Target Key** that matches a registered workflow module in the backend (`src/agents/workflows/`).
 - Template is hidden — workflows carry their own orchestration logic.
 
+**Goal Based** (`execution_type = goal_based`):
+- Define an objective instead of a detailed prompt — the agent plans its own execution to achieve the goal.
+- Requires a **Template** (provides the goal description).
+- The agent autonomously breaks down the goal into steps and executes them.
+
 Both types share:
 - **Title** (required) and **Description** (optional)
 - **Visibility**: `tenant` (available to all users in the tenant) or `personal` (owned by the creating user)
@@ -749,7 +752,7 @@ Both types share:
 
 **Tenant skills** (created in Admin Area, `visibility=tenant`) are available to all users in the tenant. **Personal skills** (created by users in the chat area) are owned by the creating user.
 
-### 9.3 MAF Target Keys
+### 11.3 MAF Target Keys
 
 The `maf_target_key` is only required for **Workflow Based** skills. It must match a registered workflow module in the backend codebase (`src/agents/workflows/`). If the key doesn't match any registered target, the backend logs a warning on startup but does not crash.
 
@@ -757,20 +760,20 @@ For Prompt Based skills, the key is auto-generated from the title if left empty 
 
 ---
 
-## 10. Embed Widget Configurations
+## 11. Embed Widget Configurations
 
 Embed configurations let you offer the AI chat assistant on external websites via
 a `<script>` tag. See the dedicated [`embed-widget.md`](embed-widget.md) guide for
 full details.
 
-### 8.1 Creating an Embed Config
+### 11.1 Creating an Embed Config
 
 1. Go to **Admin → Embed Widget**
 2. Click **New Embed Config** and fill in the form
 3. Copy the generated embed snippet **immediately** — the token is shown only once
 4. Paste the `<script>` tag on your website
 
-### 8.2 Configuration Options
+### 11.2 Configuration Options
 
 - **Name** — descriptive label for admin reference
 - **Allowed Origins** — optional domain whitelist (comma-separated)
@@ -779,7 +782,7 @@ full details.
 - **Feature Toggles** — enable/disable file upload, model selection, feedback,
   follow-up questions, and cross-session memory per embed
 
-### 8.3 Managing Tokens
+### 11.3 Managing Tokens
 
 - **Regenerate** invalidates the old token immediately — update your website's snippet
 - **Copy Snippet** copies the current `<script>` tag to your clipboard
@@ -792,13 +795,13 @@ full details.
 
 PH Agent Hub supports a free/pro licensing model that controls how many tenants can be created.
 
-### 11.1 Free Tier
+### 12.1 Free Tier
 
 - By default, a fresh deployment allows up to **3 tenants** (configurable via `MAX_FREE_TENANTS`)
 - When the limit is reached, attempting to create a new tenant returns `402 Payment Required`
 - No license key is required — the free tier works out of the box
 
-### 11.2 Pro License
+### 12.2 Pro License
 
 To remove the tenant limit, install a Pro license:
 
@@ -813,7 +816,7 @@ To remove the tenant limit, install a Pro license:
 - If the license key is invalid, expired, or tampered with, the system falls back to the free tier limit
 - Leaving `LICENSE_PUBLIC_KEY` empty disables license verification entirely (free tier only)
 
-### 11.3 License Key Input
+### 12.3 License Key Input
 
 When entering a license key:
 - Internal whitespace is automatically stripped
@@ -858,9 +861,73 @@ A user can belong to multiple groups. When group-based access is active, users s
 
 ---
 
-## 13. Admin Memory & Session Management
+## 13. Managing Background Tasks
 
-### 13.1 Memory Management
+**Admin Area → Background Tasks** lists all background agent executions across the platform. Background tasks are long-running agent runs that execute independently of a user's current chat session.
+
+### 13.1 Viewing Background Tasks
+
+- **Admins**: See all background tasks across all tenants
+- **Managers**: See tasks within their own tenant only
+
+The task list displays status (`RUNNING`, `COMPLETED`, `FAILED`, `CANCELED`), the user who started it, the session context, timestamps, and progress information.
+
+### 13.2 Cancelling Tasks
+
+Admins and managers can cancel any `RUNNING` background task from the admin panel. This sends a cancellation signal to the agent loop, which stops execution at the next safe boundary.
+
+### 13.3 Configuration
+
+| Setting | Default | Env Variable |
+|---|---|---|
+| Max concurrent tasks per user | 3 | `MAX_CONCURRENT_BACKGROUND_TASKS_PER_USER` |
+| Task timeout (seconds) | 3600 (1 hour) | `BACKGROUND_TASK_TIMEOUT_SECONDS` |
+
+---
+
+## 14. Managing Scheduled Tasks
+
+**Admin Area → Scheduled Tasks** lists all time-based autonomous agent executions. Scheduled tasks can be one-shot (run at a specific datetime) or recurring (cron-like schedule).
+
+### 14.1 Task States
+
+| State | Description |
+|---|---|
+| `ACTIVE` | Task is enabled and will execute at its scheduled time |
+| `PAUSED` | Task is suspended and will not fire until resumed |
+
+### 14.2 Creating a Scheduled Task
+
+1. Go to **Admin Area → Scheduled Tasks**
+2. Click **Add Scheduled Task**
+3. Configure:
+   - **Name** — human-readable label
+   - **Prompt** — the instruction the agent will execute
+   - **Model** — which AI model to use
+   - **Tools** — which tools the agent can access
+   - **Schedule** — one-shot datetime or cron expression
+   - **Session** — optional existing session to execute in
+4. Click **Save**
+
+### 14.3 Managing Tasks
+
+- **Pause** — suspend a task without deleting it
+- **Resume** — reactivate a paused task
+- **Delete** — permanently remove a task
+
+### 14.4 Configuration
+
+| Setting | Default | Env Variable |
+|---|---|---|
+| Scheduler poll interval | 30 seconds | `SCHEDULER_POLL_INTERVAL_SECONDS` |
+
+The scheduler runs in the backend process. In testing mode (`TESTING=true`), the scheduler loop is disabled to prevent DB lock contention.
+
+---
+
+## 15. Admin Memory & Session Management
+
+### 15.1 Memory Management
 
 **Admin Area → Memories** shows all memory entries across the platform:
 - **Admins**: See all memory entries, optionally filtered by tenant or user
@@ -868,7 +935,7 @@ A user can belong to multiple groups. When group-based access is active, users s
 
 You can view and delete any memory entry. Deleting a memory entry removes it permanently — the user will no longer see it in their Memory Manager.
 
-### 13.2 Session Management
+### 15.2 Session Management
 
 **Admin Area → Sessions** provides a read-only view of all permanent chat sessions:
 - **Admins**: See all sessions across all tenants
@@ -876,11 +943,15 @@ You can view and delete any memory entry. Deleting a memory entry removes it per
 
 You can view session metadata (title, user, tags, pin status) and delete sessions. Deleting a session permanently removes all its messages, file uploads, and feedback.
 
+### 15.3 Mass Delete Sessions
+
+**Admin Area → Sessions** supports selecting multiple sessions and deleting them in bulk. This is useful for cleanup of old or unused sessions.
+
 ---
 
-## 14. Analytics & Monitoring
+## 16. Analytics & Monitoring
 
-### 13.1 Usage Analytics
+### 16.1 Usage Analytics
 
 **Admin Area → Analytics** shows token usage:
 - **Admins**: See all tenants
@@ -888,7 +959,7 @@ You can view session metadata (title, user, tags, pin status) and delete session
 
 Usage logs are written automatically on every completed agent run (both streaming and non-streaming).
 
-### 13.2 Audit Logs
+### 16.2 Audit Logs
 
 **Admin Area → Audit** shows a read-only log of all administrative mutations:
 - Who performed the action
@@ -897,13 +968,13 @@ Usage logs are written automatically on every completed agent run (both streamin
 
 Audit logs are **immutable** — they cannot be deleted or modified. Only admins can view them.
 
-### 13.3 System Logs
+### 16.3 System Logs
 
 **Admin Area → Logs** provides a view of agent activity and error logs. (Currently a stub — detailed log strategy is planned for a future release.)
 
 ---
 
-## 15. Security Best Practices
+## 17. Security Best Practices
 
 1. **Change the default admin password** immediately after first deployment
 2. **Use strong, unique values** for `JWT_SECRET` and `ENCRYPTION_KEY`
@@ -916,7 +987,7 @@ Audit logs are **immutable** — they cannot be deleted or modified. Only admins
 
 ---
 
-## 16. Troubleshooting
+## 18. Troubleshooting
 
 ### Backend won't start
 

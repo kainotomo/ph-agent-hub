@@ -142,3 +142,73 @@ A log of key design decisions made during the design phase, with rationale. Orde
 **Rationale:** In multi-tenant deployments, different users connect to different ERPNext sites or have distinct API keys/permissions. Sharing a single tenant-level API key loses audit trails and forces all users into the same identity. The email/calendar/tasks tools already follow this pattern (Issue #312), proving the architecture. Existing tenant-level setups continue working unchanged.
 **Alternatives considered:** Tenant-level only (rejected — breaks multi-user ERPNext use cases), per-user only with no fallback (rejected — breaks backward compatibility for existing setups).
 **Reference:** `backend/src/tools/erpnext.py` (`_resolve_erpnext_credentials`, `build_erpnext_tools`), `backend/src/agents/runner.py` (`_build_erpnext_callables`), [Issue #432](https://github.com/kainotomo/ph-agent-hub/issues/432)
+
+---
+
+## D-15 — Auto tool selection with top-K diversity
+
+**Date:** 2026-07-03
+**Decision:** The LLM can automatically select relevant tools from the available pool without requiring manual activation per session. The number of tools presented is capped by `AUTO_SELECT_TOOLS_TOP_K` (default 8). Tools are randomly sampled from the pool to improve selection diversity.
+**Rationale:** Manual tool activation is tedious for users with many tools. Auto-selection lets the LLM pick dynamically based on the user's request. Random sampling prevents the same tools from always being selected (Issue #439).
+**Alternatives considered:** Always-on all tools (rejected — too many tools degrades LLM quality), strict keyword matching (rejected — too brittle).
+**Reference:** `backend/src/core/config.py` (`AUTO_SELECT_TOOLS_TOP_K`), [Issue #439](https://github.com/kainotomo/ph-agent-hub/issues/439)
+
+---
+
+## D-16 — Parallel tool execution via asyncio.gather
+
+**Date:** 2026-07-20
+**Decision:** When the LLM returns multiple `tool_calls` in a single response for independent operations, MAF executes them concurrently via `asyncio.gather`. System prompt guidance encourages the LLM to batch independent calls.
+**Rationale:** Reduces total execution time for multi-tool workflows. MAF natively supports concurrent tool execution. Parallel batches count as a single step toward `AGENT_MAX_STEPS`, preventing premature termination.
+**Alternatives considered:** Sequential execution (rejected — slower for independent operations).
+**Reference:** `backend/src/core/config.py` (`AGENT_PARALLEL_TOOLS_ENABLED`), [Issue #447](https://github.com/kainotomo/ph-agent-hub/issues/447)
+
+---
+
+## D-17 — Agent Autopilot with pause/resume
+
+**Date:** 2026-07-21
+**Decision:** An autonomous multi-turn execution mode where the agent loops without requiring user prompts. Autopilot supports pause, resume, and stop controls. Limits: `AUTOPILOT_MAX_TURNS` (default 20), `AUTOPILOT_MAX_TOKENS` (default 0 = unlimited).
+**Rationale:** Users need the agent to work through complex multi-step tasks without constant prompting. Pause/resume allows users to inspect progress and redirect the agent mid-task. Turn and token limits prevent runaway execution.
+**Alternatives considered:** Single-turn only (rejected — too limiting for complex tasks), always-on autopilot (rejected — safety concerns).
+**Reference:** `backend/src/agents/autopilot.py`, `backend/src/core/config.py`, [Issue #446](https://github.com/kainotomo/ph-agent-hub/issues/446)
+
+---
+
+## D-18 — Background tasks with progress tracking
+
+**Date:** 2026-07-23
+**Decision:** Long-running agent executions can run as background tasks independent of the user's current chat session. Tasks support progress tracking, cancellation, and completion notifications.
+**Rationale:** Users should be able to start a long-running task and navigate away without losing progress. Background tasks use the same autopilot execution infrastructure but run in a detached mode.
+**Alternatives considered:** Foreground-only execution (rejected — blocks user from doing other work).
+**Reference:** `backend/src/api/background_tasks.py`, `backend/src/core/config.py` (`MAX_CONCURRENT_BACKGROUND_TASKS_PER_USER`, `BACKGROUND_TASK_TIMEOUT_SECONDS`), [Issue #449](https://github.com/kainotomo/ph-agent-hub/issues/449)
+
+---
+
+## D-19 — Scheduled tasks with cron-based scheduling
+
+**Date:** 2026-07-23
+**Decision:** Time-based autonomous agent execution supporting one-shot (run at datetime) and recurring (cron expression) schedules. A polling loop checks for due tasks at `SCHEDULER_POLL_INTERVAL_SECONDS` (default 30).
+**Rationale:** Users need agents to run autonomously at specific times (e.g., daily reports, weekly analyses) without manual initiation. Cron expressions provide flexible scheduling.
+**Alternatives considered:** Dedicated scheduler service (rejected — adds infrastructure complexity; in-process polling is sufficient).
+**Reference:** `backend/src/api/scheduled_tasks.py`, `backend/src/services/scheduler_executor.py`, `backend/src/core/config.py`, [Issue #297](https://github.com/kainotomo/ph-agent-hub/issues/297)
+
+---
+
+## D-20 — In-app notifications for agent events
+
+**Date:** 2026-07-23
+**Decision:** Persistent in-app notification records for background task completion, scheduled task events, and other agent-triggered events. Notifications are stored in MariaDB with read/unread state. API provides list, mark read, mark all read, and unread count endpoints.
+**Rationale:** Users need asynchronous notification when background tasks complete. In-app notifications are simpler than email/push infrastructure and don't require external services. DB storage ensures notifications survive server restarts.
+**Alternatives considered:** Email notifications (rejected — adds SMTP infrastructure), push notifications (rejected — requires service worker and FCM/APNs, not available on all platforms).
+**Reference:** `backend/src/api/notifications.py`, `backend/src/services/notification_service.py`, `backend/src/db/orm/notifications.py`
+
+---
+
+## D-21 — Goal-based skills execution type
+
+**Date:** 2026-07-23
+**Decision:** Added `goal_based` execution type to skills. Users define an objective (e.g., "Analyze Q3 reports"), and the agent autonomously plans and executes steps to achieve it.
+**Rationale:** Complex tasks are better expressed as goals rather than detailed prompts. The agent's planning capabilities can break down objectives into actionable steps.
+**Alternatives considered:** Prompt-based only (rejected — requires users to specify every step).
+**Reference:** `backend/src/db/orm/skills.py` (execution_type enum), frontend skill creation UI, [Issue #448](https://github.com/kainotomo/ph-agent-hub/issues/448)

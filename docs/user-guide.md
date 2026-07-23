@@ -523,7 +523,134 @@ Toggle thinking mode in your session settings. Your administrator controls wheth
 
 ---
 
-## 12. Tips & Best Practices
+## 12. Background Tasks
+
+Background tasks let you run long agent operations without keeping the chat page open. When you start a task in background mode, you can navigate away and come back later.
+
+### 12.1 Starting a Background Task
+
+1. Configure your session with the desired model, tools, and skill
+2. Send your message
+3. Click the **Run in Background** button (or toggle) to switch to background mode
+4. The task starts and runs independently of your current view
+
+### 12.2 Monitoring Progress
+
+- A status indicator in the sidebar shows running background tasks
+- You can click on a running task to view its progress and intermediate results
+- When the task completes, you receive a notification
+
+### 12.3 Cancelling a Task
+
+Click **Cancel** on any running background task. The agent stops at the next safe boundary.
+
+### 12.4 Limits
+
+- Your administrator controls the maximum number of concurrent background tasks per user
+- Each task has a maximum runtime limit (configurable by admin, default 1 hour)
+- Tasks running longer than the limit are automatically cancelled
+
+---
+
+## 13. Autopilot Mode
+
+Autopilot mode enables autonomous multi-turn execution — the agent continues working without requiring a new prompt after each response.
+
+### 13.1 Enabling Autopilot
+
+1. Start a new session or use an existing one
+2. In the session settings, toggle **Autopilot** on
+3. Send your initial instruction — the agent will work through it step by step
+
+### 13.2 How It Works
+
+- The agent loops autonomously: picks the next action, executes it, evaluates the result, and decides what to do next
+- Progress is streamed to the chat window in real time
+- You can see the agent's intermediate results and tool calls
+
+### 13.3 Controls
+
+- **Pause** — suspends the autopilot loop; the agent stops after its current action
+- **Resume** — continues execution from where it paused
+- **Stop** — terminates the autopilot session permanently
+
+### 13.4 Safeguards
+
+- **Max turns**: The autopilot stops after a configurable number of turns (default 20) to prevent runaway execution
+- **Max tokens**: An optional cumulative token limit (input + output) — when reached, the autopilot stops
+- You can always intervene manually by sending a new message to redirect the agent
+
+---
+
+## 14. Auto Tool Selection
+
+Instead of manually activating tools per session, the agent can automatically select relevant tools from your available pool based on your request.
+
+### 14.1 How It Works
+
+1. When you send a message, the LLM reviews your available tools
+2. It selects the tools most relevant to your request (up to a configurable limit, default 8)
+3. The selected tools are invoked automatically during the conversation
+
+### 14.2 Manual vs Auto Selection
+
+- **Manual**: You explicitly activate tools in session settings — only those tools are available
+- **Auto**: The LLM picks tools dynamically — you don't need to manage tool activation
+- **Mixed**: Auto-selection works alongside manual tool activation; both are supported simultaneously
+
+Auto selection is enabled by default. Your administrator can disable it per tenant.
+
+---
+
+## 15. Goal-Based Skills
+
+Goal-based skills let you define an **objective** instead of a detailed prompt. The agent plans its own execution to achieve the goal.
+
+### 15.1 Creating a Goal-Based Skill
+
+1. Go to **Skills** in the chat sidebar
+2. Click **Create Skill**
+3. Select execution type: **Goal Based**
+4. Enter your goal (e.g., "Analyze Q3 financial reports and generate a summary")
+5. Select the model and tools the agent can use
+6. Click **Save**
+
+### 15.2 Using a Goal-Based Skill
+
+- Select the skill when creating or editing a session
+- The agent autonomously breaks down your goal into steps and executes them
+- You can monitor progress in the chat window
+
+Goal-based skills work well for complex, multi-step tasks where you want to specify *what* to do, not *how* to do it.
+
+---
+
+## 16. Notifications
+
+Notifications alert you to important events like background task completion and scheduled task execution.
+
+### 16.1 Viewing Notifications
+
+- Click the **bell icon** 🔔 in the chat header to open the notification panel
+- Unread notifications show a badge with the count
+- Click any notification to view details or navigate to the related session
+
+### 16.2 Marking Notifications
+
+- Click a notification to mark it as read
+- Click **Mark all as read** to clear the badge
+
+### 16.3 Notification Types
+
+| Type | Trigger |
+|---|---|
+| Background task completed | Your background task finishes execution |
+| Background task failed | Your background task encounters an error |
+| Scheduled task executed | A scheduled task you created has run |
+
+---
+
+## 17. Tips & Best Practices
 
 - **Use descriptive session titles** — it makes searching and organizing much easier
 - **Pin important sessions** — they stay at the top of your list

@@ -39,6 +39,7 @@ This folder contains role-based and architecture-focused documentation for PH Ag
 - [agent-framework-integration.md](agent-framework-integration.md)
 - [architecture-overview.md](architecture-overview.md)
 - [backend-architecture.md](backend-architecture.md)
+- [CHANGELOG.md](../CHANGELOG.md) — release history
 - [data-model.md](data-model.md)
 - [deepseek-stabilizer.md](deepseek-stabilizer.md)
 - [deployment.md](deployment.md)

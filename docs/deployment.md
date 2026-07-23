@@ -186,6 +186,23 @@ Key variables:
 | `WIDGET_MESSAGE_LIMIT` | Per-guest message rate limit for `POST /widget/session/message`, short window (default: `"20/minute"`) |
 | `WIDGET_TOTAL_MESSAGE_LIMIT` | Per-guest total message rate limit for `POST /widget/session/message`, long window (default: `"100/hour"`) |
 | `WIDGET_SESSION_READ_LIMIT` | Per-guest read rate limit for `GET /widget/session`, `GET /widget/session/messages`, and `DELETE /widget/session/stream` (default: `"60/minute"`) |
+| `AUTOPILOT_MAX_TURNS` | Max agent-invocation turns before autopilot forces summary (default: `20`) |
+| `AUTOPILOT_MAX_TOKENS` | Max cumulative tokens for autopilot; `0` = unlimited (default: `0`) |
+| `MAX_CONCURRENT_BACKGROUND_TASKS_PER_USER` | Max concurrent background tasks per user (default: `3`) |
+| `BACKGROUND_TASK_TIMEOUT_SECONDS` | Max wall-clock time for a background task in seconds (default: `3600`) |
+| `AGENT_MAX_STEPS` | Max tool-call steps before agent loop terminates (default: `15`) |
+| `AGENT_PARALLEL_TOOLS_ENABLED` | Enable parallel tool execution (default: `True`) |
+| `AUTO_SELECT_TOOLS_TOP_K` | Number of tools presented for auto-selection (default: `8`) |
+| `SCHEDULER_POLL_INTERVAL_SECONDS` | How often scheduler polls for due tasks in seconds (default: `30`) |
+| `A2A_TASK_TTL_SECONDS` | Default TTL for completed/canceled A2A task records (default: `86400`) |
+| `A2A_DEFAULT_RETRY_MAX_ATTEMPTS` | Default max retry attempts for A2A transient errors (default: `3`) |
+| `A2A_DEFAULT_CIRCUIT_BREAKER_THRESHOLD` | Default consecutive failures to trip circuit breaker (default: `5`) |
+| `GOOGLE_CLIENT_ID` | Google OAuth client ID for Gmail/Calendar/Tasks |
+| `GOOGLE_CLIENT_SECRET` | Google OAuth client secret |
+| `MS_CLIENT_ID` | Microsoft OAuth client ID for Outlook/Calendar/Tasks |
+| `MS_CLIENT_SECRET` | Microsoft OAuth client secret |
+| `API_BASE_URL` | Public-facing API base URL for OAuth callbacks (default: `http://localhost:8000`) |
+| `FRONTEND_URL` | Public-facing frontend URL for OAuth redirects (default: `http://localhost:3000`) |
 
 **Important:** `infrastructure/env` is in `.gitignore` — keep secrets out of version control.
 

@@ -93,7 +93,10 @@ async def list_scheduled_tasks(
 
     result = await db.execute(
         query
-        .order_by(ScheduledTask.next_run_at.asc().nullslast())
+        .order_by(
+            ScheduledTask.next_run_at.is_(None).asc(),
+            ScheduledTask.next_run_at.asc(),
+        )
         .offset(offset)
         .limit(limit)
     )

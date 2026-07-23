@@ -16,11 +16,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from .api.admin import router as admin_router
 from .api.a2a_oauth import router as a2a_oauth_router
 from .api.auth import router as auth_router
+from .api.background_tasks import router as background_tasks_router
 from .api.chat import router as chat_router
 from .api.credentials import router as credentials_router
 from .api.demo import router as demo_router
 from .api.memory import router as memory_router
 from .api.models import router as models_router
+from .api.notifications import router as notifications_router
 from .api.prompts import router as prompts_router
 from .api.skills import router as skills_router
 from .api.templates import router as templates_router
@@ -84,6 +86,46 @@ async def _cleanup_demo_temp_uploads() -> None:
             pass  # Best-effort: never let a cleanup failure crash the task
 
 
+async def _timeout_background_tasks() -> None:
+    """Periodic background task: auto-cancel background tasks that have
+    exceeded the configured timeout (Issue #449).
+
+    Checks every 5 minutes for EXECUTING background tasks whose
+    ``created_at`` is older than ``BACKGROUND_TASK_TIMEOUT_SECONDS``.
+    """
+    from datetime import datetime, timezone, timedelta
+    from .db.base import AsyncSessionLocal
+    from .services.autopilot_service import get_executing_runs
+
+    CHECK_INTERVAL = 300  # 5 minutes
+    while True:
+        await asyncio.sleep(CHECK_INTERVAL)
+        try:
+            timeout = settings.BACKGROUND_TASK_TIMEOUT_SECONDS
+            if timeout <= 0:
+                continue  # disabled
+            cutoff = datetime.now(timezone.utc) - timedelta(seconds=timeout)
+            async with AsyncSessionLocal() as _db:
+                runs = await get_executing_runs(_db)
+                for run in runs:
+                    if run.created_at and run.created_at < cutoff:
+                        run.state = run.STATE_FAILED
+                        run.error_message = (
+                            f"Task timed out after {timeout}s"
+                        )
+                        import logging as _lg
+                        _lg.getLogger(__name__).info(
+                            "Timed out background task %s (session %s, "
+                            "created %s, timeout=%ds)",
+                            run.id, run.session_id,
+                            run.created_at, timeout,
+                        )
+                if runs:
+                    await _db.commit()
+        except Exception:
+            pass  # Best-effort
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup: scan MAF registry, load agent identity, start cleanup task."""
@@ -129,10 +171,14 @@ async def lifespan(app: FastAPI):
     # Start background cleanup for demo tenant temp uploads (every 6 hours)
     demo_cleanup_task = asyncio.create_task(_cleanup_demo_temp_uploads())
 
+    # Start background task timeout cleanup (Issue #449)
+    _bg_timeout_task = asyncio.create_task(_timeout_background_tasks())
+
     yield
 
     orphan_cleanup_task.cancel()
     demo_cleanup_task.cancel()
+    _bg_timeout_task.cancel()
 
 
 app = FastAPI(title="PH Agent Hub", version="2.0.0", lifespan=lifespan)
@@ -183,6 +229,8 @@ app.include_router(skills_router, prefix="/api")
 app.include_router(widget_router, prefix="/api")
 app.include_router(credentials_router, prefix="/api")
 app.include_router(demo_router, prefix="/api")
+app.include_router(background_tasks_router, prefix="/api")
+app.include_router(notifications_router, prefix="/api")
 
 
 @app.get("/health")

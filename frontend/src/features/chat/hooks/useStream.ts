@@ -200,6 +200,17 @@ export interface AutopilotResumeEvent {
   };
 }
 
+// ---- Background task progress (Issue #449) --------------------------------
+
+export interface ProgressEvent {
+  event: "progress";
+  data: {
+    turn: number;
+    max_turns: number;
+    message: string;
+  };
+}
+
 export type StreamEvent =
   | TokenEvent
   | ToolStartEvent
@@ -217,6 +228,7 @@ export type StreamEvent =
   | AutopilotMaxTurnsEvent
   | AutopilotPauseEvent
   | AutopilotResumeEvent
+  | ProgressEvent
   | ErrorEvent
   | HeartbeatEvent;
 
@@ -280,6 +292,7 @@ export function useStream(apiPrefix: string = "chat") {
         onAutopilotMaxTurns?: (data: AutopilotMaxTurnsEvent["data"]) => void;
         onAutopilotPause?: (data: AutopilotPauseEvent["data"]) => void;
         onAutopilotResume?: (data: AutopilotResumeEvent["data"]) => void;
+        onProgress?: (data: ProgressEvent["data"]) => void;
         onError?: (error: string, messageId: string) => void;
         onClose?: () => void;
         /** Fires inside the SSE onopen handler — the backend has confirmed
@@ -439,6 +452,9 @@ export function useStream(apiPrefix: string = "chat") {
                   case "autopilot_resume":
                     handlers.onAutopilotResume?.(parsed);
                     break;
+                  case "progress":
+                    handlers.onProgress?.(parsed);
+                    break;
                   case "error":
                     handlers.onError?.(parsed.message || parsed.error || "Unknown error", parsed.message_id);
                     break;
@@ -549,6 +565,7 @@ export function useStream(apiPrefix: string = "chat") {
         onAutopilotMaxTurns?: (data: AutopilotMaxTurnsEvent["data"]) => void;
         onAutopilotPause?: (data: AutopilotPauseEvent["data"]) => void;
         onAutopilotResume?: (data: AutopilotResumeEvent["data"]) => void;
+        onProgress?: (data: ProgressEvent["data"]) => void;
         onError?: (error: string, messageId: string) => void;
         onClose?: () => void;
       },

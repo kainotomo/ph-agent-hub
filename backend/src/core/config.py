@@ -121,6 +121,12 @@ class Settings(BaseSettings):
     SCHEDULER_POLL_INTERVAL_SECONDS: int = 30
     """How often the scheduler polling loop checks for due tasks (seconds)."""
 
+    # --- Testing ---
+    TESTING: bool = False
+    """When True, background scheduler loops and other lifespan tasks are
+    skipped.  Set automatically by the test runner via environment variable,
+    or explicitly in CI config."""
+
     # --- OAuth (Issue #312) ---
     GOOGLE_CLIENT_ID: str = ""
     """Google OAuth client ID for Gmail/Calendar/Tasks access."""

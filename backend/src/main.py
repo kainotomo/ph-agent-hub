@@ -243,15 +243,20 @@ async def lifespan(app: FastAPI):
     # Start background task timeout cleanup (Issue #449)
     _bg_timeout_task = asyncio.create_task(_timeout_background_tasks())
 
-    # Start scheduler polling loop (Issue #297)
-    _scheduler_task = asyncio.create_task(_run_scheduler_loop())
+    # Start scheduler polling loop (Issue #297) — skip in test mode
+    if not settings.TESTING:
+        _scheduler_task = asyncio.create_task(_run_scheduler_loop())
+    else:
+        _scheduler_task = None
+        logger.info("Scheduler disabled (TESTING=True)")
 
     yield
 
     orphan_cleanup_task.cancel()
     demo_cleanup_task.cancel()
     _bg_timeout_task.cancel()
-    _scheduler_task.cancel()
+    if _scheduler_task is not None:
+        _scheduler_task.cancel()
 
 
 app = FastAPI(title="PH Agent Hub", version="2.0.0", lifespan=lifespan)

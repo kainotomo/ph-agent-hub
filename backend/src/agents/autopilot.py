@@ -271,6 +271,52 @@ async def run_autopilot_stream(
                     "Resuming autopilot %s from turn %d with steering: %.80s",
                     autopilot_run_id, start_turn, steering_instruction,
                 )
+    # ---- Local helper: create a completion/failure notification for
+    #      background tasks -----------------------------------------------
+    async def _notify_if_background(
+        run_id: str | None,
+        state: str,
+        title: str,
+        body: str | None = None,
+    ) -> None:
+        """Create an in-app notification if the AutopilotRun is a
+        background task.  Does nothing for inline autopilot runs."""
+        if run_id is None:
+            return
+        from ..db.base import AsyncSessionLocal as _AsyncSessionLocal
+        async with _AsyncSessionLocal() as _notify_db:
+            from ..services.autopilot_service import get_run as _ap_get_run
+            _run = await _ap_get_run(_notify_db, run_id)
+            if _run is None or not _run.background_task:
+                return
+            # Already notified — avoid duplicates
+            if _run.notification_sent:
+                return
+            # Mark notified
+            _run.notification_sent = True
+            # Create notification
+            from ..services.notification_service import create_notification as _create_notif
+            from ..db.orm.sessions import Session as _SessionORM
+            from sqlalchemy import select as _sa_select
+            _session_row = await _notify_db.execute(
+                _sa_select(_SessionORM).where(_SessionORM.id == _run.session_id)
+            )
+            _session = _session_row.scalar_one_or_none()
+            if _session is None:
+                await _notify_db.commit()
+                return
+            await _create_notif(
+                _notify_db,
+                user_id=_session.user_id,
+                tenant_id=_session.tenant_id,
+                type=state,
+                title=title,
+                body=body,
+                reference_id=run_id,
+                reference_type="autopilot_run",
+            )
+            await _notify_db.commit()
+
     # Emit autopilot_resume on any resume — start_turn > 1 means a
     # previous turn completed, steering_instruction means a resume
     # even if start_turn wrapped back to 1 (pause before first turn).
@@ -304,6 +350,14 @@ async def run_autopilot_stream(
                     db, autopilot_run_id, "FAILED",
                     error_message=f"Token budget of {max_tokens} exceeded",
                 )
+            # Notify for background tasks (Issue #449)
+            await _notify_if_background(
+                autopilot_run_id,
+                "TASK_FAILED",
+                "Task failed — token budget exceeded",
+                body=f"The task used {cumulative_tokens_in + cumulative_tokens_out} tokens "
+                     f"which exceeded the budget of {max_tokens}. Try simplifying the goal.",
+            )
             return
 
         # ---- Check for user-initiated pause (DB state) --------------------
@@ -391,6 +445,31 @@ async def run_autopilot_stream(
                 "message": turn_message[:200],
             }),
         })
+
+        # ---- Emit progress event for the frontend (Issue #449) ----------
+        _progress_message = (
+            f"Turn {turn}/{max_turns}: Analyzing and researching…"
+            if turn == 1
+            else f"Turn {turn}/{max_turns}: Continuing toward goal…"
+        )
+        await bridge.put({
+            "event": "progress",
+            "data": json.dumps({
+                "turn": turn,
+                "max_turns": max_turns,
+                "message": _progress_message,
+            }),
+        })
+        # Persist progress message to AutopilotRun if available
+        if autopilot_run_id:
+            from ..services.autopilot_service import get_run as _ap_get_run
+            from ..db.base import AsyncSessionLocal as _AsyncSessionLocal
+            async with _AsyncSessionLocal() as _prog_db:
+                _ap_run = await _ap_get_run(_prog_db, autopilot_run_id)
+                if _ap_run:
+                    _ap_run.progress_message = _progress_message
+                    _ap_run.current_turn = turn
+                    await _prog_db.commit()
 
         # ---- Run the agent for this turn (streaming) --------------------
         # Each turn gets its own DB session so run_agent_stream()'s
@@ -553,7 +632,26 @@ async def run_autopilot_stream(
                             "summary": completion_state["summary"][:500],
                         },
                     )
-                    await _ap_set_state(_ap_db, autopilot_run_id, "COMPLETED")
+                    await _ap_set_state(
+                        _ap_db, autopilot_run_id, "COMPLETED",
+                        result_summary=completion_state["summary"],
+                    )
+                # Notify for background tasks (Issue #449)
+                await _notify_if_background(
+                    autopilot_run_id,
+                    "TASK_COMPLETED",
+                    "Task completed",
+                    body=completion_state["summary"][:500],
+                )
+            # Emit final progress event
+            await bridge.put({
+                "event": "progress",
+                "data": json.dumps({
+                    "turn": turn,
+                    "max_turns": max_turns,
+                    "message": "Task completed successfully!",
+                }),
+            })
             await bridge.put({
                 "event": "autopilot_complete",
                 "data": json.dumps({
@@ -606,6 +704,23 @@ async def run_autopilot_stream(
                 _ap_db, autopilot_run_id, "FAILED",
                 error_message=f"Reached max turns ({max_turns})",
             )
+        # Notify for background tasks (Issue #449)
+        await _notify_if_background(
+            autopilot_run_id,
+            "TASK_FAILED",
+            "Task did not complete",
+            body=f"Reached maximum of {max_turns} turns without finishing. "
+                 "Check the session for partial results.",
+        )
+    # Emit final progress event
+    await bridge.put({
+        "event": "progress",
+        "data": json.dumps({
+            "turn": max_turns,
+            "max_turns": max_turns,
+            "message": f"Reached maximum of {max_turns} turns.",
+        }),
+    })
     await bridge.put({
         "event": "autopilot_max_turns",
         "data": json.dumps({

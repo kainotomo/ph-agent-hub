@@ -45,6 +45,7 @@ import {
   UploadOutlined,
   FileTextOutlined,
   FileOutlined,
+  FolderOpenOutlined,
 } from "@ant-design/icons";
 import { Logo } from "../../../shared/components/Logo";
 import { useNavigate, useParams } from "react-router-dom";
@@ -323,6 +324,14 @@ export function SessionSidebar() {
                 style={{ display: "none" }}
                 onChange={handleImport}
               />
+              <Tooltip title="Tasks">
+                <Button
+                  type="text"
+                  icon={<FolderOpenOutlined />}
+                  size="small"
+                  onClick={() => navigate("/background-tasks")}
+                />
+              </Tooltip>
               <Tooltip title="Refresh">
                 <Button
                   type="text"

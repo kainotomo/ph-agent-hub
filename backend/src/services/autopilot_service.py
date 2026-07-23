@@ -12,7 +12,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.orm.autopilot_runs import AutopilotRun
@@ -25,6 +25,7 @@ async def create_autopilot_run(
     session_id: str,
     goal: str,
     max_turns: int = 20,
+    background_task: bool = False,
 ) -> AutopilotRun:
     """Create a new AutopilotRun record with state=EXECUTING."""
     run = AutopilotRun(
@@ -32,6 +33,7 @@ async def create_autopilot_run(
         goal=goal,
         state=AutopilotRun.STATE_EXECUTING,
         max_turns=max_turns,
+        background_task=background_task,
     )
     db.add(run)
     await db.commit()
@@ -74,11 +76,28 @@ async def update_turn(
     await db.commit()
 
 
+async def update_progress(
+    db: AsyncSession,
+    run_id: str,
+    progress_message: str,
+) -> None:
+    """Update the progress message for a running background task."""
+    run = await get_run(db, run_id)
+    if run is None:
+        logger.warning("AutopilotRun %s not found — cannot update progress", run_id)
+        return
+
+    run.progress_message = progress_message
+    run.current_turn += 1  # Each progress update advances the turn counter
+    await db.commit()
+
+
 async def set_state(
     db: AsyncSession,
     run_id: str,
     state: str,
     error_message: str | None = None,
+    result_summary: str | None = None,
 ) -> None:
     """Transition an AutopilotRun to a new state."""
     run = await get_run(db, run_id)
@@ -89,6 +108,8 @@ async def set_state(
     run.state = state
     if error_message:
         run.error_message = error_message
+    if result_summary:
+        run.result_summary = result_summary
     await db.commit()
 
     logger.info("AutopilotRun %s → state=%s", run_id, state)
@@ -150,6 +171,67 @@ async def get_executing_runs(
         )
     )
     return list(result.scalars().all())
+
+
+async def list_background_tasks(
+    db: AsyncSession,
+    user_id: str,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+    state: str | None = None,
+) -> tuple[list[AutopilotRun], int]:
+    """List background tasks for a user, newest first."""
+    query = select(AutopilotRun).where(
+        AutopilotRun.background_task == True,  # noqa: E712
+    )
+    count_query = select(func.count(AutopilotRun.id)).where(
+        AutopilotRun.background_task == True,  # noqa: E712
+    )
+
+    # Filter by session's user_id via join
+    from ..db.orm.sessions import Session
+
+    query = query.join(Session, AutopilotRun.session_id == Session.id).where(
+        Session.user_id == user_id,
+    )
+    count_query = count_query.join(Session, AutopilotRun.session_id == Session.id).where(
+        Session.user_id == user_id,
+    )
+
+    if state:
+        query = query.where(AutopilotRun.state == state)
+        count_query = count_query.where(AutopilotRun.state == state)
+
+    total_result = await db.execute(count_query)
+    total = total_result.scalar() or 0
+
+    result = await db.execute(
+        query.order_by(AutopilotRun.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+    items = list(result.scalars().all())
+    return items, total
+
+
+async def count_active_for_user(
+    db: AsyncSession,
+    user_id: str,
+) -> int:
+    """Count running background tasks for a user."""
+    from ..db.orm.sessions import Session
+
+    result = await db.execute(
+        select(func.count(AutopilotRun.id))
+        .join(Session, AutopilotRun.session_id == Session.id)
+        .where(
+            Session.user_id == user_id,
+            AutopilotRun.state == AutopilotRun.STATE_EXECUTING,
+            AutopilotRun.background_task == True,  # noqa: E712
+        )
+    )
+    return result.scalar() or 0
 
 
 async def fail_stale_runs(

@@ -5,12 +5,13 @@
 // =============================================================================
 
 import { useParams, useNavigate } from "react-router-dom";
-import { Layout, Button, Typography, message } from "antd";
-import { PlusOutlined, ThunderboltOutlined } from "@ant-design/icons";
+import { Layout, Button, Typography, message, Space } from "antd";
+import { PlusOutlined, ThunderboltOutlined, FolderOpenOutlined } from "@ant-design/icons";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { SessionSidebar } from "../components/SessionSidebar";
 import { ChatWindow } from "../components/ChatWindow";
 import { getSession, createSession, updateSession } from "../services/chat";
+import { NotificationBell } from "../../../shared/components/NotificationBell";
 
 const { Content } = Layout;
 const { Title, Text } = Typography;
@@ -63,7 +64,29 @@ export function ChatPage() {
   return (
     <Layout style={{ height: "100dvh", overflow: "hidden" }}>
       <SessionSidebar />
-      <Content>
+      <Content style={{ display: "flex", flexDirection: "column", overflow: "hidden" }}>
+        {/* Header bar with notification bell and navigation (Issue #449) */}
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "flex-end",
+            alignItems: "center",
+            padding: "6px 16px",
+            borderBottom: "1px solid #f0f0f0",
+            background: "#fff",
+          }}
+        >
+          <Space size={4}>
+            <Button
+              type="text"
+              icon={<FolderOpenOutlined />}
+              onClick={() => navigate("/background-tasks")}
+            >
+              Tasks
+            </Button>
+            <NotificationBell />
+          </Space>
+        </div>
         {!sessionId ? (
           <div
             style={{
@@ -71,7 +94,7 @@ export function ChatPage() {
               flexDirection: "column",
               justifyContent: "center",
               alignItems: "center",
-              height: "100%",
+              flex: 1,
               gap: 16,
             }}
           >

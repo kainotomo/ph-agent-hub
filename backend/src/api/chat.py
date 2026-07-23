@@ -146,6 +146,11 @@ class MessageCreate(BaseModel):
     prompts between turns.  The agent calls ``task_complete()`` when
     done.  Only supported for permanent (non-temporary) sessions.
     (Issue #446)"""
+    background: bool = False
+    """When True, runs the task as a persistent background task with
+    progress tracking and notification on completion.  Implies
+    ``autopilot=True``.  The user can close the browser and come
+    back later to see results.  (Issue #449)"""
 
 
 class MessageResponse(BaseModel):
@@ -1168,6 +1173,25 @@ async def send_message(
     accept = request.headers.get("accept", "")
     is_streaming = "text/event-stream" in accept.lower()
 
+    # ---- Background task implies autopilot -----------------------------
+    if body.background:
+        body.autopilot = True
+        if data.get("is_temporary", False):
+            raise ValidationError(
+                "Background tasks are not supported for temporary sessions"
+            )
+        # Check concurrent task limit
+        from ..services.autopilot_service import count_active_for_user as _count_active
+
+        active_count = await _count_active(db, current_user.id)
+        max_concurrent = settings.MAX_CONCURRENT_BACKGROUND_TASKS_PER_USER
+        if max_concurrent > 0 and active_count >= max_concurrent:
+            raise ValidationError(
+                f"You already have {active_count} background task(s) running. "
+                f"Maximum concurrent tasks is {max_concurrent}. "
+                "Please wait for one to complete or cancel it before starting another."
+            )
+
     # ---- Inject file content into user message --------------------------
     file_ids = body.file_ids or []
     modified_message, valid_file_ids = await _inject_file_content(
@@ -1500,6 +1524,7 @@ async def _run_autopilot_background(
     bridge: StreamBridge,
     max_turns: int | None = None,
     resume_from_turn: int | None = None,
+    background: bool = False,
 ) -> None:
     """Run the autopilot in the background, writing events to *bridge*.
 
@@ -1510,6 +1535,10 @@ async def _run_autopilot_background(
     When *resume_from_turn* is provided, the existing ``AutopilotRun``
     for this session is reused (no new record created) and the loop
     starts from that turn.
+
+    When *background* is True, the ``AutopilotRun`` is created with
+    ``background_task=True`` for persistent tracking and notification
+    on completion (Issue #449).
 
     Cleanup on completion (``finally``):
       - Clears the Redis ``stream:active:`` flag
@@ -1553,7 +1582,8 @@ async def _run_autopilot_background(
                     from ..services.autopilot_service import create_autopilot_run as _ap_create
                     async with AsyncSessionLocal() as _ap_create_db:
                         autopilot_run = await _ap_create(
-                            _ap_create_db, session_id, user_message, max_turns or 20,
+                            _ap_create_db, session_id, user_message,
+                            max_turns or 20, background_task=background,
                         )
                         autopilot_run_id = autopilot_run.id
             except Exception:
@@ -1583,8 +1613,31 @@ async def _run_autopilot_background(
             )
             try:
                 from ..services.autopilot_service import set_state as _ap_set_state
+                from ..services.notification_service import create_notification as _notify
+                from ..db.orm.sessions import Session as _SessionORM
+                from sqlalchemy import select as _sa_select
                 async with AsyncSessionLocal() as _cancel_db:
                     await _ap_set_state(_cancel_db, autopilot_run_id, "CANCELLED")
+                    # Notify background tasks
+                    if autopilot_run_id and background:
+                        _run_row = await _cancel_db.execute(
+                            _sa_select(_SessionORM).where(
+                                _SessionORM.id == session_id
+                            )
+                        )
+                        _sess = _run_row.scalar_one_or_none()
+                        if _sess:
+                            await _notify(
+                                _cancel_db,
+                                user_id=_sess.user_id,
+                                tenant_id=_sess.tenant_id,
+                                type="TASK_CANCELLED",
+                                title="Task cancelled",
+                                body=f"The background task was cancelled by the user.",
+                                reference_id=autopilot_run_id,
+                                reference_type="autopilot_run",
+                            )
+                            await _cancel_db.commit()
             except Exception:
                 pass
         except Exception:
@@ -1594,11 +1647,35 @@ async def _run_autopilot_background(
             )
             try:
                 from ..services.autopilot_service import set_state as _ap_set_state
+                from ..services.notification_service import create_notification as _notify
+                from ..db.orm.sessions import Session as _SessionORM
+                from sqlalchemy import select as _sa_select
                 async with AsyncSessionLocal() as _err_db:
                     await _ap_set_state(
                         _err_db, autopilot_run_id, "FAILED",
                         error_message="Autopilot execution failed",
                     )
+                    # Notify background tasks
+                    if autopilot_run_id and background:
+                        _run_row = await _err_db.execute(
+                            _sa_select(_SessionORM).where(
+                                _SessionORM.id == session_id
+                            )
+                        )
+                        _sess = _run_row.scalar_one_or_none()
+                        if _sess:
+                            await _notify(
+                                _err_db,
+                                user_id=_sess.user_id,
+                                tenant_id=_sess.tenant_id,
+                                type="TASK_FAILED",
+                                title="Task failed",
+                                body="Autopilot execution failed due to an unexpected error. "
+                                     "Check the session for details.",
+                                reference_id=autopilot_run_id,
+                                reference_type="autopilot_run",
+                            )
+                            await _err_db.commit()
             except Exception:
                 pass
             await bridge.put({
@@ -1725,6 +1802,7 @@ def _spawn_autopilot_background(
     bridge: StreamBridge,
     max_turns: int | None = None,
     resume_from_turn: int | None = None,
+    background: bool = False,
 ) -> asyncio.Task:
     """Create and return a background ``asyncio.Task`` for autopilot execution.
 
@@ -1733,6 +1811,9 @@ def _spawn_autopilot_background(
 
     When *resume_from_turn* is provided, the existing ``AutopilotRun``
     is reused (no new record created).
+
+    When *background* is True, the ``AutopilotRun`` is created with
+    ``background_task=True`` for persistent tracking (Issue #449).
     """
     register_bridge(session_id, bridge)
     asyncio.ensure_future(set_stream_active(session_id))
@@ -1746,6 +1827,7 @@ def _spawn_autopilot_background(
             bridge=bridge,
             max_turns=max_turns,
             resume_from_turn=resume_from_turn,
+            background=background,
         )
     )
     return task
@@ -1830,6 +1912,7 @@ async def _handle_streaming_autopilot(
         user_message=_user_message,
         current_user=current_user,
         bridge=bridge,
+        background=body.background,
     )
 
     return EventSourceResponse(

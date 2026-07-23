@@ -102,6 +102,14 @@ class Settings(BaseSettings):
     """Maximum cumulative tokens (input + output) before the autopilot
     stops.  ``0`` means no limit (default)."""
 
+    # --- Background tasks (Issue #449) ---
+    MAX_CONCURRENT_BACKGROUND_TASKS_PER_USER: int = 3
+    """Maximum number of concurrent background tasks a single user can run.
+    Prevents accidental resource exhaustion. Set to 0 for unlimited."""
+    BACKGROUND_TASK_TIMEOUT_SECONDS: int = 3600
+    """Maximum wall-clock time for a single background task before it is
+    auto-cancelled. 3600s = 1 hour."""
+
     # --- Parallel tool execution (Issue #447) ---
     AGENT_PARALLEL_TOOLS_ENABLED: bool = True
     """When True, injects system prompt guidance telling the LLM to batch

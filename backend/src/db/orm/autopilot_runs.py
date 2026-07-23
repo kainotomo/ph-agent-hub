@@ -96,6 +96,24 @@ class AutopilotRun(Base):
         comment="User's steering instruction when state is PAUSED (resume injects this)",
     )
 
+    # --- Background task fields (Issue #449) ---
+    progress_message: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+        comment="Latest human-readable progress message (e.g. 'Analyzing moat score…')",
+    )
+    notification_sent: Mapped[bool] = mapped_column(
+        default=False,
+        comment="Whether the completion/failure notification has been sent",
+    )
+    result_summary: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+        comment="Final result summary from task_complete() or the last response",
+    )
+    background_task: Mapped[bool] = mapped_column(
+        default=False,
+        comment="True if this was started as a user-facing background task (vs inline autopilot)",
+    )
+
     # --- Timestamps ---
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False,

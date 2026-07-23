@@ -219,6 +219,8 @@ export function ChatWindow({
 
   // ---- Autopilot mode (Issue #446) ----------------------------------------
   const [isAutopilotMode, setIsAutopilotMode] = useState(false);
+  // ---- Background task mode (Issue #449) -----------------------------------
+  const [isBackgroundMode, setIsBackgroundMode] = useState(false);
   const [autopilotState, setAutopilotState] = useState(INITIAL_AUTOPILOT_STATE);
   // Tracks whether the autopilot is in paused state.
   // Set to true in onAutopilotPause, cleared in onAutopilotResume/handleAutopilotResume.
@@ -847,6 +849,14 @@ export function ChatWindow({
             status: "executing" as const,
           }));
         },
+        // ---- Background task progress (Issue #449) -----------------------
+        onProgress: (data: { turn: number; max_turns: number; message: string }) => {
+          setAutopilotState((prev) => ({
+            ...prev,
+            currentTurn: data.turn,
+            maxTurns: data.max_turns,
+          }));
+        },
         // ------------------------------------------------------------------
         onSummarized: isReconnect
           ? () => { /* No notification during reconnect */ }
@@ -1060,12 +1070,15 @@ export function ChatWindow({
         status: "executing",
       });
       const apHandlers = buildStreamHandlers('autopilot');
+      const sessionDataWithFlags = isBackgroundMode
+        ? { ...(sessionData || {}), autopilot: true, background: true }
+        : { ...(sessionData || {}), autopilot: true };
       startStream(
         sessionId,
         content,
         fileIds.length > 0 ? fileIds : undefined,
         sessionTemperature ?? undefined,
-        { ...(sessionData || {}), autopilot: true },
+        sessionDataWithFlags,
         {
           ...apHandlers,
           onStreamStart: () => {
@@ -1945,6 +1958,35 @@ export function ChatWindow({
               </Button>
               <Text style={{ fontSize: 9, lineHeight: "12px", color: "#888" }}>
                 {isAutopilotMode ? "Auto" : "Chat"}
+              </Text>
+            </Space>
+          )}
+          {/* Background mode toggle (Issue #449) — only when autopilot is active */}
+          {!demo && !widget && !editingMsgId && !isTemporary && isAutopilotMode && (
+            <Space direction="vertical" size={0} style={{ alignItems: "center" }}>
+              <Button
+                size="small"
+                type={isBackgroundMode ? "primary" : "default"}
+                onClick={() => setIsBackgroundMode(!isBackgroundMode)}
+                title={
+                  isBackgroundMode
+                    ? "Run in background: off"
+                    : "Run in background: task continues after you close the browser"
+                }
+                style={{
+                  fontSize: 11,
+                  padding: "0 6px",
+                  height: 22,
+                  lineHeight: "20px",
+                  background: isBackgroundMode ? "#722ed1" : undefined,
+                  borderColor: isBackgroundMode ? "#722ed1" : undefined,
+                  color: isBackgroundMode ? "#fff" : undefined,
+                }}
+              >
+                {isBackgroundMode ? "BG ON" : "BG"}
+              </Button>
+              <Text style={{ fontSize: 9, lineHeight: "12px", color: "#888" }}>
+                {isBackgroundMode ? "Bgnd" : "Back"}
               </Text>
             </Space>
           )}

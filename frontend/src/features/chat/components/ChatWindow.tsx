@@ -1070,15 +1070,12 @@ export function ChatWindow({
         status: "executing",
       });
       const apHandlers = buildStreamHandlers('autopilot');
-      const sessionDataWithFlags = isBackgroundMode
-        ? { ...(sessionData || {}), autopilot: true, background: true }
-        : { ...(sessionData || {}), autopilot: true };
       startStream(
         sessionId,
         content,
         fileIds.length > 0 ? fileIds : undefined,
         sessionTemperature ?? undefined,
-        sessionDataWithFlags,
+        sessionData,
         {
           ...apHandlers,
           onStreamStart: () => {
@@ -1099,6 +1096,7 @@ export function ChatWindow({
           },
         },
         true,
+        isBackgroundMode,
       );
     } else {
       const sendHandlers = buildStreamHandlers('send');
@@ -1939,13 +1937,17 @@ export function ChatWindow({
         )}
 
         <div style={{ display: "flex", alignItems: "flex-end", gap: 8, width: "100%" }}>
-          {/* Autopilot mode toggle (Issue #446) — only for normal chat */}
-          {!demo && !widget && !editingMsgId && !isTemporary && (
-            <Space direction="vertical" size={0} style={{ alignItems: "center" }}>
+          {/* Mode toggles stacked vertically — only for normal chat */}
+          {!demo && !widget && !editingMsgId && !isTemporary ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              {/* Autopilot mode toggle (Issue #446) */}
               <Button
                 size="small"
                 type={isAutopilotMode ? "primary" : "default"}
-                onClick={() => setIsAutopilotMode(!isAutopilotMode)}
+                onClick={() => {
+                  setIsAutopilotMode(!isAutopilotMode);
+                  if (!isAutopilotMode) setIsBackgroundMode(false);
+                }}
                 title={isAutopilotMode ? "Switch to Chat mode" : "Switch to Autopilot mode"}
                 style={{
                   fontSize: 11,
@@ -1956,40 +1958,32 @@ export function ChatWindow({
               >
                 {isAutopilotMode ? "🤖 AP" : "💬"}
               </Button>
-              <Text style={{ fontSize: 9, lineHeight: "12px", color: "#888" }}>
-                {isAutopilotMode ? "Auto" : "Chat"}
-              </Text>
-            </Space>
-          )}
-          {/* Background mode toggle (Issue #449) — only when autopilot is active */}
-          {!demo && !widget && !editingMsgId && !isTemporary && isAutopilotMode && (
-            <Space direction="vertical" size={0} style={{ alignItems: "center" }}>
-              <Button
-                size="small"
-                type={isBackgroundMode ? "primary" : "default"}
-                onClick={() => setIsBackgroundMode(!isBackgroundMode)}
-                title={
-                  isBackgroundMode
-                    ? "Run in background: off"
-                    : "Run in background: task continues after you close the browser"
-                }
-                style={{
-                  fontSize: 11,
-                  padding: "0 6px",
-                  height: 22,
-                  lineHeight: "20px",
-                  background: isBackgroundMode ? "#722ed1" : undefined,
-                  borderColor: isBackgroundMode ? "#722ed1" : undefined,
-                  color: isBackgroundMode ? "#fff" : undefined,
-                }}
-              >
-                {isBackgroundMode ? "BG ON" : "BG"}
-              </Button>
-              <Text style={{ fontSize: 9, lineHeight: "12px", color: "#888" }}>
-                {isBackgroundMode ? "Bgnd" : "Back"}
-              </Text>
-            </Space>
-          )}
+              {/* Background mode toggle (Issue #449) — only when autopilot is active */}
+              {isAutopilotMode && (
+                <Button
+                  size="small"
+                  type={isBackgroundMode ? "primary" : "default"}
+                  onClick={() => setIsBackgroundMode(!isBackgroundMode)}
+                  title={
+                    isBackgroundMode
+                      ? "Disable background mode"
+                      : "Run in background: task continues after you close"
+                  }
+                  style={{
+                    fontSize: 11,
+                    padding: "0 6px",
+                    height: 22,
+                    lineHeight: "20px",
+                    background: isBackgroundMode ? "#722ed1" : undefined,
+                    borderColor: isBackgroundMode ? "#722ed1" : undefined,
+                    color: isBackgroundMode ? "#fff" : undefined,
+                  }}
+                >
+                  {isBackgroundMode ? "BG ON" : "BG"}
+                </Button>
+              )}
+            </div>
+          ) : null}
           {(featureFlags.file_upload ?? true) && (
             <Upload
               multiple

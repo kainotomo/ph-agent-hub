@@ -333,7 +333,7 @@ export function BackgroundTasksPage() {
       {/* Table */}
       <div style={{ flex: 1, overflow: "auto", padding: 16 }}>
         <Card
-          bordered={false}
+          variant="borderless"
           style={{ boxShadow: "none" }}
         >
           <Table

@@ -300,6 +300,7 @@ export function useStream(apiPrefix: string = "chat") {
         onStreamStart?: () => void;
       },
       autopilot?: boolean,
+      background?: boolean,
     ) => {
       const controller = new AbortController();
       abortRef.current = controller;
@@ -332,6 +333,7 @@ export function useStream(apiPrefix: string = "chat") {
               ...(temperature !== undefined ? { temperature } : {}),
               ...(sessionData ? { session_data: sessionData } : {}),
               ...(autopilot ? { autopilot: true } : {}),
+              ...(background ? { background: true } : {}),
             }),
           });
           if (!res.ok) {
@@ -377,6 +379,7 @@ export function useStream(apiPrefix: string = "chat") {
               ...(temperature !== undefined ? { temperature } : {}),
               ...(sessionData ? { session_data: sessionData } : {}),
               ...(autopilot ? { autopilot: true } : {}),
+              ...(background ? { background: true } : {}),
             }),
             openWhenHidden: true,
             signal: controller.signal,

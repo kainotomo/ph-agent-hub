@@ -521,13 +521,22 @@ export function SessionSidebar() {
                         }}
                       >
                         {item.is_temporary && "⚡ "}
-                        {item.title && item.title.length <= 2 && item.title !== "New Chat" ? "New Chat" : item.title}
+                        {item.title || "New Chat"}
                       </Text>
                     </Space>
                   }
                   description={
                     !collapsed ? (
                       <div>
+                        {(item as any).last_message ? (
+                          <Text
+                            type="secondary"
+                            style={{ fontSize: 11, display: "block", marginBottom: 2 }}
+                            ellipsis
+                          >
+                            {(item as any).last_message}
+                          </Text>
+                        ) : null}
                         <Text
                           type="secondary"
                           style={{ fontSize: 11 }}

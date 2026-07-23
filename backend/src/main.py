@@ -110,6 +110,19 @@ async def lifespan(app: FastAPI):
     async with AsyncSessionLocal() as db:
         await startup_scan(db)
 
+    # Mark stale autopilot runs as FAILED (server restarted mid-execution)
+    try:
+        from .services.autopilot_service import fail_stale_runs as _ap_fail_stale
+        async with AsyncSessionLocal() as ap_db:
+            stale = await _ap_fail_stale(ap_db)
+            if stale:
+                logger.info(
+                    "Marked %d stale autopilot run(s) as FAILED on startup",
+                    len(stale),
+                )
+    except Exception:
+        logger.warning("Failed to clean up stale autopilot runs on startup")
+
     # Start background cleanup for orphaned temp uploads
     orphan_cleanup_task = asyncio.create_task(_cleanup_orphaned_temp_uploads())
 

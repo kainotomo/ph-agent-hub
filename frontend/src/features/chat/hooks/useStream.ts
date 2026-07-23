@@ -148,6 +148,58 @@ export interface HeartbeatEvent {
   data: Record<string, never>;
 }
 
+// ---- Autopilot events (Issue #446) ---------------------------------------
+
+export interface AutopilotTurnStartEvent {
+  event: "autopilot_turn_start";
+  data: {
+    turn: number;
+    max_turns: number;
+    message?: string;
+  };
+}
+
+export interface AutopilotTurnCompleteEvent {
+  event: "autopilot_turn_complete";
+  data: {
+    turn: number;
+    max_turns: number;
+  };
+}
+
+export interface AutopilotCompleteEvent {
+  event: "autopilot_complete";
+  data: {
+    summary: string;
+    turn: number;
+  };
+}
+
+export interface AutopilotMaxTurnsEvent {
+  event: "autopilot_max_turns";
+  data: {
+    max_turns: number;
+    session_id: string;
+    message: string;
+  };
+}
+
+export interface AutopilotPauseEvent {
+  event: "autopilot_pause";
+  data: {
+    reason: string;
+    turn: number;
+  };
+}
+
+export interface AutopilotResumeEvent {
+  event: "autopilot_resume";
+  data: {
+    turn: number;
+    max_turns: number;
+  };
+}
+
 export type StreamEvent =
   | TokenEvent
   | ToolStartEvent
@@ -159,6 +211,12 @@ export type StreamEvent =
   | FollowUpQuestionsEvent
   | SummarizedEvent
   | TagsUpdatedEvent
+  | AutopilotTurnStartEvent
+  | AutopilotTurnCompleteEvent
+  | AutopilotCompleteEvent
+  | AutopilotMaxTurnsEvent
+  | AutopilotPauseEvent
+  | AutopilotResumeEvent
   | ErrorEvent
   | HeartbeatEvent;
 
@@ -216,9 +274,19 @@ export function useStream(apiPrefix: string = "chat") {
         onFollowUpQuestions?: (questions: string[]) => void;
         onSummarized?: (data: SummarizedEvent["data"]) => void;
         onTagsUpdated?: (data: TagsUpdatedEvent["data"]) => void;
+        onAutopilotTurnStart?: (data: AutopilotTurnStartEvent["data"]) => void;
+        onAutopilotTurnComplete?: (data: AutopilotTurnCompleteEvent["data"]) => void;
+        onAutopilotComplete?: (data: AutopilotCompleteEvent["data"]) => void;
+        onAutopilotMaxTurns?: (data: AutopilotMaxTurnsEvent["data"]) => void;
+        onAutopilotPause?: (data: AutopilotPauseEvent["data"]) => void;
+        onAutopilotResume?: (data: AutopilotResumeEvent["data"]) => void;
         onError?: (error: string, messageId: string) => void;
         onClose?: () => void;
+        /** Fires inside the SSE onopen handler — the backend has confirmed
+         *  the session exists and processing has started. */
+        onStreamStart?: () => void;
       },
+      autopilot?: boolean,
     ) => {
       const controller = new AbortController();
       abortRef.current = controller;
@@ -250,10 +318,11 @@ export function useStream(apiPrefix: string = "chat") {
               file_ids: fileIds || [],
               ...(temperature !== undefined ? { temperature } : {}),
               ...(sessionData ? { session_data: sessionData } : {}),
+              ...(autopilot ? { autopilot: true } : {}),
             }),
           });
           if (!res.ok) {
-            throw new Error(`Request failed with status ${res.status}`);
+            handlers.onClose?.();
           }
           const data = await res.json();
           // Call onMessageComplete first so it finalizes the message
@@ -294,6 +363,7 @@ export function useStream(apiPrefix: string = "chat") {
               file_ids: fileIds || [],
               ...(temperature !== undefined ? { temperature } : {}),
               ...(sessionData ? { session_data: sessionData } : {}),
+              ...(autopilot ? { autopilot: true } : {}),
             }),
             openWhenHidden: true,
             signal: controller.signal,
@@ -304,11 +374,18 @@ export function useStream(apiPrefix: string = "chat") {
                   .get("content-type")
                   ?.includes(EventStreamContentType)
               ) {
+                // Backend has confirmed the connection — session exists
+                // and message was persisted.  Fire the callback so
+                // callers can invalidate sidebar, etc.
+                handlers.onStreamStart?.();
                 return;
               }
-              throw new Error(
-                `Stream failed with status ${response.status}`,
-              );
+              // Not an SSE response (e.g. 404 for lazy session) — close
+              // gracefully instead of throwing, which would trigger a
+              // fetchEventSource retry loop that floods the console.
+              // The agent is still running in the background; results
+              // will be persisted and visible on next page load.
+              handlers.onClose?.();
             },
             onmessage(ev) {
               try {
@@ -344,6 +421,24 @@ export function useStream(apiPrefix: string = "chat") {
                   case "tags_updated":
                     handlers.onTagsUpdated?.(parsed);
                     break;
+                  case "autopilot_turn_start":
+                    handlers.onAutopilotTurnStart?.(parsed);
+                    break;
+                  case "autopilot_turn_complete":
+                    handlers.onAutopilotTurnComplete?.(parsed);
+                    break;
+                  case "autopilot_complete":
+                    handlers.onAutopilotComplete?.(parsed);
+                    break;
+                  case "autopilot_max_turns":
+                    handlers.onAutopilotMaxTurns?.(parsed);
+                    break;
+                  case "autopilot_pause":
+                    handlers.onAutopilotPause?.(parsed);
+                    break;
+                  case "autopilot_resume":
+                    handlers.onAutopilotResume?.(parsed);
+                    break;
                   case "error":
                     handlers.onError?.(parsed.message || parsed.error || "Unknown error", parsed.message_id);
                     break;
@@ -356,17 +451,18 @@ export function useStream(apiPrefix: string = "chat") {
               }
             },
             onclose() {
-              // Only remove from active set on NATURAL stream end.
-              // When the controller is aborted (resetStream/navigation),
-              // the agent is still running — keep the session active.
-              if (!controller.signal.aborted) {
-                removeStreamingSession(sessionId);
-              }
+              // Always remove from active set — the stream has ended
+              // regardless of how (natural end, abort, or error).
+              removeStreamingSession(sessionId);
               setStreaming(false);
               setStreamingSessionId(null);
               handlers.onClose?.();
             },
-            onerror(err) {
+            onerror(_err) {
+              // Abort during normal stream end (component re-render,
+              // isPending transition) is expected — do NOT throw so
+              // fetchEventSource doesn't retry with a GET request
+              // that also fails and confuses the user.
               if (controller.signal.aborted) {
                 setStreaming(false);
                 setStreamingSessionId(null);
@@ -377,7 +473,7 @@ export function useStream(apiPrefix: string = "chat") {
               setStreaming(false);
               setStreamingSessionId(null);
               handlers.onClose?.();
-              throw err;
+              // Don't throw — prevents fetchEventSource retry loop.
             },
           },
         );
@@ -447,6 +543,12 @@ export function useStream(apiPrefix: string = "chat") {
         onFollowUpQuestions?: (questions: string[]) => void;
         onSummarized?: (data: SummarizedEvent["data"]) => void;
         onTagsUpdated?: (data: TagsUpdatedEvent["data"]) => void;
+        onAutopilotTurnStart?: (data: AutopilotTurnStartEvent["data"]) => void;
+        onAutopilotTurnComplete?: (data: AutopilotTurnCompleteEvent["data"]) => void;
+        onAutopilotComplete?: (data: AutopilotCompleteEvent["data"]) => void;
+        onAutopilotMaxTurns?: (data: AutopilotMaxTurnsEvent["data"]) => void;
+        onAutopilotPause?: (data: AutopilotPauseEvent["data"]) => void;
+        onAutopilotResume?: (data: AutopilotResumeEvent["data"]) => void;
         onError?: (error: string, messageId: string) => void;
         onClose?: () => void;
       },
@@ -490,8 +592,36 @@ export function useStream(apiPrefix: string = "chat") {
               }
               // Agent finished between status check and reconnect request.
               // Backend returns 200 OK with {"active": false} as JSON.
+              // May also include autopilot_state for panel recovery.
               if (response.ok) {
-                // Silently close — no error shown to user.
+                // Try to read the response body for autopilot state.
+                response.clone().json().then(body => {
+                  if (body && body.autopilot_state) {
+                    // Fire the appropriate synthetic event so the
+                    // autopilot panel transitions to the correct final
+                    // state.  The error handler now updates autopilotState
+                    // to status: "error" (see buildStreamHandlers).
+                    const state = body.autopilot_state;
+                    if (state === "COMPLETED") {
+                      handlers.onAutopilotComplete?.({
+                        summary: "",
+                        turn: 0,
+                      });
+                    } else if (state === "FAILED" || state === "CANCELLED") {
+                      handlers.onError?.(
+                        `Autopilot ${state.toLowerCase()}`,
+                        "",
+                      );
+                    } else if (state === "PAUSED") {
+                      handlers.onAutopilotPause?.({
+                        reason: "Autopilot was paused",
+                        turn: 0,
+                      });
+                    }
+                  }
+                }).catch(() => {
+                  // Ignore parse errors — fall through to normal close.
+                });
                 handlers.onClose?.();
                 return;
               }
@@ -501,9 +631,7 @@ export function useStream(apiPrefix: string = "chat") {
                 handlers.onClose?.();
                 return;
               }
-              throw new Error(
-                `Reconnect stream failed with status ${response.status}`,
-              );
+              handlers.onClose?.();
             },
             onmessage(ev) {
               try {
@@ -539,6 +667,24 @@ export function useStream(apiPrefix: string = "chat") {
                   case "tags_updated":
                     handlers.onTagsUpdated?.(parsed);
                     break;
+                  case "autopilot_turn_start":
+                    handlers.onAutopilotTurnStart?.(parsed);
+                    break;
+                  case "autopilot_turn_complete":
+                    handlers.onAutopilotTurnComplete?.(parsed);
+                    break;
+                  case "autopilot_complete":
+                    handlers.onAutopilotComplete?.(parsed);
+                    break;
+                  case "autopilot_max_turns":
+                    handlers.onAutopilotMaxTurns?.(parsed);
+                    break;
+                  case "autopilot_pause":
+                    handlers.onAutopilotPause?.(parsed);
+                    break;
+                  case "autopilot_resume":
+                    handlers.onAutopilotResume?.(parsed);
+                    break;
                   case "error":
                     handlers.onError?.(parsed.message || parsed.error || "Unknown error", parsed.message_id);
                     break;
@@ -557,7 +703,7 @@ export function useStream(apiPrefix: string = "chat") {
               setStreamingSessionId(null);
               handlers.onClose?.();
             },
-            onerror(err) {
+            onerror(_err) {
               if (controller.signal.aborted) {
                 setStreaming(false);
                 setStreamingSessionId(null);
@@ -568,7 +714,7 @@ export function useStream(apiPrefix: string = "chat") {
               setStreaming(false);
               setStreamingSessionId(null);
               handlers.onClose?.();
-              throw err;
+              // Don't throw — prevents fetchEventSource retry loop.
             },
           },
         );
@@ -599,6 +745,10 @@ export function useStream(apiPrefix: string = "chat") {
         onFollowUpQuestions?: (questions: string[]) => void;
         onSummarized?: (data: SummarizedEvent["data"]) => void;
         onTagsUpdated?: (data: TagsUpdatedEvent["data"]) => void;
+        onAutopilotTurnStart?: (data: AutopilotTurnStartEvent["data"]) => void;
+        onAutopilotTurnComplete?: (data: AutopilotTurnCompleteEvent["data"]) => void;
+        onAutopilotComplete?: (data: AutopilotCompleteEvent["data"]) => void;
+        onAutopilotMaxTurns?: (data: AutopilotMaxTurnsEvent["data"]) => void;
         onError?: (error: string, messageId: string) => void;
         onClose?: () => void;
       },
@@ -632,9 +782,6 @@ export function useStream(apiPrefix: string = "chat") {
               ) {
                 return;
               }
-              throw new Error(
-                `Stream failed with status ${response.status}`,
-              );
             },
             onmessage(ev) {
               try {
@@ -688,7 +835,7 @@ export function useStream(apiPrefix: string = "chat") {
               setStreamingSessionId(null);
               handlers.onClose?.();
             },
-            onerror(err) {
+            onerror(_err) {
               if (controller.signal.aborted) {
                 setStreaming(false);
                 setStreamingSessionId(null);
@@ -699,7 +846,7 @@ export function useStream(apiPrefix: string = "chat") {
               setStreaming(false);
               setStreamingSessionId(null);
               handlers.onClose?.();
-              throw err;
+              // Don't throw — prevents fetchEventSource retry loop.
             },
           },
         );
@@ -768,9 +915,6 @@ export function useStream(apiPrefix: string = "chat") {
               ) {
                 return;
               }
-              throw new Error(
-                `Stream failed with status ${response.status}`,
-              );
             },
             onmessage(ev) {
               try {
@@ -821,7 +965,7 @@ export function useStream(apiPrefix: string = "chat") {
               setStreamingSessionId(null);
               handlers.onClose?.();
             },
-            onerror(err) {
+            onerror(_err) {
               if (controller.signal.aborted) {
                 setStreaming(false);
                 setStreamingSessionId(null);
@@ -832,7 +976,7 @@ export function useStream(apiPrefix: string = "chat") {
               setStreaming(false);
               setStreamingSessionId(null);
               handlers.onClose?.();
-              throw err;
+              // Don't throw — prevents fetchEventSource retry loop.
             },
           },
         );

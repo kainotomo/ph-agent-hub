@@ -499,6 +499,15 @@ export function listSessionsByTag(tag: string): Promise<SessionData[]> {
 
 export interface StreamStatusResponse {
   active: boolean;
+  autopilot?: boolean;
+  /** True when the autopilot is paused (stream ended but run exists). */
+  paused?: boolean;
+  /** Current turn number when autopilot is active (1-based). */
+  current_turn?: number;
+  /** Maximum turns configured for the autopilot run. */
+  max_turns?: number;
+  /** Backend AutopilotRun state: COMPLETED, FAILED, CANCELLED, PAUSED, etc. */
+  run_state?: string | null;
 }
 
 /**
@@ -533,4 +542,32 @@ export async function reconnectStream(
     throw new Error(`Reconnect failed with status ${res.status}`);
   }
   return res;
+}
+
+/**
+ * Pause a running autopilot.
+ */
+export async function autopilotPause(
+  sessionId: string,
+): Promise<{ status: string; run_id: string }> {
+  return api<{ status: string; run_id: string }>(
+    `/chat/session/${sessionId}/autopilot/pause`,
+    { method: "POST" },
+  );
+}
+
+/**
+ * Send a steering instruction to a paused autopilot.
+ */
+export async function autopilotSteer(
+  sessionId: string,
+  instruction: string,
+): Promise<{ status: string; run_id: string }> {
+  return api<{ status: string; run_id: string }>(
+    `/chat/session/${sessionId}/autopilot/steer`,
+    {
+      method: "POST",
+      body: { instruction },
+    },
+  );
 }

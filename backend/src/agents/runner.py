@@ -790,6 +790,7 @@ async def run_agent(
     current_user: User | None = None,
     file_ids: list[str] | None = None,
     function_invocation_kwargs: dict | None = None,
+    extra_tools: list | None = None,
 ) -> tuple[str, str]:
     """Assemble and run a MAF agent for a single user message.
 
@@ -800,12 +801,20 @@ async def run_agent(
         current_user: The authenticated user (or None for guest sessions).
         file_ids: Optional list of FileUpload IDs to link to the user message.
         function_invocation_kwargs: Optional kwargs forwarded to tool invocation
-            layers (used by A2A ``ask_user`` tool).
+            layers (used by A2A ``ask_user`` tool and autopilot ``task_complete`` tool).
+        extra_tools: Optional list of additional ``@tool``-decorated callables
+            to inject beyond those resolved from the session configuration
+            (used by the autopilot controller to inject ``task_complete``).
 
     Returns:
         A tuple of (assistant response text, assistant message ID).
     """
-    tenant_id = current_user.tenant_id if current_user else session_data.get("tenant_id", "")
+    # Use session_data for tenant_id — current_user may be a detached ORM
+    # object in the background task context, and accessing its attributes
+    # triggers a MissingGreenlet error (async lazy load in wrong session).
+    tenant_id = session_data.get("tenant_id", "") or (
+        current_user.tenant_id if current_user else ""
+    )
     session_id = session_data["id"]
     is_temporary = session_data.get("is_temporary", False)
 
@@ -845,6 +854,11 @@ async def run_agent(
         from ..tools.request_auth import request_auth
         # Prepend so they're available but don't shadow other tools
         _tools = [ask_user, request_auth] + list(_tools)
+
+    # ---- Inject extra tools (autopilot task_complete, etc.) ----------------
+    if extra_tools:
+        # Append so built-in/A2A tools take precedence
+        _tools = list(_tools) + list(extra_tools)
 
     # ---- 7. Run agent or workflow ----------------------------------------
     raw_response: str
@@ -2768,6 +2782,9 @@ async def run_agent_stream(
     current_user: User | None = None,
     message_id: str = "",
     file_ids: list[str] | None = None,
+    extra_tools: list | None = None,
+    function_invocation_kwargs: dict | None = None,
+    skip_user_persist: bool = False,
 ) -> AsyncIterator[dict]:
     """Assemble and run a MAF agent, yielding typed SSE event dicts.
 
@@ -2783,12 +2800,25 @@ async def run_agent_stream(
         message_id: Pre-generated UUID for the assistant message (used
             for client-side correlation across all events).
         file_ids: Optional list of FileUpload IDs to link to the user message.
+        extra_tools: Optional list of additional ``@tool``-decorated callables
+            to inject beyond those resolved from the session configuration.
+        function_invocation_kwargs: Optional kwargs forwarded to tool invocation
+            layers (used by autopilot ``task_complete`` tool).
+        skip_user_persist: When True, skip persisting the user message to
+            the DB.  Used by the autopilot controller on turn 1 when the
+            user's original message was already persisted by the caller
+            (``_handle_streaming_autopilot``) before the background task
+            started.
 
     Yields:
         Dicts with ``event`` and ``data`` keys suitable for
         ``EventSourceResponse``.
     """
-    tenant_id = current_user.tenant_id if current_user else session_data.get("tenant_id", "")
+    # Use session_data for tenant_id — current_user may be a detached ORM
+    # object in the background task context (MissingGreenlet fix).
+    tenant_id = session_data.get("tenant_id", "") or (
+        current_user.tenant_id if current_user else ""
+    )
     session_id = session_data["id"]
     is_temporary = session_data.get("is_temporary", False)
 
@@ -2802,12 +2832,17 @@ async def run_agent_stream(
 
     # Persist the user message immediately so it's always visible,
     # even if the agent run fails.
-    user_msg_id = await _persist_user_message(
-        db=db,
-        session_id=session_id,
-        is_temporary=is_temporary,
-        user_message=user_message,
-    )
+    # Can be skipped when the caller already persisted it (autopilot
+    # turn 1 — see ``_handle_streaming_autopilot``).
+    if skip_user_persist:
+        user_msg_id = ""
+    else:
+        user_msg_id = await _persist_user_message(
+            db=db,
+            session_id=session_id,
+            is_temporary=is_temporary,
+            user_message=user_message,
+        )
 
     # Link file uploads to the user message
     if file_ids and not is_temporary and current_user is not None:
@@ -2873,13 +2908,18 @@ async def run_agent_stream(
             cfg.execution_type,
             getattr(cfg.skill, "name", None) if cfg.skill else None,
         )
+        # ---- Inject extra tools into streaming tool list --------------------
+        _stream_tools = cfg.active_tool_callables
+        if extra_tools:
+            _stream_tools = list(_stream_tools) + list(extra_tools)
+
         if cfg.execution_type == "workflow":
             stream = _run_workflow_stream(
                 model=cfg.model,
                 skill=cfg.skill,
                 model_client=cfg.model_client,
                 system_prompt=cfg.system_prompt,
-                tools=cfg.active_tool_callables,
+                tools=_stream_tools,
                 user_message=contextualized_message,
                 agent_name=cfg.agent_name,
                 session_id=session_id,
@@ -2893,7 +2933,7 @@ async def run_agent_stream(
                 model=cfg.model,
                 model_client=cfg.model_client,
                 system_prompt=cfg.system_prompt,
-                tools=cfg.active_tool_callables,
+                tools=_stream_tools,
                 user_message=contextualized_message,
                 agent_name=cfg.agent_name,
                 session_id=session_id,
@@ -2901,6 +2941,7 @@ async def run_agent_stream(
                 token_counts=_stream_token_info,
                 temperature=cfg.temperature,
                 reasoning_effort=cfg.reasoning_effort,
+                function_invocation_kwargs=function_invocation_kwargs,
             )
         event_count = 0
         async for event_dict in stream:
@@ -3225,6 +3266,7 @@ async def _run_agent_stream(
     token_counts: dict | None = None,
     temperature: float = 0.7,
     reasoning_effort: str | None = None,
+    function_invocation_kwargs: dict | None = None,
 ) -> AsyncIterator[dict]:
     """Run a MAF Agent in streaming mode, yielding SSE event dicts.
 
@@ -3261,7 +3303,10 @@ async def _run_agent_stream(
         tokenizer=tokenizer,
     )
 
-    response_stream = agent.run(user_message, stream=True)
+    if function_invocation_kwargs is not None:
+        response_stream = agent.run(user_message, stream=True, function_invocation_kwargs=function_invocation_kwargs)
+    else:
+        response_stream = agent.run(user_message, stream=True)
     logger.info(
         "Agent.run returned: type=%s",
         type(response_stream).__module__ + "." + type(response_stream).__qualname__,

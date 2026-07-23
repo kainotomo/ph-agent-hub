@@ -53,12 +53,14 @@ class StreamBridge:
     def __init__(
         self,
         session_id: str,
-        max_buffer: int = 200,
+        max_buffer: int = 1000,
         heartbeat_interval: int = 15,
+        autopilot: bool = False,
     ) -> None:
         self._session_id = session_id
         self._max_buffer = max_buffer
         self._heartbeat_interval = heartbeat_interval
+        self._autopilot = autopilot
 
         #: Bounded buffer of past events for replay on new subscriptions.
         self._buffer: deque[dict[str, Any]] = deque(maxlen=max_buffer)
@@ -180,6 +182,10 @@ class StreamBridge:
     @property
     def event_count(self) -> int:
         return self._event_count
+
+    @property
+    def is_autopilot(self) -> bool:
+        return self._autopilot
 
     def __repr__(self) -> str:
         return (

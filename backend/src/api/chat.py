@@ -125,6 +125,10 @@ class SessionResponse(BaseModel):
     auto_route_enabled: bool = False
     auto_select_tools: bool = True
     tags: list[TagResponse] = []
+    last_message: str | None = None
+    """Preview text of the most recent user or assistant message in the
+    session.  Populated by ``list_sessions()``.  Shown in the sidebar
+    so the user can identify sessions at a glance."""
     created_at: datetime
     updated_at: datetime
 
@@ -136,6 +140,12 @@ class MessageCreate(BaseModel):
     file_ids: list[str] | None = None
     temperature: float | None = None
     session_data: SessionCreate | None = None
+    autopilot: bool = False
+    """When True, runs the agent in autopilot mode — autonomous multi-turn
+    execution toward the goal in ``content`` without waiting for user
+    prompts between turns.  The agent calls ``task_complete()`` when
+    done.  Only supported for permanent (non-temporary) sessions.
+    (Issue #446)"""
 
 
 class MessageResponse(BaseModel):
@@ -614,12 +624,59 @@ async def list_sessions(
     db: AsyncSession = Depends(get_db),
     current_user: UserORM = Depends(get_current_user),
 ):
-    """List the current user's permanent sessions (temp sessions excluded)."""
+    """List the current user's permanent sessions (temp sessions excluded).
+
+    The response includes a ``last_message`` preview — the text of the
+    most recent message — so the sidebar can show a snippet at a glance.
+    """
     sessions = await session_service.list_sessions_for_user(
         db=db,
         user_id=current_user.id,
         tenant_id=current_user.tenant_id,
     )
+
+    # Fetch the last message content for each session.
+    if sessions:
+        from ..db.orm.messages import Message as MsgORM
+
+        session_ids = [s.id for s in sessions]
+        # Fetch all non-deleted messages for these sessions, ordered by
+        # time descending, then keep the first (latest) per session_id.
+        all_msgs_sql = (
+            select(
+                MsgORM.session_id,
+                MsgORM.content,
+                MsgORM.created_at,
+            )
+            .where(
+                MsgORM.session_id.in_(session_ids),
+                MsgORM.is_deleted == False,  # noqa: E712
+            )
+            .order_by(MsgORM.created_at.desc())
+        )
+        all_msgs = await db.execute(all_msgs_sql)
+        last_msg_map: dict[str, str | None] = {}
+        seen: set[str] = set()
+        for row in all_msgs:
+            if row.session_id in seen:
+                continue
+            seen.add(row.session_id)
+            content_list = row.content or []
+            preview = None
+            if isinstance(content_list, list):
+                for block in content_list:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        preview = block.get("text", "")[:120].strip()
+                        break
+            last_msg_map[row.session_id] = preview or None
+
+        result = []
+        for s in sessions:
+            resp = SessionResponse.model_validate(s)
+            resp.last_message = last_msg_map.get(s.id)
+            result.append(resp)
+        return result
+
     return [SessionResponse.model_validate(s) for s in sessions]
 
 
@@ -920,7 +977,7 @@ async def list_messages(
                 Message.session_id == session_id,
                 Message.is_deleted == False,  # noqa: E712
             )
-            .order_by(Message.created_at)
+            .order_by(Message.created_at, Message.id)
         )
         messages = result.scalars().all()
         return [
@@ -969,7 +1026,17 @@ async def send_message(
         await _require_session_owner(data, current_user)
     except NotFoundError:
         if body.session_data is None:
-            raise
+            # Frontend didn't send session creation data (e.g. pendingFlag
+            # race).  Create the session with defaults instead of returning
+            # 404, which would trigger a fetchEventSource retry loop.
+            logger.info(
+                "Lazy-creating session %s with defaults (no session_data)",
+                session_id,
+            )
+            body.session_data = SessionCreate(
+                title="New Chat",
+                auto_route_enabled=True,
+            )
         logger.info(
             "Lazy-creating session %s on first message", session_id,
         )
@@ -1115,6 +1182,22 @@ async def send_message(
         # Inject per-message temperature override into session_data
         if body.temperature is not None:
             data["_message_temperature"] = body.temperature
+
+        # ---- Autopilot mode (Issue #446) — streaming path ----------------
+        if body.autopilot:
+            if data.get("is_temporary", False):
+                raise ValidationError(
+                    "Autopilot is not supported for temporary sessions"
+                )
+            return await _handle_streaming_autopilot(
+                session_id=session_id,
+                body=body,
+                data=data,
+                db=db,
+                current_user=current_user,
+                modified_message=modified_message,
+            )
+
         return await _handle_streaming_message(
             session_id=session_id,
             body=body,
@@ -1129,13 +1212,29 @@ async def send_message(
     # Inject per-message temperature override into session_data
     if body.temperature is not None:
         data["_message_temperature"] = body.temperature
-    response_text, assistant_msg_id = await run_agent(
-        session_data=data,
-        user_message=modified_message,
-        db=db,
-        current_user=current_user,
-        file_ids=valid_file_ids,
-    )
+
+    # ---- Autopilot mode (Issue #446) --------------------------------------
+    if body.autopilot:
+        if data.get("is_temporary", False):
+            raise ValidationError(
+                "Autopilot is not supported for temporary sessions"
+            )
+        from ..agents.autopilot import run_autopilot
+
+        response_text, assistant_msg_id = await run_autopilot(
+            session_data=data,
+            goal=modified_message,
+            db=db,
+            current_user=current_user,
+        )
+    else:
+        response_text, assistant_msg_id = await run_agent(
+            session_data=data,
+            user_message=modified_message,
+            db=db,
+            current_user=current_user,
+            file_ids=valid_file_ids,
+        )
 
     model_id = data.get("selected_model_id")
 
@@ -1280,11 +1379,26 @@ async def _run_agent_background(
       - Closes and removes the bridge
     """
     from ..db.base import AsyncSessionLocal
+    from sqlalchemy import select as _sa_select
 
     _file_ids = file_ids or []
 
     async with AsyncSessionLocal() as stream_db:
+        # Initialise early so finally blocks don't UnboundLocalError if
+        # the refresh query below fails (detached current_user).
+        keepalive_task: asyncio.Task | None = None
+        local_user = current_user
         try:
+            # Refresh current_user in this session's context using the
+            # user_id from session_data (a plain dict, no ORM access).
+            _uid = data.get("user_id") or current_user.id
+            _user = await stream_db.execute(
+                _sa_select(UserORM).where(UserORM.id == _uid)
+            )
+            _row = _user.scalar_one_or_none()
+            if _row is not None:
+                local_user = _row
+
             # Periodic Redis keepalive so the frontend can check status.
             keepalive_task = asyncio.ensure_future(
                 _keep_stream_active_loop(session_id, bridge)
@@ -1294,7 +1408,7 @@ async def _run_agent_background(
                 session_data=data,
                 user_message=user_message,
                 db=stream_db,
-                current_user=current_user,
+                current_user=local_user,
                 message_id=message_id,
                 file_ids=_file_ids,
             ):
@@ -1343,11 +1457,12 @@ async def _run_agent_background(
             })
         finally:
             # Stop the keepalive loop.
-            keepalive_task.cancel()
-            try:
-                await keepalive_task
-            except (asyncio.CancelledError, Exception):
-                pass
+            if keepalive_task is not None:
+                keepalive_task.cancel()
+                try:
+                    await keepalive_task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
             # Clean up Redis active flag.
             await clear_stream_active(session_id)
@@ -1373,6 +1488,157 @@ async def _run_agent_background(
 
             logger.info(
                 "Background agent task finished for session %s",
+                session_id,
+            )
+
+
+async def _run_autopilot_background(
+    session_id: str,
+    data: dict[str, Any],
+    user_message: str,
+    current_user: UserORM,
+    bridge: StreamBridge,
+    max_turns: int | None = None,
+    resume_from_turn: int | None = None,
+) -> None:
+    """Run the autopilot in the background, writing events to *bridge*.
+
+    Same pattern as ``_run_agent_background`` but calls
+    ``run_autopilot_stream()`` instead of ``run_agent_stream()``.
+    The meta-loop handles multiple turns autonomously.
+
+    When *resume_from_turn* is provided, the existing ``AutopilotRun``
+    for this session is reused (no new record created) and the loop
+    starts from that turn.
+
+    Cleanup on completion (``finally``):
+      - Clears the Redis ``stream:active:`` flag
+      - Closes and removes the bridge
+    """
+    from ..db.base import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as agent_db:
+        # Initialise early so finally blocks don't UnboundLocalError.
+        keepalive_task: asyncio.Task | None = None
+        local_user = current_user
+        try:
+            # Refresh current_user in this session's context using the
+            # user_id from data (a plain dict, no ORM access).
+            from sqlalchemy import select as _sa_select
+            _uid = data.get("user_id") or current_user.id
+            _user = await agent_db.execute(
+                _sa_select(UserORM).where(UserORM.id == _uid)
+            )
+            _row = _user.scalar_one_or_none()
+            if _row is not None:
+                local_user = _row
+
+            # Create or fetch AutopilotRun using a separate session.
+            autopilot_run_id = None
+            start_turn = 1
+            try:
+                if resume_from_turn is not None:
+                    # Reuse the existing run.
+                    from ..services.autopilot_service import get_run_by_session as _ap_get
+                    async with AsyncSessionLocal() as _ap_fetch_db:
+                        existing_run = await _ap_get(_ap_fetch_db, session_id)
+                        if existing_run:
+                            autopilot_run_id = existing_run.id
+                            start_turn = resume_from_turn
+                            logger.info(
+                                "Resuming autopilot %s for session %s from turn %d",
+                                autopilot_run_id, session_id, start_turn,
+                            )
+                else:
+                    from ..services.autopilot_service import create_autopilot_run as _ap_create
+                    async with AsyncSessionLocal() as _ap_create_db:
+                        autopilot_run = await _ap_create(
+                            _ap_create_db, session_id, user_message, max_turns or 20,
+                        )
+                        autopilot_run_id = autopilot_run.id
+            except Exception:
+                logger.warning("Failed to create/fetch AutopilotRun — continuing without persistence")
+
+            keepalive_task = asyncio.ensure_future(
+                _keep_stream_active_loop(session_id, bridge)
+            )
+
+            from ..agents.autopilot import run_autopilot_stream
+
+            await run_autopilot_stream(
+                session_data=data,
+                goal=user_message,
+                db=agent_db,
+                current_user=local_user,
+                bridge=bridge,
+                max_turns=max_turns,
+                autopilot_run_id=autopilot_run_id,
+                start_turn=start_turn,
+            )
+
+        except asyncio.CancelledError:
+            logger.info(
+                "Background autopilot task cancelled for session %s",
+                session_id,
+            )
+            try:
+                from ..services.autopilot_service import set_state as _ap_set_state
+                async with AsyncSessionLocal() as _cancel_db:
+                    await _ap_set_state(_cancel_db, autopilot_run_id, "CANCELLED")
+            except Exception:
+                pass
+        except Exception:
+            logger.exception(
+                "Background autopilot task failed for session %s",
+                session_id,
+            )
+            try:
+                from ..services.autopilot_service import set_state as _ap_set_state
+                async with AsyncSessionLocal() as _err_db:
+                    await _ap_set_state(
+                        _err_db, autopilot_run_id, "FAILED",
+                        error_message="Autopilot execution failed",
+                    )
+            except Exception:
+                pass
+            await bridge.put({
+                "event": "error",
+                "data": json.dumps({
+                    "code": "autopilot_error",
+                    "message": "Autopilot execution failed",
+                    "session_id": session_id,
+                }),
+            })
+        finally:
+            # Stop the keepalive loop (may be None if setup failed).
+            if keepalive_task is not None:
+                keepalive_task.cancel()
+                try:
+                    await keepalive_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+            # Clean up Redis active flag.
+            await clear_stream_active(session_id)
+
+            # Clean up Redis cancel flag if set.
+            await clear_stream_cancel(session_id)
+
+            # Close the bridge — signals all subscribers to stop.
+            await bridge.close()
+
+            # Remove from registry.
+            remove_bridge(session_id)
+
+            # Close the agent DB session (no rollback needed —
+            # run_agent_stream() manages its own transactions).
+            try:
+                await asyncio.shield(agent_db.close())
+            except (asyncio.CancelledError, Exception):
+                pass
+
+            logger.info(
+                "Background autopilot task finished for session %s",
                 session_id,
             )
 
@@ -1451,6 +1717,40 @@ def _spawn_agent_background(
     return task
 
 
+def _spawn_autopilot_background(
+    session_id: str,
+    data: dict,
+    user_message: str,
+    current_user: UserORM,
+    bridge: StreamBridge,
+    max_turns: int | None = None,
+    resume_from_turn: int | None = None,
+) -> asyncio.Task:
+    """Create and return a background ``asyncio.Task`` for autopilot execution.
+
+    Same pattern as ``_spawn_agent_background`` — registers the bridge,
+    sets the Redis active flag, and spawns via ``asyncio.create_task``.
+
+    When *resume_from_turn* is provided, the existing ``AutopilotRun``
+    is reused (no new record created).
+    """
+    register_bridge(session_id, bridge)
+    asyncio.ensure_future(set_stream_active(session_id))
+
+    task = asyncio.create_task(
+        _run_autopilot_background(
+            session_id=session_id,
+            data=data,
+            user_message=user_message,
+            current_user=current_user,
+            bridge=bridge,
+            max_turns=max_turns,
+            resume_from_turn=resume_from_turn,
+        )
+    )
+    return task
+
+
 async def _handle_streaming_message(
     session_id: str,
     body: MessageCreate,
@@ -1483,6 +1783,55 @@ async def _handle_streaming_message(
     )
 
     # Return SSE response that reads from the bridge.
+    return EventSourceResponse(
+        bridge.subscribe(), media_type="text/event-stream"
+    )
+
+
+async def _handle_streaming_autopilot(
+    session_id: str,
+    body: MessageCreate,
+    data: dict[str, Any],
+    db: AsyncSession,
+    current_user: UserORM,
+    modified_message: str = "",
+) -> EventSourceResponse:
+    """Send a message in autopilot mode and run the meta-loop in the
+    background, returning SSE.
+
+    Same pattern as ``_handle_streaming_message`` — the autopilot runs as
+    a background task and the SSE client reads from a ``StreamBridge``.
+    If the SSE client disconnects, the autopilot continues uninterrupted
+    (same resilience guarantee as normal streaming chat).
+
+    **Important**: The user's original message is persisted to the DB
+    **before** the background task starts so it is immediately visible
+    in the sidebar and survives page refresh / navigation away.
+    """
+    _user_message = modified_message or body.content
+
+    # Persist the user's original message immediately so it's in the DB
+    # before any autopilot turn starts.  This ensures the session title
+    # is set (auto-title in ``send_message``) and the message survives
+    # page refresh / navigation.
+    from ..agents.runner import _persist_user_message
+
+    await _persist_user_message(
+        db=db,
+        session_id=session_id,
+        is_temporary=data.get("is_temporary", False),
+        user_message=_user_message,
+    )
+
+    bridge = StreamBridge(session_id=session_id, autopilot=True)
+    _spawn_autopilot_background(
+        session_id=session_id,
+        data=data,
+        user_message=_user_message,
+        current_user=current_user,
+        bridge=bridge,
+    )
+
     return EventSourceResponse(
         bridge.subscribe(), media_type="text/event-stream"
     )
@@ -1567,13 +1916,20 @@ async def reconnect_stream(
 
     # Check if the agent is still running.
     if not await check_stream_active(session_id):
-        # Agent already finished — return a single message_complete
-        # with the last persisted message.  The frontend will fall
-        # back to the normal message-fetch flow.
+        # Agent already finished — return state so the frontend can
+        # update the autopilot panel instead of staying stuck.
+        _autopilot_state = None
+        from ..services.autopilot_service import (
+            get_run_by_session as _ap_get_run,
+        )
+        _run = await _ap_get_run(db, session_id)
+        if _run is not None:
+            _autopilot_state = _run.state
         return Response(
             content=json.dumps({
                 "active": False,
                 "session_id": session_id,
+                "autopilot_state": _autopilot_state,
             }),
             media_type="application/json",
         )
@@ -1582,10 +1938,18 @@ async def reconnect_stream(
     if bridge is None:
         # Race: agent finished between the Redis check and the bridge
         # lookup.  Return inactive.
+        _autopilot_state = None
+        from ..services.autopilot_service import (
+            get_run_by_session as _ap_get_run,
+        )
+        _run = await _ap_get_run(db, session_id)
+        if _run is not None:
+            _autopilot_state = _run.state
         return Response(
             content=json.dumps({
                 "active": False,
                 "session_id": session_id,
+                "autopilot_state": _autopilot_state,
             }),
             media_type="application/json",
         )
@@ -1619,7 +1983,124 @@ async def stream_status(
     await _require_session_owner(data, current_user)
 
     active = await check_stream_active(session_id)
-    return {"active": active}
+    autopilot = False
+    paused = False
+    current_turn: int | None = None
+    max_turns: int | None = None
+    if active:
+        bridge = get_bridge(session_id)
+        if bridge is not None:
+            autopilot = bridge.is_autopilot
+            # If no bridge info available, try the DB for turn info.
+    # Fetch autopilot run details for turn info regardless of active state
+    # (on reconnect the frontend needs current_turn/max_turns to restore
+    # the autopilot panel accurately).
+    from ..services.autopilot_service import (
+        get_run_by_session as _ap_get_run,
+    )
+    run = await _ap_get_run(db, session_id)
+    if run is not None:
+        if run.state == "PAUSED":
+            autopilot = True
+            paused = True
+        elif run.state in ("COMPLETED", "FAILED", "CANCELLED"):
+            autopilot = True
+        current_turn = run.current_turn
+        max_turns = run.max_turns
+    elif not active:
+        # Stream inactive, no autopilot run — normal session, nothing extra.
+        pass
+    return {
+        "active": active,
+        "autopilot": autopilot,
+        "paused": paused,
+        "current_turn": current_turn,
+        "max_turns": max_turns,
+        "run_state": run.state if run is not None else None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Autopilot steer endpoint — Issue #446 Phase 3
+# ---------------------------------------------------------------------------
+
+
+class SteerRequest(BaseModel):
+    instruction: str
+
+
+@router.post("/session/{session_id}/autopilot/pause")
+async def autopilot_pause(
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(get_current_user),
+):
+    """Pause a running autopilot.
+
+    Sets the ``AutopilotRun.state`` to ``PAUSED``.  The running
+    autopilot loop detects this between turns and stops.
+    """
+    data = await _load_session(db, session_id)
+    await _require_session_owner(data, current_user)
+
+    from ..services.autopilot_service import (
+        get_run_by_session as _ap_get_run,
+        set_state as _ap_set_state,
+    )
+
+    run = await _ap_get_run(db, session_id)
+    if run is None:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="No autopilot run found for this session")
+
+    await _ap_set_state(db, run.id, "PAUSED")
+    return {"status": "paused", "run_id": run.id}
+
+
+@router.post("/session/{session_id}/autopilot/steer")
+async def autopilot_steer(
+    session_id: str,
+    body: SteerRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(get_current_user),
+):
+    """Provide a steering instruction to a paused autopilot and resume it.
+
+    The instruction is stored in the ``AutopilotRun`` record and
+    a new background task is spawned to continue execution from
+    the current turn.
+    """
+    data = await _load_session(db, session_id)
+    await _require_session_owner(data, current_user)
+
+    from ..services.autopilot_service import (
+        get_run_by_session as _ap_get_run,
+        set_state as _ap_set_state,
+        set_steering_instruction as _ap_set_steer,
+    )
+
+    run = await _ap_get_run(db, session_id)
+    if run is None:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="No autopilot run found for this session")
+
+    await _ap_set_steer(db, run.id, body.instruction)
+    # After storing the instruction, set back to EXECUTING so the
+    # controller's next poll sees it should continue.
+    await _ap_set_state(db, run.id, "EXECUTING")
+
+    # Spawn a new background task with a new bridge to continue execution.
+    resumed_bridge = StreamBridge(session_id=session_id, autopilot=True)
+    _spawn_autopilot_background(
+        session_id=session_id,
+        data=data,
+        user_message=run.goal,
+        current_user=current_user,
+        bridge=resumed_bridge,
+        resume_from_turn=run.current_turn + 1,
+    )
+
+    return {"status": "resumed", "run_id": run.id}
 
 
 # =============================================================================

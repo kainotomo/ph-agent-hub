@@ -723,19 +723,26 @@ class TestSendMessage:
         )
         assert resp.status_code == 403
 
+    @patch("src.api.chat.run_agent")
     async def test_send_message_to_nonexistent_session(
-        self, async_client, auth_headers, test_user
+        self, mock_run_agent, async_client, auth_headers, test_user, test_model
     ):
-        """Verify sending to a non-existent session returns 404."""
+        """Verify sending to a non-existent session lazy-creates one (200)."""
+        mock_run_agent.return_value = ("Welcome!", str(uuid.uuid4()))
         headers = auth_headers(test_user)
         fake_id = str(uuid.uuid4())
-        payload = {"content": "Hello"}
+        payload = {
+            "content": "Hello",
+            "session_data": {
+                "selected_model_id": test_model.id,
+            },
+        }
         resp = await async_client.post(
             f"/api/chat/session/{fake_id}/message",
             json=payload,
             headers=headers,
         )
-        assert resp.status_code == 404
+        assert resp.status_code == 200, resp.text
 
     @patch("src.api.chat.run_agent")
     async def test_send_message_with_session_data_creates_session(

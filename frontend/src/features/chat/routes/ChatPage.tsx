@@ -5,7 +5,7 @@
 // =============================================================================
 
 import { useParams, useNavigate } from "react-router-dom";
-import { Layout, Button, Typography, Spin, message } from "antd";
+import { Layout, Button, Typography, message } from "antd";
 import { PlusOutlined, ThunderboltOutlined } from "@ant-design/icons";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { SessionSidebar } from "../components/SessionSidebar";
@@ -20,11 +20,15 @@ export function ChatPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
-  const { data: session, isLoading: loadingSession } = useQuery({
+  const { data: session } = useQuery({
     queryKey: ["session", sessionId],
     queryFn: () => getSession(sessionId!),
     enabled: !!sessionId,
     retry: false,
+    // No staleTime — we rely on manual invalidation via onStreamStart /
+    // onMessageComplete to pull fresh data when the session is created.
+    // The initial 404 for lazy sessions is expected and harmless (one
+    // single error, not a flood, since invalidations are now controlled).
   });
 
   const handleSessionUpdate = async (data: Record<string, unknown>) => {
@@ -95,34 +99,18 @@ export function ChatPage() {
               </Button>
             </div>
           </div>
-        ) : loadingSession ? (
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "center",
-              alignItems: "center",
-              height: "100%",
-            }}
-          >
-            <Spin size="large" />
-          </div>
-        ) : session ? (
-          <ChatWindow
-            sessionId={session.id}
-            isTemporary={session.is_temporary}
-            selectedModelId={session.selected_model_id ?? undefined}
-            selectedTemplateId={session.selected_template_id ?? undefined}
-            selectedSkillId={session.selected_skill_id ?? undefined}
-            temperature={session.temperature ?? null}
-            crossSessionMemoryEnabled={session.cross_session_retrieval_enabled ?? null}
-            autoRouteEnabled={session.auto_route_enabled ?? false}
-            autoSelectTools={session.auto_select_tools ?? true}
-            onSessionUpdate={handleSessionUpdate}
-          />
         ) : (
           <ChatWindow
             sessionId={sessionId!}
-            isPending={true}
+            isPending={!session}
+            isTemporary={session?.is_temporary}
+            selectedModelId={session?.selected_model_id ?? undefined}
+            selectedTemplateId={session?.selected_template_id ?? undefined}
+            selectedSkillId={session?.selected_skill_id ?? undefined}
+            temperature={session?.temperature ?? null}
+            crossSessionMemoryEnabled={session?.cross_session_retrieval_enabled ?? null}
+            autoRouteEnabled={session?.auto_route_enabled ?? false}
+            autoSelectTools={session?.auto_select_tools ?? true}
             onSessionUpdate={handleSessionUpdate}
           />
         )}

@@ -207,9 +207,9 @@ describe("ChatPage", () => {
     expect(chatWindow).toHaveAttribute("data-is-temporary", "false");
   });
 
-  // ── sessionId with loading → Spin ──────────────────────────────────────
+  // ── sessionId with loading → ChatWindow with isPending ─────────────────
 
-  it("shows loading spinner while session is being fetched", async () => {
+  it("renders ChatWindow with isPending while session is being fetched", async () => {
     mockSessionId = "session-1";
     // Don't resolve the query
     mockGetSession.mockImplementation(() => new Promise(() => {}));
@@ -217,7 +217,9 @@ describe("ChatPage", () => {
     renderChatPage();
     await settle();
 
-    expect(document.querySelector(".ant-spin")).toBeInTheDocument();
+    const chatWindow = screen.getByTestId("chat-window");
+    expect(chatWindow).toBeInTheDocument();
+    expect(chatWindow).toHaveAttribute("data-is-pending", "true");
   });
 
   // ── sessionId with 404 → ChatWindow with isPending ─────────────────────

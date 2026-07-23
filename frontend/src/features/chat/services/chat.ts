@@ -145,6 +145,19 @@ export function deleteSession(id: string): Promise<void> {
   return api<void>(`/chat/session/${id}`, { method: "DELETE" });
 }
 
+export interface BatchDeleteResult {
+  deleted: number;
+  skipped: Array<{ id: string; reason: string }>;
+  errors: string[];
+}
+
+export function deleteSessions(ids: string[]): Promise<BatchDeleteResult> {
+  return api<BatchDeleteResult>("/chat/sessions/delete", {
+    method: "POST",
+    body: { ids },
+  });
+}
+
 export function finalizeSession(id: string): Promise<SessionData> {
   return api<SessionData>(`/chat/session/${id}/finalize`, {
     method: "POST",

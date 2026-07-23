@@ -101,6 +101,15 @@ class SessionUpdate(BaseModel):
     auto_select_tools: bool | None = None
 
 
+class BatchDeleteSessionsRequest(BaseModel):
+    """Request body for batch-deleting sessions.
+
+    Accepts a list of session IDs.  Max 100 sessions per call.
+    """
+
+    ids: list[str]
+
+
 class TagResponse(BaseModel):
     id: str
     name: str
@@ -898,6 +907,39 @@ async def delete_session(
         await delete_temp_session(session_id)
     else:
         await session_service.delete_session(db, session_id)
+
+
+@router.post("/sessions/delete")
+async def delete_sessions_batch(
+    body: BatchDeleteSessionsRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(get_current_user),
+):
+    """Batch-delete multiple sessions (DB and/or Redis).
+
+    Accepts up to 100 session IDs.  Returns a structured response with
+    counts of deleted / skipped / errored sessions.
+
+    Skips (rather than fails) sessions that don't exist or aren't owned
+    by the current user, so that a batch of 10 where 1 is unauthorized
+    still deletes the other 9.
+    """
+    ids = body.ids
+
+    if not ids:
+        raise ValidationError("ids must be a non-empty list of session IDs")
+
+    if len(ids) > 100:
+        raise ValidationError("Cannot delete more than 100 sessions at once")
+
+    result = await session_service.delete_sessions_batch(
+        db=db,
+        session_ids=ids,
+        user_id=current_user.id,
+        tenant_id=current_user.tenant_id,
+    )
+
+    return result
 
 
 @router.post("/session/{session_id}/finalize", response_model=SessionResponse)

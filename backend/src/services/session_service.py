@@ -394,6 +394,170 @@ async def delete_session(db: AsyncSession, session_id: str) -> None:
     await db.commit()
 
 
+async def delete_sessions_batch(
+    db: AsyncSession,
+    session_ids: list[str],
+    user_id: str,
+    tenant_id: str,
+) -> dict:
+    """Delete multiple sessions by ID in a single transaction.
+
+    For each ID, checks existence and ownership.  Separates DB (permanent)
+    sessions from Redis (temporary) sessions.  Returns a dict with:
+      - ``deleted``: number of sessions successfully deleted
+      - ``skipped``: list of ``{"id": str, "reason": str}`` for sessions that
+        could not be deleted (not found, not owned, streaming, already temp)
+      - ``errors``: list of ``{"id": str, "error": str}`` for unexpected errors
+
+    The function processes DB sessions in bulk using ``.in_(session_ids)``
+    for FK-dependent tables (same cascade pattern as ``_purge_empty_sessions``),
+    then handles temp (Redis) sessions one at a time.
+    """
+    from sqlalchemy import delete as sa_delete
+    from ..core.redis import delete_temp_session, get_temp_session
+    from ..db.orm.messages import Message, MessageFeedback
+    from ..db.orm.sessions import SessionActiveTool as SAT
+    from ..db.orm.file_uploads import FileUpload
+    from ..db.orm.memory import Memory
+    from ..db.orm.tags import SessionTag
+    from ..services import upload_service
+
+    skipped: list[dict] = []
+    errors: list[dict] = []
+    db_session_ids: list[str] = []
+    temp_session_ids: list[str] = []
+
+    # --- Phase 1: Validate each session ---
+    for sid in session_ids:
+        # Try DB lookup first
+        session_orm = await get_session_by_id(db, sid)
+        if session_orm is not None:
+            if session_orm.user_id != user_id:
+                skipped.append({"id": sid, "reason": "Not owned by current user"})
+                continue
+            if session_orm.tenant_id != tenant_id:
+                skipped.append({"id": sid, "reason": "Session belongs to a different tenant"})
+                continue
+            db_session_ids.append(sid)
+            continue
+
+        # Try Redis (temporary session)
+        temp = await get_temp_session(sid)
+        if temp is not None:
+            t_user = temp.get("user_id")
+            t_tenant = temp.get("tenant_id")
+            if t_user != user_id:
+                skipped.append({"id": sid, "reason": "Not owned by current user"})
+                continue
+            if t_tenant != tenant_id:
+                skipped.append({"id": sid, "reason": "Session belongs to a different tenant"})
+                continue
+            temp_session_ids.append(sid)
+            continue
+
+        # Not found anywhere
+        skipped.append({"id": sid, "reason": "Session not found"})
+
+    # --- Phase 2: Delete DB (permanent) sessions ---
+    if db_session_ids:
+        # Collect all message IDs across all targeted sessions
+        msg_result = await db.execute(
+            select(Message.id).where(Message.session_id.in_(db_session_ids))
+        )
+        all_message_ids = [row[0] for row in msg_result.all()]
+
+        # 0. Delete autopilot runs
+        await db.execute(
+            sa_delete(AutopilotRun).where(AutopilotRun.session_id.in_(db_session_ids))
+        )
+
+        # 1. Delete file uploads BEFORE messages
+        for sid in db_session_ids:
+            await upload_service.delete_uploads_for_session(db, sid)
+
+        # 2. Delete message feedbacks
+        if all_message_ids:
+            await db.execute(
+                sa_delete(MessageFeedback).where(
+                    MessageFeedback.message_id.in_(all_message_ids)
+                )
+            )
+            await db.flush()
+
+        # 3. Delete messages
+        await db.execute(
+            sa_delete(Message).where(Message.session_id.in_(db_session_ids))
+        )
+        await db.flush()
+
+        # 4. Delete active tool associations
+        await db.execute(
+            sa_delete(SAT).where(SAT.session_id.in_(db_session_ids))
+        )
+        await db.flush()
+
+        # 5. Delete session tags
+        await db.execute(
+            sa_delete(SessionTag).where(SessionTag.session_id.in_(db_session_ids))
+        )
+        await db.flush()
+
+        # 6. Delete session-scoped memories
+        await db.execute(
+            sa_delete(Memory).where(Memory.session_id.in_(db_session_ids))
+        )
+        await db.flush()
+
+        # 7. Delete the session rows
+        for sid in db_session_ids:
+            session_orm = await get_session_by_id(db, sid)
+            if session_orm is not None:
+                db.expire(session_orm, ["tags"])
+                await db.delete(session_orm)
+
+        await db.flush()
+
+    # --- Phase 3: Delete temp (Redis) sessions ---
+    for sid in temp_session_ids:
+        try:
+            # Clean up file uploads before deleting Redis keys
+            temp = await get_temp_session(sid)
+            if temp:
+                uploaded_ids: list[str] = temp.get("uploaded_file_ids", [])
+                for file_id in uploaded_ids:
+                    await upload_service._delete_temp_upload_by_id(db, file_id)
+            await delete_temp_session(sid)
+        except Exception as exc:
+            errors.append({"id": sid, "error": str(exc)})
+            temp_session_ids.remove(sid)
+
+    # --- Phase 4: Commit and finalize ---
+    if db_session_ids:
+        try:
+            await db.commit()
+        except Exception as exc:
+            await db.rollback()
+            errors.append({"id": "batch", "error": f"Transaction failed: {exc}"})
+            # Reconstruct skipped from what we tried
+            deleted_count = 0
+            for sid in db_session_ids:
+                skipped.insert(0, {"id": sid, "reason": "Transaction rolled back"})
+            db_session_ids = []
+            return {
+                "deleted": deleted_count,
+                "skipped": skipped,
+                "errors": errors,
+            }
+
+    deleted_count = len(db_session_ids) + len(temp_session_ids)
+
+    return {
+        "deleted": deleted_count,
+        "skipped": skipped,
+        "errors": errors,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Session active tool management
 # ---------------------------------------------------------------------------

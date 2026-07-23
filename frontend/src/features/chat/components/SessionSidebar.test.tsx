@@ -23,12 +23,14 @@ const {
   mockListSessions,
   mockCreateSession,
   mockDeleteSession,
+  mockDeleteSessions,
   mockUpdateSession,
   mockImportSession,
 } = vi.hoisted(() => ({
   mockListSessions: vi.fn(),
   mockCreateSession: vi.fn(),
   mockDeleteSession: vi.fn(),
+  mockDeleteSessions: vi.fn(),
   mockUpdateSession: vi.fn(),
   mockImportSession: vi.fn(),
 }));
@@ -37,6 +39,7 @@ vi.mock("../services/chat", () => ({
   listSessions: mockListSessions,
   createSession: mockCreateSession,
   deleteSession: mockDeleteSession,
+  deleteSessions: mockDeleteSessions,
   updateSession: mockUpdateSession,
   exportSession: vi.fn(),
   importSession: mockImportSession,
@@ -377,5 +380,95 @@ describe("SessionSidebar", () => {
     // Ant Design List shows a Spin when loading
     const spinner = document.querySelector(".ant-spin");
     expect(spinner).toBeInTheDocument();
+  });
+
+  // ── Batch delete: selection mode toggle ───────────────────────────────
+
+  it("toggles selection mode when select button is clicked", async () => {
+    renderSidebar();
+    await settle();
+
+    // Find the select button (CheckSquareOutlined icon)
+    const selectBtn = document.querySelector(".anticon-check-square");
+    expect(selectBtn).toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.click(selectBtn!.closest("button")!);
+
+    // Checkboxes should now appear on session items
+    const checkboxes = document.querySelectorAll(".ant-checkbox");
+    expect(checkboxes.length).toBeGreaterThan(0);
+
+    // Batch action bar should appear with "0 selected"
+    expect(screen.getByText("0 selected")).toBeInTheDocument();
+
+    // Click the select button again to exit selection mode
+    const closeBtn = document.querySelector(".anticon-close");
+    await user.click(closeBtn!.closest("button")!);
+
+    // Checkboxes should disappear
+    const checkboxesAfter = document.querySelectorAll(".ant-checkbox");
+    expect(checkboxesAfter.length).toBe(0);
+  });
+
+  // ── Batch delete: select and delete sessions ──────────────────────────
+
+  it("selects sessions and calls deleteSessions on confirm", async () => {
+    mockDeleteSessions.mockResolvedValue({
+      deleted: 2,
+      skipped: [],
+      errors: [],
+    });
+
+    renderSidebar();
+    await settle();
+
+    const user = userEvent.setup();
+
+    // Enter selection mode
+    const selectBtn = document.querySelector(".anticon-check-square");
+    await user.click(selectBtn!.closest("button")!);
+
+    // Click two session items to select them in selection mode
+    const sessionItems = document.querySelectorAll("[data-session-id]");
+    await user.click(sessionItems[0]); // session-pinned-1
+    await user.click(sessionItems[2]); // session-1 (active)
+
+    // The action bar should show "2 selected"
+    expect(screen.getByText("2 selected")).toBeInTheDocument();
+
+    // Click "Delete Selected" button
+    const deleteSelectedBtn = screen.getByRole("button", { name: /delete selected/i });
+    await user.click(deleteSelectedBtn);
+
+    // Confirmation modal should appear — check that modal exists
+    expect(document.querySelector(".ant-modal-confirm-title")).toBeInTheDocument();
+
+    // Click the OK button in the modal
+    const confirmBtn = screen.getByRole("button", { name: "Delete" });
+    await user.click(confirmBtn);
+
+    // Wait for the mutation to resolve
+    await settle();
+
+    expect(mockDeleteSessions).toHaveBeenCalledWith([
+      "session-pinned-1",
+      "session-1",
+    ]);
+
+    // Since session-1 was the active session, should navigate away
+    expect(mockNavigate).toHaveBeenCalledWith("/chat");
+  });
+
+  // ── Batch delete: disabled for streaming sessions ─────────────────────
+
+  it("disables the select button when sessions list is empty", async () => {
+    mockListSessions.mockResolvedValue([]);
+    renderSidebar();
+    await settle();
+
+    // Select button should not be rendered when no sessions
+    const selectBtn = document.querySelector(".anticon-check-square");
+    expect(selectBtn).not.toBeInTheDocument();
   });
 });

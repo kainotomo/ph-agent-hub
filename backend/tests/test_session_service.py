@@ -705,6 +705,157 @@ class TestSessionDeleteCascade:
             await delete_session(db_session, str(uuid.uuid4()))
 
 
+class TestBatchDeleteSessions:
+    """Verify delete_sessions_batch cascade behavior."""
+
+    async def test_batch_delete_cleans_all_references(
+        self,
+        db_session: AsyncSession,
+        test_tenant,
+        test_user,
+        test_tool,
+        test_model,
+    ):
+        """Batch delete should clean messages, tools, and tags for all sessions."""
+        from src.db.orm.models import Model as ModelORM
+        from src.db.orm.sessions import Session
+        from src.db.orm.messages import Message
+        from src.services.session_service import (
+            add_session_tool,
+            add_tag_to_session,
+            delete_sessions_batch,
+            get_or_create_tag,
+            get_session_by_id,
+            get_session_tools,
+            get_session_tags,
+        )
+
+        # Create 2 sessions with messages, tools, and tags
+        sessions = []
+        for i in range(2):
+            s = Session(
+                id=str(uuid.uuid4()),
+                tenant_id=test_tenant.id,
+                user_id=test_user.id,
+                title=f"Session {i}",
+                selected_model_id=test_model.id,
+            )
+            db_session.add(s)
+            sessions.append(s)
+        await db_session.flush()
+
+        for s in sessions:
+            # Add a message
+            msg = Message(
+                id=str(uuid.uuid4()),
+                session_id=s.id,
+                sender="user",
+                content=[{"type": "text", "text": f"test {s.id}"}],
+            )
+            db_session.add(msg)
+            # Add a tool
+            await add_session_tool(db_session, s.id, test_tool.id, test_tenant.id)
+            # Add a tag
+            tag = await get_or_create_tag(db_session, test_tenant.id, f"tag-{s.id[:8]}")
+            await add_tag_to_session(db_session, s.id, tag.id)
+
+        await db_session.flush()
+        session_ids = [s.id for s in sessions]
+
+        # Delete batch
+        result = await delete_sessions_batch(
+            db_session, session_ids, test_user.id, test_tenant.id
+        )
+
+        assert result["deleted"] == 2
+        assert result["skipped"] == []
+        assert result["errors"] == []
+
+        # Verify all sessions gone
+        for sid in session_ids:
+            assert await get_session_by_id(db_session, sid) is None
+            # Verify messages gone
+            msgs = await db_session.execute(
+                select(Message).where(Message.session_id == sid)
+            )
+            assert list(msgs.scalars().all()) == []
+            # Verify tools gone
+            tools = await get_session_tools(db_session, sid)
+            assert tools == []
+            # Verify tags gone
+            tags = await get_session_tags(db_session, sid)
+            assert tags == []
+
+    async def test_batch_delete_skips_unowned_sessions(
+        self,
+        db_session: AsyncSession,
+        test_tenant,
+        test_user,
+        test_model,
+        second_tenant,
+    ):
+        """Batch delete should skip sessions not owned by the user."""
+        from src.db.orm.sessions import Session
+        from src.db.orm.users import User
+        from src.services.session_service import delete_sessions_batch, get_session_by_id
+
+        # Create a session for another user
+        other_user = User(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            email=f"other-{uuid.uuid4().hex[:8]}@example.com",
+            password_hash="pbkdf2:sha256:600000$test-salt$test-hash",
+            display_name="Other User",
+            role="user",
+            is_active=True,
+        )
+        db_session.add(other_user)
+        await db_session.flush()
+
+        other_session = Session(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=other_user.id,
+            title="Other User Session",
+            selected_model_id=test_model.id,
+        )
+        db_session.add(other_session)
+        await db_session.flush()
+
+        result = await delete_sessions_batch(
+            db_session,
+            [other_session.id],
+            test_user.id,
+            test_tenant.id,
+        )
+
+        assert result["deleted"] == 0
+        assert len(result["skipped"]) == 1
+        assert result["skipped"][0]["id"] == other_session.id
+        assert "not owned" in result["skipped"][0]["reason"].lower()
+
+        # Verify other session still exists
+        assert await get_session_by_id(db_session, other_session.id) is not None
+
+    async def test_batch_delete_skips_nonexistent(
+        self,
+        db_session: AsyncSession,
+        test_tenant,
+        test_user,
+    ):
+        """Batch delete should skip non-existent sessions gracefully."""
+        from src.services.session_service import delete_sessions_batch
+
+        fake_id = str(uuid.uuid4())
+        result = await delete_sessions_batch(
+            db_session, [fake_id], test_user.id, test_tenant.id
+        )
+
+        assert result["deleted"] == 0
+        assert len(result["skipped"]) == 1
+        assert result["skipped"][0]["id"] == fake_id
+
+
 class TestListSessions:
     """Tests for list_sessions_for_user and list_admin_sessions."""
 

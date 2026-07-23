@@ -215,6 +215,7 @@ For deeper architecture detail, see [docs/architecture-overview.md](docs/archite
 
 Start here:
 - [docs/README.md](docs/README.md)
+- [CHANGELOG.md](CHANGELOG.md) — release history
 
 Role-specific guides:
 - [docs/user-guide.md](docs/user-guide.md)

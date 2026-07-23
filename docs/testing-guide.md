@@ -55,6 +55,10 @@ The project uses **pytest** for backend testing. Tests are organized by marker a
 | `test_group_service.py` | 3 | Group CRUD idempotency (Issue #348) |
 | `test_oauth_state_security.py` | 8 | OAuth state edge cases: cross-user binding, tampered payloads, expiry boundaries, concurrent callbacks, Microsoft replay (Issue #354) |
 | `test_upload_auth.py` | 12 | Upload authorization: non-owner access, cross-tenant, path-traversal filenames, size limits, content-type spoofing (Issue #354) |
+| `test_autopilot_lifecycle.py` | — | Autopilot lifecycle: start, pause, resume, cancel, max turn enforcement (Issue #446) |
+| `test_background_tasks.py` | — | Background task creation, monitoring, cancellation, limits (Issue #449) |
+| `test_agent_runner.py` | — | Agent execution flow, parallel tool execution, auto tool selection (Issue #447) |
+| `test_agent_memory_integration.py` | — | Self-improving agent: feedback learning, usage patterns (Issue #451) |
 
 ### Security & Isolation Tests
 
@@ -83,6 +87,7 @@ The project uses **pytest** for backend testing. Tests are organized by marker a
 | `e2e_auto_select_tools.py` | 1 | Auto tool selection |
 | `e2e_user_journey.py` | 5 | Full user journey (login → session → chat → history) |
 | `e2e_admin_flow.py` | 5 | Admin management flow (tenant → user → model → group) |
+| `e2e_a2a_input_required.py` | — | A2A INPUT_REQUIRED flow end-to-end (Issue #416) |
 
 ---
 

@@ -124,6 +124,8 @@ Route domains:
 /admin/rag-documents                 — RAG document management
 /admin/embed                        — embed widget configuration
 /admin/sessions                     — administrative session viewer
+/admin/background-tasks             — background agent task list & management
+/admin/scheduled-tasks              — scheduled agent task CRUD & management
 /admin/audit                        — audit log viewer
 /admin/analytics
 /admin/settings
@@ -260,6 +262,7 @@ The PWA install targets the **Chat Area** as the primary experience. The admin a
 - Cache the app shell (HTML, JS, CSS) for fast load on repeat visits
 - Do not cache backend API responses in the service worker; data freshness is handled by TanStack Query
 - Push notifications (for agent completion events) are supported on Android and on iOS 16.4+
+- In-app notifications (bell icon, count badge, dropdown panel) are supported for all users via the `/api/notifications` endpoints (see [backend-architecture.md](backend-architecture.md) §3.21)
 
 ---
 

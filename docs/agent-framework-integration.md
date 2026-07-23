@@ -157,6 +157,7 @@ MAF streaming integration points:
 - Token chunks are forwarded to the SSE response stream as they arrive from the model
 - Agent events (tool start, tool result, step complete) are emitted as typed SSE events
 - The DeepSeek stabilizer filters `<think>` tokens from the stream before they reach the SSE layer
+- The **Stream Bridge** (`agents/stream_bridge.py`) manages the SSE streaming connection between the agent loop and the frontend, handling reconnection, partial response preservation on navigation, and stream lifecycle
 
 ---
 

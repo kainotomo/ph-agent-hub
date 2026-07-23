@@ -46,6 +46,40 @@ Streaming SSE events include a `batch_id` field so the frontend can display
 parallel execution indicators. Parallel batches count as a single step toward
 `AGENT_MAX_STEPS`, preventing premature termination.
 
+**Auto Tool Selection (Issues #287, #439):** Instead of requiring users to
+manually activate tools per session, the agent can automatically select
+relevant tools from the available pool. The LLM receives tool definitions
+and chooses which to invoke based on the user's request. The number of tools
+presented to the LLM is capped by `AUTO_SELECT_TOOLS_TOP_K` (default `8`).
+This feature works alongside manual tool activation — both are supported.
+
+**Autopilot Mode (Issue #446):** An autonomous multi-turn execution mode
+where the agent continues working without requiring a user prompt after each
+response. The autopilot controller manages turn boundaries, invokes the
+agent in a loop, and can pause/resume execution. Protections include
+`AUTOPILOT_MAX_TURNS` (default `20`) to prevent runaway sessions and
+`AUTOPILOT_MAX_TOKENS` (default `0` = unlimited) for cumulative token limits.
+Progress is streamed via SSE and displayed in a dedicated UI.
+
+**Background Tasks (Issue #449):** Long-running agent executions that run
+independently of the user's current chat session. Users can start a task in
+background mode, navigate away, and receive a notification when it completes.
+Configurable limits: `MAX_CONCURRENT_BACKGROUND_TASKS_PER_USER` (default `3`)
+and `BACKGROUND_TASK_TIMEOUT_SECONDS` (default `3600`).
+
+**Scheduled Tasks (Issue #297):** Time-based autonomous agent execution
+scheduled at specific times or intervals. Supports one-shot (run at datetime)
+and recurring (cron-like) schedules. Tasks are stored in the database with
+states: `ACTIVE`, `PAUSED`. A background scheduler loop polls for due tasks
+at `SCHEDULER_POLL_INTERVAL_SECONDS` (default `30`). Users and admins can
+create, pause, resume, and delete scheduled tasks.
+
+**Notifications:** Users receive notifications for background task completion,
+scheduled task events, and other agent-triggered events. Notifications are
+stored in the database with read/unread state. The API provides list, mark
+read, mark all read, and unread count endpoints. The frontend displays a bell
+icon with unread badge.
+
 ### **1.4 Authentication & Authorization**
 - JWT‑based authentication
 - Three user roles:
@@ -356,7 +390,38 @@ GET /admin/audit
 
 > `GET /admin/audit` is admin-only. Managers can access `/admin/usage` and `/admin/logs` scoped to their own tenant. Audit log entries are read-only — no delete endpoint is exposed.
 
-### **3.19 Update Semantics**
+### **3.19 Background Tasks** *(admin/manager)*
+```
+GET    /background-tasks           # List tasks (paginated, filterable by state)
+POST   /background-tasks/:id/cancel  # Cancel a running background task
+```
+
+Background tasks are long-running agent executions that run independently of the user's current chat session. They support states like `RUNNING`, `COMPLETED`, `FAILED`, `CANCELED`. Tasks are tracked in the `autopilot_runs` table and can be viewed in the admin panel or from the user's chat sidebar.
+
+### **3.20 Scheduled Tasks** *(admin/manager)*
+```
+GET    /scheduled-tasks            # List tasks (paginated, filterable by state)
+POST   /scheduled-tasks            # Create a scheduled task
+GET    /scheduled-tasks/:id        # Get task details
+PUT    /scheduled-tasks/:id        # Update a scheduled task
+DELETE /scheduled-tasks/:id        # Delete a scheduled task
+POST   /scheduled-tasks/:id/pause  # Pause a scheduled task
+POST   /scheduled-tasks/:id/resume # Resume a paused scheduled task
+```
+
+Scheduled tasks support time-based autonomous agent execution. States: `ACTIVE`, `PAUSED`. They can be one-shot (run at a specific datetime) or recurring (cron-like schedule). A background scheduler loop polls for due tasks.
+
+### **3.21 Notifications** *(user)*
+```
+GET    /notifications              # List notifications (paginated, unread_only filter)
+POST   /notifications/read/:id     # Mark a notification as read
+POST   /notifications/read-all     # Mark all notifications as read
+GET    /notifications/unread-count # Get unread notification count
+```
+
+Notifications are created for background task completion, scheduled task events, and other agent-triggered events. They are user-scoped with read/unread state tracking.
+
+### **3.22 Update Semantics**
 
 All `PUT` endpoints follow a consistent convention for handling request bodies:
 
@@ -369,7 +434,7 @@ This is implemented via Pydantic's `model_dump(exclude_unset=True)`, which retur
 
 > Use `PATCH` semantics with `PUT`: send only the fields you want to change. See `backend/src/core/schemas.py` for the shared utility.
 
-### **3.20 A2A Server** *(A2A Protocol — Inbound)*
+### **3.23 A2A Server** *(A2A Protocol — Inbound)*
 
 The A2A server implements the inbound side of the Agent-to-Agent protocol (Google A2A Spec §11 — HTTP+JSON/REST binding). It exposes ph-agent-hub agents as A2A-compatible agents that external clients can discover and invoke. These endpoints are served on the A2A binding path (not under `/api/`) and are only enabled when `A2A_SERVER_ENABLED=true`.
 
@@ -432,14 +497,20 @@ Admin API endpoints (see `api/admin.py`):
 /backend
   /src
     /api
+      a2a_oauth.py         — A2A OAuth2 authentication endpoints
+      a2a_server.py        — A2A protocol server (Agent Card, task lifecycle)
       admin.py             — admin/manager CRUD (users, tenants, models, tools, groups,
                               templates, skills, embed configs, MCP servers, analytics, audit)
       auth.py              — login, refresh, logout, me
+      background_tasks.py  — list/cancel background agent tasks
       chat.py              — sessions, messages, streaming, branches, feedback, files
+      credentials.py       — OAuth credential management (Google, Microsoft, GitHub)
       demo.py              — public demo endpoint
       memory.py            — user memory CRUD
       models.py            — user-facing model listing
+      notifications.py     — list notifications, mark read, unread count
       prompts.py           — user prompt CRUD
+      scheduled_tasks.py   — CRUD + pause/resume for scheduled agent tasks
       skills.py            — user skill CRUD
       templates.py         — user-facing template listing
       users.py             — user management
@@ -449,6 +520,8 @@ Admin API endpoints (see `api/admin.py`):
       stabilizer.py        — DeepSeek stabilizer middleware
       deepseek_patch.py    — DeepSeek monkey-patches
       registry.py          — MAF agent/workflow scanner (scans skills/ and workflows/)
+      autopilot.py         — autonomous multi-turn agent controller
+      stream_bridge.py     — SSE streaming bridge between agent loop and frontend
       identity.txt         — bot identity/system prompt
       skills/              — MAF skill definitions (scanned at startup)
       workflows/           — MAF workflow definitions (scanned at startup)
@@ -493,6 +566,9 @@ Admin API endpoints (see `api/admin.py`):
       s3.py              — all MinIO/boto3 interactions; single module rule
     /services
       audit_service.py       — audit log writes/queries
+      autopilot_service.py   — background/autopilot task lifecycle management
+      balance_service.py     — per-tenant spending limits and auto-blocking
+      credential_service.py  — OAuth token management, per-user tool credentials
       embed_service.py       — embed configuration management
       embedding_service.py   — text embedding generation
       group_service.py       — model/tool group management
@@ -500,8 +576,12 @@ Admin API endpoints (see `api/admin.py`):
       mcp_service.py         — MCP server CRUD, encryption, tool sync
       memory_service.py      — pagination, cross-session retrieval
       model_service.py       — model CRUD
+      notification_service.py — user notification CRUD and push
       prompt_service.py      — user prompt CRUD
       rag_service.py         — RAG ingestion, semantic search, doc management
+      router_service.py      — LLM model routing and load balancing
+      scheduled_task_service.py   — scheduled task CRUD and execution logic
+      scheduler_executor.py  — background scheduler polling loop
       session_service.py     — session CRUD, temp→permanent conversion
       settings_service.py    — system settings management
       skill_service.py       — skill CRUD
@@ -519,13 +599,25 @@ Admin API endpoints (see `api/admin.py`):
         embed_configs.py
         file_uploads.py
         groups.py
+        a2a_call_logs.py       — A2A call history
+        a2a_servers.py          — A2A server config with resilience columns
+        a2a_tasks.py            — A2A task persistence
+        app_settings.py
+        audit_logs.py
+        autopilot_runs.py       — autopilot execution tracking
+        balance_transactions.py — spending limit transactions
+        embed_configs.py
+        file_uploads.py
+        groups.py
         mcp_servers.py
         memory.py
         message_embeddings.py
         messages.py
         models.py
+        notifications.py        — user notification records
         prompts.py
         rag.py
+        scheduled_tasks.py      — scheduled agent task definitions
         sessions.py
         skills.py
         tags.py
@@ -533,6 +625,7 @@ Admin API endpoints (see `api/admin.py`):
         tenants.py
         tools.py
         usage_logs.py
+        user_tool_credentials.py — per-user OAuth/credential storage
         user_tool_preferences.py
         users.py
       /migrations          — Alembic migration scripts

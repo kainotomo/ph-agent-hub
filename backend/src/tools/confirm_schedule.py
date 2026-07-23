@@ -2,18 +2,20 @@
 # PH Agent Hub — Tool: Confirm Schedule
 # =============================================================================
 #
-# Called by the agent (during autopilot) after the user confirms a
-# proposed schedule.  Creates the ScheduledTask record in the database.
+# Called by the agent after the user confirms a proposed schedule.
+# Creates the ScheduledTask record in the database.
 #
-# Requires ``session_data`` to be in ``ctx.kwargs`` (passed via
-# ``function_invocation_kwargs`` from the autopilot controller).
+# The ``session_data`` dict is passed via ``function_invocation_kwargs``
+# (which the runner places in ``ctx.kwargs``).  MAF injects the
+# ``FunctionInvocationContext`` automatically when the tool has a
+# ``ctx`` parameter with that type annotation.
 # =============================================================================
 
 from __future__ import annotations
 
 import logging
 
-from agent_framework import tool
+from agent_framework import FunctionInvocationContext, tool
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +26,7 @@ async def confirm_schedule(
     goal: str,
     schedule_description: str,
     timezone: str = "UTC",
+    ctx: FunctionInvocationContext | None = None,
 ) -> dict:
     """Confirm and create a scheduled agent task.
 
@@ -39,6 +42,8 @@ async def confirm_schedule(
         schedule_description: Human-readable description (e.g. "Every
             Friday at 8pm", "Every weekday at 9am").
         timezone: IANA timezone name (default "UTC").
+        ctx: Injected by MAF — provides access to kwargs passed via
+            ``function_invocation_kwargs``.
 
     Returns:
         Dict with:
@@ -47,22 +52,9 @@ async def confirm_schedule(
             - "next_run_at": ISO datetime string
             - "message": confirmation message
     """
-    # We need the function invocation context to get the user/session info
-    from agent_framework import FunctionInvocationContext
-
-    # Try to get ctx from caller — the MAF framework injects it
-    # automatically when the tool has a ctx parameter.
-    ctx = None
-    import inspect
-    for frame_info in inspect.stack():
-        local_ctx = frame_info.frame.f_locals.get("ctx")
-        if local_ctx is not None and hasattr(local_ctx, "kwargs"):
-            ctx = local_ctx
-            break
-
     if ctx is None:
         logger.warning(
-            "confirm_schedule called without FunctionInvocationContext — cannot create schedule"
+            "confirm_schedule called without FunctionInvocationContext — no-op"
         )
         return {
             "ok": False,

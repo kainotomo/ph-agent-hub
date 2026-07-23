@@ -855,6 +855,18 @@ async def run_agent(
         # Prepend so they're available but don't shadow other tools
         _tools = [ask_user, request_auth] + list(_tools)
 
+    # Ensure session_data is always available to tools via function_invocation_kwargs
+    # (needed by confirm_schedule, propose_schedule, etc.)
+    if function_invocation_kwargs is None:
+        function_invocation_kwargs = {}
+    if "session_data" not in function_invocation_kwargs:
+        function_invocation_kwargs["session_data"] = session_data
+
+    # ---- Inject scheduling tools (Issue #297) - always available ----------
+    from ..tools.propose_schedule import propose_schedule
+    from ..tools.confirm_schedule import confirm_schedule
+    _tools = list(_tools) + [propose_schedule, confirm_schedule]
+
     # ---- Inject extra tools (autopilot task_complete, etc.) ----------------
     if extra_tools:
         # Append so built-in/A2A tools take precedence
@@ -2910,6 +2922,15 @@ async def run_agent_stream(
         )
         # ---- Inject extra tools into streaming tool list --------------------
         _stream_tools = cfg.active_tool_callables
+        # Ensure session_data is always available to tools (Issue #297)
+        if function_invocation_kwargs is None:
+            function_invocation_kwargs = {}
+        if "session_data" not in function_invocation_kwargs:
+            function_invocation_kwargs["session_data"] = session_data
+
+        from ..tools.propose_schedule import propose_schedule
+        from ..tools.confirm_schedule import confirm_schedule
+        _stream_tools = list(_stream_tools) + [propose_schedule, confirm_schedule]
         if extra_tools:
             _stream_tools = list(_stream_tools) + list(extra_tools)
 

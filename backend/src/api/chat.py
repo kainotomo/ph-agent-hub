@@ -2003,6 +2003,8 @@ async def stream_status(
         if run.state == "PAUSED":
             autopilot = True
             paused = True
+        elif run.state in ("COMPLETED", "FAILED", "CANCELLED"):
+            autopilot = True
         current_turn = run.current_turn
         max_turns = run.max_turns
     elif not active:
@@ -2014,6 +2016,7 @@ async def stream_status(
         "paused": paused,
         "current_turn": current_turn,
         "max_turns": max_turns,
+        "run_state": run.state if run is not None else None,
     }
 
 

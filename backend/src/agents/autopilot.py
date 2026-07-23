@@ -291,8 +291,9 @@ async def run_autopilot_stream(
                 cumulative_tokens_in + cumulative_tokens_out, max_tokens, session_id,
             )
             await bridge.put({
-                "event": "autopilot_error",
+                "event": "error",
                 "data": json.dumps({
+                    "code": "autopilot_error",
                     "message": f"Token budget of {max_tokens} exceeded",
                     "turn": turn,
                 }),

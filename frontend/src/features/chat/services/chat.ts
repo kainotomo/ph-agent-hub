@@ -506,6 +506,8 @@ export interface StreamStatusResponse {
   current_turn?: number;
   /** Maximum turns configured for the autopilot run. */
   max_turns?: number;
+  /** Backend AutopilotRun state: COMPLETED, FAILED, CANCELLED, PAUSED, etc. */
+  run_state?: string | null;
 }
 
 /**

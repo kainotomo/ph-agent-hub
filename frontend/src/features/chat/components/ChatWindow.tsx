@@ -32,7 +32,7 @@ import {
   listAlwaysOnTools,
   getStreamStatus,
 } from "../services/chat";
-import { AutopilotPanel, INITIAL_AUTOPILOT_STATE } from "./AutopilotPanel";
+import { AutopilotPanel, INITIAL_AUTOPILOT_STATE, type AutopilotState } from "./AutopilotPanel";
 import { getDemoMessages } from "../services/demo";
 import { getWidgetMessages } from "../services/widget";
 import api, { getToken } from "../../../services/api";
@@ -619,6 +619,25 @@ export function ChatWindow({
             status: "paused",
             pauseReason: "Autopilot was paused",
           }));
+        } else if (status.autopilot && status.run_state) {
+          // Stream ended with autopilot in a terminal state (COMPLETED,
+          // FAILED, CANCELLED).  Restore the panel showing the outcome
+          // so navigating back after an autopilot crash shows the error.
+          const terminalStatus = status.run_state === "COMPLETED"
+            ? "complete"
+            : status.run_state === "FAILED"
+              ? "error"
+              : "max_turns";
+          setIsAutopilotMode(true);
+          setAutopilotState((prev) => ({
+            ...prev,
+            currentTurn: status.current_turn ?? prev.currentTurn,
+            maxTurns: status.max_turns ?? prev.maxTurns,
+            status: terminalStatus as AutopilotState["status"],
+            errorMessage: terminalStatus === "error"
+              ? `Autopilot ${status.run_state.toLowerCase()}`
+              : undefined,
+          }));
         }
       } catch {
         // Stream status check failed — session may not exist yet.
@@ -894,6 +913,14 @@ export function ChatWindow({
           if (isSend || isEdit) setPendingUserMessage(null);
           setStreamingTokens(null);
           setStreamError(err);
+          if (isAutopilot) {
+            setIsAutopilotMode(true);
+            setAutopilotState((prev) => ({
+              ...prev,
+              status: "error" as const,
+              errorMessage: err,
+            }));
+          }
           if (!isReconnect) {
             message.error(err || (isEdit ? "Edit failed" : isRegenerate ? "Regenerate failed" : "Request failed"));
           } else {

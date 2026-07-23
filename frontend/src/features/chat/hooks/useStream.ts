@@ -597,28 +597,25 @@ export function useStream(apiPrefix: string = "chat") {
                 // Try to read the response body for autopilot state.
                 response.clone().json().then(body => {
                   if (body && body.autopilot_state) {
-                    // Map backend state to frontend panel status.
-                    const statusMap: Record<string, string> = {
-                      COMPLETED: "complete",
-                      FAILED: "error",
-                      CANCELLED: "error",
-                      PAUSED: "paused",
-                    };
-                    const panelStatus = statusMap[body.autopilot_state] || "complete";
-                    // Fire a synthetic autopilot_complete event so the
-                    // panel transitions to the correct final state.
-                    handlers.onAutopilotComplete?.({
-                      summary: "",
-                      turn: 0,
-                    });
-                    // Override status to match the actual backend state.
-                    // onAutopilotComplete sets status to "complete";
-                    // if it was an error, we override.
-                    if (panelStatus !== "complete") {
-                      handlers.onAutopilotMaxTurns?.({
-                        max_turns: 0,
-                        session_id: body.session_id || "",
-                        message: `Autopilot ${body.autopilot_state.toLowerCase()}`,
+                    // Fire the appropriate synthetic event so the
+                    // autopilot panel transitions to the correct final
+                    // state.  The error handler now updates autopilotState
+                    // to status: "error" (see buildStreamHandlers).
+                    const state = body.autopilot_state;
+                    if (state === "COMPLETED") {
+                      handlers.onAutopilotComplete?.({
+                        summary: "",
+                        turn: 0,
+                      });
+                    } else if (state === "FAILED" || state === "CANCELLED") {
+                      handlers.onError?.(
+                        `Autopilot ${state.toLowerCase()}`,
+                        "",
+                      );
+                    } else if (state === "PAUSED") {
+                      handlers.onAutopilotPause?.({
+                        reason: "Autopilot was paused",
+                        turn: 0,
                       });
                     }
                   }

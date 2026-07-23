@@ -141,6 +141,10 @@ async def create_skill(
     cross_session_max_snippets: int = 3,
     cross_session_min_score: float = 0.30,
     a2a_metadata: dict | None = None,
+    goal: str | None = None,
+    constraints: list[str] | None = None,
+    success_criteria: str | None = None,
+    agent_config: dict | None = None,
 ) -> Skill:
     """Create a new skill with optional tool associations.
 
@@ -166,6 +170,10 @@ async def create_skill(
         cross_session_max_snippets=cross_session_max_snippets,
         cross_session_min_score=cross_session_min_score,
         a2a_metadata=a2a_metadata,
+        goal=goal,
+        constraints=constraints,
+        success_criteria=success_criteria,
+        agent_config=agent_config,
     )
     db.add(skill)
     await db.flush()  # Get the skill ID before adding join rows

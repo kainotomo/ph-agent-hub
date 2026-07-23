@@ -2335,6 +2335,10 @@ class AdminSkillCreate(BaseModel):
     cross_session_max_snippets: int = 3
     cross_session_min_score: float = 0.30
     a2a_metadata: dict | None = None
+    goal: str | None = None
+    constraints: list[str] | None = None
+    success_criteria: str | None = None
+    agent_config: dict | None = None
 
 
 class AdminSkillUpdate(BaseModel):
@@ -2354,6 +2358,10 @@ class AdminSkillUpdate(BaseModel):
     cross_session_max_snippets: int | None = None
     cross_session_min_score: float | None = None
     a2a_metadata: dict | None = None
+    goal: str | None = None
+    constraints: list[str] | None = None
+    success_criteria: str | None = None
+    agent_config: dict | None = None
 
 
 class AdminSkillResponse(BaseModel):
@@ -2373,6 +2381,10 @@ class AdminSkillResponse(BaseModel):
     cross_session_max_snippets: int
     a2a_metadata: dict | None = None
     cross_session_min_score: float
+    goal: str | None = None
+    constraints: list[str] | None = None
+    success_criteria: str | None = None
+    agent_config: dict | None = None
     created_at: datetime
     updated_at: datetime
     tool_ids: list[str] = []
@@ -2457,6 +2469,10 @@ async def admin_create_skill(
         cross_session_max_snippets=body.cross_session_max_snippets,
         cross_session_min_score=body.cross_session_min_score,
         a2a_metadata=body.a2a_metadata,
+        goal=body.goal,
+        constraints=body.constraints,
+        success_criteria=body.success_criteria,
+        agent_config=body.agent_config,
     )
     tools = await _svc_list_skill_tools(db, skill.id)
     resp = AdminSkillResponse.model_validate(skill)

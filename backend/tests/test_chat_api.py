@@ -527,6 +527,152 @@ class TestDeleteSession:
         assert resp.status_code == 403
 
 
+class TestBatchDeleteSessions:
+    """Tests for POST /chat/sessions/delete."""
+
+    async def test_batch_delete_multiple_sessions(
+        self,
+        async_client,
+        auth_headers,
+        test_user,
+        test_tenant,
+        test_model,
+        db_session,
+    ):
+        """Verify deleting multiple sessions at once."""
+        from src.db.orm.sessions import Session
+
+        # Create 3 sessions owned by test_user
+        sessions = []
+        for i in range(3):
+            s = Session(
+                id=str(uuid.uuid4()),
+                tenant_id=test_tenant.id,
+                user_id=test_user.id,
+                title=f"Session {i}",
+                selected_model_id=test_model.id,
+            )
+            db_session.add(s)
+            sessions.append(s)
+        await db_session.flush()
+        session_ids = [s.id for s in sessions]
+
+        headers = auth_headers(test_user)
+        resp = await async_client.post(
+            "/api/chat/sessions/delete",
+            json={"ids": session_ids},
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["deleted"] == 3
+        assert data["skipped"] == []
+        assert data["errors"] == []
+
+        # Verify all sessions are gone
+        for sid in session_ids:
+            get_resp = await async_client.get(
+                f"/api/chat/session/{sid}", headers=headers
+            )
+            assert get_resp.status_code == 404
+
+    async def test_batch_delete_partial_skip_unauthorized(
+        self,
+        async_client,
+        auth_headers,
+        test_user,
+        second_user,
+        test_tenant,
+        test_session,
+        test_model,
+        db_session,
+    ):
+        """Verify batch skips sessions not owned by the current user."""
+        from src.db.orm.sessions import Session
+
+        # second_user's session (should be skipped)
+        other_session = Session(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=second_user.id,
+            title="Other User Session",
+            selected_model_id=test_model.id,
+        )
+        db_session.add(other_session)
+        await db_session.flush()
+
+        # Mix of owned + not-owned + non-existent
+        ids = [test_session.id, other_session.id, str(uuid.uuid4())]
+
+        headers = auth_headers(test_user)
+        resp = await async_client.post(
+            "/api/chat/sessions/delete",
+            json={"ids": ids},
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["deleted"] == 1  # Only test_session
+        assert len(data["skipped"]) == 2  # other_session + non-existent
+        assert data["errors"] == []
+
+        # Verify own session is gone
+        get_resp = await async_client.get(
+            f"/api/chat/session/{test_session.id}", headers=headers
+        )
+        assert get_resp.status_code == 404
+
+    async def test_batch_delete_empty_ids_rejected(
+        self, async_client, auth_headers, test_user
+    ):
+        """Verify empty ids list returns validation error."""
+        headers = auth_headers(test_user)
+        resp = await async_client.post(
+            "/api/chat/sessions/delete",
+            json={"ids": []},
+            headers=headers,
+        )
+        assert resp.status_code == 422
+
+    async def test_batch_delete_too_many_ids_rejected(
+        self, async_client, auth_headers, test_user
+    ):
+        """Verify more than 100 ids returns validation error."""
+        headers = auth_headers(test_user)
+        ids = [str(uuid.uuid4()) for _ in range(101)]
+        resp = await async_client.post(
+            "/api/chat/sessions/delete",
+            json={"ids": ids},
+            headers=headers,
+        )
+        assert resp.status_code == 422
+
+    async def test_batch_delete_cross_tenant_skips(
+        self,
+        async_client,
+        auth_headers,
+        test_user,
+        second_user,
+        test_session,
+    ):
+        """Verify cross-tenant sessions are skipped."""
+        # second_user is in a different tenant, so test_session's tenant
+        # doesn't match second_user's tenant
+        headers = auth_headers(second_user)
+        resp = await async_client.post(
+            "/api/chat/sessions/delete",
+            json={"ids": [test_session.id]},
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["deleted"] == 0
+        assert len(data["skipped"]) == 1
+        # Should be skipped because of tenant mismatch (second_user has
+        # a different tenant_id)
+        assert data["skipped"][0]["id"] == test_session.id
+
+
 # =============================================================================
 # Message Tests  (with mocked agent runner)
 # =============================================================================

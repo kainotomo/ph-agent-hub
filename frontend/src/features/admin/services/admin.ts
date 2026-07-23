@@ -627,6 +627,19 @@ export function deleteAdminSession(id: string): Promise<void> {
   return api<void>(`/admin/sessions/${id}`, { method: "DELETE" });
 }
 
+export interface AdminBatchDeleteResult {
+  deleted: number;
+  skipped: Array<{ id: string; reason: string }>;
+  errors: string[];
+}
+
+export function deleteAdminSessions(ids: string[]): Promise<AdminBatchDeleteResult> {
+  return api<AdminBatchDeleteResult>("/admin/sessions/delete", {
+    method: "POST",
+    body: { ids },
+  });
+}
+
 // =============================================================================
 // MCP Servers
 // =============================================================================

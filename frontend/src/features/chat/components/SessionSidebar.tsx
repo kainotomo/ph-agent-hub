@@ -23,6 +23,7 @@ import {
   message,
   Tag,
   Popconfirm,
+  Checkbox,
 } from "antd";
 import type { MenuProps } from "antd";
 import {
@@ -47,6 +48,8 @@ import {
   FileOutlined,
   FolderOpenOutlined,
   ClockCircleOutlined,
+  CheckSquareOutlined,
+  CloseOutlined,
 } from "@ant-design/icons";
 import { Logo } from "../../../shared/components/Logo";
 import { useNavigate, useParams } from "react-router-dom";
@@ -57,6 +60,7 @@ import {
   listSessions,
   createSession,
   deleteSession,
+  deleteSessions,
   updateSession,
   SessionData,
   addTagToSession,
@@ -83,6 +87,8 @@ export function SessionSidebar() {
   const [editTitle, setEditTitle] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { streamingSessionIds, removeStreamingSession } = useStreamingContext();
@@ -216,6 +222,32 @@ export function SessionSidebar() {
     },
   });
 
+  const batchDeleteMutation = useMutation({
+    mutationFn: (ids: string[]) => deleteSessions(ids),
+    onSuccess: (data, ids) => {
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      if (data.deleted > 0) {
+        message.success(`Deleted ${data.deleted} session${data.deleted !== 1 ? "s" : ""}`);
+      }
+      if (data.skipped.length > 0) {
+        message.warning(`${data.skipped.length} session${data.skipped.length !== 1 ? "s" : ""} skipped (not owned or not found)`);
+      }
+      if (data.errors.length > 0) {
+        message.error(`${data.errors.length} error${data.errors.length !== 1 ? "s" : ""} during deletion`);
+      }
+      setSelectMode(false);
+      setSelectedIds(new Set());
+      if (sessionId && ids.includes(sessionId)) {
+        navigate("/chat");
+      }
+    },
+    onError: (err: Error) => {
+      message.error(`Failed to delete sessions: ${err.message}`);
+      setSelectMode(false);
+      setSelectedIds(new Set());
+    },
+  });
+
   // Sort: pinned first, then by updated_at.
   const sortedSessions = [...(sessions || [])]
     .sort((a, b) => {
@@ -294,6 +326,21 @@ export function SessionSidebar() {
           {!collapsed && (
             <Space size={4} style={{ marginLeft: "auto" }}>
               {sessionExists && <ContextIndicator sessionId={sessionId} />}
+              {sessions && sessions.length > 0 && (
+                <Tooltip title={selectMode ? "Cancel selection" : "Select sessions"}>
+                  <Button
+                    type="text"
+                    icon={selectMode ? <CloseOutlined /> : <CheckSquareOutlined />}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectMode(!selectMode);
+                      if (selectMode) {
+                        setSelectedIds(new Set());
+                      }
+                    }}
+                  />
+                </Tooltip>
+              )}
               <Tooltip title="Search">
                 <Button
                   type="text"
@@ -418,6 +465,18 @@ export function SessionSidebar() {
               <List.Item
                 data-session-id={item.id}
                 onClick={() => {
+                  if (selectMode) {
+                    setSelectedIds((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(item.id)) {
+                        next.delete(item.id);
+                      } else {
+                        next.add(item.id);
+                      }
+                      return next;
+                    });
+                    return;
+                  }
                   navigate(sessionId === item.id ? "/chat" : `/chat/${item.id}`);
                   if (isMobile) setMobileOpen(false);
                 }}
@@ -425,13 +484,16 @@ export function SessionSidebar() {
                   cursor: "pointer",
                   padding: "8px 12px",
                   background:
-                    sessionId === item.id ? "#e6f4ff" : "transparent",
+                    sessionId === item.id && !selectMode ? "#e6f4ff" : "transparent",
                   borderLeft:
-                    sessionId === item.id
+                    sessionId === item.id && !selectMode
                       ? "3px solid #1677ff"
                       : "3px solid transparent",
                 }}
-                actions={[
+                actions={
+                  selectMode
+                    ? []
+                    : [
                   <Tooltip title="Edit" key="edit">
                     <Button
                       type="text"
@@ -521,9 +583,30 @@ export function SessionSidebar() {
                       />
                     </Tooltip>
                   </Popconfirm>,
-                ]}
+                ]
+                }
               >
                 <List.Item.Meta
+                  avatar={
+                    selectMode ? (
+                      <Checkbox
+                        checked={selectedIds.has(item.id)}
+                        disabled={streamingSessionIds.has(item.id)}
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={() => {
+                          setSelectedIds((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(item.id)) {
+                              next.delete(item.id);
+                            } else {
+                              next.add(item.id);
+                            }
+                            return next;
+                          });
+                        }}
+                      />
+                    ) : undefined
+                  }
                   title={
                     <Space size={4} style={{ display: "flex", alignItems: "center" }}>
                       {streamingSessionIds.has(item.id) && (
@@ -581,6 +664,74 @@ export function SessionSidebar() {
               </List.Item>
             )}
           />
+        )}
+
+        {selectMode && (
+          <div
+            style={{
+              position: "sticky",
+              bottom: 0,
+              background: "#fff",
+              borderTop: "1px solid #f0f0f0",
+              padding: "8px 12px",
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+            }}
+          >
+            <Text type="secondary" style={{ fontSize: 13, flexShrink: 0 }}>
+              {selectedIds.size} selected
+            </Text>
+            <Button
+              size="small"
+              onClick={() => {
+                const selectable = sortedSessions.filter(
+                  (s) => !streamingSessionIds.has(s.id)
+                );
+                if (selectable.length === selectedIds.size) {
+                  setSelectedIds(new Set());
+                } else {
+                  setSelectedIds(new Set(selectable.map((s) => s.id)));
+                }
+              }}
+            >
+              {selectedIds.size ===
+              sortedSessions.filter((s) => !streamingSessionIds.has(s.id)).length
+                ? "Deselect All"
+                : "Select All"}
+            </Button>
+            <div style={{ flex: 1 }} />
+            <Button
+              type="primary"
+              danger
+              size="small"
+              disabled={selectedIds.size === 0}
+              loading={batchDeleteMutation.isPending}
+              onClick={() => {
+                const ids = [...selectedIds];
+                const isActiveSelected = sessionId && ids.includes(sessionId);
+                Modal.confirm({
+                  title: `Delete ${ids.length} session${ids.length !== 1 ? "s" : ""}?`,
+                  content: (
+                    <div>
+                      <p>This will permanently delete {ids.length} session{ids.length !== 1 ? "s" : ""} and all their messages. This action cannot be undone.</p>
+                      {isActiveSelected && (
+                        <p style={{ color: "#ff4d4f", fontWeight: 500 }}>
+                          Warning: Your current chat will also be deleted.
+                        </p>
+                      )}
+                    </div>
+                  ),
+                  okText: "Delete",
+                  okButtonProps: { danger: true },
+                  cancelText: "Cancel",
+                  onOk: () => batchDeleteMutation.mutate(ids),
+                });
+              }}
+            >
+              Delete Selected
+            </Button>
+          </div>
         )}
       </div>
 

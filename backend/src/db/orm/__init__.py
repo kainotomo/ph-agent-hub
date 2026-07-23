@@ -33,6 +33,7 @@ from .a2a_call_logs import A2aCallLog
 from .a2a_tasks import A2aTask
 from .embed_configs import EmbedConfig
 from .autopilot_runs import AutopilotRun
+from .scheduled_tasks import ScheduledTask
 from .notifications import Notification
 
 __all__ = [
@@ -68,5 +69,6 @@ __all__ = [
     "AppSetting",
     "EmbedConfig",
     "AutopilotRun",
+    "ScheduledTask",
     "Notification",
 ]

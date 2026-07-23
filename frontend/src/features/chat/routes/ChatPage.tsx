@@ -6,7 +6,7 @@
 
 import { useParams, useNavigate } from "react-router-dom";
 import { Layout, Button, Typography, message, Space } from "antd";
-import { PlusOutlined, ThunderboltOutlined, FolderOpenOutlined } from "@ant-design/icons";
+import { PlusOutlined, ThunderboltOutlined, FolderOpenOutlined, ClockCircleOutlined } from "@ant-design/icons";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { SessionSidebar } from "../components/SessionSidebar";
 import { ChatWindow } from "../components/ChatWindow";
@@ -83,6 +83,13 @@ export function ChatPage() {
               onClick={() => navigate("/background-tasks")}
             >
               Tasks
+            </Button>
+            <Button
+              type="text"
+              icon={<ClockCircleOutlined />}
+              onClick={() => navigate("/scheduled-tasks")}
+            >
+              Scheduled
             </Button>
             <NotificationBell />
           </Space>

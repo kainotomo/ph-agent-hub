@@ -88,6 +88,9 @@ msal
 # Financial / Investor Tools (Issue #158)
 yfinance
 numpy
+
+# Cron expression parsing (Issue #297 — Scheduled Tasks)
+croniter>=6.0
 scipy
 beautifulsoup4
 edgartools

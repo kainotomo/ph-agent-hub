@@ -79,8 +79,9 @@ async def run_autopilot(
     # Build the task_complete and pause_and_report tools once and reuse on every turn.
     from ..tools.task_complete import task_complete
     from ..tools.pause_and_report import pause_and_report
+    from ..tools.confirm_schedule import confirm_schedule as _confirm_schedule
 
-    task_complete_tools = [task_complete, pause_and_report]
+    task_complete_tools = [task_complete, pause_and_report, _confirm_schedule]
 
     last_response_text = ""
     last_message_id = ""
@@ -127,7 +128,11 @@ async def run_autopilot(
                 "`task_complete(summary=...)` to signal completion."
             )
             turn_extra_tools = task_complete_tools
-            turn_fn_kwargs = {"completion_state": completion_state, "pause_state": pause_state}
+            turn_fn_kwargs = {
+                "completion_state": completion_state,
+                "pause_state": pause_state,
+                "session_data": session_data,
+            }
 
         # ---- Run the agent for this turn --------------------------------
         from .runner import run_agent
@@ -434,7 +439,11 @@ async def run_autopilot_stream(
                 "`task_complete(summary=...)` to signal completion."
             )
             turn_extra_tools = task_complete_tools
-            turn_fn_kwargs = {"completion_state": completion_state, "pause_state": pause_state}
+            turn_fn_kwargs = {
+                "completion_state": completion_state,
+                "pause_state": pause_state,
+                "session_data": session_data,
+            }
 
         # ---- Emit autopilot_turn_start event ----------------------------
         await bridge.put({

@@ -65,6 +65,8 @@ async def startup_scan(db: AsyncSession) -> None:
     db_keys = [row[0] for row in result.all()]
 
     for key in db_keys:
+        if key is None:
+            continue  # goal_based skills don't need a MAF target
         if key not in _registry:
             logger.warning(
                 "Skill '%s' exists in DB but has no registered MAF target.", key

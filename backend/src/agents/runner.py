@@ -127,10 +127,10 @@ async def _resolve_session_config(
 
     # 5. Determine execution type and name
     execution_type = skill.execution_type if skill else "agent"
-    # Normalize: workflow_based → workflow, prompt_based → agent
+    # Normalize: workflow_based → workflow, prompt_based → agent, goal_based → agent
     if execution_type == "workflow_based":
         execution_type = "workflow"
-    if execution_type == "prompt_based":
+    if execution_type in ("prompt_based", "goal_based"):
         execution_type = "agent"
     agent_name = skill.title if skill else "assistant"
 
@@ -174,6 +174,37 @@ async def _resolve_session_config(
             tenant_name = tenant_row.name
     except Exception:
         logger.warning("Failed to resolve tenant name for tenant %s", tenant_id)
+
+    # ---- Constraint-aware tool filtering (Goal-Based Skills, Issue #448) --
+    # When a goal_based skill has a "read_only" constraint, strip tools
+    # that perform write operations so the agent cannot modify data.
+    if (
+        skill
+        and skill.execution_type == "goal_based"
+        and skill.constraints
+        and "read_only" in skill.constraints
+    ):
+        _WRITE_TOOL_PREFIXES = (
+            "create_", "update_", "delete_", "save_", "send_",
+            "insert_", "submit_", "write_", "upload_", "remove_",
+            "edit_", "modify_", "add_", "set_", "put_", "post_",
+        )
+        _EXEMPT_TOOLS = {"propose_schedule", "confirm_schedule", "save_memory",
+                         "delete_memory", "list_memory"}
+        before = len(active_tool_callables)
+        active_tool_callables = [
+            t for t in active_tool_callables
+            if not hasattr(t, "name")
+            or not t.name.lower().startswith(_WRITE_TOOL_PREFIXES)
+            or t.name in _EXEMPT_TOOLS
+        ]
+        removed = before - len(active_tool_callables)
+        if removed:
+            logger.info(
+                "read_only constraint removed %d write tool(s) "
+                "for goal_based skill '%s'",
+                removed, skill.title,
+            )
 
     return SessionConfig(
         model=model,
@@ -1413,6 +1444,47 @@ async def _build_system_prompt(
             "email depends on search"
         )
         parts.append(parallel_guidance)
+
+    # ---- Goal-Based Skill context (Issue #448) ----------------------------
+    # When the session has a goal_based skill selected, inject the goal,
+    # constraints, and success criteria so the agent knows what to achieve.
+    skill_id = session_data.get("selected_skill_id")
+    if skill_id:
+        try:
+            result = await db.execute(select(Skill).where(Skill.id == skill_id))
+            skill_row = result.scalar_one_or_none()
+            if skill_row and skill_row.execution_type == "goal_based" and skill_row.goal:
+                goal_lines: list[str] = [
+                    "## Goal",
+                    "",
+                    skill_row.goal,
+                    "",
+                ]
+                if skill_row.constraints:
+                    goal_lines.append("## Constraints")
+                    goal_lines.append("")
+                    if isinstance(skill_row.constraints, list):
+                        for c in skill_row.constraints:
+                            goal_lines.append(f"- {c}")
+                    else:
+                        goal_lines.append(str(skill_row.constraints))
+                    goal_lines.append("")
+                if skill_row.success_criteria:
+                    goal_lines.append("## Success Criteria")
+                    goal_lines.append("")
+                    goal_lines.append(skill_row.success_criteria)
+                    goal_lines.append("")
+
+                goal_lines.append(
+                    "Work autonomously toward this goal. "
+                    "Plan your approach step by step. "
+                    "Report progress as you go. "
+                    "When you have achieved the goal, call "
+                    "`task_complete(summary=...)` to signal completion."
+                )
+                parts.append("\n".join(goal_lines))
+        except Exception:
+            logger.warning("Failed to load goal-based skill context", exc_info=True)
 
     if parts:
         return "\n\n---\n\n".join(parts)

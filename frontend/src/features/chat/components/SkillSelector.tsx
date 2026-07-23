@@ -38,6 +38,10 @@ interface SkillData {
   created_at: string;
   updated_at: string;
   tool_ids: string[];
+  goal?: string;
+  constraints?: string[];
+  success_criteria?: string;
+  agent_config?: { max_turns?: number; model?: string };
 }
 
 interface SkillSelectorProps {
@@ -76,6 +80,11 @@ export function SkillSelector({
               label: (
                 <Space size={4}>
                   {s.title}
+                  {s.execution_type === "goal_based" && (
+                    <Tag color="green" style={{ fontSize: 11, lineHeight: "18px", margin: 0 }}>
+                      Goal
+                    </Tag>
+                  )}
                   {s.tool_ids && s.tool_ids.length > 0 && (
                     <Tag color="blue" style={{ fontSize: 11, lineHeight: "18px", margin: 0 }}>
                       {s.tool_ids.length} tool{s.tool_ids.length !== 1 ? "s" : ""}

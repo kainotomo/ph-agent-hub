@@ -162,6 +162,10 @@ export interface SkillData {
   cross_session_retrieval_enabled?: boolean;
   cross_session_max_snippets?: number;
   cross_session_min_score?: number;
+  goal?: string;
+  constraints?: string[];
+  success_criteria?: string;
+  agent_config?: { max_turns?: number; model?: string };
 }
 
 export interface UsageData {

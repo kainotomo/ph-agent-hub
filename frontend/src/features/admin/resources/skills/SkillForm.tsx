@@ -212,6 +212,7 @@ export function SkillForm({ open, skill, duplicateFrom, onClose }: SkillFormProp
             options={[
               { label: "Prompt Based", value: "prompt_based" },
               { label: "Workflow Based", value: "workflow_based" },
+              { label: "Goal Based", value: "goal_based" },
             ]}
           />
         </Form.Item>
@@ -250,7 +251,7 @@ export function SkillForm({ open, skill, duplicateFrom, onClose }: SkillFormProp
             />
           </Form.Item>
         )}
-        {executionType !== "workflow_based" && (
+        {executionType !== "workflow_based" && executionType !== "goal_based" && (
           <Form.Item name="template_id" label="Template">
             <Select
               allowClear
@@ -262,6 +263,51 @@ export function SkillForm({ open, skill, duplicateFrom, onClose }: SkillFormProp
             />
           </Form.Item>
         )}
+
+        {executionType === "goal_based" && (
+          <>
+            <Form.Item
+              name="goal"
+              label="Goal"
+              rules={[{ required: true, message: "Please enter the goal" }]}
+              extra="The objective the agent should achieve"
+            >
+              <TextArea rows={4} placeholder="e.g., Diagnose why the supplier_rate report is showing incorrect values" />
+            </Form.Item>
+            <Form.Item
+              name="constraints"
+              label="Constraints"
+              extra="Behavioral constraints for the agent"
+            >
+              <Select
+                mode="multiple"
+                allowClear
+                placeholder="Select constraints"
+                options={[
+                  { label: "Read Only (no modifications)", value: "read_only" },
+                  { label: "Max Cost €0.50", value: "max_cost_€0.50" },
+                  { label: "Max Cost €1.00", value: "max_cost_€1.00" },
+                  { label: "Max Cost €5.00", value: "max_cost_€5.00" },
+                ]}
+              />
+            </Form.Item>
+            <Form.Item
+              name="success_criteria"
+              label="Success Criteria"
+              extra="How to determine the task is complete"
+            >
+              <TextArea rows={2} placeholder="e.g., Identify the root cause and propose a specific fix" />
+            </Form.Item>
+            <Form.Item
+              name={["agent_config", "max_turns"]}
+              label="Max Turns"
+              extra="Maximum agent turns before forced summarization (default: 20)"
+            >
+              <Input type="number" min={1} max={50} placeholder="20" />
+            </Form.Item>
+          </>
+        )}
+
         <Form.Item name="default_model_id" label="Default Model">
           <Select
             allowClear

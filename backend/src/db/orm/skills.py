@@ -5,7 +5,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import String, Boolean, Integer, Float, DateTime, Enum, ForeignKey, JSON, func
+from sqlalchemy import String, Boolean, Integer, Float, DateTime, Enum, ForeignKey, JSON, Text, func
 from sqlalchemy.dialects.mysql import CHAR
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -33,7 +33,7 @@ class Skill(Base):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     execution_type: Mapped[str] = mapped_column(
-        Enum("agent", "workflow", "prompt_based", "workflow_based", name="skill_execution_enum"), nullable=False
+        Enum("agent", "workflow", "prompt_based", "workflow_based", "goal_based", name="skill_execution_enum"), nullable=False
     )
     maf_target_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     template_id: Mapped[str | None] = mapped_column(
@@ -65,6 +65,24 @@ class Skill(Base):
     a2a_metadata: Mapped[dict | None] = mapped_column(
         JSON, nullable=True,
         comment="A2A Agent Card per-skill metadata: {inputModes, outputModes, examples, tags}",
+    )
+
+    # ---- Goal-Based Skill fields (Issue #448) ------------------------------
+    goal: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+        comment="The objective the agent should achieve",
+    )
+    constraints: Mapped[dict | None] = mapped_column(
+        JSON, nullable=True,
+        comment="Behavioral constraints, e.g. [\"read_only\"]",
+    )
+    success_criteria: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+        comment="How to determine the task is complete",
+    )
+    agent_config: Mapped[dict | None] = mapped_column(
+        JSON, nullable=True,
+        comment="Agent overrides: {max_turns, model}",
     )
 
     created_at: Mapped[datetime] = mapped_column(

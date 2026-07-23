@@ -91,7 +91,23 @@ export function SkillList() {
       dataIndex: "execution_type",
       key: "execution_type",
       sorter: true,
-      render: (v: string) => <Tag color="blue">{v}</Tag>,
+      render: (v: string) => {
+        const colorMap: Record<string, string> = {
+          agent: "blue",
+          prompt_based: "blue",
+          workflow: "orange",
+          workflow_based: "orange",
+          goal_based: "green",
+        };
+        const labelMap: Record<string, string> = {
+          agent: "Agent",
+          prompt_based: "Prompt Based",
+          workflow: "Workflow",
+          workflow_based: "Workflow Based",
+          goal_based: "Goal Based",
+        };
+        return <Tag color={colorMap[v] || "default"}>{labelMap[v] || v}</Tag>;
+      },
     },
     {
       title: "MAF Key",
@@ -184,12 +200,13 @@ export function SkillList() {
         <Select
           placeholder="Type"
           allowClear
-          style={{ width: 140 }}
+          style={{ width: 150 }}
           value={params.execution_type as string | undefined}
           onChange={(value) => updateParams({ execution_type: value, page: 1 })}
           options={[
             { label: "Agent", value: "agent" },
             { label: "Workflow", value: "workflow" },
+            { label: "Goal Based", value: "goal_based" },
           ]}
         />
         <Select

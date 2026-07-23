@@ -1192,6 +1192,31 @@ async def send_message(
                 "Please wait for one to complete or cancel it before starting another."
             )
 
+    # ---- Goal-Based Skill implies autopilot (Issue #448) -----------------
+    _goal_based_goal: str | None = None
+    _goal_based_max_turns: int | None = None
+    skill_id = data.get("selected_skill_id")
+    if skill_id and not (body.autopilot is False and body.background is False):
+        try:
+            from ..db.orm.skills import Skill as SkillORM
+            from sqlalchemy import select as _sa_select
+            _skill_result = await db.execute(
+                _sa_select(SkillORM).where(SkillORM.id == skill_id)
+            )
+            _skill = _skill_result.scalar_one_or_none()
+            if _skill and _skill.execution_type == "goal_based" and _skill.goal:
+                # Auto-enable autopilot for goal-based skills
+                body.autopilot = True
+                _goal_based_goal = _skill.goal
+                if _skill.agent_config:
+                    _goal_based_max_turns = _skill.agent_config.get("max_turns")
+                logger.info(
+                    "Goal-based skill '%s' auto-enabled autopilot",
+                    _skill.title,
+                )
+        except Exception:
+            logger.warning("Failed to check goal-based skill", exc_info=True)
+
     # ---- Inject file content into user message --------------------------
     file_ids = body.file_ids or []
     modified_message, valid_file_ids = await _inject_file_content(
@@ -1220,6 +1245,8 @@ async def send_message(
                 db=db,
                 current_user=current_user,
                 modified_message=modified_message,
+                goal_override=_goal_based_goal,
+                max_turns_override=_goal_based_max_turns,
             )
 
         return await _handle_streaming_message(
@@ -1245,11 +1272,13 @@ async def send_message(
             )
         from ..agents.autopilot import run_autopilot
 
+        autopilot_goal = _goal_based_goal or modified_message
         response_text, assistant_msg_id = await run_autopilot(
             session_data=data,
-            goal=modified_message,
+            goal=autopilot_goal,
             db=db,
             current_user=current_user,
+            max_turns=_goal_based_max_turns,
         )
     else:
         response_text, assistant_msg_id = await run_agent(
@@ -1877,6 +1906,8 @@ async def _handle_streaming_autopilot(
     db: AsyncSession,
     current_user: UserORM,
     modified_message: str = "",
+    goal_override: str | None = None,
+    max_turns_override: int | None = None,
 ) -> EventSourceResponse:
     """Send a message in autopilot mode and run the meta-loop in the
     background, returning SSE.
@@ -1889,8 +1920,13 @@ async def _handle_streaming_autopilot(
     **Important**: The user's original message is persisted to the DB
     **before** the background task starts so it is immediately visible
     in the sidebar and survives page refresh / navigation away.
+
+    When *goal_override* is provided (from a Goal-Based Skill), the
+    autopilot goal is set to the skill's goal text while the user's
+    original message is preserved as-is in the conversation history.
     """
     _user_message = modified_message or body.content
+    _autopilot_goal = goal_override or _user_message
 
     # Persist the user's original message immediately so it's in the DB
     # before any autopilot turn starts.  This ensures the session title
@@ -1909,9 +1945,10 @@ async def _handle_streaming_autopilot(
     _spawn_autopilot_background(
         session_id=session_id,
         data=data,
-        user_message=_user_message,
+        user_message=_autopilot_goal,
         current_user=current_user,
         bridge=bridge,
+        max_turns=max_turns_override,
         background=body.background,
     )
 

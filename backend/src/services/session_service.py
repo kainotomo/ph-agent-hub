@@ -399,6 +399,7 @@ async def delete_sessions_batch(
     session_ids: list[str],
     user_id: str,
     tenant_id: str,
+    admin_override: bool = False,
 ) -> dict:
     """Delete multiple sessions by ID in a single transaction.
 
@@ -408,6 +409,9 @@ async def delete_sessions_batch(
       - ``skipped``: list of ``{"id": str, "reason": str}`` for sessions that
         could not be deleted (not found, not owned, streaming, already temp)
       - ``errors``: list of ``{"id": str, "error": str}`` for unexpected errors
+
+    When ``admin_override=True``, skips user ownership checks (the caller is
+    responsible for any authorization, e.g. manager tenant scoping).
 
     The function processes DB sessions in bulk using ``.in_(session_ids)``
     for FK-dependent tables (same cascade pattern as ``_purge_empty_sessions``),
@@ -432,10 +436,10 @@ async def delete_sessions_batch(
         # Try DB lookup first
         session_orm = await get_session_by_id(db, sid)
         if session_orm is not None:
-            if session_orm.user_id != user_id:
+            if not admin_override and session_orm.user_id != user_id:
                 skipped.append({"id": sid, "reason": "Not owned by current user"})
                 continue
-            if session_orm.tenant_id != tenant_id:
+            if not admin_override and session_orm.tenant_id != tenant_id:
                 skipped.append({"id": sid, "reason": "Session belongs to a different tenant"})
                 continue
             db_session_ids.append(sid)
@@ -446,10 +450,10 @@ async def delete_sessions_batch(
         if temp is not None:
             t_user = temp.get("user_id")
             t_tenant = temp.get("tenant_id")
-            if t_user != user_id:
+            if not admin_override and t_user != user_id:
                 skipped.append({"id": sid, "reason": "Not owned by current user"})
                 continue
-            if t_tenant != tenant_id:
+            if not admin_override and t_tenant != tenant_id:
                 skipped.append({"id": sid, "reason": "Session belongs to a different tenant"})
                 continue
             temp_session_ids.append(sid)

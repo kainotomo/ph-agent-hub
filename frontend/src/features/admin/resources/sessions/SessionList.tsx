@@ -20,6 +20,7 @@ import {
   Card,
   Typography,
   Select,
+  Modal,
 } from "antd";
 import {
   DeleteOutlined,
@@ -29,6 +30,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   listAdminSessions,
   deleteAdminSession,
+  deleteAdminSessions,
   listTenants,
   AdminSessionData,
 } from "../../services/admin";
@@ -45,6 +47,7 @@ export function SessionList() {
   const [searchText, setSearchText] = useState("");
   const [searchParams] = useSearchParams();
   const tenantId = searchParams.get("tenant_id") || undefined;
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
 
   const debouncedSearch = useDebounce(searchText, 300);
 
@@ -70,6 +73,24 @@ export function SessionList() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["admin-sessions"] });
       message.success("Session deleted");
+    },
+  });
+
+  const batchDeleteMutation = useMutation({
+    mutationFn: (ids: string[]) => deleteAdminSessions(ids),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["admin-sessions"] });
+      if (data.deleted > 0) {
+        message.success(`Deleted ${data.deleted} session${data.deleted !== 1 ? "s" : ""}`);
+      }
+      if (data.skipped.length > 0) {
+        message.warning(`${data.skipped.length} session${data.skipped.length !== 1 ? "s" : ""} skipped`);
+      }
+      setSelectedRowKeys([]);
+    },
+    onError: (err: Error) => {
+      message.error(`Failed to delete sessions: ${err.message}`);
+      setSelectedRowKeys([]);
     },
   });
 
@@ -153,6 +174,23 @@ export function SessionList() {
     },
   ];
 
+  const rowSelection = {
+    selectedRowKeys,
+    onChange: (keys: React.Key[]) => setSelectedRowKeys(keys),
+  };
+
+  const handleBatchDelete = () => {
+    const ids = selectedRowKeys as string[];
+    Modal.confirm({
+      title: `Delete ${ids.length} session${ids.length !== 1 ? "s" : ""}?`,
+      content: `This will permanently delete ${ids.length} session${ids.length !== 1 ? "s" : ""} and all their messages. This action cannot be undone.`,
+      okText: "Delete",
+      okButtonProps: { danger: true },
+      cancelText: "Cancel",
+      onOk: () => batchDeleteMutation.mutate(ids),
+    });
+  };
+
   return (
     <div>
       <Space style={{ marginBottom: 16 }} wrap>
@@ -183,6 +221,20 @@ export function SessionList() {
             { label: "Not Pinned", value: "false" },
           ]}
         />
+        {selectedRowKeys.length > 0 && (
+          <>
+            <Text type="secondary">{selectedRowKeys.length} selected</Text>
+            <Button
+              type="primary"
+              danger
+              size="small"
+              loading={batchDeleteMutation.isPending}
+              onClick={handleBatchDelete}
+            >
+              Delete Selected
+            </Button>
+          </>
+        )}
       </Space>
 
       {isMobile ? (
@@ -240,6 +292,7 @@ export function SessionList() {
       ) : (
         <Table
           rowKey="id"
+          rowSelection={rowSelection}
           columns={columns}
           dataSource={sessionsData}
           loading={isLoading}

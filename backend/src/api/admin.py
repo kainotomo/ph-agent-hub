@@ -30,6 +30,7 @@ from ..core.pagination import PaginatedResponse
 from ..core.redis import store_a2a_oauth_state
 from ..db.orm.users import User as UserORM
 from ..services.audit_service import list_audit_logs, write_audit_log
+from ..services import session_service
 from ..services.tenant_service import (
     count_tenants,
     create_tenant as _svc_create_tenant,
@@ -3229,6 +3230,81 @@ async def admin_delete_session(
         tenant_id=current_user.tenant_id,
         ip_address=_get_client_ip(request),
     )
+
+
+class AdminBatchDeleteSessionsRequest(BaseModel):
+    """Request body for admin batch-deleting sessions. Max 100 per call."""
+    ids: list[str]
+
+
+@router.post("/sessions/delete")
+async def admin_delete_sessions_batch(
+    body: AdminBatchDeleteSessionsRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Batch-delete sessions (admin/manager).
+
+    Admin: deletes any session. Manager: only sessions in own tenant.
+    Skips non-existent sessions and (for managers) cross-tenant sessions.
+    """
+    ids = body.ids
+    if not ids:
+        raise ValidationError("ids must be a non-empty list of session IDs")
+    if len(ids) > 100:
+        raise ValidationError("Cannot delete more than 100 sessions at once")
+
+    from ..db.orm.sessions import Session as SessionORM
+
+    result = await db.execute(
+        select(SessionORM).where(SessionORM.id.in_(ids))
+    )
+    sessions = list(result.scalars().all())
+    found_ids = {s.id for s in sessions}
+
+    db_session_ids: list[str] = []
+    skipped: list[dict] = []
+
+    for sid in ids:
+        if sid not in found_ids:
+            skipped.append({"id": sid, "reason": "Session not found"})
+            continue
+        if current_user.role == "manager":
+            s = next(s for s in sessions if s.id == sid)
+            if s.tenant_id != current_user.tenant_id:
+                skipped.append({"id": sid, "reason": "Session belongs to a different tenant"})
+                continue
+        db_session_ids.append(sid)
+
+    if not db_session_ids:
+        return {"deleted": 0, "skipped": skipped, "errors": []}
+
+    await session_service.delete_sessions_batch(
+        db=db,
+        session_ids=db_session_ids,
+        user_id=current_user.id,
+        tenant_id=current_user.tenant_id,
+        admin_override=True,
+    )
+
+    # Write audit log for each deleted session
+    for sid in db_session_ids:
+        await write_audit_log(
+            db,
+            actor=current_user,
+            action="session.deleted",
+            target_type="session",
+            target_id=sid,
+            tenant_id=current_user.tenant_id,
+            ip_address=_get_client_ip(request),
+        )
+
+    return {
+        "deleted": len(db_session_ids),
+        "skipped": skipped,
+        "errors": [],
+    }
 
 
 # =============================================================================

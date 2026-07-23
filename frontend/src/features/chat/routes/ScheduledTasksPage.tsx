@@ -8,7 +8,9 @@
 import { useCallback, useMemo, useState } from "react";
 import {
   Button,
+  Card,
   Form,
+  Grid,
   Input,
   Modal,
   Space,
@@ -19,6 +21,7 @@ import {
   message,
 } from "antd";
 import {
+  ArrowLeftOutlined,
   CheckCircleOutlined,
   ClockCircleOutlined,
   DeleteOutlined,
@@ -93,6 +96,8 @@ function formatLastRun(lastRunAt: string | null): string {
 export function ScheduledTasksPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const screens = Grid.useBreakpoint();
+  const isMobile = !screens.md;
   const [page, setPage] = useState(1);
   const [stateFilter, setStateFilter] = useState<string | undefined>();
   const [editingTask, setEditingTask] = useState<ScheduledTaskData | null>(null);
@@ -328,39 +333,213 @@ export function ScheduledTasksPage() {
     [],
   );
 
+  // --- Mobile card render -------------------------------------------------
+  const renderMobileCard = useCallback(
+    (task: ScheduledTaskData) => {
+      const stateCfg = STATE_CONFIG[task.state];
+      const statusCfg = STATUS_CONFIG[task.last_run_status ?? ""];
+      return (
+        <Card
+          key={task.id}
+          size="small"
+          style={{ marginBottom: 12 }}
+          title={
+            <Tooltip title={task.goal}>
+              <Text ellipsis style={{ maxWidth: 220, display: "inline-block" }}>
+                {task.goal}
+              </Text>
+            </Tooltip>
+          }
+          extra={
+            stateCfg ? (
+              <Tag color={stateCfg.color} icon={stateCfg.icon}>
+                {task.state}
+              </Tag>
+            ) : (
+              <Tag>{task.state}</Tag>
+            )
+          }
+          actions={[
+            task.state === "ACTIVE" ? (
+              <Tooltip title="Pause" key="pause">
+                <PauseCircleOutlined onClick={() => handlePause(task.id)} />
+              </Tooltip>
+            ) : task.state === "PAUSED" ? (
+              <Tooltip title="Resume" key="resume">
+                <PlayCircleOutlined onClick={() => handleResume(task.id)} />
+              </Tooltip>
+            ) : (
+              <span key="state" />
+            ),
+            <Tooltip title="Edit" key="edit">
+              <EditOutlined onClick={() => handleEdit(task)} />
+            </Tooltip>,
+            <Tooltip title="Delete" key="delete">
+              <DeleteOutlined onClick={() => handleDelete(task.id)} />
+            </Tooltip>,
+          ]}
+        >
+          <div style={{ lineHeight: 1.8 }}>
+            <div>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                Schedule:{" "}
+              </Text>
+              <Tooltip
+                title={`Cron: ${task.cron_expression} • TZ: ${task.timezone}`}
+              >
+                <Text style={{ fontSize: 13 }}>{task.schedule_description}</Text>
+              </Tooltip>
+            </div>
+            <div>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                Next Run:{" "}
+              </Text>
+              <Text style={{ fontSize: 13 }}>{formatNextRun(task.next_run_at)}</Text>
+            </div>
+            <div>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                Last Run:{" "}
+              </Text>
+              {task.last_run_at ? (
+                <Space size={4}>
+                  <Tag
+                    color={statusCfg?.color ?? "default"}
+                    style={{ fontSize: 11, lineHeight: "18px" }}
+                  >
+                    {task.last_run_status ?? "UNKNOWN"}
+                  </Tag>
+                  <Text style={{ fontSize: 13 }}>
+                    {formatLastRun(task.last_run_at)}
+                  </Text>
+                  {task.last_run_session_id && (
+                    <Button
+                      type="link"
+                      size="small"
+                      style={{ padding: 0, height: 20, fontSize: 12 }}
+                      onClick={() =>
+                        navigate(`/chat/${task.last_run_session_id}`)
+                      }
+                    >
+                      View
+                    </Button>
+                  )}
+                </Space>
+              ) : (
+                <Text style={{ color: "#999", fontSize: 13 }}>Never</Text>
+              )}
+            </div>
+          </div>
+        </Card>
+      );
+    },
+    [handlePause, handleResume, handleEdit, handleDelete, navigate],
+  );
+
+  // --- Empty state --------------------------------------------------------
+  const emptyState = (
+    <div style={{ padding: 40, textAlign: "center" }}>
+      <ClockCircleOutlined style={{ fontSize: 48, color: "#d9d9d9" }} />
+      <Typography.Paragraph type="secondary" style={{ marginTop: 12 }}>
+        No scheduled tasks yet. Create one in a chat by asking the agent
+        to schedule a recurring task.
+      </Typography.Paragraph>
+      <Button type="primary" onClick={() => navigate("/chat")}>
+        Go to Chat
+      </Button>
+    </div>
+  );
+
+  // --- Mobile pagination helper -------------------------------------------
+  const totalPages = data ? Math.ceil(data.total / 50) : 0;
+
   return (
-    <div style={{ padding: 24 }}>
+    <div
+      style={
+        isMobile
+          ? {
+              height: "100dvh",
+              overflow: "hidden",
+              display: "flex",
+              flexDirection: "column",
+            }
+          : { padding: 24 }
+      }
+    >
       {/* Header */}
       <div
         style={{
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
-          marginBottom: 16,
+          ...(isMobile
+            ? {
+                padding: "12px 16px",
+                borderBottom: "1px solid #f0f0f0",
+                background: "#fff",
+              }
+            : { marginBottom: 16 }),
         }}
       >
-        <div>
-          <Typography.Title level={4} style={{ margin: 0 }}>
-            <ClockCircleOutlined style={{ marginRight: 8 }} />
-            Scheduled Tasks
-          </Typography.Title>
-          <Typography.Text type="secondary">
-            Agent tasks that run automatically on a recurring schedule
-          </Typography.Text>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            minWidth: 0,
+            flex: 1,
+          }}
+        >
+          {isMobile && (
+            <Button
+              icon={<ArrowLeftOutlined />}
+              onClick={() => navigate("/chat")}
+              type="text"
+            />
+          )}
+          <div style={{ overflow: "hidden" }}>
+            <Typography.Title
+              level={isMobile ? 5 : 4}
+              style={{ margin: 0 }}
+            >
+              <ClockCircleOutlined style={{ marginRight: 8 }} />
+              Scheduled Tasks
+            </Typography.Title>
+            {!isMobile && (
+              <Typography.Text type="secondary">
+                Agent tasks that run automatically on a recurring schedule
+              </Typography.Text>
+            )}
+          </div>
         </div>
-        <Space>
-          <Button icon={<ReloadOutlined />} onClick={() => refetch()}>
-            Refresh
+        <Space size={isMobile ? 4 : 8}>
+          <Button
+            icon={<ReloadOutlined />}
+            onClick={() => refetch()}
+            size={isMobile ? "small" : "middle"}
+          >
+            {isMobile ? undefined : "Refresh"}
           </Button>
-          <Button type="primary" onClick={() => navigate("/chat")}>
-            New Schedule in Chat
-          </Button>
+          {!isMobile && (
+            <Button type="primary" onClick={() => navigate("/chat")}>
+              New Schedule in Chat
+            </Button>
+          )}
         </Space>
       </div>
 
       {/* Filter tabs */}
-      <div style={{ marginBottom: 12 }}>
-        <Space>
+      <div
+        style={{
+          ...(isMobile
+            ? {
+                padding: "8px 16px",
+                borderBottom: "1px solid #f0f0f0",
+                background: "#fafafa",
+              }
+            : { marginBottom: 12 }),
+        }}
+      >
+        <Space size={isMobile ? 4 : 8} wrap>
           {filterTabs.map((tab) => (
             <Button
               key={tab.key ?? "all"}
@@ -377,41 +556,66 @@ export function ScheduledTasksPage() {
         </Space>
       </div>
 
-      {/* Table */}
-      <Table
-        dataSource={data?.items ?? []}
-        columns={columns}
-        rowKey="id"
-        loading={isLoading || isRefetching}
-        pagination={
-          data && data.total > 50
-            ? {
-                current: page,
-                pageSize: 50,
-                total: data.total,
-                onChange: setPage,
-                showSizeChanger: false,
-              }
-            : false
-        }
-        locale={{
-          emptyText: (
-            <div style={{ padding: 40, textAlign: "center" }}>
-              <ClockCircleOutlined style={{ fontSize: 48, color: "#d9d9d9" }} />
-              <Typography.Paragraph
-                type="secondary"
-                style={{ marginTop: 12 }}
+      {/* Content: Table (desktop) or Card list (mobile) */}
+      {isMobile ? (
+        <div style={{ flex: 1, overflow: "auto", padding: 12 }}>
+          {data?.items?.length ? (
+            data.items.map(renderMobileCard)
+          ) : (
+            emptyState
+          )}
+          {data && data.total > 10 && totalPages > 1 && (
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "center",
+                alignItems: "center",
+                gap: 12,
+                padding: "16px 0",
+              }}
+            >
+              <Button
+                size="small"
+                disabled={page <= 1}
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
               >
-                No scheduled tasks yet. Create one in a chat by asking the agent
-                to schedule a recurring task.
-              </Typography.Paragraph>
-              <Button type="primary" onClick={() => navigate("/chat")}>
-                Go to Chat
+                Previous
+              </Button>
+              <Typography.Text type="secondary" style={{ fontSize: 13 }}>
+                Page {page} of {totalPages}
+              </Typography.Text>
+              <Button
+                size="small"
+                disabled={page >= totalPages}
+                onClick={() => setPage((p) => p + 1)}
+              >
+                Next
               </Button>
             </div>
-          ),
-        }}
-      />
+          )}
+        </div>
+      ) : (
+        <Table
+          dataSource={data?.items ?? []}
+          columns={columns}
+          rowKey="id"
+          loading={isLoading || isRefetching}
+          size="middle"
+          scroll={{ x: 700 }}
+          pagination={
+            data && data.total > 50
+              ? {
+                  current: page,
+                  pageSize: 50,
+                  total: data.total,
+                  onChange: setPage,
+                  showSizeChanger: false,
+                }
+              : false
+          }
+          locale={{ emptyText: emptyState }}
+        />
+      )}
 
       {/* Edit Modal */}
       <Modal

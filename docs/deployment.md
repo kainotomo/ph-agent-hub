@@ -304,6 +304,65 @@ Access:
 
 Alembic migrations run automatically inside the backend container on startup before the application server starts.
 
+### Migration Verification (Issue #482)
+
+Before deploying to production, verify all migrations are safe:
+
+**Pre-deploy checklist:**
+
+1. **Review migration risk registry** — Check `backend/tests/test_migrations.py` for the `RISK_REGISTRY` dict which classifies each migration as HIGH/MEDIUM/LOW risk.
+2. **Preview SQL** — Generate the raw SQL that will be executed:
+   ```bash
+   cd backend
+   alembic upgrade heads --sql
+   ```
+3. **Run migration tests** — Execute the DAG integrity and round-trip tests:
+   ```bash
+   cd backend
+   pytest tests/test_migrations.py -v
+   ```
+4. **Test on staging** — Apply migrations against a staging database that mirrors production schema and data volume.
+5. **Back up production DB** — Take a MariaDB dump or snapshot before deployment:
+   ```bash
+   docker compose exec mariadb mysqldump -u root -p phagent_hub > pre_migration_backup.sql
+   ```
+
+**HIGH-risk operations to watch for:**
+
+| Operation | Risk | Mitigation |
+|-----------|------|------------|
+| `DROP TABLE` | Irreversible data loss | Verify no production data exists or archive first |
+| `DROP COLUMN` | Data loss | Confirm column is truly unused |
+| `MODIFY COLUMN ... ENUM(...)` | Full table rebuild (downtime) | Check table size; plan maintenance window |
+| Data backfill (`UPDATE`) | Partial failure risk | Test on staging copy of production data |
+| `ADD UNIQUE` on existing data | Failure on duplicates | Verify dedup logic works (e.g., `n1o2p3q4r5s7`) |
+
+**Rollback procedure:**
+
+If a migration causes issues in production:
+
+```bash
+# 1. Check current migration version
+docker compose exec backend alembic current
+
+# 2. Downgrade one step (replace REVISION with the previous revision ID)
+docker compose exec backend alembic downgrade -1
+
+# 3. Verify downgrade succeeded
+docker compose exec backend alembic current
+
+# 4. Restore database from backup if needed
+# docker compose exec -T mariadb mysql -u root -p phagent_hub < pre_migration_backup.sql
+```
+
+> **Note**: Merge migrations (`4ffaa9dfdcb5`, `b5c6d7e8f9a0`, `930b42d7f5c0`) have empty `downgrade()` — they are no-ops and cannot be "undone". Always test on staging first.
+
+**Current migration chain:**
+- Root: `6b6bd31267a0` (initial_schema)
+- Current head: `a5b6c7d8e9f0` (add_goal_based_skill_type)
+- Total migrations: 65
+- Merge migrations: 3 (all branches resolved)
+
 ### Hot-reload behavior
 - **Backend**: Edit any `.py` file → uvicorn logs `WatchFiles detected changes… Reloading…` and restarts the server in ~2 seconds.
 - **Frontend**: Edit any `.tsx`/`.ts` file → Vite HMR updates the browser instantly without a full page reload.

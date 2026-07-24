@@ -111,6 +111,16 @@ jobs:
           cd backend
           alembic upgrade heads
 
+      - name: Run migration verification tests (Issue #482)
+        env:
+          ENCRYPTION_KEY: ${{ steps.gen-key.outputs.fernet }}
+        run: |
+          cd backend
+          pytest tests/test_migrations.py \
+            -v \
+            -m "not slow" \
+            --tb=short
+
       - name: Run tests (Tier 1 — unit + integration with coverage)
         env:
           ENCRYPTION_KEY: ${{ steps.gen-key.outputs.fernet }}
@@ -121,6 +131,7 @@ jobs:
             --dist loadscope \
             --durations=15 \
             -m "not e2e and not slow" \
+            --ignore=tests/test_migrations.py \
             --cov=src/services \
             --cov=src/api \
             --cov-report=term \

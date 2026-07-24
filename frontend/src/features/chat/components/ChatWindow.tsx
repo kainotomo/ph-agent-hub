@@ -31,6 +31,7 @@ import {
   updateAssistantMessage,
   listAlwaysOnTools,
   getStreamStatus,
+  createSession,
 } from "../services/chat";
 import { AutopilotPanel, INITIAL_AUTOPILOT_STATE, type AutopilotState } from "./AutopilotPanel";
 import { getDemoMessages } from "../services/demo";
@@ -1044,6 +1045,9 @@ export function ChatWindow({
     setPendingFiles([]);
 
     // Build session_data for lazy session creation (Phase 2)
+    // This is kept as a fallback even with eager creation (Issue #478):
+    // if the eager POST beats the lazy-session POST the backend can
+    // still create the session inline.
     const sessionData = pendingFlag
       ? {
           title: "New Chat",
@@ -1065,6 +1069,31 @@ export function ChatWindow({
     // causing a spurious "Reconnecting to live session" flash and a
     // duplicate SSE subscription to the bridge.
     reconnectAttemptedRef.current = true;
+
+    // ---- Eager session creation for pending sessions (Issue #478) ---------
+    // Fire a separate POST to create the session before the fetchEventSource
+    // POST arrives, so the backend doesn't need lazy-creation during the SSE
+    // stream.  If the eager creation fails or is too slow, the fallback
+    // session_data in the POST body still works.
+    if (pendingFlag) {
+      createSession({
+        title: "New Chat",
+        auto_route_enabled: pendAutoRoute,
+        auto_select_tools: pendAutoSelectTools,
+        selected_model_id: pendModelId || null,
+        selected_template_id: pendTemplateId || null,
+        selected_skill_id: pendSkillId || null,
+        thinking_enabled: thinkingEnabled ?? undefined,
+        temperature: sessionTemperature ?? undefined,
+        active_tool_ids: pendActiveToolIds.length > 0 ? pendActiveToolIds : undefined,
+      }).then(() => {
+        setPendingFlag(false);
+        queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+      }).catch(() => {
+        // Ignore — fallback session_data in the POST body handles it.
+      });
+    }
 
     if (isAutopilotMode) {
       // ---- Autopilot mode: stream with autopilot flag ----------------------

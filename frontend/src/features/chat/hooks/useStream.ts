@@ -478,28 +478,49 @@ export function useStream(apiPrefix: string = "chat") {
               handlers.onClose?.();
             },
             onerror(_err) {
-              // Abort during normal stream end (component re-render,
-              // isPending transition) is expected — do NOT throw so
-              // fetchEventSource doesn't retry with a GET request
-              // that also fails and confuses the user.
+              // IMPORTANT: must THROW to prevent fetchEventSource from
+              // scheduling a retry.  When onerror returns (doesn't throw),
+              // the library schedules create() via setTimeout(1000), which
+              // sends a SECOND POST with the same body — causing duplicate
+              // messages or ERR_ABORTED on the retried request (Issue #478).
+              //
+              // On throw, the library's inner catch calls reject(InnerErr),
+              // which rejects the outer promise and lands in the catch
+              // block below.  No retry.
               if (controller.signal.aborted) {
+                // Intentional abort (cleanup, stopStream) — clean up
+                // silently.  The outer catch will call handlers.onClose.
                 setStreaming(false);
                 setStreamingSessionId(null);
-                handlers.onClose?.();
-                return;
+                throw _err;
               }
+              // Actual stream error — report it and throw to reject the
+              // promise.  The outer catch calls onClose for final cleanup.
+              const errMsg =
+                _err instanceof Error ? _err.message : String(_err);
               removeStreamingSession(sessionId);
               setStreaming(false);
               setStreamingSessionId(null);
-              handlers.onClose?.();
-              // Don't throw — prevents fetchEventSource retry loop.
+              // Include the raw error string so the toast shows the
+              // actual error (e.g. "The user aborted a request") rather
+              // than the generic "Request failed" fallback.
+              handlers.onError?.(errMsg, "");
+              throw _err;
             },
           },
         );
       } catch (err) {
+        // When onerror threw: onError was already called inside onerror.
+        // We still call onClose so the caller can run query invalidation
+        // and final cleanup (onError only does state reset + toast).
         if (!controller.signal.aborted) {
-          handlers.onError?.(String(err), "");
+          handlers.onClose?.();
           removeStreamingSession(sessionId);
+        } else {
+          // Intentional abort: the onerror handler already cleaned up
+          // streaming state.  We still fire onClose so the caller can
+          // run final cleanup (query invalidation, etc.).
+          handlers.onClose?.();
         }
         setStreaming(false);
         setStreamingSessionId(null);

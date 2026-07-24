@@ -2665,6 +2665,36 @@ async def get_logs(
 # =============================================================================
 
 
+@router.get("/groups", response_model=PaginatedResponse[GroupResponse])
+async def list_groups(
+    tenant_id: str | None = None,
+    search: str | None = None,
+    sort_by: str | None = None,
+    sort_dir: str | None = None,
+    page: int = 1,
+    page_size: int = 25,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """List user groups. Admin sees all (optionally filtered by tenant).
+    Manager sees own tenant only. Supports search, sorting, pagination."""
+    if current_user.role == "manager":
+        tenant_id = current_user.tenant_id
+
+    groups, total = await _svc_list_groups(
+        db, tenant_id=tenant_id,
+        search=search, sort_by=sort_by, sort_dir=sort_dir,
+        page=page, page_size=page_size,
+    )
+
+    total_pages = max(1, -(-total // page_size))
+    return PaginatedResponse(
+        items=[GroupResponse.model_validate(g) for g in groups],
+        total=total, page=page,
+        page_size=page_size, total_pages=total_pages,
+    )
+
+
 @router.post("/groups", response_model=GroupResponse, status_code=201)
 async def create_group(
     body: GroupCreate,

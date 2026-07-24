@@ -28,6 +28,7 @@ export interface SessionData {
   /** True when the session hasn't been persisted yet (lazy creation). */
   selected_skill_id: string | null;
   selected_model_id: string | null;
+  selected_template_id?: string | null;
   auto_route_enabled?: boolean;
   auto_select_tools?: boolean;
   thinking_enabled?: boolean | null;
@@ -108,6 +109,8 @@ export function createSession(data: {
   selected_model_id?: string;
   auto_route_enabled?: boolean;
   auto_select_tools?: boolean;
+  thinking_enabled?: boolean;
+  temperature?: number;
   active_tool_ids?: string[];
 }): Promise<SessionData> {
   return api<SessionData>("/chat/session", {

@@ -335,4 +335,17 @@ describe("ChatWindow — Stream reconnect on mount (Issue #457)", () => {
     // the stop to happen before navigation, which is tested by the effect guard.
     expect(mockGetStreamStatus).toHaveBeenCalledWith("test-session-1");
   });
+
+  it("does NOT call getStreamStatus when isPending is true (Issue #475)", async () => {
+    // Simulate navigating from an existing session to a new one — the
+    // component stays mounted but isPending becomes true, so pendingFlag
+    // should be true and the reconnect effect should be skipped.
+    mockGetStreamStatus.mockResolvedValue({ active: true });
+
+    renderChatWindow({ isPending: true, sessionId: "test-new-session" });
+    await settle();
+
+    expect(mockGetStreamStatus).not.toHaveBeenCalled();
+    expect(mockStartReconnect).not.toHaveBeenCalled();
+  });
 });

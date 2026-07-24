@@ -24,7 +24,8 @@ export interface SessionData {
   title: string;
   is_temporary: boolean;
   is_pinned: boolean;
-  selected_template_id: string | null;
+  is_pending?: boolean;
+  /** True when the session hasn't been persisted yet (lazy creation). */
   selected_skill_id: string | null;
   selected_model_id: string | null;
   auto_route_enabled?: boolean;

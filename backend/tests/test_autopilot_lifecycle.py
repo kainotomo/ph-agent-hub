@@ -385,3 +385,25 @@ class TestStreamStatusAutopilot:
         assert data["paused"] is False
         # run_state may be None or absent — just check it's falsy
         assert not data.get("run_state")
+
+    async def test_status_nonexistent_session(
+        self, async_client, auth_headers, test_user
+    ):
+        """A non-existent session should return 200 with inactive defaults
+        instead of 404, so the frontend avoids console errors for
+        lazy-created sessions (Issue #475)."""
+        import uuid
+        fake_id = str(uuid.uuid4())
+        headers = auth_headers(test_user)
+        resp = await async_client.get(
+            f"/api/chat/session/{fake_id}/stream-status",
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["active"] is False
+        assert data["autopilot"] is False
+        assert data["paused"] is False
+        assert data["current_turn"] is None
+        assert data["max_turns"] is None
+        assert data["run_state"] is None

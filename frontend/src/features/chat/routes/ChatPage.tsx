@@ -28,9 +28,14 @@ export function ChatPage() {
     retry: false,
     // No staleTime — we rely on manual invalidation via onStreamStart /
     // onMessageComplete to pull fresh data when the session is created.
-    // The initial 404 for lazy sessions is expected and harmless (one
-    // single error, not a flood, since invalidations are now controlled).
+    // The backend now returns is_pending:true instead of 404 for
+    // lazy-created sessions, so no console error is logged.
   });
+
+  // A session is "pending" when the backend hasn't persisted it yet
+  // (lazy creation).  The ChatWindow uses this flag to read/write
+  // drafts from localStorage instead of API calls.
+  const isPending = session?.is_pending ?? true;
 
   const handleSessionUpdate = async (data: Record<string, unknown>) => {
     if (!sessionId) return;
@@ -132,7 +137,7 @@ export function ChatPage() {
         ) : (
           <ChatWindow
             sessionId={sessionId!}
-            isPending={!session}
+            isPending={isPending}
             isTemporary={session?.is_temporary}
             selectedModelId={session?.selected_model_id ?? undefined}
             selectedTemplateId={session?.selected_template_id ?? undefined}

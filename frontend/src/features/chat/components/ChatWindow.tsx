@@ -239,11 +239,15 @@ export function ChatWindow({
   const [pendActiveToolIds, setPendActiveToolIds] = useState<string[]>([]);
   const [pendingFlag, setPendingFlag] = useState(isPending);
 
-  // When the session gets created (isPending flips), clear pending state
-  // and remove the persisted draft from sessionStorage.
+  // Sync pendingFlag with isPending on every change.
+  // When navigating from an existing session to a new one (React Router
+  // preserves the component), useState(isPending) retains the old value,
+  // so we need this effect to keep pendingFlag in sync on both transitions
+  // (true→false and false→true).  When isPending becomes false the session
+  // has been created on the backend — clear localStorage drafts.
   useEffect(() => {
+    setPendingFlag(isPending);
     if (!isPending) {
-      setPendingFlag(false);
       removeDraft(DRAFT_PREFIX + sessionId);
       removeDraft(FILES_PREFIX + sessionId);
     }

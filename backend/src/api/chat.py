@@ -125,6 +125,10 @@ class SessionResponse(BaseModel):
     title: str
     is_temporary: bool
     is_pinned: bool
+    is_pending: bool = False
+    """True when the session does not yet exist on the backend (lazy creation).
+    The frontend uses this to know the session is not yet persisted and
+    should use localStorage drafts instead of API calls."""
     selected_template_id: str | None
     selected_skill_id: str | None
     selected_model_id: str | None
@@ -700,9 +704,36 @@ async def get_session(
     db: AsyncSession = Depends(get_db),
     current_user: UserORM = Depends(get_current_user),
 ):
-    """Get a session by ID (from DB or Redis)."""
-    data = await _load_session(db, session_id)
-    await _require_session_owner(data, current_user)
+    """Get a session by ID (from DB or Redis).
+
+    If the session does not yet exist (lazy creation), returns a minimal
+    pending session instead of 404 so the frontend avoids console errors.
+    """
+    try:
+        data = await _load_session(db, session_id)
+        await _require_session_owner(data, current_user)
+    except NotFoundError:
+        now = datetime.now(timezone.utc)
+        return {
+            "id": session_id,
+            "tenant_id": current_user.tenant_id,
+            "user_id": current_user.id,
+            "title": "New Chat",
+            "is_temporary": False,
+            "is_pinned": False,
+            "is_pending": True,
+            "selected_template_id": None,
+            "selected_skill_id": None,
+            "selected_model_id": None,
+            "thinking_enabled": None,
+            "temperature": None,
+            "auto_route_enabled": False,
+            "auto_select_tools": True,
+            "cross_session_retrieval_enabled": None,
+            "tags": [],
+            "created_at": now,
+            "updated_at": now,
+        }
 
     return {
         "id": data["id"],
@@ -2139,10 +2170,22 @@ async def stream_status(
 
     Note: Ownership verification is done via a lightweight session load
     to prevent information disclosure (leaking whether arbitrary sessions
-    are active).
+    are active).  If the session does not yet exist (lazy creation), the
+    response defaults to inactive so the frontend avoids 404 errors.
     """
-    data = await _load_session(db, session_id)
-    await _require_session_owner(data, current_user)
+    try:
+        data = await _load_session(db, session_id)
+        await _require_session_owner(data, current_user)
+    except NotFoundError:
+        # Session doesn't exist yet (lazy creation) — no active stream.
+        return {
+            "active": False,
+            "autopilot": False,
+            "paused": False,
+            "current_turn": None,
+            "max_turns": None,
+            "run_state": None,
+        }
 
     active = await check_stream_active(session_id)
     autopilot = False

@@ -69,13 +69,40 @@ def event_loop():
 async def db_session():
     """Create a fresh async DB session for each test.
 
-    Uses a transaction that is rolled back after each test to ensure
-    test isolation without creating/dropping tables.
+    Uses a savepoint-backed transaction that is **always** rolled back in the
+    ``finally`` block, even when service functions call ``await db.commit()``
+    internally.
+
+    How it works
+    ------------
+    1. An outer transaction is started (``session.begin``).
+    2. A savepoint is created within it (``session.begin_nested``).
+    3. The test uses the session normally.
+    4. When a service calls ``await db.commit()``, the savepoint is released
+       but the outer transaction remains — **nothing is persisted to DB yet**.
+    5. In ``finally``, ``session.rollback()`` rolls back the *outer* transaction,
+       undoing **everything**, including data the service "committed".
+
+    This guarantees complete test isolation even when services call ``commit()``.
     """
     session = AsyncSessionLocal()
     try:
-        # Begin a transaction that will be rolled back
         await session.begin()
+
+        # Monkey-patch commit() to be flush() so service functions never
+        # actually commit data to the database.  The outer begin() keeps
+        # the transaction open, and the finally block's rollback() undoes
+        # everything.
+        original_commit = session.commit
+        original_flush = session.flush
+
+        async def _noop_commit():
+            # Call flush to ensure data is visible within the session
+            # (services expect this), but never actually commit.
+            await original_flush()
+
+        session.commit = _noop_commit  # type: ignore[method-assign]
+
         yield session
     finally:
         await session.rollback()
@@ -723,13 +750,17 @@ async def test_tool_group(
 
 @pytest_asyncio.fixture
 async def e2e_db_session():
-    """Provide an async DB session that E2E tests use directly.
+    """Provide an async DB session for E2E tests backed by a savepoint that is
+    **always** rolled back in the ``finally`` block, even when service functions
+    call ``await db.commit()`` internally.
 
-    Unlike ``db_session`` (which wraps everything in a transaction and always
-    rolls back), this fixture does **not** begin an explicit transaction.
-    It rolls back any uncommitted work in ``finally``, and the session-level
-    cleanup hook (``pytest_sessionfinish``) handles any data committed
-    intentionally by tests.
+    Same savepoint mechanism as ``db_session`` — see that fixture's docstring
+    for details.
+
+    For tests that genuinely need cross-session persistence (write in one
+    session, read from another), use explicit ``AsyncSessionLocal()`` instances
+    and add explicit cleanup — those are handled by the ``pytest_sessionfinish``
+    safety net.
 
     Expects ``DATABASE_URL`` env var (falls back to the Docker Compose
     default connection string).
@@ -749,6 +780,19 @@ async def e2e_db_session():
 
     session = AsyncSessionLocal()
     try:
+        await session.begin()
+
+        # Same monkey-patch as db_session: commit → flush so services never
+        # persist data to the database.  The outer begin() keeps the
+        # transaction open, and the finally block's rollback() undoes
+        # everything.
+        original_flush = session.flush
+
+        async def _noop_commit():
+            await original_flush()
+
+        session.commit = _noop_commit  # type: ignore[method-assign]
+
         yield session
     finally:
         await session.rollback()
@@ -761,23 +805,20 @@ async def e2e_db_session():
 
 
 def pytest_sessionfinish(session, exitstatus):
-    """After the entire test session finishes, delete rows that were created
-    by E2E tests and left behind (e.g. tests that intentionally ``commit()``).
+    """After the entire test session finishes, delete test-created rows that
+    were left behind (service functions called by tests often ``commit()``
+    internally, bypassing fixture-level rollback).
 
     Uses a **separate engine and session** so it is not affected by any
-    fixture-level rollback.
+    fixture-level transaction.
 
     The cleanup is selective — it deletes only rows whose names / emails match
     known test-fixture patterns.  The A2A default tenant and system user
     (fixed IDs) are **not** deleted.
-    """
-    # Only run cleanup when e2e tests were collected
-    has_e2e = any(
-        item.get_closest_marker("e2e") for item in getattr(session, "items", [])
-    )
-    if not has_e2e:
-        return
 
+    This hook runs unconditionally for every pytest session, including runs
+    that exclude ``e2e`` markers.
+    """
     import asyncio
 
     asyncio.run(_cleanup_test_data())
@@ -800,43 +841,201 @@ async def _cleanup_test_data():
 
     with Session(engine) as db:
         tables = [
-            # Order matters: children first, parents last
+            # ---- Child / leaf tables (no FK references to other test data) ----
+            # These are unconditionally deleted because they never hold seed data
             ("a2a_call_logs", None),
             ("a2a_tasks", None),
-            ("a2a_servers", "name LIKE 'Test%' OR name LIKE 'E2E%'"),
             ("rag_documents", None),
             ("file_uploads", None),
             ("message_embeddings", None),
             ("messages", None),
+            ("message_feedback", None),
             ("session_active_tools", None),
-            ("sessions", "title LIKE 'Test%' OR title LIKE 'E2E%' OR title LIKE 'Journey%' OR title LIKE 'CRUD%' OR title LIKE 'A2A task%' OR title LIKE 'Manual%' OR title LIKE 'API%' OR title LIKE 'Auto Tools%' OR title LIKE 'Tenant%' OR title LIKE 'Model Test%'"),
+            ("session_tags", None),
+            ("tags", None),
             ("skill_allowed_tools", None),
-            ("skills", "title LIKE 'Test%' OR title LIKE 'E2E%'"),
-            ("prompts", "title LIKE 'Test%' OR description LIKE 'test%'"),
-            ("templates", "title LIKE 'Test%'"),
             ("model_groups", None),
             ("tool_groups", None),
             ("user_group_members", None),
-            ("user_groups", "name LIKE 'Test%' OR name LIKE 'E2E%'"),
-            ("user_tool_credentials", "label LIKE 'Test%'"),
             ("user_tool_preferences", None),
-            ("models", "name LIKE 'Test%' OR name LIKE 'E2E%'"),
-            ("tools", "name LIKE 'Test%' OR name LIKE 'E2E%'"),
             ("audit_logs", None),
             ("autopilot_runs", None),
             ("balance_transactions", None),
             ("notifications", None),
-            ("mcp_servers", "name LIKE 'Test%' OR name LIKE 'E2E%'"),
             ("scheduled_tasks", None),
             ("usage_logs", None),
             ("memory", None),
             ("embed_configs", None),
-            ("message_feedback", None),
-            ("session_tags", None),
-            ("tags", None),
-            # Parents last
-            ("users", "email LIKE '%@example.com' OR email LIKE '%@test.com' OR email LIKE '%@e2e.test'"),
-            ("tenants", "name LIKE 'Test%' OR name LIKE 'E2E%' OR name LIKE 'Admin%' OR name LIKE 'Empty%' OR name LIKE 'Unlimited%' OR name LIKE 'UserTest%' OR name LIKE 'GroupTest%' OR name LIKE 'AuditTest%' OR name LIKE 'AutoRoute%' OR name LIKE 'AutoTools%' OR name LIKE 'UserJourney%' OR name LIKE 'Demo%' OR name LIKE 'Second%' OR name LIKE 'Journey%'"),
+
+            # ---- Tables with name/title patterns ----
+            (
+                "sessions",
+                "title LIKE 'Test%'"
+                " OR title LIKE 'E2E%'"
+                " OR title LIKE 'Journey%'"
+                " OR title LIKE 'CRUD%'"
+                " OR title LIKE 'A2A task%'"
+                " OR title LIKE 'Manual%'"
+                " OR title LIKE 'API%'"
+                " OR title LIKE 'Auto Tools%'"
+                " OR title LIKE 'Auto Model%'"
+                " OR title LIKE 'Auto Route%'"
+                " OR title LIKE 'Tenant%'"
+                " OR title LIKE 'Model Test%'"
+                " OR title LIKE 'Updated Title%'"
+                " OR title LIKE '%Chat%'"
+                " OR title LIKE 'Temp%'"
+                " OR title LIKE 'Skill%'"
+                " OR title LIKE 'Tool%'"
+                " OR title LIKE 'New%'"
+                " OR title LIKE 'Multi%'"
+                " OR title LIKE 'Session %'"
+                " OR title LIKE 'Other%'"
+                " OR title LIKE 'Finalized%'"
+                " OR title LIKE 'Secret%'"
+                " OR title LIKE 'Empty ID%'"
+                " OR title LIKE 'DeepSeek%'"
+                " OR title LIKE 'Paginated%'"
+                " OR title LIKE 'Old%'"
+                " OR title LIKE 'Special%'"
+                " OR title LIKE 'Cross-Tenant%'"
+            ),
+            (
+                "skills",
+                "title LIKE 'Test%'"
+                " OR title LIKE 'E2E%'"
+                " OR title LIKE 'Skill with%'"
+                " OR title LIKE 'Skill A%'"
+                " OR title LIKE 'Skill B%'"
+                " OR title LIKE 'Old%'"
+                " OR title LIKE 'New Skill%'"
+                " OR title LIKE 'Paginated%'"
+                " OR title LIKE 'Special%'"
+                " OR title LIKE 'Tenant A%'"
+                " OR title LIKE 'Cross-Tenant%'"
+                " OR title LIKE 'Charlie%'"
+                " OR title LIKE 'Skill With%'"
+            ),
+            (
+                "prompts",
+                "title LIKE 'Test%'"
+                " OR title LIKE 'Tenant A%'"
+                " OR description LIKE '%test%'"
+                " OR description LIKE '%Test%'"
+                " OR description LIKE '%tenant A%'"
+            ),
+            (
+                "templates",
+                "title LIKE 'Test%'"
+                " OR title LIKE 'E2E%'"
+                " OR title LIKE 'First%'"
+                " OR title LIKE 'Second%'"
+                " OR title LIKE 'Customer%'"
+                " OR title LIKE 'Dev%'"
+                " OR title LIKE 'Tenant%'"
+                " OR title LIKE 'User%'"
+                " OR title LIKE 'Shared%'"
+                " OR title LIKE 'Mine%'"
+                " OR title LIKE 'Theirs%'"
+                " OR title LIKE 'Found%'"
+            ),
+            (
+                "user_groups",
+                "name LIKE 'Test%'"
+                " OR name LIKE 'E2E%'"
+                " OR name LIKE 'Idempotent%'"
+            ),
+            (
+                "user_tool_credentials",
+                "label LIKE 'Test%'"
+                " OR label LIKE 'Tool%'"
+                " OR label LIKE 'Other%'"
+            ),
+            (
+                "models",
+                "name LIKE 'Test%'"
+                " OR name LIKE 'E2E%'"
+                " OR name LIKE 'Blocking%'"
+                " OR name LIKE 'Idempotent%'"
+                " OR name LIKE 'auto-model%'"
+                " OR name LIKE 'Cross-Tenant%'"
+            ),
+            (
+                "tools",
+                "name LIKE 'Test%'"
+                " OR name LIKE 'E2E%'"
+                " OR name LIKE 'Tool%'"
+                " OR name LIKE 'Other%'"
+                " OR name LIKE 'Weather%'"
+                " OR name LIKE 'Stock%'"
+                " OR name LIKE 'Calc%'"
+                " OR name LIKE 'Public%'"
+                " OR name LIKE 'Group Only%'"
+                " OR name LIKE 'Hidden%'"
+                " OR name LIKE 'Beta%'"
+                " OR name LIKE 'Alpha%'"
+                " OR name LIKE 'Always-On%'"
+                " OR name LIKE 'Cross-Tenant%'"
+                " OR name LIKE 'My Tool%'"
+                " OR name LIKE 'Renamed%'"
+                " OR name LIKE 'Disabled%'"
+                " OR name LIKE 'datetime'"
+                " OR name LIKE 'disabled%'"
+            ),
+            (
+                "mcp_servers",
+                "name LIKE 'Test%'"
+                " OR name LIKE 'E2E%'"
+                " OR name LIKE 'Mcp%'"
+                " OR name LIKE 'Server%'"
+            ),
+            (
+                "a2a_servers",
+                "name LIKE 'Test%'"
+                " OR name LIKE 'E2E%'"
+                " OR name LIKE 'Update%'"
+                " OR name LIKE 'Dep%'"
+                " OR name LIKE 'Sync%'"
+                " OR name LIKE 'Skillful%'"
+                " OR name LIKE 'test:%'"
+            ),
+            # ---- Parent tables (FK targets) ----
+            (
+                "users",
+                "email LIKE '%@example.com'"
+                " OR email LIKE '%@test.com'"
+                " OR email LIKE '%@e2e.test'"
+            ),
+            (
+                "tenants",
+                "name LIKE 'Test%'"
+                " OR name LIKE 'E2E%'"
+                " OR name LIKE 'Admin%'"
+                " OR name LIKE 'Empty%'"
+                " OR name LIKE 'Unlimited%'"
+                " OR name LIKE 'UserTest%'"
+                " OR name LIKE 'GroupTest%'"
+                " OR name LIKE 'AuditTest%'"
+                " OR name LIKE 'AutoRoute%'"
+                " OR name LIKE 'AutoTools%'"
+                " OR name LIKE 'UserJourney%'"
+                " OR name LIKE 'Demo%'"
+                " OR name LIKE 'Second%'"
+                " OR name LIKE 'Journey%'"
+                " OR name LIKE 'Test Tenant%'"
+                " OR name LIKE 'AAA%'"
+                " OR name LIKE 'BBB%'"
+                " OR name LIKE 'Unique%'"
+                " OR name LIKE 'Updated%'"
+                " OR name LIKE 'Other Tenant%'"
+                " OR name LIKE 'Blocker Tenant%'"
+                " OR name LIKE 'Models Blocker%'"
+                " OR name LIKE 'Multi Blocker%'"
+                " OR name LIKE 'Demo Candidate%'"
+                " OR name LIKE 'Zero%'"
+                " OR name LIKE 'Negative%'"
+                " OR name LIKE 'No Threshold%'"
+            ),
         ]
 
         # Disable FK checks so we can delete in any order

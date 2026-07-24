@@ -66,22 +66,71 @@ _GENERIC_MIME_TYPES = frozenset({
 # mimetypes module may not know about or may report differently than
 # the IANA / official MIME types used in UPLOAD_ALLOWED_TYPES.
 _EXTENSION_MIME_OVERRIDES: dict[str, str] = {
+    # Office documents
     ".doc": "application/msword",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".xls": "application/vnd.ms-excel",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ".ppt": "application/vnd.ms-powerpoint",
     ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    # Plain text / data
     ".csv": "text/csv",
     ".txt": "text/plain",
     ".md": "text/markdown",
     ".json": "application/json",
     ".pdf": "application/pdf",
+    ".log": "text/plain",
+    ".ini": "text/plain",
+    ".cfg": "text/plain",
+    ".conf": "text/plain",
+    ".env": "text/plain",
+    ".toml": "text/plain",
+    # Config / markup / stylesheet
+    ".yml": "text/plain",
+    ".yaml": "text/plain",
+    ".xml": "text/plain",
+    ".html": "text/plain",
+    ".htm": "text/plain",
+    ".css": "text/plain",
+    # Scripting / programming
+    ".js": "text/plain",
+    ".jsx": "text/plain",
+    ".ts": "text/plain",
+    ".tsx": "text/plain",
+    ".py": "text/plain",
+    ".rb": "text/plain",
+    ".go": "text/plain",
+    ".rs": "text/plain",
+    ".java": "text/plain",
+    ".sh": "text/plain",
+    ".bash": "text/plain",
+    ".zsh": "text/plain",
+    ".bat": "text/plain",
+    ".ps1": "text/plain",
+    ".sql": "text/plain",
+    ".r": "text/plain",
+    # Web / template
+    ".vue": "text/plain",
+    ".svelte": "text/plain",
+    ".php": "text/plain",
+    # Documentation / diff
+    ".tex": "text/plain",
+    ".rst": "text/plain",
+    ".diff": "text/plain",
+    ".patch": "text/plain",
+    # Build / infra
+    ".dockerfile": "text/plain",
+    ".makefile": "text/plain",
+    ".gradle": "text/plain",
+    ".tf": "text/plain",  # Terraform
+    ".json5": "text/plain",
+    # Images
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".gif": "image/gif",
     ".webp": "image/webp",
+    ".svg": "image/svg+xml",
 }
 
 
@@ -113,9 +162,17 @@ def _resolve_content_type(content_type: str, filename: str) -> str:
     if guessed:
         return guessed
 
-    # Nothing worked — return the original (will fail validation
-    # with a clear error message)
-    return content_type
+    # Nothing worked — fall back to text/plain instead of returning
+    # the opaque generic type (which would fail validation).
+    # This matches user expectation: most files users try to upload
+    # are text-like, and security is maintained by the 100 MiB size
+    # cap and filename sanitization.
+    logger.info(
+        "Could not resolve MIME type for '%s' (reported: %s). "
+        "Falling back to text/plain.",
+        filename, content_type,
+    )
+    return "text/plain"
 
 
 # ---------------------------------------------------------------------------

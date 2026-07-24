@@ -1416,7 +1416,7 @@ export function ChatWindow({
           />
           <Button
             size="small"
-            onClick={() => setToolsOpen(true)}
+            onClick={() => setToolsOpen((prev) => !prev)}
           >
             Tools
           </Button>

@@ -158,6 +158,30 @@ export function ModelList() {
       ),
     },
     {
+      title: "Input Price",
+      dataIndex: "input_price_per_1m",
+      key: "input_price_per_1m",
+      render: (v: number | null) =>
+        v !== null && v !== undefined ? (
+          <Text style={{ fontSize: 12 }}>${v.toFixed(4)}</Text>
+        ) : (
+          <Text type="secondary" style={{ fontSize: 12 }}>—</Text>
+        ),
+      responsive: ["lg" as const],
+    },
+    {
+      title: "Output Price",
+      dataIndex: "output_price_per_1m",
+      key: "output_price_per_1m",
+      render: (v: number | null) =>
+        v !== null && v !== undefined ? (
+          <Text style={{ fontSize: 12 }}>${v.toFixed(4)}</Text>
+        ) : (
+          <Text type="secondary" style={{ fontSize: 12 }}>—</Text>
+        ),
+      responsive: ["lg" as const],
+    },
+    {
       title: "Auto-Route",
       dataIndex: "auto_route_eligible",
       key: "auto_route_eligible",

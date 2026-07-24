@@ -40,6 +40,13 @@ export function TemplateSelector({
     queryFn: () => api<TemplateData[]>("/templates"),
   });
 
+  const hasTemplates = (templates || []).length > 0;
+
+  // I6: Hide selector when no templates exist
+  if (!isLoading && !hasTemplates) {
+    return null;
+  }
+
   return (
     <Space direction="vertical" size={0} style={style}>
       <Text type="secondary" style={{ fontSize: 12 }}>

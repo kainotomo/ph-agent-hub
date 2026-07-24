@@ -320,6 +320,7 @@ export function SessionSidebar() {
             display: "flex",
             alignItems: "center",
             width: "100%",
+            gap: 6,
           }}
         >
           <Logo size={28} textColor="#141414" />
@@ -574,6 +575,7 @@ export function SessionSidebar() {
                             <Button
                               type="text"
                               size="small"
+                              aria-label="Edit session title"
                               icon={<EditOutlined />}
                               onClick={(e) => {
                                 e.stopPropagation();
@@ -586,6 +588,7 @@ export function SessionSidebar() {
                             <Button
                               type="text"
                               size="small"
+                              aria-label={item.is_pinned ? "Unpin session" : "Pin session"}
                               icon={
                                 item.is_pinned ? (
                                   <PushpinFilled />
@@ -631,6 +634,7 @@ export function SessionSidebar() {
                               <Button
                                 type="text"
                                 size="small"
+                                aria-label="Export session"
                                 icon={<DownloadOutlined />}
                                 onClick={(e) => e.stopPropagation()}
                               />
@@ -649,6 +653,7 @@ export function SessionSidebar() {
                                 type="text"
                                 size="small"
                                 danger
+                                aria-label="Delete session"
                                 icon={<DeleteOutlined />}
                                 onClick={(e) => e.stopPropagation()}
                               />
@@ -866,7 +871,7 @@ export function SessionSidebar() {
           open={mobileOpen}
           onClose={() => setMobileOpen(false)}
           placement="left"
-          width={280}
+          width={310}
           styles={{ body: { padding: 0 } }}
         >
           {sidebarContent}
@@ -878,7 +883,7 @@ export function SessionSidebar() {
   // Desktop: use Sider
   return (
     <Sider
-      width={280}
+      width={310}
       collapsible
       collapsed={collapsed}
       collapsedWidth={0}

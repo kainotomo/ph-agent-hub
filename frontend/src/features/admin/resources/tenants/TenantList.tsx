@@ -10,7 +10,6 @@ import {
   Button,
   Space,
   Popconfirm,
-  Checkbox,
   message,
   Grid,
   List,
@@ -52,7 +51,7 @@ const { Text } = Typography;
 export function TenantList() {
   const [editingTenant, setEditingTenant] = useState<TenantData | null>(null);
   const [creating, setCreating] = useState(false);
-  const [forceDelete, setForceDelete] = useState(false);
+  const [forceDeleteTenantId, setForceDeleteTenantId] = useState<string | null>(null);
   const [searchText, setSearchText] = useState("");
   const [balanceTenant, setBalanceTenant] = useState<TenantData | null>(null);
   const [historyTenant, setHistoryTenant] = useState<TenantData | null>(null);
@@ -79,12 +78,13 @@ export function TenantList() {
   }, [debouncedSearch, setSearch]);
 
   const deleteMutation = useMutation({
-    mutationFn: (id: string) => deleteTenant(id, { force: forceDelete }),
+    mutationFn: ({ id, force }: { id: string; force: boolean }) =>
+      deleteTenant(id, { force }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["admin-tenants"] });
       queryClient.invalidateQueries({ queryKey: ["admin-tenant-status"] });
       message.success("Tenant deleted");
-      setForceDelete(false);
+      setForceDeleteTenantId(null);
     },
     onError: (error: Error) => {
       message.error(error.message || "Failed to delete tenant");
@@ -168,12 +168,39 @@ export function TenantList() {
             onClick={() => setEditingTenant(record)}
           />
           <Popconfirm
-            title={
-              forceDelete
-                ? "⚠️ This will PERMANENTLY delete the tenant AND ALL related data (users, sessions, files, etc.). Continue?"
-                : "Delete this tenant?"
+            title="Delete this tenant?"
+            description={
+              <div>
+                <p style={{ marginBottom: 8 }}>This will permanently delete the tenant.</p>
+                <label
+                  onClick={(e) => e.stopPropagation()}
+                  style={{ cursor: "pointer", fontSize: 12, color: "#ff4d4f" }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={forceDeleteTenantId === record.id}
+                    onChange={() =>
+                      setForceDeleteTenantId(
+                        forceDeleteTenantId === record.id ? null : record.id,
+                      )
+                    }
+                    style={{ marginRight: 4 }}
+                  />
+                  Force delete (cascade all data)
+                </label>
+                {forceDeleteTenantId === record.id && (
+                  <p style={{ marginTop: 8, marginBottom: 0, fontSize: 12, color: "#ff4d4f" }}>
+                    ⚠️ This will PERMANENTLY delete the tenant AND ALL related data (users, sessions, files, etc.).
+                  </p>
+                )}
+              </div>
             }
-            onConfirm={() => deleteMutation.mutate(record.id)}
+            onConfirm={() =>
+              deleteMutation.mutate({
+                id: record.id,
+                force: forceDeleteTenantId === record.id,
+              })
+            }
           >
             <Button icon={<DeleteOutlined />} size="small" danger />
           </Popconfirm>
@@ -295,12 +322,6 @@ export function TenantList() {
             Create Tenant
           </Button>
         </Tooltip>
-        <Checkbox
-          checked={forceDelete}
-          onChange={(e) => setForceDelete(e.target.checked)}
-        >
-          Force delete (cascade all data)
-        </Checkbox>
         <Input
           placeholder="Search by name…"
           prefix={<SearchOutlined />}
@@ -346,12 +367,39 @@ export function TenantList() {
                   onClick={() => setEditingTenant(tenant)}
                 />,
                 <Popconfirm
-                  title={
-                    forceDelete
-                      ? "⚠️ This will PERMANENTLY delete the tenant AND ALL related data. Continue?"
-                      : "Delete?"
+                  title="Delete this tenant?"
+                  description={
+                    <div>
+                      <p style={{ marginBottom: 8 }}>This will permanently delete the tenant.</p>
+                      <label
+                        onClick={(e) => e.stopPropagation()}
+                        style={{ cursor: "pointer", fontSize: 12, color: "#ff4d4f" }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={forceDeleteTenantId === tenant.id}
+                          onChange={() =>
+                            setForceDeleteTenantId(
+                              forceDeleteTenantId === tenant.id ? null : tenant.id,
+                            )
+                          }
+                          style={{ marginRight: 4 }}
+                        />
+                        Force delete (cascade all data)
+                      </label>
+                      {forceDeleteTenantId === tenant.id && (
+                        <p style={{ marginTop: 8, marginBottom: 0, fontSize: 12, color: "#ff4d4f" }}>
+                          ⚠️ This will PERMANENTLY delete the tenant AND ALL related data.
+                        </p>
+                      )}
+                    </div>
                   }
-                  onConfirm={() => deleteMutation.mutate(tenant.id)}
+                  onConfirm={() =>
+                    deleteMutation.mutate({
+                      id: tenant.id,
+                      force: forceDeleteTenantId === tenant.id,
+                    })
+                  }
                 >
                   <Button icon={<DeleteOutlined />} type="link" danger />
                 </Popconfirm>,

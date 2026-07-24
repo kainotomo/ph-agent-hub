@@ -120,6 +120,7 @@ export function WidgetPage() {
   const greetingText = (config?.theme?.greeting_text as string) || "";
   const logoUrl = (config?.theme?.logo_url as string) || "";
   const themeConfig = {
+    cssVar: true,
     algorithm: antTheme.defaultAlgorithm,
     token: {
       colorPrimary: primaryColor,

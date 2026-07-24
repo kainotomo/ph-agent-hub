@@ -130,110 +130,105 @@ class TestA2AInputRequiredE2E:
 
     async def test_input_required_full_flow(self, e2e_db_session, monkeypatch):
         """Send message → agent calls ask_user → INPUT_REQUIRED → resume → COMPLETED."""
+        db = e2e_db_session
         from src.api.a2a_server import a2a_send_message
         from src.core.redis import store_a2a_question, get_a2a_question
-        from src.db.base import AsyncSessionLocal
-        from src.db.orm.a2a_tasks import A2aTask
         from src.services import a2a_task_service as svc
 
-        async with AsyncSessionLocal() as db:
-            # ---- Setup: ensure A2A default tenant + system user exist ----
-            await _ensure_a2a_tenant_and_user(db)
+        # ---- Setup: ensure A2A default tenant + system user exist ----
+        await _ensure_a2a_tenant_and_user(db)
 
-            captured_task_id = {}
+        captured_task_id = {}
 
-            # ---- Step 1: First message — agent asks a question ----
-            async def _agent_asks_question(
-                session_id, text_content, db, task_id=None
-            ):
-                """Simulate agent calling ask_user tool."""
-                if task_id:
-                    captured_task_id["id"] = task_id
-                    await store_a2a_question(
-                        task_id, "What is your name?"
-                    )
-                return "Let me ask you something..."
+        # ---- Step 1: First message — agent asks a question ----
+        async def _agent_asks_question(
+            session_id, text_content, db, task_id=None
+        ):
+            """Simulate agent calling ask_user tool."""
+            if task_id:
+                captured_task_id["id"] = task_id
+                await store_a2a_question(
+                    task_id, "What is your name?"
+                )
+            return "Let me ask you something..."
 
-            monkeypatch.setattr(
-                "src.api.a2a_server._run_a2a_agent",
-                _agent_asks_question,
-            )
+        monkeypatch.setattr(
+            "src.api.a2a_server._run_a2a_agent",
+            _agent_asks_question,
+        )
 
-            first_result = await a2a_send_message(
-                _make_request("Hello"),
-                Request(scope={"type": "http"}),
-                db=db,
-            )
+        first_result = await a2a_send_message(
+            _make_request("Hello"),
+            Request(scope={"type": "http"}),
+            db=db,
+        )
 
-            task_id = captured_task_id.get("id")
-            assert task_id is not None, "task_id was not captured by agent mock"
+        task_id = captured_task_id.get("id")
+        assert task_id is not None, "task_id was not captured by agent mock"
 
-            # ---- Verify response shows INPUT_REQUIRED ----
-            assert (
-                first_result["task"]["status"]["state"]
-                == svc.TASK_STATE_INPUT_REQUIRED
-            ), f"Expected INPUT_REQUIRED, got {first_result['task']['status']['state']}"
-            status_msg = first_result["task"]["status"].get("message", {})
-            parts = status_msg.get("parts", [])
-            assert any(
-                "What is your name?" in p.get("text", "") for p in parts
-            ), f"Question not found in status message: {status_msg}"
+        # ---- Verify response shows INPUT_REQUIRED ----
+        assert (
+            first_result["task"]["status"]["state"]
+            == svc.TASK_STATE_INPUT_REQUIRED
+        ), f"Expected INPUT_REQUIRED, got {first_result['task']['status']['state']}"
+        status_msg = first_result["task"]["status"].get("message", {})
+        parts = status_msg.get("parts", [])
+        assert any(
+            "What is your name?" in p.get("text", "") for p in parts
+        ), f"Question not found in status message: {status_msg}"
 
-            # ---- Verify DB row shows INPUT_REQUIRED ----
-            db_task = await svc.get_task(db, task_id)
-            assert db_task.state == svc.TASK_STATE_INPUT_REQUIRED, (
-                f"DB state expected INPUT_REQUIRED, got {db_task.state}"
-            )
-            db_status = json.loads(db_task.status_message) if isinstance(
-                db_task.status_message, str
-            ) else (db_task.status_message or {})
-            db_parts = db_status.get("parts", [])
-            assert any(
-                "What is your name?" in p.get("text", "") for p in db_parts
-            ), f"Question not found in DB status_message"
+        # ---- Verify DB row shows INPUT_REQUIRED ----
+        db_task = await svc.get_task(db, task_id)
+        assert db_task.state == svc.TASK_STATE_INPUT_REQUIRED, (
+            f"DB state expected INPUT_REQUIRED, got {db_task.state}"
+        )
+        db_status = json.loads(db_task.status_message) if isinstance(
+            db_task.status_message, str
+        ) else (db_task.status_message or {})
+        db_parts = db_status.get("parts", [])
+        assert any(
+            "What is your name?" in p.get("text", "") for p in db_parts
+        ), f"Question not found in DB status_message"
 
-            # ---- Verify Redis was cleared after detection ----
-            redis_question = await get_a2a_question(task_id)
-            assert redis_question is None, (
-                f"Expected Redis key to be cleared, got: {redis_question}"
-            )
+        # ---- Verify Redis was cleared after detection ----
+        redis_question = await get_a2a_question(task_id)
+        assert redis_question is None, (
+            f"Expected Redis key to be cleared, got: {redis_question}"
+        )
 
-            # ---- Step 2: Resume — agent completes ----
-            monkeypatch.setattr(
-                "src.api.a2a_server._run_a2a_agent",
-                AsyncMock(return_value="Nice to meet you, John!"),
-            )
+        # ---- Step 2: Resume — agent completes ----
+        monkeypatch.setattr(
+            "src.api.a2a_server._run_a2a_agent",
+            AsyncMock(return_value="Nice to meet you, John!"),
+        )
 
-            resume_result = await a2a_send_message(
-                _make_request("My name is John", task_id=task_id),
-                Request(scope={"type": "http"}),
-                db=db,
-            )
+        resume_result = await a2a_send_message(
+            _make_request("My name is John", task_id=task_id),
+            Request(scope={"type": "http"}),
+            db=db,
+        )
 
-            # ---- Verify response shows COMPLETED ----
-            assert (
-                resume_result["task"]["status"]["state"]
-                == svc.TASK_STATE_COMPLETED
-            ), (
-                f"Expected COMPLETED after resume, "
-                f"got {resume_result['task']['status']['state']}"
-            )
-            artifacts = resume_result["task"].get("artifacts", [])
-            assert len(artifacts) >= 1, "Expected at least one artifact"
-            assert any(
-                "Nice to meet you" in p.get("text", "")
-                for artifact in artifacts
-                for p in artifact.get("parts", [])
-            ), "Agent response text not found in artifacts"
+        # ---- Verify response shows COMPLETED ----
+        assert (
+            resume_result["task"]["status"]["state"]
+            == svc.TASK_STATE_COMPLETED
+        ), (
+            f"Expected COMPLETED after resume, "
+            f"got {resume_result['task']['status']['state']}"
+        )
+        artifacts = resume_result["task"].get("artifacts", [])
+        assert len(artifacts) >= 1, "Expected at least one artifact"
+        assert any(
+            "Nice to meet you" in p.get("text", "")
+            for artifact in artifacts
+            for p in artifact.get("parts", [])
+        ), "Agent response text not found in artifacts"
 
-            # ---- Verify DB row shows COMPLETED ----
-            db_task2 = await svc.get_task(db, task_id)
-            assert db_task2.state == svc.TASK_STATE_COMPLETED, (
-                f"DB state expected COMPLETED, got {db_task2.state}"
-            )
-
-            # ---- Cleanup ----
-            await _cleanup_task(db, task_id)
+        # ---- Verify DB row shows COMPLETED ----
+        db_task2 = await svc.get_task(db, task_id)
+        assert db_task2.state == svc.TASK_STATE_COMPLETED, (
+            f"DB state expected COMPLETED, got {db_task2.state}"
+        )
 
     # ------------------------------------------------------------------
     # Test 2: Normal completion — no INPUT_REQUIRED
@@ -243,49 +238,45 @@ class TestA2AInputRequiredE2E:
         self, e2e_db_session, monkeypatch
     ):
         """Agent does NOT call ask_user → task completes directly."""
+        db = e2e_db_session
         from src.api.a2a_server import a2a_send_message
-        from src.db.base import AsyncSessionLocal
         from src.services import a2a_task_service as svc
 
-        async with AsyncSessionLocal() as db:
-            # ---- Setup: ensure A2A default tenant + system user exist ----
-            await _ensure_a2a_tenant_and_user(db)
+        # ---- Setup: ensure A2A default tenant + system user exist ----
+        await _ensure_a2a_tenant_and_user(db)
 
-            # Agent completes without asking any question
-            monkeypatch.setattr(
-                "src.api.a2a_server._run_a2a_agent",
-                AsyncMock(return_value="Task completed successfully!"),
-            )
+        # Agent completes without asking any question
+        monkeypatch.setattr(
+            "src.api.a2a_server._run_a2a_agent",
+            AsyncMock(return_value="Task completed successfully!"),
+        )
 
-            result = await a2a_send_message(
-                _make_request("Do something"),
-                Request(scope={"type": "http"}),
-                db=db,
-            )
+        result = await a2a_send_message(
+            _make_request("Do something"),
+            Request(scope={"type": "http"}),
+            db=db,
+        )
 
-            task_id = result["task"]["id"]
+        task_id = result["task"]["id"]
 
-            # ---- Verify COMPLETED directly (no INPUT_REQUIRED) ----
-            assert (
-                result["task"]["status"]["state"]
-                == svc.TASK_STATE_COMPLETED
-            ), (
-                f"Expected COMPLETED, "
-                f"got {result['task']['status']['state']}"
-            )
-            artifacts = result["task"].get("artifacts", [])
-            assert len(artifacts) >= 1, "Expected at least one artifact"
-            assert any(
-                "Task completed successfully!" in p.get("text", "")
-                for artifact in artifacts
-                for p in artifact.get("parts", [])
-            ), "Agent response not found in artifacts"
+        # ---- Verify COMPLETED directly (no INPUT_REQUIRED) ----
+        assert (
+            result["task"]["status"]["state"]
+            == svc.TASK_STATE_COMPLETED
+        ), (
+            f"Expected COMPLETED, "
+            f"got {result['task']['status']['state']}"
+        )
+        artifacts = result["task"].get("artifacts", [])
+        assert len(artifacts) >= 1, "Expected at least one artifact"
+        assert any(
+            "Task completed successfully!" in p.get("text", "")
+            for artifact in artifacts
+            for p in artifact.get("parts", [])
+        ), "Agent response not found in artifacts"
 
-            # ---- Verify DB row shows COMPLETED ----
-            db_task = await svc.get_task(db, task_id)
-            assert db_task.state == svc.TASK_STATE_COMPLETED, (
-                f"DB state expected COMPLETED, got {db_task.state}"
-            )
-
-            # ---- Cleanup ----
-            await _cleanup_task(db, task_id)
+        # ---- Verify DB row shows COMPLETED ----
+        db_task = await svc.get_task(db, task_id)
+        assert db_task.state == svc.TASK_STATE_COMPLETED, (
+            f"DB state expected COMPLETED, got {db_task.state}"
+        )

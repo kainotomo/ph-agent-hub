@@ -1424,7 +1424,6 @@ export function ChatWindow({
             size="small"
             checked={localCrossSessionMemory ?? false}
             checkedChildren="🧠 Memory"
-            unCheckedChildren="🧠 Memory"
             title="Cross-session memory"
             onChange={(v) => {
               setLocalCrossSessionMemory(v);
@@ -1435,8 +1434,8 @@ export function ChatWindow({
             <Switch
               size="small"
               checked={thinkingEnabled ?? true}
-              checkedChildren="🧠"
-              unCheckedChildren="🧠"
+              checkedChildren="🧠 Thinking"
+              unCheckedChildren="🧠 Thinking"
               title="Thinking Mode"
               onChange={(v) => {
                 setThinkingEnabled(v);
@@ -1513,8 +1512,8 @@ export function ChatWindow({
             <Switch
               size="small"
               checked={thinkingEnabled ?? true}
-              checkedChildren="🧠"
-              unCheckedChildren="🧠"
+              checkedChildren="🧠 Thinking"
+              unCheckedChildren="🧠 Thinking"
               title="Thinking Mode"
               onChange={(v) => {
                 setThinkingEnabled(v);
@@ -1526,7 +1525,6 @@ export function ChatWindow({
             size="small"
             checked={localCrossSessionMemory ?? false}
             checkedChildren="🧠 Memory"
-            unCheckedChildren="🧠 Memory"
             title="Cross-session memory"
             onChange={(v) => {
               setLocalCrossSessionMemory(v);

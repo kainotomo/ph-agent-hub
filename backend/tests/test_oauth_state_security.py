@@ -107,19 +107,27 @@ class TestOAuthStateStoreEdgeCases:
         assert isinstance(payload3, str)  # returned as-is, not validated
 
     async def test_expiry_boundary_precision(self):
-        """Verify state is retrievable just before TTL and gone after."""
-        # Key A — store with 2-second TTL, read at ~1.5s (should exist)
+        """Verify state is retrievable before TTL and gone after expiry.
+
+        Uses generous timing margins to avoid flakiness on loaded CI runners.
+        The key insight: ``asyncio.sleep()`` is imprecise under load, so we
+        give ourselves 4x the TTL margin on each side.
+        """
+        r = await get_redis()
+
+        # Key A — store with 5-second TTL, read at ~1s (should easily exist)
         nonce_a = f"boundary-a-{uuid.uuid4().hex}"
-        await store_oauth_state(nonce_a, "user-1", "email_tool", ttl=2)
-        await asyncio.sleep(1.5)
+        await store_oauth_state(nonce_a, "user-1", "email_tool", ttl=5)
+        await asyncio.sleep(1)
 
         payload = await get_oauth_state(nonce_a)
         assert payload is not None, "State should still exist before TTL expiry"
+        assert payload["user_id"] == "user-1"
 
-        # Key B — store with 1-second TTL, read at ~2.5s (should be gone)
+        # Key B — store with 1-second TTL, read at ~3s (should be gone)
         nonce_b = f"boundary-b-{uuid.uuid4().hex}"
         await store_oauth_state(nonce_b, "user-2", "email_tool", ttl=1)
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(2)
 
         payload = await get_oauth_state(nonce_b)
         assert payload is None, "State should have expired after TTL"

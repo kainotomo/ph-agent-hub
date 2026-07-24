@@ -499,15 +499,25 @@ export function ChatWindow({
   );
   const modelSupportsThinking = selectedModel?.thinking_enabled === true;
 
-  // Auto-select the first available model for pending sessions (no backend
-  // session to provide a default yet — mirrors backend create_session logic).
-  // NOTE: Must NOT fire when the user has explicitly chosen "Auto" mode —
-  // that sets pendModelId=null + pendAutoRoute=true.  The check for
-  // !pendAutoRoute prevents re-selecting the first model and overriding
-  // the user's choice (Issue #400).
+  // Auto-select a model for pending sessions (no backend session to provide
+  // a default yet — mirrors backend create_session logic).
+  //
+  // Rules:
+  //   1. If exactly one model exists → auto-select it.
+  //   2. If multiple models exist → auto-select "Auto (Recommended)".
+  //
+  // NOTE: Must NOT fire when the user has explicitly chosen "Auto" mode or
+  // a specific model — the checks for !pendModelId and !pendAutoRoute
+  // prevent overriding the user's choice (Issue #400, Issue #479).
   useEffect(() => {
     if (pendingFlag && modelList && modelList.length > 0 && !pendModelId && !pendAutoRoute) {
-      setPendModelId(modelList[0].id);
+      if (modelList.length === 1) {
+        setPendModelId(modelList[0].id);
+      } else {
+        setPendAutoRoute(true);
+        // pendModelId stays undefined; the model value resolves to
+        // AUTO_ROUTE_VALUE via (pendAutoRoute && !pendModelId).
+      }
     }
   }, [pendingFlag, modelList, pendModelId, pendAutoRoute]);
 

@@ -62,6 +62,13 @@ export function SkillSelector({
     queryFn: () => api<PaginatedResponse<SkillData>>("/skills"),
   });
 
+  const skillsList = skills?.items || [];
+
+  // I6: Hide selector when no skills exist
+  if (!isLoading && skillsList.length === 0) {
+    return null;
+  }
+
   return (
     <>
       <Space direction="vertical" size={0} style={style}>
@@ -76,7 +83,7 @@ export function SkillSelector({
             placeholder="Select skill"
             style={{ minWidth: 160 }}
             allowClear
-            options={(skills?.items || []).map((s) => ({
+            options={skillsList.map((s) => ({
               label: (
                 <Space size={4}>
                   {s.title}

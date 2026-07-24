@@ -16,6 +16,7 @@ function App() {
   return (
     <ConfigProvider
       theme={{
+        cssVar: true,
         token: {
           colorPrimary: "#1677ff",
           borderRadius: 6,
@@ -27,7 +28,10 @@ function App() {
           <AuthProvider>
             <TenantProvider>
               <StreamingProvider>
-                <RouterProvider router={router} />
+                <RouterProvider
+                  router={router}
+                  future={{ v7_startTransition: true }}
+                />
               </StreamingProvider>
             </TenantProvider>
           </AuthProvider>

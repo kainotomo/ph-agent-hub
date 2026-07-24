@@ -81,6 +81,7 @@ const FAKE_SESSION = {
   id: "session-1",
   title: "Test Session",
   is_temporary: false,
+  is_pending: false,
   selected_model_id: "model-abc",
   selected_template_id: null,
   selected_skill_id: "skill-1",
@@ -222,11 +223,33 @@ describe("ChatPage", () => {
     expect(chatWindow).toHaveAttribute("data-is-pending", "true");
   });
 
-  // ── sessionId with 404 → ChatWindow with isPending ─────────────────────
+  // ── sessionId with pending session → ChatWindow with isPending ─────────
 
-  it("renders ChatWindow with isPending when session is not found (404)", async () => {
+  it("renders ChatWindow with isPending when session is pending (lazy creation) — no 404 console error (Issue #475)", async () => {
     mockSessionId = "nonexistent-id";
-    mockGetSession.mockRejectedValue(new Error("Not found"));
+    // Backend now returns is_pending:true instead of 404
+    mockGetSession.mockResolvedValue({
+      id: "nonexistent-id",
+      is_pending: true,
+      title: "New Chat",
+      tenant_id: "tenant-1",
+      user_id: "user-1",
+      is_temporary: false,
+      is_pinned: false,
+      selected_template_id: null,
+      selected_skill_id: null,
+      selected_model_id: null,
+      auto_route_enabled: false,
+      auto_select_tools: true,
+      cross_session_retrieval_enabled: null,
+      tags: [],
+      temperature: null,
+      thinking_enabled: null,
+      created_at: "2024-01-01T00:00:00Z",
+      updated_at: "2024-01-01T00:00:00Z",
+    });
+
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     renderChatPage();
     await settle();
@@ -235,6 +258,12 @@ describe("ChatPage", () => {
     expect(chatWindow).toBeInTheDocument();
     expect(chatWindow).toHaveAttribute("data-session-id", "nonexistent-id");
     expect(chatWindow).toHaveAttribute("data-is-pending", "true");
+
+    // Backend returns 200 with is_pending, so no console error at all
+    expect(mockGetSession).toHaveBeenCalledWith("nonexistent-id");
+    expect(consoleSpy).not.toHaveBeenCalled();
+
+    consoleSpy.mockRestore();
   });
 
   // ── SessionSidebar always rendered ─────────────────────────────────────

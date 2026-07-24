@@ -16,57 +16,67 @@ import { WidgetPage } from "../features/chat/routes/WidgetPage";
 import { AccountSettingsPage } from "../features/account/AccountSettingsPage";
 import AdminApp from "../features/admin/routes/AdminApp";
 
-export const router = createBrowserRouter([
+export const router = createBrowserRouter(
+  [
+    {
+      path: "/login",
+      element: <LoginPage />,
+    },
+    {
+      path: "/widget",
+      element: <WidgetPage />,
+    },
+    {
+      path: "/demo",
+      element: <DemoPage />,
+    },
+    {
+      element: <RouteGuard />,
+      children: [
+        {
+          path: "/chat",
+          element: <ChatPage />,
+        },
+        {
+          path: "/chat/:sessionId",
+          element: <ChatPage />,
+        },
+        {
+          path: "/background-tasks",
+          element: <BackgroundTasksPage />,
+        },
+        {
+          path: "/scheduled-tasks",
+          element: <ScheduledTasksPage />,
+        },
+        {
+          path: "/settings",
+          element: <AccountSettingsPage />,
+        },
+      ],
+    },
+    {
+      element: <RouteGuard adminOnly />,
+      children: [
+        {
+          path: "/admin/*",
+          element: <AdminApp />,
+        },
+      ],
+    },
+    {
+      path: "*",
+      element: <LoginPage />,
+    },
+  ],
   {
-    path: "/login",
-    element: <LoginPage />,
+    // v7_startTransition is supported at runtime in react-router-dom 6.30.4
+    // even though it's missing from the FutureConfig type definitions.
+    future: {
+      v7_relativeSplatPath: true,
+      v7_startTransition: true,
+    } as { v7_relativeSplatPath: boolean; v7_startTransition: boolean },
   },
-  {
-    path: "/widget",
-    element: <WidgetPage />,
-  },
-  {
-    path: "/demo",
-    element: <DemoPage />,
-  },
-  {
-    element: <RouteGuard />,
-    children: [
-      {
-        path: "/chat",
-        element: <ChatPage />,
-      },
-      {
-        path: "/chat/:sessionId",
-        element: <ChatPage />,
-      },
-      {
-        path: "/background-tasks",
-        element: <BackgroundTasksPage />,
-      },
-      {
-        path: "/scheduled-tasks",
-        element: <ScheduledTasksPage />,
-      },
-      {
-        path: "/settings",
-        element: <AccountSettingsPage />,
-      },
-    ],
-  },
-  {
-    element: <RouteGuard adminOnly />,
-    children: [
-      {
-        path: "/admin/*",
-        element: <AdminApp />,
-      },
-    ],
-  },
-  {
-    path: "*",
-    element: <LoginPage />,
-  },
-]);
+);
 
 export default router;

@@ -359,11 +359,17 @@ class TestGetSession:
     async def test_get_session_not_found(
         self, async_client, auth_headers, test_user
     ):
-        """Verify non-existent session returns 404."""
+        """Verify non-existent session returns 200 with is_pending (Issue #475)."""
         headers = auth_headers(test_user)
         fake_id = str(uuid.uuid4())
         resp = await async_client.get(f"/api/chat/session/{fake_id}", headers=headers)
-        assert resp.status_code == 404
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["id"] == fake_id
+        assert data["is_pending"] is True
+        assert data["title"] == "New Chat"
+        assert data["tenant_id"] == test_user.tenant_id
+        assert data["user_id"] == test_user.id
 
 
 class TestUpdateSession:
@@ -510,11 +516,14 @@ class TestDeleteSession:
         )
         assert resp.status_code == 204
 
-        # Verify it's gone
+        # Verify it's gone — now returns is_pending instead of 404 (Issue #475)
         get_resp = await async_client.get(
             f"/api/chat/session/{test_session.id}", headers=headers
         )
-        assert get_resp.status_code == 404
+        assert get_resp.status_code == 200
+        data = get_resp.json()
+        assert data["is_pending"] is True
+        assert data["id"] == test_session.id
 
     async def test_delete_session_other_user_forbidden(
         self, async_client, auth_headers, test_user, second_user, test_session
@@ -569,12 +578,13 @@ class TestBatchDeleteSessions:
         assert data["skipped"] == []
         assert data["errors"] == []
 
-        # Verify all sessions are gone
+        # Verify all sessions are gone — now returns is_pending (Issue #475)
         for sid in session_ids:
             get_resp = await async_client.get(
                 f"/api/chat/session/{sid}", headers=headers
             )
-            assert get_resp.status_code == 404
+            assert get_resp.status_code == 200
+            assert get_resp.json()["is_pending"] is True
 
     async def test_batch_delete_partial_skip_unauthorized(
         self,
@@ -616,11 +626,12 @@ class TestBatchDeleteSessions:
         assert len(data["skipped"]) == 2  # other_session + non-existent
         assert data["errors"] == []
 
-        # Verify own session is gone
+        # Verify own session is gone — now returns is_pending (Issue #475)
         get_resp = await async_client.get(
             f"/api/chat/session/{test_session.id}", headers=headers
         )
-        assert get_resp.status_code == 404
+        assert get_resp.status_code == 200
+        assert get_resp.json()["is_pending"] is True
 
     async def test_batch_delete_empty_ids_rejected(
         self, async_client, auth_headers, test_user

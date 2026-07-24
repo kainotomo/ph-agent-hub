@@ -63,6 +63,18 @@ export function ModelSelector({ value, onChange, style }: ModelSelectorProps) {
   const isAutoRoute = value === AUTO_ROUTE_VALUE;
   const isCurrentDefault = value && value === defaultModelId && !isAutoRoute;
 
+  // I5: Auto-select the only available model when no value is selected
+  const effectiveModels = models || [];
+  const singleModelId = effectiveModels.length === 1 ? effectiveModels[0].id : undefined;
+  const effectiveValue = value || singleModelId;
+
+  // Notify parent when auto-selection happens
+  React.useEffect(() => {
+    if (singleModelId && !value && onChange) {
+      onChange(singleModelId);
+    }
+  }, [singleModelId, value, onChange]);
+
   return (
     <Space direction="vertical" size={0} style={style}>
       <Text type="secondary" style={{ fontSize: 12 }}>
@@ -70,25 +82,31 @@ export function ModelSelector({ value, onChange, style }: ModelSelectorProps) {
       </Text>
       <Space.Compact style={{ width: "100%" }}>
         <Select
-          value={value}
+          value={effectiveValue}
           onChange={onChange}
           loading={isLoading}
           placeholder="Select model"
           style={{ minWidth: 160 }}
           allowClear
           options={[
-            {
-              label: "⚡ Auto (Recommended)",
-              value: AUTO_ROUTE_VALUE,
-            },
-            ...(models || []).map((m) => ({
+            // Show Auto option when there is not exactly 1 model
+            // (0 models: Auto as placeholder; 2+ models: allow user choice)
+            ...(effectiveModels.length !== 1
+              ? [
+                  {
+                    label: "⚡ Auto (Recommended)",
+                    value: AUTO_ROUTE_VALUE,
+                  },
+                ]
+              : []),
+            ...effectiveModels.map((m) => ({
               label: `${m.name} (${m.provider})`,
               value: m.id,
             })),
           ]}
           notFoundContent={isLoading ? "Loading..." : "No models available"}
         />
-        {value && value !== AUTO_ROUTE_VALUE && (
+        {effectiveValue && effectiveValue !== AUTO_ROUTE_VALUE && (
           <Tooltip
             title={
               isCurrentDefault
@@ -99,14 +117,14 @@ export function ModelSelector({ value, onChange, style }: ModelSelectorProps) {
             <Button
               icon={isCurrentDefault ? <StarFilled /> : <StarOutlined />}
               onClick={() =>
-                setDefaultMutation.mutate(isCurrentDefault ? null : value)
+                setDefaultMutation.mutate(isCurrentDefault ? null : effectiveValue)
               }
               loading={setDefaultMutation.isPending}
               type={isCurrentDefault ? "primary" : "default"}
             />
           </Tooltip>
         )}
-        {value === AUTO_ROUTE_VALUE && (
+        {effectiveValue === AUTO_ROUTE_VALUE && (
           <Tooltip title="Model auto-selected on first message">
             <Button
               icon={<ThunderboltOutlined />}

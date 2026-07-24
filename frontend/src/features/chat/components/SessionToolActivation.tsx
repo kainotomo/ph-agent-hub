@@ -183,6 +183,8 @@ export function SessionToolActivation({
       open={open}
       onClose={onClose}
       width={420}
+      keyboard
+      maskClosable
     >
       <div style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 8 }}>
         <Switch

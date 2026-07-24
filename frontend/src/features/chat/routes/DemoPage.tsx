@@ -48,6 +48,7 @@ export function DemoPage() {
 
   // Derive Ant Design theme (minimal — no tenant theme for demo)
   const themeConfig = {
+    cssVar: true,
     algorithm: antTheme.defaultAlgorithm,
     token: {
       colorPrimary: "#1677ff",

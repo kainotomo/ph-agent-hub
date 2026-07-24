@@ -179,34 +179,50 @@ describe("ChatWindow — Auto model selection (Issue #400)", () => {
     vi.clearAllMocks();
   });
 
-  it("auto-selects the first model when no model is chosen in pending mode", async () => {
+  it("auto-selects Auto (Recommended) when multiple models exist in pending mode", async () => {
     renderChatWindow();
     await settle();
 
     const select = screen.getByRole("combobox");
     expect(select).toBeInTheDocument();
 
-    // The auto-select effect should have set pendModelId to the first model
-    // ("model-abc") because pendAutoRoute is false.
+    // With 2 models (FAKE_MODELS), the auto-select effect should set
+    // pendAutoRoute=true so the value resolves to AUTO_ROUTE_VALUE
+    // (Issue #479).
+    expect(select).toHaveValue(AUTO_ROUTE_VALUE);
+  });
+
+  it("auto-selects the only model when exactly one model exists in pending mode", async () => {
+    mockApi.mockImplementation((url: string) => {
+      if (url === "/models") return Promise.resolve([FAKE_MODELS[0]]);
+      return Promise.resolve([]);
+    });
+    renderChatWindow();
+    await settle();
+
+    const select = screen.getByRole("combobox");
+    expect(select).toBeInTheDocument();
+
+    // With 1 model, the auto-select effect should set pendModelId to it.
     expect(select).toHaveValue("model-abc");
   });
 
-  it("keeps Auto selected when user chooses Auto after initial auto-select", async () => {
+  it("keeps Auto selected when user confirms Auto after initial auto-select", async () => {
     const user = userEvent.setup();
     renderChatWindow();
     await settle();
 
-    // Verify auto-select has kicked in first
+    // Verify auto-select has kicked in first (Auto for multiple models)
     const select = screen.getByRole("combobox");
-    expect(select).toHaveValue("model-abc");
+    expect(select).toHaveValue(AUTO_ROUTE_VALUE);
 
-    // User selects "Auto (Recommended)" → sets pendModelId=null, pendAutoRoute=true
+    // User re-selects "Auto (Recommended)" (no-op but verifies no override)
     await act(async () => {
       await user.selectOptions(select, AUTO_ROUTE_VALUE);
     });
     await settle();
 
-    // MUST remain on Auto — the useEffect must NOT override it back to "model-abc"
+    // MUST remain on Auto
     expect(select).toHaveValue(AUTO_ROUTE_VALUE);
   });
 
@@ -215,12 +231,8 @@ describe("ChatWindow — Auto model selection (Issue #400)", () => {
     renderChatWindow();
     await settle();
 
-    // Step 1: Select Auto
+    // Auto-select kicks in first (Auto for multiple models)
     const select = screen.getByRole("combobox");
-    await act(async () => {
-      await user.selectOptions(select, AUTO_ROUTE_VALUE);
-    });
-    await settle();
     expect(select).toHaveValue(AUTO_ROUTE_VALUE);
 
     // Step 2: Select GPT-5 specifically
@@ -334,5 +346,18 @@ describe("ChatWindow — Stream reconnect on mount (Issue #457)", () => {
     // so reconnect should fire again. The "no reconnect after stop" scenario requires
     // the stop to happen before navigation, which is tested by the effect guard.
     expect(mockGetStreamStatus).toHaveBeenCalledWith("test-session-1");
+  });
+
+  it("does NOT call getStreamStatus when isPending is true (Issue #475)", async () => {
+    // Simulate navigating from an existing session to a new one — the
+    // component stays mounted but isPending becomes true, so pendingFlag
+    // should be true and the reconnect effect should be skipped.
+    mockGetStreamStatus.mockResolvedValue({ active: true });
+
+    renderChatWindow({ isPending: true, sessionId: "test-new-session" });
+    await settle();
+
+    expect(mockGetStreamStatus).not.toHaveBeenCalled();
+    expect(mockStartReconnect).not.toHaveBeenCalled();
   });
 });

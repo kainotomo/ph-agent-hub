@@ -31,6 +31,7 @@ import {
   updateAssistantMessage,
   listAlwaysOnTools,
   getStreamStatus,
+  createSession,
 } from "../services/chat";
 import { AutopilotPanel, INITIAL_AUTOPILOT_STATE, type AutopilotState } from "./AutopilotPanel";
 import { getDemoMessages } from "../services/demo";
@@ -239,11 +240,15 @@ export function ChatWindow({
   const [pendActiveToolIds, setPendActiveToolIds] = useState<string[]>([]);
   const [pendingFlag, setPendingFlag] = useState(isPending);
 
-  // When the session gets created (isPending flips), clear pending state
-  // and remove the persisted draft from sessionStorage.
+  // Sync pendingFlag with isPending on every change.
+  // When navigating from an existing session to a new one (React Router
+  // preserves the component), useState(isPending) retains the old value,
+  // so we need this effect to keep pendingFlag in sync on both transitions
+  // (true→false and false→true).  When isPending becomes false the session
+  // has been created on the backend — clear localStorage drafts.
   useEffect(() => {
+    setPendingFlag(isPending);
     if (!isPending) {
-      setPendingFlag(false);
       removeDraft(DRAFT_PREFIX + sessionId);
       removeDraft(FILES_PREFIX + sessionId);
     }
@@ -494,15 +499,25 @@ export function ChatWindow({
   );
   const modelSupportsThinking = selectedModel?.thinking_enabled === true;
 
-  // Auto-select the first available model for pending sessions (no backend
-  // session to provide a default yet — mirrors backend create_session logic).
-  // NOTE: Must NOT fire when the user has explicitly chosen "Auto" mode —
-  // that sets pendModelId=null + pendAutoRoute=true.  The check for
-  // !pendAutoRoute prevents re-selecting the first model and overriding
-  // the user's choice (Issue #400).
+  // Auto-select a model for pending sessions (no backend session to provide
+  // a default yet — mirrors backend create_session logic).
+  //
+  // Rules:
+  //   1. If exactly one model exists → auto-select it.
+  //   2. If multiple models exist → auto-select "Auto (Recommended)".
+  //
+  // NOTE: Must NOT fire when the user has explicitly chosen "Auto" mode or
+  // a specific model — the checks for !pendModelId and !pendAutoRoute
+  // prevent overriding the user's choice (Issue #400, Issue #479).
   useEffect(() => {
     if (pendingFlag && modelList && modelList.length > 0 && !pendModelId && !pendAutoRoute) {
-      setPendModelId(modelList[0].id);
+      if (modelList.length === 1) {
+        setPendModelId(modelList[0].id);
+      } else {
+        setPendAutoRoute(true);
+        // pendModelId stays undefined; the model value resolves to
+        // AUTO_ROUTE_VALUE via (pendAutoRoute && !pendModelId).
+      }
     }
   }, [pendingFlag, modelList, pendModelId, pendAutoRoute]);
 
@@ -1040,6 +1055,9 @@ export function ChatWindow({
     setPendingFiles([]);
 
     // Build session_data for lazy session creation (Phase 2)
+    // This is kept as a fallback even with eager creation (Issue #478):
+    // if the eager POST beats the lazy-session POST the backend can
+    // still create the session inline.
     const sessionData = pendingFlag
       ? {
           title: "New Chat",
@@ -1061,6 +1079,31 @@ export function ChatWindow({
     // causing a spurious "Reconnecting to live session" flash and a
     // duplicate SSE subscription to the bridge.
     reconnectAttemptedRef.current = true;
+
+    // ---- Eager session creation for pending sessions (Issue #478) ---------
+    // Fire a separate POST to create the session before the fetchEventSource
+    // POST arrives, so the backend doesn't need lazy-creation during the SSE
+    // stream.  If the eager creation fails or is too slow, the fallback
+    // session_data in the POST body still works.
+    if (pendingFlag) {
+      createSession({
+        title: "New Chat",
+        auto_route_enabled: pendAutoRoute,
+        auto_select_tools: pendAutoSelectTools,
+        selected_model_id: pendModelId || undefined,
+        selected_template_id: pendTemplateId || undefined,
+        selected_skill_id: pendSkillId || undefined,
+        thinking_enabled: thinkingEnabled ?? undefined,
+        temperature: sessionTemperature ?? undefined,
+        active_tool_ids: pendActiveToolIds.length > 0 ? pendActiveToolIds : undefined,
+      }).then(() => {
+        setPendingFlag(false);
+        queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+      }).catch(() => {
+        // Ignore — fallback session_data in the POST body handles it.
+      });
+    }
 
     if (isAutopilotMode) {
       // ---- Autopilot mode: stream with autopilot flag ----------------------
@@ -1412,7 +1455,7 @@ export function ChatWindow({
           />
           <Button
             size="small"
-            onClick={() => setToolsOpen(true)}
+            onClick={() => setToolsOpen((prev) => !prev)}
           >
             Tools
           </Button>
@@ -1420,7 +1463,6 @@ export function ChatWindow({
             size="small"
             checked={localCrossSessionMemory ?? false}
             checkedChildren="🧠 Memory"
-            unCheckedChildren="🧠 Memory"
             title="Cross-session memory"
             onChange={(v) => {
               setLocalCrossSessionMemory(v);
@@ -1431,8 +1473,8 @@ export function ChatWindow({
             <Switch
               size="small"
               checked={thinkingEnabled ?? true}
-              checkedChildren="🧠"
-              unCheckedChildren="🧠"
+              checkedChildren="🧠 Thinking"
+              unCheckedChildren="🧠 Thinking"
               title="Thinking Mode"
               onChange={(v) => {
                 setThinkingEnabled(v);
@@ -1509,8 +1551,8 @@ export function ChatWindow({
             <Switch
               size="small"
               checked={thinkingEnabled ?? true}
-              checkedChildren="🧠"
-              unCheckedChildren="🧠"
+              checkedChildren="🧠 Thinking"
+              unCheckedChildren="🧠 Thinking"
               title="Thinking Mode"
               onChange={(v) => {
                 setThinkingEnabled(v);
@@ -1522,7 +1564,6 @@ export function ChatWindow({
             size="small"
             checked={localCrossSessionMemory ?? false}
             checkedChildren="🧠 Memory"
-            unCheckedChildren="🧠 Memory"
             title="Cross-session memory"
             onChange={(v) => {
               setLocalCrossSessionMemory(v);

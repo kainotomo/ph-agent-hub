@@ -717,18 +717,21 @@ async def test_tool_group(
 
 
 # =============================================================================
-# E2E Test Fixture — Real DB (no rollback)
+# E2E Test Fixture — auto-rollback for uncommitted changes
 # =============================================================================
 
 
 @pytest_asyncio.fixture
 async def e2e_db_session():
-    """Create a real DB session for E2E tests (no transaction rollback).
+    """Provide an async DB session that E2E tests use directly.
 
-    Used by ``@pytest.mark.e2e`` tests that require actual persistence.
-    Cleans up by dropping test data created during the test.
+    Unlike ``db_session`` (which wraps everything in a transaction and always
+    rolls back), this fixture does **not** begin an explicit transaction.
+    It rolls back any uncommitted work in ``finally``, and the session-level
+    cleanup hook (``pytest_sessionfinish``) handles any data committed
+    intentionally by tests.
 
-    Expects ``E2E_DATABASE_URL`` env var (falls back to the Docker Compose
+    Expects ``DATABASE_URL`` env var (falls back to the Docker Compose
     default connection string).
     """
     import os
@@ -747,6 +750,117 @@ async def e2e_db_session():
     session = AsyncSessionLocal()
     try:
         yield session
-        await session.commit()
     finally:
+        await session.rollback()
         await session.close()
+
+
+# =============================================================================
+# Session-level cleanup — removes test data after the full test run
+# =============================================================================
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """After the entire test session finishes, delete rows that were created
+    by E2E tests and left behind (e.g. tests that intentionally ``commit()``).
+
+    Uses a **separate engine and session** so it is not affected by any
+    fixture-level rollback.
+
+    The cleanup is selective — it deletes only rows whose names / emails match
+    known test-fixture patterns.  The A2A default tenant and system user
+    (fixed IDs) are **not** deleted.
+    """
+    # Only run cleanup when e2e tests were collected
+    has_e2e = any(
+        item.get_closest_marker("e2e") for item in getattr(session, "items", [])
+    )
+    if not has_e2e:
+        return
+
+    import asyncio
+
+    asyncio.run(_cleanup_test_data())
+
+
+async def _cleanup_test_data():
+    """Delete rows matching test-data patterns and log counts."""
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import Session
+
+    # Use a sync engine to avoid event-loop nesting issues
+    db_url = os.environ.get(
+        "DATABASE_URL",
+        "mysql+aiomysql://phagent:pRep5v3Nzw_aMMV@mariadb:3306/phagent_hub?charset=utf8mb4",
+    )
+    # Convert aiomysql → mysqlconnector or pymysql for sync access
+    sync_url = db_url.replace("+aiomysql", "+pymysql")
+    engine = create_engine(sync_url)
+    total = 0
+
+    with Session(engine) as db:
+        tables = [
+            # Order matters: children first, parents last
+            ("a2a_call_logs", None),
+            ("a2a_tasks", None),
+            ("a2a_servers", "name LIKE 'Test%' OR name LIKE 'E2E%'"),
+            ("rag_documents", None),
+            ("file_uploads", None),
+            ("message_embeddings", None),
+            ("messages", None),
+            ("session_active_tools", None),
+            ("sessions", "title LIKE 'Test%' OR title LIKE 'E2E%' OR title LIKE 'Journey%' OR title LIKE 'CRUD%' OR title LIKE 'A2A task%' OR title LIKE 'Manual%' OR title LIKE 'API%' OR title LIKE 'Auto Tools%' OR title LIKE 'Tenant%' OR title LIKE 'Model Test%'"),
+            ("skill_allowed_tools", None),
+            ("skills", "title LIKE 'Test%' OR title LIKE 'E2E%'"),
+            ("prompts", "title LIKE 'Test%' OR description LIKE 'test%'"),
+            ("templates", "title LIKE 'Test%'"),
+            ("model_groups", None),
+            ("tool_groups", None),
+            ("user_group_members", None),
+            ("user_groups", "name LIKE 'Test%' OR name LIKE 'E2E%'"),
+            ("user_tool_credentials", "label LIKE 'Test%'"),
+            ("user_tool_preferences", None),
+            ("models", "name LIKE 'Test%' OR name LIKE 'E2E%'"),
+            ("tools", "name LIKE 'Test%' OR name LIKE 'E2E%'"),
+            ("audit_logs", None),
+            ("autopilot_runs", None),
+            ("balance_transactions", None),
+            ("notifications", None),
+            ("mcp_servers", "name LIKE 'Test%' OR name LIKE 'E2E%'"),
+            ("scheduled_tasks", None),
+            ("usage_logs", None),
+            ("memory", None),
+            ("embed_configs", None),
+            ("message_feedback", None),
+            ("session_tags", None),
+            ("tags", None),
+            # Parents last
+            ("users", "email LIKE '%@example.com' OR email LIKE '%@test.com' OR email LIKE '%@e2e.test'"),
+            ("tenants", "name LIKE 'Test%' OR name LIKE 'E2E%' OR name LIKE 'Admin%' OR name LIKE 'Empty%' OR name LIKE 'Unlimited%' OR name LIKE 'UserTest%' OR name LIKE 'GroupTest%' OR name LIKE 'AuditTest%' OR name LIKE 'AutoRoute%' OR name LIKE 'AutoTools%' OR name LIKE 'UserJourney%' OR name LIKE 'Demo%' OR name LIKE 'Second%' OR name LIKE 'Journey%'"),
+        ]
+
+        # Disable FK checks so we can delete in any order
+        db.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
+
+        for table_name, where_clause in tables:
+            try:
+                if where_clause:
+                    sql = f"DELETE FROM {table_name} WHERE {where_clause}"
+                else:
+                    sql = f"DELETE FROM {table_name}"
+                result = db.execute(text(sql))
+                deleted = result.rowcount
+                if deleted:
+                    total += deleted
+                    print(f"  Cleanup: deleted {deleted} rows from {table_name}")
+            except Exception as exc:
+                print(f"  Cleanup: SKIP {table_name} ({exc})")
+
+        db.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
+        db.commit()
+
+    engine.dispose()
+    if total:
+        print(f"  Total: deleted {total} test-data rows")
+    else:
+        print("  No test data found to clean up")

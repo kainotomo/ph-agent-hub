@@ -106,10 +106,13 @@ class TestAutoRoutingE2E:
             auto_route_eligible=True,
         )
 
+        from src.core.security import hash_password
+
         user = User(
             id=test_user_id,
             tenant_id=test_tenant_id,
             email=f"autoroute-{uuid.uuid4().hex[:8]}@e2e.test",
+            password_hash=hash_password("E2ETestPass123!"),
             display_name="AutoRoute Tester",
             role="user",
             is_active=True,
@@ -129,70 +132,62 @@ class TestAutoRoutingE2E:
 
     async def test_auto_routing_math_picks_reasoning(self, e2e_db_session):
         """Test 1: Auto-routing picks reasoning model for math query."""
-        from src.db.base import AsyncSessionLocal
+        db = e2e_db_session
         from src.services import session_service
         from src.services.router_service import route_message
 
-        async with AsyncSessionLocal() as db:
-            setup = await self._setup(db)
-            session = await session_service.create_session(
-                db, tenant_id=setup["tenant_id"], user_id=setup["user_id"],
-                title="E2E Math Test",
-                auto_route_enabled=True,
-                selected_model_id=None,
-            )
-            assert session.auto_route_enabled is True
-            assert session.selected_model_id is None
+        setup = await self._setup(db)
+        session = await session_service.create_session(
+            db, tenant_id=setup["tenant_id"], user_id=setup["user_id"],
+            title="E2E Math Test",
+            auto_route_enabled=True,
+            selected_model_id=None,
+        )
+        assert session.auto_route_enabled is True
+        assert session.selected_model_id is None
 
-            selected_id = await route_message(
-                db, "Solve this equation: 2x + 5 = 15",
-                setup["tenant_id"], setup["user_id"],
-            )
-            assert selected_id is not None
-            assert selected_id != setup["ineligible_model"].id
-            await db.rollback()
+        selected_id = await route_message(
+            db, "Solve this equation: 2x + 5 = 15",
+            setup["tenant_id"], setup["user_id"],
+        )
+        assert selected_id is not None
+        assert selected_id != setup["ineligible_model"].id
 
     async def test_auto_routing_general_picks_general(self, e2e_db_session):
         """Test 2: Auto-routing picks general model for generic query."""
-        from src.db.base import AsyncSessionLocal
+        db = e2e_db_session
         from src.services.router_service import route_message
 
-        async with AsyncSessionLocal() as db:
-            setup = await self._setup(db)
-            selected_id = await route_message(
-                db, "Hello, how are you today?",
-                setup["tenant_id"], setup["user_id"],
-            )
-            assert selected_id is not None
-            assert selected_id != setup["ineligible_model"].id
-            await db.rollback()
+        setup = await self._setup(db)
+        selected_id = await route_message(
+            db, "Hello, how are you today?",
+            setup["tenant_id"], setup["user_id"],
+        )
+        assert selected_id is not None
+        assert selected_id != setup["ineligible_model"].id
 
     async def test_ineligible_model_never_selected(self, e2e_db_session):
         """Test 3: Ineligible model is never auto-selected."""
-        from src.db.base import AsyncSessionLocal
+        db = e2e_db_session
         from src.services.router_service import route_message
 
-        async with AsyncSessionLocal() as db:
-            setup = await self._setup(db)
-            selected_id = await route_message(
-                db, "Solve 2+2",
-                setup["tenant_id"], setup["user_id"],
-            )
-            assert selected_id != setup["ineligible_model"].id
-            await db.rollback()
+        setup = await self._setup(db)
+        selected_id = await route_message(
+            db, "Solve 2+2",
+            setup["tenant_id"], setup["user_id"],
+        )
+        assert selected_id != setup["ineligible_model"].id
 
     async def test_manual_model_bypasses_routing(self, e2e_db_session):
         """Test 4: Manual model selection bypasses auto-routing."""
-        from src.db.base import AsyncSessionLocal
+        db = e2e_db_session
         from src.services import session_service
 
-        async with AsyncSessionLocal() as db:
-            setup = await self._setup(db)
-            session = await session_service.create_session(
-                db, tenant_id=setup["tenant_id"], user_id=setup["user_id"],
-                title="E2E Manual Test",
-                selected_model_id=setup["reasoning_model"].id,
-                auto_route_enabled=False,
-            )
-            assert session.selected_model_id == setup["reasoning_model"].id
-            await db.rollback()
+        setup = await self._setup(db)
+        session = await session_service.create_session(
+            db, tenant_id=setup["tenant_id"], user_id=setup["user_id"],
+            title="E2E Manual Test",
+            selected_model_id=setup["reasoning_model"].id,
+            auto_route_enabled=False,
+        )
+        assert session.selected_model_id == setup["reasoning_model"].id

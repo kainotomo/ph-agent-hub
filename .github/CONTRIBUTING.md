@@ -231,9 +231,27 @@ A GitHub Actions workflow runs on every pull request to `main`:
 | Job | What it validates |
 |-----|------------------|
 | **Backend Tests** | `pytest tests/ -m "not e2e and not slow"` with coverage |
+| **Migration Tests** | DAG integrity, single head, no orphan migrations |
 | **Frontend Build** | `tsc` type-check + `vite build` |
 
 CI uses MariaDB and Redis as service containers — no Docker Compose or API keys needed. See `.github/workflows/ci.yml` for details.
+
+### Migration Safety
+
+When adding or modifying Alembic migrations, follow these guidelines (see [deployment docs](../docs/deployment.md#migration-verification-issue-482) for details):
+
+1. **Every migration needs a real downgrade** — only merge migrations may have `pass` as their downgrade body.
+2. **Idempotency** — Migrations must be safe to run multiple times. Data migrations (`UPDATE`, `DELETE`) should use `WHERE` clauses that make them no-ops on re-run.
+3. **ENUM changes trigger table rebuilds** — `ALTER TABLE ... MODIFY COLUMN ... ENUM(...)` locks the table and copies all rows. Check the table size before adding/modifying enum values.
+4. **No orphan heads** — Run `alembic heads` before committing; it must return exactly 1 revision. If you get multiple heads, create a merge migration: `alembic merge heads`.
+5. **Test locally** — Before pushing:
+   ```bash
+   cd backend
+   alembic upgrade heads      # Verify it applies cleanly
+   alembic downgrade -1        # Verify rollback works
+   alembic upgrade heads       # Re-apply for tests
+   ```
+6. **Migration test suite** — `tests/test_migrations.py` validates DAG integrity and upgrade/downgrade round-trips. Ensure new migrations pass these tests.
 
 ---
 

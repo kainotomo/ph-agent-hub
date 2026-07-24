@@ -39,6 +39,14 @@ Closes #
 - [ ] I have updated the documentation (`docs/`) if my change affects user-facing behaviour or configuration
 - [ ] My changes generate no new warnings or errors
 - [ ] New and existing tests pass locally
+- [ ] **Migration safety** (if adding/modifying a migration):
+  - [ ] Migration has a valid downgrade path (not just `pass`)
+  - [ ] Migration is idempotent (safe to run multiple times)
+  - [ ] If ENUM change: checked table size; planned maintenance window if large
+  - [ ] If DROP COLUMN/TABLE: confirmed no production data loss
+  - [ ] If data backfill: tested on staging copy of production data
+  - [ ] `alembic upgrade heads` tested locally (DAG has a single head)
+  - [ ] `alembic downgrade -1` tested locally (rollback works)
 
 ## Screenshots (if applicable)
 

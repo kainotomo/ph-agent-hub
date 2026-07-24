@@ -299,26 +299,26 @@ class TestUploadInputValidation:
         )
         assert resp.status_code == 422, resp.text
 
-    async def test_upload_content_type_fallback_rejects_unknown_extension(
+    async def test_upload_content_type_fallback_accepts_unknown_extension(
         self,
         async_client,
         auth_headers,
         test_user,
         test_session,
     ):
-        """Verify a file with generic content-type and unknown extension is rejected.
+        """Verify a file with generic content-type and unknown extension is accepted.
 
-        When the browser reports ``application/octet-stream`` and the
-        extension maps to an unknown type, the upload should be rejected
-        with 422.
+        Unknown extensions now fall back to ``text/plain``, which is in the
+        allowed list. The upload should be accepted (200/201).
         """
         headers = auth_headers(test_user)
-        # .xyz is unknown — the resolver returns the original generic type
-        # which is NOT in the allowed list
         files = {"file": ("unknown.xyz", b"some data", "application/octet-stream")}
         resp = await async_client.post(
             f"/api/chat/session/{test_session.id}/upload",
             files=files,
             headers=headers,
         )
-        assert resp.status_code == 422, resp.text
+        assert resp.status_code not in (422, 403), (
+            f"Unknown extension should fall back to text/plain, "
+            f"got {resp.status_code}: {resp.text}"
+        )

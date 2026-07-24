@@ -837,7 +837,7 @@ to next message → Backend links message_id after message is persisted
 | Setting | Default | Env var |
 |---|---|---|
 | Max file size | 100 MB | `UPLOAD_MAX_SIZE_BYTES` |
-| Allowed MIME types | `text/plain`, `text/csv`, `text/markdown`, `application/pdf`, `application/json`, `image/png`, `image/jpeg`, `image/gif`, `image/webp` | `UPLOAD_ALLOWED_TYPES` |
+| Allowed MIME types | `text/plain`, `text/csv`, `text/markdown`, `application/pdf`, `application/json`, `image/png`, `image/jpeg`, `image/gif`, `image/webp`, `image/svg+xml`, `image/bmp`, `image/tiff`, `image/avif`, Office formats | `UPLOAD_ALLOWED_TYPES` |
 
 ### 10.6 Authorization Model
 
@@ -901,7 +901,7 @@ MINIO_ACCESS_KEY=minioadmin
 MINIO_SECRET_KEY=minioadmin
 MINIO_BUCKET_PREFIX=phhub-tenant
 UPLOAD_MAX_SIZE_BYTES=104857600
-UPLOAD_ALLOWED_TYPES=text/plain,text/csv,text/markdown,application/pdf,application/json,image/png,image/jpeg,image/gif,image/webp
+UPLOAD_ALLOWED_TYPES=text/plain,text/csv,text/markdown,application/pdf,application/json,image/png,image/jpeg,image/gif,image/webp,image/svg+xml,image/bmp,image/tiff,image/avif,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/msword,application/vnd.ms-excel,application/vnd.ms-powerpoint
 ```
 
 ---

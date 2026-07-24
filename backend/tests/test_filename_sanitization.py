@@ -9,6 +9,7 @@ import pytest
 
 from src.services.upload_service import (
     _encode_content_disposition_filename,
+    _resolve_content_type,
     _sanitize_storage_filename,
 )
 
@@ -156,3 +157,116 @@ class TestEncodeContentDispositionFilename:
         """An empty/weird filename still produces a valid header."""
         result = _encode_content_disposition_filename("")
         assert result.startswith("attachment; ")
+        assert 'filename="file"' in result
+
+
+# =============================================================================
+# _resolve_content_type
+# =============================================================================
+
+
+class TestResolveContentType:
+    """Unit tests for ``_resolve_content_type()``."""
+
+    def test_specific_mime_type_returned_as_is(self):
+        """A specific (non-generic) MIME type is returned unchanged."""
+        assert _resolve_content_type("image/png", "foo.xyz") == "image/png"
+
+    def test_generic_type_falls_back_to_override(self):
+        """application/octet-stream falls back to extension-based override."""
+        assert _resolve_content_type("application/octet-stream", "report.docx") == (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+
+    def test_yml_extension_resolves_to_text_plain(self):
+        """.yml files with generic content type resolve to text/plain."""
+        assert _resolve_content_type("application/octet-stream", "config.yml") == "text/plain"
+
+    def test_yaml_extension_resolves_to_text_plain(self):
+        """.yaml files resolve to text/plain."""
+        assert _resolve_content_type("application/octet-stream", "config.yaml") == "text/plain"
+
+    def test_log_extension_resolves_to_text_plain(self):
+        """.log files resolve to text/plain."""
+        assert _resolve_content_type("application/octet-stream", "server.log") == "text/plain"
+
+    def test_py_extension_resolves_to_text_plain(self):
+        """.py files resolve to text/plain."""
+        assert _resolve_content_type("application/octet-stream", "script.py") == "text/plain"
+
+    def test_js_extension_resolves_to_text_plain(self):
+        """.js files resolve to text/plain."""
+        assert _resolve_content_type("application/octet-stream", "app.js") == "text/plain"
+
+    def test_ts_extension_resolves_to_text_plain(self):
+        """.ts files resolve to text/plain."""
+        assert _resolve_content_type("application/octet-stream", "component.ts") == "text/plain"
+
+    def test_sh_extension_resolves_to_text_plain(self):
+        """.sh files resolve to text/plain."""
+        assert _resolve_content_type("application/octet-stream", "deploy.sh") == "text/plain"
+
+    def test_sql_extension_resolves_to_text_plain(self):
+        """.sql files resolve to text/plain."""
+        assert _resolve_content_type("application/octet-stream", "query.sql") == "text/plain"
+
+    def test_html_extension_resolves_to_text_plain(self):
+        """.html files resolve to text/plain."""
+        assert _resolve_content_type("application/octet-stream", "index.html") == "text/plain"
+
+    def test_css_extension_resolves_to_text_plain(self):
+        """.css files resolve to text/plain."""
+        assert _resolve_content_type("application/octet-stream", "style.css") == "text/plain"
+
+    def test_xml_extension_resolves_to_text_plain(self):
+        """.xml files resolve to text/plain."""
+        assert _resolve_content_type("application/octet-stream", "data.xml") == "text/plain"
+
+    def test_toml_extension_resolves_to_text_plain(self):
+        """.toml files resolve to text/plain."""
+        assert _resolve_content_type("application/octet-stream", "pyproject.toml") == "text/plain"
+
+    def test_env_extension_resolves_to_text_plain(self):
+        """.env files resolve to text/plain."""
+        assert _resolve_content_type("application/octet-stream", ".env") == "text/plain"
+
+    def test_tf_extension_resolves_to_text_plain(self):
+        """.tf files resolve to text/plain."""
+        assert _resolve_content_type("application/octet-stream", "main.tf") == "text/plain"
+
+    def test_unknown_extension_falls_back_to_text_plain(self):
+        """A truly unknown extension falls back to text/plain."""
+        assert _resolve_content_type("application/octet-stream", "notes.xyz") == "text/plain"
+
+    def test_no_extension_falls_back_to_text_plain(self):
+        """A filename without extension falls back to text/plain."""
+        assert _resolve_content_type("application/octet-stream", "README") == "text/plain"
+
+    def test_empty_filename_falls_back_to_text_plain(self):
+        """An empty filename falls back to text/plain."""
+        assert _resolve_content_type("application/octet-stream", "") == "text/plain"
+
+    def test_office_extensions_still_resolve_correctly(self):
+        """Office extensions still resolve to their proper MIME types."""
+        assert _resolve_content_type("application/octet-stream", "data.xlsx") == (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        assert _resolve_content_type("application/octet-stream", "doc.doc") == "application/msword"
+        assert _resolve_content_type("application/octet-stream", "slides.pptx") == (
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        )
+
+    def test_image_extensions_resolve_correctly(self):
+        """Image extensions resolve to their proper types."""
+        assert _resolve_content_type("application/octet-stream", "photo.png") == "image/png"
+        assert _resolve_content_type("application/octet-stream", "photo.jpg") == "image/jpeg"
+        assert _resolve_content_type("application/octet-stream", "photo.svg") == "image/svg+xml"
+
+    def test_svg_extension_resolves_to_image_svg_xml(self):
+        """.svg files resolve to image/svg+xml."""
+        assert _resolve_content_type("application/octet-stream", "icon.svg") == "image/svg+xml"
+
+    def test_exe_with_specific_mime_not_overridden(self):
+        """.exe files with a specific MIME type are NOT overridden."""
+        result = _resolve_content_type("application/x-msdownload", "installer.exe")
+        assert result == "application/x-msdownload"

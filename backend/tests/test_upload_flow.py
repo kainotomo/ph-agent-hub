@@ -70,6 +70,66 @@ class TestFileUpload:
         )
         assert resp.status_code == 422, resp.text
 
+    async def test_upload_yml_file(
+        self, async_client, auth_headers, test_user, test_session
+    ):
+        """.yml files are now accepted (resolve to text/plain)."""
+        headers = auth_headers(test_user)
+        files = {"file": ("config.yml", b"key: value\n", "application/octet-stream")}
+        resp = await async_client.post(
+            f"/api/chat/session/{test_session.id}/upload",
+            files=files,
+            headers=headers,
+        )
+        assert resp.status_code not in (422, 403), (
+            f".yml upload should be accepted, got {resp.status_code}: {resp.text}"
+        )
+
+    async def test_upload_log_file(
+        self, async_client, auth_headers, test_user, test_session
+    ):
+        """.log files are now accepted (resolve to text/plain)."""
+        headers = auth_headers(test_user)
+        files = {"file": ("server.log", b"2026-01-01 INFO starting up\n", "application/octet-stream")}
+        resp = await async_client.post(
+            f"/api/chat/session/{test_session.id}/upload",
+            files=files,
+            headers=headers,
+        )
+        assert resp.status_code not in (422, 403), (
+            f".log upload should be accepted, got {resp.status_code}: {resp.text}"
+        )
+
+    async def test_upload_py_file(
+        self, async_client, auth_headers, test_user, test_session
+    ):
+        """.py files are now accepted (resolve to text/plain)."""
+        headers = auth_headers(test_user)
+        files = {"file": ("script.py", b"print('hello')\n", "application/octet-stream")}
+        resp = await async_client.post(
+            f"/api/chat/session/{test_session.id}/upload",
+            files=files,
+            headers=headers,
+        )
+        assert resp.status_code not in (422, 403), (
+            f".py upload should be accepted, got {resp.status_code}: {resp.text}"
+        )
+
+    async def test_upload_sh_file(
+        self, async_client, auth_headers, test_user, test_session
+    ):
+        """.sh files are now accepted (resolve to text/plain)."""
+        headers = auth_headers(test_user)
+        files = {"file": ("deploy.sh", b"#!/bin/bash\necho deploy\n", "application/octet-stream")}
+        resp = await async_client.post(
+            f"/api/chat/session/{test_session.id}/upload",
+            files=files,
+            headers=headers,
+        )
+        assert resp.status_code not in (422, 403), (
+            f".sh upload should be accepted, got {resp.status_code}: {resp.text}"
+        )
+
 
 class TestTempSessionUploadGuard:
     """Verify temp session upload rejection (validates Step 0c)."""

@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     UPLOAD_ALLOWED_TYPES: str = (
         "text/plain,text/csv,text/markdown,application/pdf,"
         "application/json,image/png,image/jpeg,image/gif,image/webp,"
+        "image/svg+xml,image/bmp,image/tiff,image/avif,"
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,"
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document,"
         "application/vnd.openxmlformats-officedocument.presentationml.presentation,"

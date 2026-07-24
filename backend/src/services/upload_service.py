@@ -162,17 +162,10 @@ def _resolve_content_type(content_type: str, filename: str) -> str:
     if guessed:
         return guessed
 
-    # Nothing worked — fall back to text/plain instead of returning
-    # the opaque generic type (which would fail validation).
-    # This matches user expectation: most files users try to upload
-    # are text-like, and security is maintained by the 100 MiB size
-    # cap and filename sanitization.
-    logger.info(
-        "Could not resolve MIME type for '%s' (reported: %s). "
-        "Falling back to text/plain.",
-        filename, content_type,
-    )
-    return "text/plain"
+    # Nothing worked — return the original (the caller may apply its
+    # own text/plain fallback for generic browser-reported types;
+    # see Issue #473).
+    return content_type
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +280,22 @@ async def create_upload(
     allowed_types = [
         t.strip() for t in settings.UPLOAD_ALLOWED_TYPES.split(",") if t.strip()
     ]
+    if resolved_type not in allowed_types:
+        # 1a. Final safety net (Issue #473): if the browser reported a
+        #     generic / opaque type (e.g. application/octet-stream) and
+        #     the resolved type is still not in the allowlist, fall back
+        #     to text/plain.  This lets users upload files with unknown
+        #     extensions (e.g. notes.xyz) while still blocking files
+        #     whose browser-reported type is already specific and
+        #     disallowed (e.g. application/x-msdownload for .exe).
+        if content_type in _GENERIC_MIME_TYPES:
+            logger.info(
+                "Content type '%s' for '%s' not allowed; "
+                "original browser type was generic. Falling back to text/plain.",
+                resolved_type, original_filename,
+            )
+            resolved_type = "text/plain"
+
     if resolved_type not in allowed_types:
         raise ValidationError(
             f"File type '{resolved_type}' is not allowed. "

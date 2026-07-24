@@ -226,25 +226,39 @@ class TestResolveContentType:
         """.toml files resolve to text/plain."""
         assert _resolve_content_type("application/octet-stream", "pyproject.toml") == "text/plain"
 
-    def test_env_extension_resolves_to_text_plain(self):
-        """.env files resolve to text/plain."""
-        assert _resolve_content_type("application/octet-stream", ".env") == "text/plain"
+    def test_env_extension_not_overridden_to_text_plain_directly(self):
+        """`_resolve_content_type` does not map .env (os.path.splitext
+        treats it as an extension-less filename; fallback is in create_upload).
+        """
+        result = _resolve_content_type("application/octet-stream", ".env")
+        # .env is treated as extension-less by splitext → not in overrides.
+        # The text/plain fallback happens in create_upload(), not here.
+        assert result != "text/plain"
 
     def test_tf_extension_resolves_to_text_plain(self):
         """.tf files resolve to text/plain."""
         assert _resolve_content_type("application/octet-stream", "main.tf") == "text/plain"
 
-    def test_unknown_extension_falls_back_to_text_plain(self):
-        """A truly unknown extension falls back to text/plain."""
-        assert _resolve_content_type("application/octet-stream", "notes.xyz") == "text/plain"
+    def test_unknown_extension_not_overridden_to_text_plain(self):
+        """`_resolve_content_type` no longer applies a text/plain fallback.
+        The safety net is now in ``create_upload()``, not here.
+        """
+        result = _resolve_content_type("application/octet-stream", "notes.xyz")
+        # The result depends on the system's mimetypes DB:
+        # - Docker (Debian): None → returns application/octet-stream
+        # - CI (Ubuntu): maps .xyz → chemical/x-xyz
+        # Either way, it should NOT be text/plain (that's in create_upload).
+        assert result != "text/plain"
 
-    def test_no_extension_falls_back_to_text_plain(self):
-        """A filename without extension falls back to text/plain."""
-        assert _resolve_content_type("application/octet-stream", "README") == "text/plain"
+    def test_no_extension_returns_original_type(self):
+        """A filename without extension returns the original generic type."""
+        result = _resolve_content_type("application/octet-stream", "README")
+        assert result == "application/octet-stream"
 
-    def test_empty_filename_falls_back_to_text_plain(self):
-        """An empty filename falls back to text/plain."""
-        assert _resolve_content_type("application/octet-stream", "") == "text/plain"
+    def test_empty_filename_returns_original_type(self):
+        """An empty filename returns the original generic type."""
+        result = _resolve_content_type("application/octet-stream", "")
+        assert result == "application/octet-stream"
 
     def test_office_extensions_still_resolve_correctly(self):
         """Office extensions still resolve to their proper MIME types."""

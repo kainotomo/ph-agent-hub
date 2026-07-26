@@ -76,7 +76,7 @@ import { SessionSearch } from "./SessionSearch";
 const { Sider } = Layout;
 const { Text } = Typography;
 
-export function SessionSidebar() {
+export const SessionSidebar = React.memo(function SessionSidebar() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const { user, logout } = useAuth();
   const navigate = useNavigate();
@@ -930,6 +930,6 @@ export function SessionSidebar() {
       {sidebarContent}
     </Sider>
   );
-}
+});
 
 export default SessionSidebar;

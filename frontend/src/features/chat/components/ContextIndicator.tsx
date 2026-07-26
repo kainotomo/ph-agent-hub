@@ -6,7 +6,7 @@
 // counts and a "Compact Conversation" button (Issue #309).
 // =============================================================================
 
-import { useState, useCallback } from "react";
+import React, { useState, useCallback } from "react";
 import { Button, Popover, Progress, Tooltip, Typography, message } from "antd";
 import { CompressOutlined } from "@ant-design/icons";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -43,7 +43,7 @@ interface ContextIndicatorProps {
   sessionId?: string;
 }
 
-export function ContextIndicator({ sessionId }: ContextIndicatorProps) {
+export const ContextIndicator = React.memo(function ContextIndicator({ sessionId }: ContextIndicatorProps) {
   const queryClient = useQueryClient();
   const [popoverOpen, setPopoverOpen] = useState(false);
   const [compacting, setCompacting] = useState(false);
@@ -179,6 +179,6 @@ export function ContextIndicator({ sessionId }: ContextIndicatorProps) {
       </Tooltip>
     </Popover>
   );
-}
+});
 
 export default ContextIndicator;

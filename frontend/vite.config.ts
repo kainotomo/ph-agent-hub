@@ -54,6 +54,21 @@ export default defineConfig({
       },
     }),
   ],
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          "vendor-antd": ["antd", "@ant-design/icons", "@ant-design/cssinjs"],
+          "vendor-refine": ["@refinedev/core", "@refinedev/antd", "@refinedev/react-router-v6"],
+          "vendor-markdown": ["react-markdown", "remark-gfm", "react-syntax-highlighter"],
+          "vendor-codemirror": ["@uiw/react-codemirror", "@uiw/codemirror-theme-dracula", "@codemirror/lang-python"],
+          "vendor-virtuoso": ["react-virtuoso"],
+          "vendor-core": ["react-router-dom", "@tanstack/react-query"],
+          "vendor-utils": ["@microsoft/fetch-event-source"],
+        },
+      },
+    },
+  },
   server: {
     port: 3000,
   },

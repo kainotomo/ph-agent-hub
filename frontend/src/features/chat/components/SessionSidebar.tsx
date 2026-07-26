@@ -76,7 +76,7 @@ import { SessionSearch } from "./SessionSearch";
 const { Sider } = Layout;
 const { Text } = Typography;
 
-export function SessionSidebar() {
+export const SessionSidebar = React.memo(function SessionSidebar() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const { user, logout } = useAuth();
   const navigate = useNavigate();
@@ -95,10 +95,15 @@ export function SessionSidebar() {
   const streamingSessionIdsRef = useRef(streamingSessionIds);
   streamingSessionIdsRef.current = streamingSessionIds;
 
+  // Use matchMedia instead of resize listener — only fires when crossing
+  // the 768px boundary, not on every pixel resize (better performance).
   React.useEffect(() => {
-    const handleResize = () => setIsMobile(window.innerWidth < 768);
-    window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
+    const mql = window.matchMedia("(max-width: 767px)");
+    const handleChange = (e: MediaQueryListEvent) => setIsMobile(e.matches);
+    // Set initial value
+    setIsMobile(mql.matches);
+    mql.addEventListener("change", handleChange);
+    return () => mql.removeEventListener("change", handleChange);
   }, []);
 
   // ---- Issue #455: Poll streaming session status -------------------------
@@ -137,7 +142,7 @@ export function SessionSidebar() {
     const timer = setTimeout(() => {
       check();
     }, 3000);
-    const interval = setInterval(check, 10000);
+    const interval = setInterval(check, 30000);
     return () => {
       cancelled = true;
       clearTimeout(timer);
@@ -930,6 +935,6 @@ export function SessionSidebar() {
       {sidebarContent}
     </Sider>
   );
-}
+});
 
 export default SessionSidebar;

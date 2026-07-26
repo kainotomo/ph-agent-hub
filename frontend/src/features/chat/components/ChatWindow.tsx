@@ -31,7 +31,6 @@ import {
   updateAssistantMessage,
   listAlwaysOnTools,
   getStreamStatus,
-  createSession,
 } from "../services/chat";
 import { AutopilotPanel, INITIAL_AUTOPILOT_STATE, type AutopilotState } from "./AutopilotPanel";
 import { getDemoMessages } from "../services/demo";
@@ -162,7 +161,7 @@ interface ChatWindowProps {
   onSessionUpdate?: (data: Record<string, unknown>) => void;
 }
 
-export function ChatWindow({
+export const ChatWindow = React.memo(function ChatWindow({
   sessionId,
   isTemporary,
   selectedModelId,
@@ -1080,31 +1079,9 @@ export function ChatWindow({
     // duplicate SSE subscription to the bridge.
     reconnectAttemptedRef.current = true;
 
-    // ---- Eager session creation for pending sessions (Issue #478) ---------
-    // Fire a separate POST to create the session before the fetchEventSource
-    // POST arrives, so the backend doesn't need lazy-creation during the SSE
-    // stream.  If the eager creation fails or is too slow, the fallback
-    // session_data in the POST body still works.
-    if (pendingFlag) {
-      createSession({
-        title: "New Chat",
-        auto_route_enabled: pendAutoRoute,
-        auto_select_tools: pendAutoSelectTools,
-        selected_model_id: pendModelId || undefined,
-        selected_template_id: pendTemplateId || undefined,
-        selected_skill_id: pendSkillId || undefined,
-        thinking_enabled: thinkingEnabled ?? undefined,
-        temperature: sessionTemperature ?? undefined,
-        active_tool_ids: pendActiveToolIds.length > 0 ? pendActiveToolIds : undefined,
-      }).then(() => {
-        setPendingFlag(false);
-        queryClient.invalidateQueries({ queryKey: ["sessions"] });
-        queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
-      }).catch(() => {
-        // Ignore — fallback session_data in the POST body handles it.
-      });
-    }
-
+    // Lazy session creation is handled by the session_data fallback in the
+    // SSE POST body below — no separate createSession call needed (which
+    // would generate a different server-side ID and create a duplicate).
     if (isAutopilotMode) {
       // ---- Autopilot mode: stream with autopilot flag ----------------------
       setAutopilotState({
@@ -2128,7 +2105,7 @@ export function ChatWindow({
       )}
     </div>
   );
-}
+});
 
 // ---------------------------------------------------------------------------
 // Helper

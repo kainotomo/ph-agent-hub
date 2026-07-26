@@ -26,8 +26,6 @@ import {
 import { useQuery } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { MessageFeedback } from "./MessageFeedback";
 import type { MessageData } from "../services/chat";
 import { listMessageUploads } from "../services/chat";
@@ -81,6 +79,48 @@ interface MessageBubbleProps {
   disabled?: boolean;
   regenerating?: boolean;
   streaming?: boolean;
+}
+
+// ── Lazy-loaded syntax highlighter ──────────────────────────────────────
+// react-syntax-highlighter is ~771 KB. Only load it when a code block with
+// a language tag is actually rendered (most messages have no code blocks).
+function CodeBlock({ language, children }: { language: string; children: string }) {
+  const [Highlighter, setHighlighter] = useState<React.ComponentType<any> | null>(null);
+  const [style, setStyle] = useState<any>(null);
+
+  useEffect(() => {
+    Promise.all([
+      import("react-syntax-highlighter") as Promise<typeof import("react-syntax-highlighter")>,
+      import("react-syntax-highlighter/dist/esm/styles/prism") as Promise<typeof import("react-syntax-highlighter/dist/esm/styles/prism")>,
+    ]).then(([hl, styleMod]) => {
+      setHighlighter(() => (hl as any).Prism);
+      setStyle((styleMod as any).oneDark);
+    });
+  }, []);
+
+  if (!Highlighter || !style) {
+    return (
+      <pre
+        style={{
+          background: "#1e1e1e",
+          color: "#d4d4d4",
+          padding: 12,
+          borderRadius: 6,
+          overflow: "auto",
+          fontSize: 13,
+          fontFamily: "monospace",
+        }}
+      >
+        <code>{children}</code>
+      </pre>
+    );
+  }
+
+  return (
+    <Highlighter style={style} language={language} PreTag="div">
+      {children}
+    </Highlighter>
+  );
 }
 
 function MessageBubbleInner({
@@ -299,13 +339,9 @@ function MessageBubbleInner({
                         );
                         if (match) {
                           return (
-                            <SyntaxHighlighter
-                              style={oneDark}
-                              language={match[1]}
-                              PreTag="div"
-                            >
+                            <CodeBlock language={match[1]}>
                               {codeStr}
-                            </SyntaxHighlighter>
+                            </CodeBlock>
                           );
                         }
                         return (

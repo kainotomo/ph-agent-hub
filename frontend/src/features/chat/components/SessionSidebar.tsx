@@ -323,7 +323,12 @@ export function SessionSidebar() {
             gap: 6,
           }}
         >
-          <Logo size={28} textColor="#141414" />
+          <div
+            style={{ cursor: "pointer", display: "flex" }}
+            onClick={() => navigate("/")}
+          >
+            <Logo size={28} textColor="#141414" />
+          </div>
           {!collapsed && (
             <Space size={4} style={{ marginLeft: "auto" }}>
               {sessionExists && <ContextIndicator sessionId={sessionId} />}

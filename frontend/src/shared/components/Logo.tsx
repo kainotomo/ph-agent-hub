@@ -13,6 +13,9 @@ interface LogoProps {
 }
 
 export function Logo({ size = 32, showText = false, textColor = "inherit", version }: LogoProps) {
+  const showVersionInline = version && !showText;
+  const showVersionBelow = version && showText;
+
   return (
     <span style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: 0, lineHeight: 1 }}>
       <span style={{ display: "inline-flex", alignItems: "center", gap: 8, lineHeight: 1 }}>
@@ -35,8 +38,20 @@ export function Logo({ size = 32, showText = false, textColor = "inherit", versi
             PH Agent
           </span>
         )}
+        {showVersionInline && (
+          <span
+            style={{
+              fontSize: size * 0.4,
+              fontWeight: 600,
+              color: textColor,
+              whiteSpace: "nowrap",
+            }}
+          >
+            v{version}
+          </span>
+        )}
       </span>
-      {version && (
+      {showVersionBelow && (
         <span
           style={{
             fontSize: size * 0.32,

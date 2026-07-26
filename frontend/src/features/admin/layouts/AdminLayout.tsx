@@ -158,7 +158,12 @@ export function AdminLayout() {
           borderBottom: "1px solid rgba(255,255,255,0.1)",
         }}
       >
-        <Logo size={30} showText textColor="#fff" version={version} />
+        <div
+          style={{ cursor: "pointer" }}
+          onClick={() => navigate("/")}
+        >
+          <Logo size={30} textColor="#fff" version={version} />
+        </div>
       </div>
       <Menu
         theme="dark"

@@ -63,7 +63,6 @@ from ..db.orm.messages import Message, MessageFeedback
 from ..db.orm.sessions import Session, SessionActiveTool
 from ..db.orm.tools import Tool
 from ..db.orm.user_tool_preferences import UserToolPreference
-from ..db.orm.tenants import Tenant
 from ..db.orm.users import User as UserORM
 from ..services import audit_service, session_service, upload_service
 from ..storage import s3
@@ -3150,20 +3149,6 @@ async def upload_file(
             "updated_at": now,
         }
         await store_temp_session(session_id, data)
-
-    # ---- Lock parent rows before any INSERT -----------------------------
-    # Acquire X-locks on FK parent rows in a consistent order BEFORE any
-    # INSERT in this transaction.  This prevents InnoDB deadlocks (1213)
-    # on FK validation: the session creation (INSERT INTO sessions) holds
-    # S-locks on tenant/user rows via FK checks.  By acquiring X-locks
-    # first, subsequent S-locks nest inside our X-lock — no circular wait
-    # between concurrent workers.
-    await db.execute(
-        select(Tenant).where(Tenant.id == current_user.tenant_id).with_for_update()
-    )
-    await db.execute(
-        select(UserORM).where(UserORM.id == current_user.id).with_for_update()
-    )
 
     # ---- Temp → permanent promotion (Issue #368) -----------------------
     # If the session is temporary (either newly lazy-created or loaded

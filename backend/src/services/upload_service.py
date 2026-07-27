@@ -16,6 +16,7 @@ import uuid
 from urllib.parse import quote
 
 from sqlalchemy import delete, select, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -373,23 +374,38 @@ async def create_upload(
             # Best-effort: extraction failure should not block upload
             pass
 
-    # 6. Persist DB row
-    upload = FileUpload(
-        id=file_id,
-        tenant_id=uploader_tenant_id,
-        user_id=uploader_id,
-        session_id=None if is_temp else session_data["id"],
-        original_filename=original_filename,
-        content_type=resolved_type,
-        size_bytes=len(file_bytes),
-        storage_key=key,
-        bucket=bucket,
-        is_temporary=is_temp,
-        extracted_text=extracted_text,
-    )
-    db.add(upload)
-    await db.commit()
-    await db.refresh(upload)
+    # 6. Persist DB row (with retry on deadlock — MySQL 1213)
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            upload = FileUpload(
+                id=file_id,
+                tenant_id=uploader_tenant_id,
+                user_id=uploader_id,
+                session_id=None if is_temp else session_data["id"],
+                original_filename=original_filename,
+                content_type=resolved_type,
+                size_bytes=len(file_bytes),
+                storage_key=key,
+                bucket=bucket,
+                is_temporary=is_temp,
+                extracted_text=extracted_text,
+            )
+            db.add(upload)
+            await db.commit()
+            await db.refresh(upload)
+            break
+        except OperationalError as exc:
+            if "1213" in str(exc) and attempt < max_retries - 1:
+                logger.warning(
+                    "Deadlock on file_uploads insert (attempt %d/%d), retrying...",
+                    attempt + 1, max_retries,
+                )
+                await db.rollback()
+                backoff = 0.1 * (attempt + 1)
+                await asyncio.sleep(backoff)
+                continue
+            raise
 
     # 7. Track file ID in Redis for temp sessions (cleanup on delete / TTL expiry)
     if is_temp:

@@ -54,6 +54,10 @@ interface SkillData {
   created_at: string;
   updated_at: string;
   tool_ids: string[];
+  goal?: string;
+  constraints?: string[];
+  success_criteria?: string;
+  agent_config?: { max_turns?: number };
 }
 
 interface PersonalSkillEditorProps {

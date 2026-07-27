@@ -2512,6 +2512,7 @@ async def admin_update_skill(
         "enabled",
         "cross_session_retrieval_enabled", "cross_session_max_snippets",
         "cross_session_min_score", "a2a_metadata",
+        "goal", "constraints", "success_criteria", "agent_config",
     ):
         val = getattr(body, field, None)
         if val is not None:

@@ -94,6 +94,10 @@ export function SkillForm({ open, skill, duplicateFrom, onClose }: SkillFormProp
           cross_session_retrieval_enabled: duplicateFrom.cross_session_retrieval_enabled ?? false,
           cross_session_max_snippets: duplicateFrom.cross_session_max_snippets ?? 3,
           cross_session_min_score: duplicateFrom.cross_session_min_score ?? 0.30,
+          goal: duplicateFrom.goal,
+          constraints: duplicateFrom.constraints,
+          success_criteria: duplicateFrom.success_criteria,
+          agent_config: duplicateFrom.agent_config ? { max_turns: duplicateFrom.agent_config.max_turns } : undefined,
         });
       } else if (skill) {
         form.setFieldsValue({
@@ -111,6 +115,10 @@ export function SkillForm({ open, skill, duplicateFrom, onClose }: SkillFormProp
           cross_session_retrieval_enabled: skill.cross_session_retrieval_enabled ?? false,
           cross_session_max_snippets: skill.cross_session_max_snippets ?? 3,
           cross_session_min_score: skill.cross_session_min_score ?? 0.30,
+          goal: skill.goal,
+          constraints: skill.constraints,
+          success_criteria: skill.success_criteria,
+          agent_config: skill.agent_config ? { max_turns: skill.agent_config.max_turns } : undefined,
         });
       } else {
         form.resetFields();

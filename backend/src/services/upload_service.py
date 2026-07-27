@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 from ..core.config import settings
 from ..core.exceptions import ForbiddenError, NotFoundError, ValidationError
 from ..db.orm.file_uploads import FileUpload
+from ..db.orm.sessions import Session
+from ..db.orm.tenants import Tenant
 from ..db.orm.users import User
 from ..storage import s3
 
@@ -330,7 +332,6 @@ async def create_upload(
     else:
         # For guest/demo uploads, use any user from the tenant as owner
         from ..db.orm.users import User as UserORM
-        from sqlalchemy import select
         result = await db.execute(
             select(UserORM).where(
                 UserORM.tenant_id == session_data.get("tenant_id", "")
@@ -373,6 +374,21 @@ async def create_upload(
         except Exception:
             # Best-effort: extraction failure should not block upload
             pass
+
+    # 5b. Lock parent rows in consistent order before INSERT
+    #     (tenants → users → sessions).  Every concurrent upload must
+    #     acquire locks in this same order to prevent InnoDB deadlocks
+    #     on FK validation (MySQL 1213).
+    if not is_temp:
+        await db.execute(
+            select(Tenant).where(Tenant.id == uploader_tenant_id).with_for_update()
+        )
+        await db.execute(
+            select(User).where(User.id == uploader_id).with_for_update()
+        )
+        await db.execute(
+            select(Session).where(Session.id == session_data["id"]).with_for_update()
+        )
 
     # 6. Persist DB row
     upload = FileUpload(

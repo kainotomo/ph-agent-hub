@@ -171,22 +171,24 @@ const SessionListItem = React.memo(function SessionListItem({
           )}
           {isStreaming && (
             <Tooltip title="Agent is running...">
-              <Spin size="small" style={{ flexShrink: 0 }} />
+              <span><Spin size="small" style={{ flexShrink: 0 }} /></span>
             </Tooltip>
           )}
           <Tooltip title={item.title || "New Chat"}>
-            <Text
-              ellipsis
-              style={{
-                maxWidth: collapsed ? 0 : 180,
-                display: "inline-block",
-                fontSize: 13,
-                lineHeight: "18px",
-              }}
-            >
-              {item.is_temporary && "⚡ "}
-              {item.title || "New Chat"}
-            </Text>
+            <span>
+              <Text
+                ellipsis
+                style={{
+                  maxWidth: collapsed ? 0 : 180,
+                  display: "inline-block",
+                  fontSize: 13,
+                  lineHeight: "18px",
+                }}
+              >
+                {item.is_temporary && "⚡ "}
+                {item.title || "New Chat"}
+              </Text>
+            </span>
           </Tooltip>
         </div>
         {!collapsed && (
@@ -221,34 +223,38 @@ const SessionListItem = React.memo(function SessionListItem({
             {!selectMode && (
               <div style={{ display: "flex", gap: 2, marginTop: 4 }}>
                 <Tooltip title="Edit">
-                  <Button
-                    type="text"
-                    size="small"
-                    aria-label="Edit session title"
-                    icon={<EditOutlined />}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onEdit(item);
-                    }}
-                  />
+                  <span>
+                    <Button
+                      type="text"
+                      size="small"
+                      aria-label="Edit session title"
+                      icon={<EditOutlined />}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onEdit(item);
+                      }}
+                    />
+                  </span>
                 </Tooltip>
                 <Tooltip title={item.is_pinned ? "Unpin" : "Pin"}>
-                  <Button
-                    type="text"
-                    size="small"
-                    aria-label={item.is_pinned ? "Unpin session" : "Pin session"}
-                    icon={
-                      item.is_pinned ? (
-                        <PushpinFilled />
-                      ) : (
-                        <PushpinOutlined />
-                      )
-                    }
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onPin(item.id, !item.is_pinned);
-                    }}
-                  />
+                  <span>
+                    <Button
+                      type="text"
+                      size="small"
+                      aria-label={item.is_pinned ? "Unpin session" : "Pin session"}
+                      icon={
+                        item.is_pinned ? (
+                          <PushpinFilled />
+                        ) : (
+                          <PushpinOutlined />
+                        )
+                      }
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onPin(item.id, !item.is_pinned);
+                      }}
+                    />
+                  </span>
                 </Tooltip>
                 <Dropdown
                   menu={{

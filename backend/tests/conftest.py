@@ -840,32 +840,88 @@ async def _cleanup_test_data():
     total = 0
 
     with Session(engine) as db:
+        # ---- SAFETY GUARD --------------------------------------------------
+        # Only run cleanup if the database contains ONLY test-pattern users.
+        # This prevents accidental data loss when pytest is run against a live
+        # database (e.g. via `docker compose exec backend pytest ...`).
+        _real_user_count = db.execute(
+            text(
+                "SELECT COUNT(*) FROM users"
+                " WHERE email NOT LIKE '%@example.com'"
+                " AND email NOT LIKE '%@test.com'"
+                " AND email NOT LIKE '%@e2e.test'"
+            )
+        ).scalar()
+        if _real_user_count > 0:
+            print(
+                f"  Cleanup: SKIPPED — database has {_real_user_count} "
+                "non-test user(s). This cleanup only runs safely in CI."
+            )
+            return
+
+        # Common subquery to scope child-table deletes to test sessions
+        _test_session_ids = (
+            "SELECT id FROM sessions WHERE"
+            " title LIKE 'Test%'"
+            " OR title LIKE 'E2E%'"
+            " OR title LIKE 'Journey%'"
+            " OR title LIKE 'CRUD%'"
+            " OR title LIKE 'A2A task%'"
+            " OR title LIKE 'Manual%'"
+            " OR title LIKE 'API%'"
+            " OR title LIKE 'Auto Tools%'"
+            " OR title LIKE 'Auto Model%'"
+            " OR title LIKE 'Auto Route%'"
+            " OR title LIKE 'Tenant%'"
+            " OR title LIKE 'Model Test%'"
+            " OR title LIKE 'Updated Title%'"
+            " OR title LIKE '%Chat%'"
+            " OR title LIKE 'Temp%'"
+            " OR title LIKE 'Skill%'"
+            " OR title LIKE 'Tool%'"
+            " OR title LIKE 'New%'"
+            " OR title LIKE 'Multi%'"
+            " OR title LIKE 'Session %'"
+            " OR title LIKE 'Other%'"
+            " OR title LIKE 'Finalized%'"
+            " OR title LIKE 'Secret%'"
+            " OR title LIKE 'Empty ID%'"
+            " OR title LIKE 'DeepSeek%'"
+            " OR title LIKE 'Paginated%'"
+            " OR title LIKE 'Old%'"
+            " OR title LIKE 'Special%'"
+            " OR title LIKE 'Cross-Tenant%'"
+        )
+        # Named tables unconditionally deleted because they never hold seed data
+        _UNCONDITIONAL_TABLES = frozenset({
+            "a2a_call_logs", "a2a_tasks", "audit_logs", "autopilot_runs",
+            "balance_transactions", "embed_configs", "model_groups",
+            "notifications", "rag_documents", "scheduled_tasks",
+            "skill_allowed_tools", "tags", "tool_groups",
+            "usage_logs", "user_group_members", "user_tool_preferences",
+        })
+
+        # ---- Child / leaf tables (no FK references to other test data) ----
+        # These are unconditionally deleted because they never hold seed data.
+        # Tables that reference real user data (messages, file_uploads, etc.)
+        # are scoped to test sessions via a subquery.
         tables = [
-            # ---- Child / leaf tables (no FK references to other test data) ----
-            # These are unconditionally deleted because they never hold seed data
-            ("a2a_call_logs", None),
-            ("a2a_tasks", None),
-            ("rag_documents", None),
-            ("file_uploads", None),
-            ("message_embeddings", None),
-            ("messages", None),
-            ("message_feedback", None),
-            ("session_active_tools", None),
-            ("session_tags", None),
-            ("tags", None),
-            ("skill_allowed_tools", None),
-            ("model_groups", None),
-            ("tool_groups", None),
-            ("user_group_members", None),
-            ("user_tool_preferences", None),
-            ("audit_logs", None),
-            ("autopilot_runs", None),
-            ("balance_transactions", None),
-            ("notifications", None),
-            ("scheduled_tasks", None),
-            ("usage_logs", None),
-            ("memory", None),
-            ("embed_configs", None),
+            (t, None) for t in sorted(_UNCONDITIONAL_TABLES)
+        ] + [
+            ("file_uploads", f"session_id IN ({_test_session_ids})"),
+            ("message_embeddings",
+             f"message_id IN (SELECT id FROM messages WHERE session_id IN ({_test_session_ids}))"),
+            ("messages", f"session_id IN ({_test_session_ids})"),
+            ("message_feedback",
+             f"message_id IN (SELECT id FROM messages WHERE session_id IN ({_test_session_ids}))"),
+            ("session_active_tools", f"session_id IN ({_test_session_ids})"),
+            ("session_tags", f"session_id IN ({_test_session_ids})"),
+            ("memory",
+             "session_id IS NOT NULL"
+             f" AND session_id IN ({_test_session_ids})"
+             " OR (session_id IS NULL"
+             "  AND `key` LIKE '%test%')"),
+        ] + [
 
             # ---- Tables with name/title patterns ----
             (

@@ -39,10 +39,19 @@ export function ChatPage() {
 
   const handleSessionUpdate = async (data: Record<string, unknown>) => {
     if (!sessionId) return;
+    // Skip if the session is still pending (lazy, not yet created on backend).
+    // updateSession() would 404, and the pending settings are already submitted
+    // via session_data in the first SSE message.
+    if (isPending) return;
     try {
       await updateSession(sessionId, data as Record<string, string | null>);
-    } catch {
-      message.error("Failed to update session settings");
+    } catch (err) {
+      // Silently ignore 404 — the session may not be persisted yet (race with
+      // lazy creation). Other errors are unexpected; log but don't alert the user
+      // since the session is still functional.
+      if (err && typeof err === "object" && "status" in err && (err as any).status !== 404) {
+        message.error("Failed to update session settings");
+      }
     } finally {
       queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
     }

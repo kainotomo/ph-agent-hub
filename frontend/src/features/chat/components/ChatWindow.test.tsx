@@ -71,7 +71,8 @@ vi.mock("../hooks/useStream", () => ({
 }));
 
 vi.mock("../services/chat", () => ({
-  listMessages: vi.fn().mockResolvedValue([]),
+  listMessages: vi.fn().mockResolvedValue({ items: [], has_more: false }),
+  buildCursor: vi.fn((msg: any) => `${msg.created_at}|${msg.id}`),
   deleteMessage: vi.fn(),
   finalizeSession: vi.fn(),
   updateAssistantMessage: vi.fn(),

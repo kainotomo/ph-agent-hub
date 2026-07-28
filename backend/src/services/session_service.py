@@ -131,6 +131,7 @@ async def list_sessions_for_user(
             ),
         )
         .order_by(Session.updated_at.desc())
+        .limit(2000)
     )
     result = await db.execute(stmt)
     return list(result.scalars().all())

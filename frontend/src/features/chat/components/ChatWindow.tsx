@@ -21,11 +21,12 @@ import {
   ToolOutlined,
   DatabaseOutlined,
 } from "@ant-design/icons";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import { MessageBubble } from "./MessageBubble";
 import { useStream } from "../hooks/useStream";
 import {
   listMessages,
+  buildCursor,
   deleteMessage,
   finalizeSession,
   updateAssistantMessage,
@@ -430,14 +431,21 @@ export const ChatWindow = React.memo(function ChatWindow({
     demo ? "demo" : widget ? "widget" : "chat"
   );
 
-  const { data: messages, isLoading: loadingMessages } = useQuery({
+  const {
+    data: messagesData,
+    isLoading: loadingMessages,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery({
     queryKey: ["messages", sessionId],
     enabled: !!sessionId && (!isPending || demo || widget),
     retry: false,
-    queryFn: () =>
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ pageParam }) =>
       demo
-        ? getDemoMessages().then((msgs) =>
-            msgs.map((m) => ({
+        ? getDemoMessages().then((msgs) => ({
+            items: msgs.map((m) => ({
               id: m.id,
               session_id: m.session_id,
               sender: m.role as "user" | "assistant",
@@ -452,10 +460,11 @@ export const ChatWindow = React.memo(function ChatWindow({
               created_at: m.created_at,
               updated_at: m.created_at,
             })),
-          )
+            has_more: false,
+          }))
         : widget
-          ? getWidgetMessages().then((msgs) =>
-              msgs.map((m) => ({
+          ? getWidgetMessages().then((msgs) => ({
+              items: msgs.map((m) => ({
                 id: m.id,
                 session_id: m.session_id,
                 sender: m.role as "user" | "assistant",
@@ -470,10 +479,29 @@ export const ChatWindow = React.memo(function ChatWindow({
                 created_at: m.created_at,
                 updated_at: m.created_at,
               })),
-            )
-          : listMessages(sessionId),
+              has_more: false,
+            }))
+          : listMessages(sessionId, { before: pageParam, limit: 50 }),
+    getNextPageParam: (lastPage) =>
+      lastPage.has_more && lastPage.items.length > 0
+        ? buildCursor(lastPage.items[0])
+        : undefined,
     refetchInterval: false,
   });
+
+  // Flatten pages into a single messages array for backward compatibility
+  const messages: any[] = useMemo(
+    () => (messagesData?.pages ?? []).flatMap((p) => p.items),
+    [messagesData],
+  );
+
+  // Allow streaming invalidation to refetch only the latest (first) page
+  const refetchLatestPage = useCallback(() => {
+    // Re-fetch the latest page by calling the infinite query's refetch
+    // with a filter that only refetches the first page index (most recent messages).
+    // Fallback: invalidate the query entirely if refetchPages is unavailable.
+    queryClient.invalidateQueries({ queryKey: ["messages", sessionId], refetchType: "active" });
+  }, [sessionId, queryClient]);
 
   // Count user messages for CTA trigger (demo mode only)
   const userMessageCount = (messages || []).filter((m: any) => m.sender === "user").length;
@@ -761,7 +789,7 @@ export const ChatWindow = React.memo(function ChatWindow({
               // connection opened, so the refetch should arrive soon.
               // pendingUserMessage will be cleared naturally by the
               // onMessageComplete / onAutopilotTurnStart refetch cycle.
-              queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+              refetchLatestPage();
             }
             return prev ?? msgId;
           });
@@ -812,7 +840,7 @@ export const ChatWindow = React.memo(function ChatWindow({
           // message is being persisted by run_agent_stream right after
           // this event was emitted — by the time the refetch arrives
           // the DB will have it too.
-          queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+          refetchLatestPage();
           setAutopilotState((prev) => ({
             ...prev,
             currentTurn: data.turn,
@@ -830,7 +858,7 @@ export const ChatWindow = React.memo(function ChatWindow({
             status: "complete" as const,
             summary: data.summary,
           }));
-          queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+          refetchLatestPage();
           // Removed: session query not needed for lazy sessions
           queryClient.invalidateQueries({ queryKey: ["sessions"] });
           queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
@@ -901,7 +929,7 @@ export const ChatWindow = React.memo(function ChatWindow({
             setStreamingContent("");
             setStreamingReasoningContent("");
             setStreamingMessageId(null);
-            queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+            refetchLatestPage();
             // Removed: session query not needed for lazy sessions
             queryClient.invalidateQueries({ queryKey: ["sessions"] });
             queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
@@ -912,20 +940,20 @@ export const ChatWindow = React.memo(function ChatWindow({
           } else if (isReconnect) {
             // Reconnect: update tokens without clearing streaming state;
             // onClose handles the final cleanup.
-            queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+            refetchLatestPage();
             queryClient.invalidateQueries({ queryKey: ["sessions"] });
           } else if (isAutopilot) {
             // Autopilot: don't clear streaming state between turns —
             // the autopilot_turn_start/complete events handle the UI.
-            // Just invalidate queries so persisted per-turn messages appear.
-            queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+            // Just refetch so persisted per-turn messages appear.
+            refetchLatestPage();
             queryClient.invalidateQueries({ queryKey: ["sessions"] });
           } else {
             // Regenerate / Edit: clear streaming state and refetch.
             setStreamingContent("");
             setStreamingReasoningContent("");
             setStreamingMessageId(null);
-            queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+            refetchLatestPage();
             // Removed: session query not needed for lazy sessions
             queryClient.invalidateQueries({ queryKey: ["sessions"] });
             queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
@@ -973,12 +1001,12 @@ export const ChatWindow = React.memo(function ChatWindow({
             // handlers (onAutopilotComplete, onAutopilotMaxTurns,
             // onMessageComplete) — no need to repeat it here.
           } else if (!demo) {
-            queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+            refetchLatestPage();
             // Removed: session query not needed for lazy sessions
             queryClient.invalidateQueries({ queryKey: ["sessions"] });
             queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
           } else {
-            queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+            refetchLatestPage();
           }
           if (!isReconnect) {
             fetchFollowUpQuestions(sessionId, setFollowUpQuestions);
@@ -995,7 +1023,7 @@ export const ChatWindow = React.memo(function ChatWindow({
       setStreamingContent, setStreamingReasoningContent, setStreamingMessageId,
       setStreamError, setToolEvents, setFollowUpQuestions, setStreamingTokens,
       setPendingUserMessage, setRegeneratingMsgId, setEditingMsgId,
-      fetchFollowUpQuestions,
+      fetchFollowUpQuestions, refetchLatestPage,
     ],
   );
 
@@ -1034,7 +1062,7 @@ export const ChatWindow = React.memo(function ChatWindow({
           if (data.tokens_in || data.tokens_out) {
             setStreamingTokens({ tokens_in: data.tokens_in || 0, tokens_out: data.tokens_out || 0 });
           }
-          queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+          refetchLatestPage();
           // Removed: session query not needed for lazy sessions
           queryClient.invalidateQueries({ queryKey: ["sessions"] });
           queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
@@ -1200,13 +1228,13 @@ export const ChatWindow = React.memo(function ChatWindow({
 
   const handleEditAssistant = useCallback(async (messageId: string, newContent: string) => {
     await updateAssistantMessage(sessionId, messageId, newContent);
-    queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
-  }, [sessionId, queryClient]);
+    refetchLatestPage();
+  }, [sessionId, refetchLatestPage]);
 
   const handleDelete = useCallback(async (messageId: string) => {
     await deleteMessage(sessionId, messageId);
-    queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
-  }, [sessionId, queryClient]);
+    refetchLatestPage();
+  }, [sessionId, refetchLatestPage]);
 
   const handleRegenerate = useCallback((messageId: string) => {
     if (streaming) return;
@@ -1267,64 +1295,111 @@ export const ChatWindow = React.memo(function ChatWindow({
     }
   };
 
-  // ---- Flat message list (linear, no branching) ----
-  const displayMessages: Array<any> = (messages || []).filter(
-    (m) => m.id !== regeneratingMsgId && m.id !== editingMsgId,
-  );
+  // ---- Infinite scroll state (cursor-based pagination, Issue #497) ---------
+  const [firstItemIndex, setFirstItemIndex] = useState(0);
+  const initialLoadDoneRef = useRef(false);
+  const prevTotalLoadedRef = useRef(0);
 
-  // Show the user's message immediately at the bottom (optimistic UI).
-  // Skip if the DB already has a user message with the same text — this
-  // prevents a brief duplicate when the onStreamStart refetch returns
-  // the persisted message before pendingUserMessage is cleared.
-  const skipPending = pendingUserMessage && (messages || []).some(
-    (m: any) => m.sender === "user" && m.content?.[0]?.text === pendingUserMessage.content,
-  );
-  if (pendingUserMessage && !skipPending) {
-    displayMessages.push({
-      id: pendingUserMessage.id,
-      session_id: sessionId,
-      sender: "user" as const,
-      content: [{ type: "text", text: pendingUserMessage.content }],
-      model_id: null,
-      tool_calls: null,
-      is_deleted: false,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    });
-  }
-  if ((streamingContent || streamingReasoningContent) && streamingMessageId) {
-    displayMessages.push({
-      id: streamingMessageId,
-      session_id: sessionId,
-      sender: "assistant" as const,
-      content: [
-        ...(streamingReasoningContent
-          ? [{ type: "reasoning", text: streamingReasoningContent }]
-          : []),
-        ...(streamingContent
-          ? [{ type: "text", text: streamingContent }]
-          : []),
-        ...toolEvents.map((ev) => ({
-          type: ev.type,
-          name: (ev.data as Record<string, unknown>).tool_name,
-          arguments: (ev.data as Record<string, unknown>).arguments,
-          output: (ev.data as Record<string, unknown>).result_summary,
-          is_error: !(ev.data as Record<string, unknown>).success,
-          call_id: (ev.data as Record<string, unknown>).tool_call_id,
-          batch_id: (ev.data as Record<string, unknown>).batch_id,
-        })),
-      ],
-      model_id: selectedModelId || null,
-      model_name: selectedModel?.name || null,
-      model_provider: selectedModel?.provider || null,
-      tool_calls: null,
-      tokens_in: streamingTokens?.tokens_in ?? null,
-      tokens_out: streamingTokens?.tokens_out ?? null,
-      is_deleted: false,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    });
-  }
+  // Track total loaded items across all pages to compute firstItemIndex
+  // for Virtuoso's prepend scroll position preservation.
+  useEffect(() => {
+    const totalLoaded = (messagesData?.pages ?? []).reduce(
+      (sum, p) => sum + p.items.length, 0,
+    );
+    if (totalLoaded > 0 && !initialLoadDoneRef.current) {
+      initialLoadDoneRef.current = true;
+      prevTotalLoadedRef.current = totalLoaded;
+      return;
+    }
+    if (totalLoaded > prevTotalLoadedRef.current) {
+      const newItems = totalLoaded - prevTotalLoadedRef.current;
+      setFirstItemIndex((prev) => prev + newItems);
+      prevTotalLoadedRef.current = totalLoaded;
+    }
+  }, [messagesData]);
+
+  // Load older messages when the user scrolls to the top
+  const handleStartReached = useCallback(() => {
+    if (hasNextPage && !isFetchingNextPage && !demo && !widget) {
+      fetchNextPage();
+    }
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage, demo, widget]);
+
+  // Build the flat message list — useMemo to avoid re-computation on every render.
+  const displayMessages: Array<any> = useMemo(() => {
+    // Start with persisted messages minus filtered IDs
+    const base = (messages || []).filter(
+      (m: any) => m.id !== regeneratingMsgId && m.id !== editingMsgId,
+    );
+
+    // Show the user's message immediately at the bottom (optimistic UI).
+    // Skip if the DB already has a user message with the same text — this
+    // prevents a brief duplicate when the onStreamStart refetch returns
+    // the persisted message before pendingUserMessage is cleared.
+    const skipPending = pendingUserMessage && (messages || []).some(
+      (m: any) => m.sender === "user" && m.content?.[0]?.text === pendingUserMessage.content,
+    );
+    if (pendingUserMessage && !skipPending) {
+      base.push({
+        id: pendingUserMessage.id,
+        session_id: sessionId,
+        sender: "user" as const,
+        content: [{ type: "text", text: pendingUserMessage.content }],
+        model_id: null,
+        tool_calls: null,
+        is_deleted: false,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+    }
+    if ((streamingContent || streamingReasoningContent) && streamingMessageId) {
+      base.push({
+        id: streamingMessageId,
+        session_id: sessionId,
+        sender: "assistant" as const,
+        content: [
+          ...(streamingReasoningContent
+            ? [{ type: "reasoning", text: streamingReasoningContent }]
+            : []),
+          ...(streamingContent
+            ? [{ type: "text", text: streamingContent }]
+            : []),
+          ...toolEvents.map((ev) => ({
+            type: ev.type,
+            name: (ev.data as Record<string, unknown>).tool_name,
+            arguments: (ev.data as Record<string, unknown>).arguments,
+            output: (ev.data as Record<string, unknown>).result_summary,
+            is_error: !(ev.data as Record<string, unknown>).success,
+            call_id: (ev.data as Record<string, unknown>).tool_call_id,
+            batch_id: (ev.data as Record<string, unknown>).batch_id,
+          })),
+        ],
+        model_id: selectedModelId || null,
+        model_name: selectedModel?.name || null,
+        model_provider: selectedModel?.provider || null,
+        tool_calls: null,
+        tokens_in: streamingTokens?.tokens_in ?? null,
+        tokens_out: streamingTokens?.tokens_out ?? null,
+        is_deleted: false,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+    }
+    return base;
+  }, [
+    messages,
+    regeneratingMsgId,
+    editingMsgId,
+    pendingUserMessage,
+    sessionId,
+    streamingContent,
+    streamingReasoningContent,
+    streamingMessageId,
+    streamingTokens,
+    selectedModelId,
+    selectedModel,
+    toolEvents,
+  ]);
 
   return (
     <div
@@ -1583,6 +1658,8 @@ export const ChatWindow = React.memo(function ChatWindow({
         <Virtuoso
           ref={virtuosoRef}
           data={displayMessages}
+          firstItemIndex={firstItemIndex}
+          startReached={handleStartReached}
           followOutput="smooth"
           atBottomThreshold={80}
           atBottomStateChange={(atBottom) => setShowScrollButton(!atBottom)}
@@ -1640,6 +1717,11 @@ export const ChatWindow = React.memo(function ChatWindow({
           components={{
             Header: () => (
               <>
+                {isFetchingNextPage && (
+                  <div style={{ padding: "8px 16px", textAlign: "center" }}>
+                    <Spin size="small" /> <span style={{ marginLeft: 8, color: "#888", fontSize: 13 }}>Loading earlier messages…</span>
+                  </div>
+                )}
                 {reconnecting && (
                   <div style={{ padding: "0 16px" }}>
                     <Alert

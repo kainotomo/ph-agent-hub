@@ -7,13 +7,11 @@
 // =============================================================================
 
 import React from "react";
-import { Select, Space, Typography, Button, Tooltip, message } from "antd";
+import { Select, Space, Button, Tooltip, message } from "antd";
 import { StarOutlined, StarFilled, ThunderboltOutlined } from "@ant-design/icons";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { setDefaultModel, getMe } from "../../../services/auth";
 import api from "../../../services/api";
-
-const { Text } = Typography;
 
 export const AUTO_ROUTE_VALUE = "__auto__";
 
@@ -76,16 +74,13 @@ export function ModelSelector({ value, onChange, style }: ModelSelectorProps) {
   }, [singleModelId, value, onChange]);
 
   return (
-    <Space direction="vertical" size={0} style={style}>
-      <Text type="secondary" style={{ fontSize: 12 }}>
-        Model
-      </Text>
-      <Space.Compact style={{ width: "100%" }}>
+    <Space.Compact style={style}>
         <Select
           value={effectiveValue}
           onChange={onChange}
           loading={isLoading}
           placeholder="Select model"
+          size="small"
           style={{ minWidth: 160 }}
           allowClear
           options={[
@@ -115,6 +110,7 @@ export function ModelSelector({ value, onChange, style }: ModelSelectorProps) {
             }
           >
             <Button
+              size="small"
               icon={isCurrentDefault ? <StarFilled /> : <StarOutlined />}
               onClick={() =>
                 setDefaultMutation.mutate(isCurrentDefault ? null : effectiveValue)
@@ -127,6 +123,7 @@ export function ModelSelector({ value, onChange, style }: ModelSelectorProps) {
         {effectiveValue === AUTO_ROUTE_VALUE && (
           <Tooltip title="Model auto-selected on first message">
             <Button
+              size="small"
               icon={<ThunderboltOutlined />}
               type="primary"
               style={{ borderLeft: "none" }}
@@ -134,7 +131,6 @@ export function ModelSelector({ value, onChange, style }: ModelSelectorProps) {
           </Tooltip>
         )}
       </Space.Compact>
-    </Space>
   );
 }
 

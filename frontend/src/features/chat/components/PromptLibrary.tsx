@@ -24,7 +24,6 @@ import {
   PlusOutlined,
   EditOutlined,
   DeleteOutlined,
-  BookOutlined,
 } from "@ant-design/icons";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import api from "../../../services/api";
@@ -163,9 +162,8 @@ export function PromptLibrary({
   return (
     <>
       <Button
-        icon={<BookOutlined />}
+        size="small"
         onClick={() => setOpen(true)}
-        type="text"
       >
         Prompts
       </Button>

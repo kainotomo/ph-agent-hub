@@ -6,11 +6,10 @@
 // links to MemoryManager, SessionSearch, logout.
 // =============================================================================
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import {
   Alert,
   Layout,
-  List,
   Button,
   Typography,
   Space,
@@ -25,6 +24,7 @@ import {
   Popconfirm,
   Checkbox,
 } from "antd";
+import { Virtuoso } from "react-virtuoso";
 import type { MenuProps } from "antd";
 import {
   PlusOutlined,
@@ -75,6 +75,243 @@ import { SessionSearch } from "./SessionSearch";
 
 const { Sider } = Layout;
 const { Text } = Typography;
+
+// =============================================================================
+// SessionListItem — individual session row (React.memo-wrapped for perf)
+// =============================================================================
+
+interface SessionListItemProps {
+  item: SessionData;
+  isActive: boolean;
+  isMobile: boolean;
+  collapsed: boolean;
+  selectMode: boolean;
+  isSelected: boolean;
+  isStreaming: boolean;
+  streamingSessionIds: Set<string>;
+  selectedIds: Set<string>;
+  onNavigate: (id: string) => void;
+  onToggleSelect: (id: string) => void;
+  onEdit: (session: SessionData) => void;
+  onPin: (id: string, is_pinned: boolean) => void;
+  onDelete: (id: string) => void;
+  pinMutation: ReturnType<typeof useMutation>;
+  deleteMutation: ReturnType<typeof useMutation>;
+  setSelectedIds: React.Dispatch<React.SetStateAction<Set<string>>>;
+  setMobileOpen: React.Dispatch<React.SetStateAction<boolean>>;
+}
+
+const SessionListItem = React.memo(function SessionListItem({
+  item,
+  isActive,
+  isMobile,
+  collapsed,
+  selectMode,
+  isSelected,
+  isStreaming,
+  streamingSessionIds,
+  selectedIds,
+  onNavigate,
+  onToggleSelect,
+  onEdit,
+  onPin,
+  onDelete,
+  pinMutation,
+  deleteMutation,
+  setSelectedIds,
+  setMobileOpen,
+}: SessionListItemProps) {
+  return (
+    <div
+      data-session-id={item.id}
+      onClick={() => {
+        if (selectMode) {
+          setSelectedIds((prev) => {
+            const next = new Set(prev);
+            if (next.has(item.id)) {
+              next.delete(item.id);
+            } else {
+              next.add(item.id);
+            }
+            return next;
+          });
+          return;
+        }
+        onNavigate(isActive ? "/chat" : `/chat/${item.id}`);
+        if (isMobile) setMobileOpen(false);
+      }}
+      style={{
+        cursor: "pointer",
+        padding: "8px 12px",
+        background:
+          isActive && !selectMode ? "#e6f4ff" : "transparent",
+        borderLeft:
+          isActive && !selectMode
+            ? "3px solid #1677ff"
+            : "3px solid transparent",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          width: "100%",
+          gap: 2,
+        }}
+      >
+        {/* Row 1: Title + Checkbox + streaming spinner */}
+        <div style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 0 }}>
+          {selectMode && (
+            <Checkbox
+              checked={isSelected}
+              disabled={isStreaming}
+              onClick={(e) => e.stopPropagation()}
+              onChange={() => onToggleSelect(item.id)}
+            />
+          )}
+          {isStreaming && (
+            <Tooltip title="Agent is running...">
+              <Spin size="small" style={{ flexShrink: 0 }} />
+            </Tooltip>
+          )}
+          <Tooltip title={item.title || "New Chat"}>
+            <Text
+              ellipsis
+              style={{
+                maxWidth: collapsed ? 0 : 180,
+                display: "inline-block",
+                fontSize: 13,
+                lineHeight: "18px",
+              }}
+            >
+              {item.is_temporary && "⚡ "}
+              {item.title || "New Chat"}
+            </Text>
+          </Tooltip>
+        </div>
+        {!collapsed && (
+          <>
+            {/* Row 2: Date (no wrap) */}
+            <Text
+              type="secondary"
+              style={{ fontSize: 11, whiteSpace: "nowrap", lineHeight: "16px" }}
+            >
+              {new Date(item.updated_at).toLocaleString("en-US", {
+                month: "short",
+                day: "numeric",
+                hour: "numeric",
+                minute: "2-digit",
+              })}
+            </Text>
+            {/* Row 3: Tags (side by side) */}
+            {(item.tags || []).length > 0 && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 2 }}>
+                {(item.tags || []).slice(0, 3).map((t) => (
+                  <Tag
+                    key={t.id}
+                    style={{ fontSize: 10, lineHeight: "14px" }}
+                    color={t.color || "default"}
+                  >
+                    {t.name}
+                  </Tag>
+                ))}
+              </div>
+            )}
+            {/* Row 4: Action buttons at bottom */}
+            {!selectMode && (
+              <div style={{ display: "flex", gap: 2, marginTop: 4 }}>
+                <Tooltip title="Edit">
+                  <Button
+                    type="text"
+                    size="small"
+                    aria-label="Edit session title"
+                    icon={<EditOutlined />}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onEdit(item);
+                    }}
+                  />
+                </Tooltip>
+                <Tooltip title={item.is_pinned ? "Unpin" : "Pin"}>
+                  <Button
+                    type="text"
+                    size="small"
+                    aria-label={item.is_pinned ? "Unpin session" : "Pin session"}
+                    icon={
+                      item.is_pinned ? (
+                        <PushpinFilled />
+                      ) : (
+                        <PushpinOutlined />
+                      )
+                    }
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onPin(item.id, !item.is_pinned);
+                    }}
+                  />
+                </Tooltip>
+                <Dropdown
+                  menu={{
+                    items: [
+                      {
+                        key: "json",
+                        icon: <FileTextOutlined />,
+                        label: "Download as JSON",
+                        onClick: (e) => {
+                          e.domEvent.stopPropagation();
+                          exportSession(item.id, "json");
+                        },
+                      },
+                      {
+                        key: "txt",
+                        icon: <FileOutlined />,
+                        label: "Download as Text",
+                        onClick: (e) => {
+                          e.domEvent.stopPropagation();
+                          exportSession(item.id, "txt");
+                        },
+                      },
+                    ],
+                  }}
+                  trigger={["click"]}
+                >
+                  <Tooltip title="Export">
+                    <Button
+                      type="text"
+                      size="small"
+                      aria-label="Export session"
+                      icon={<DownloadOutlined />}
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                  </Tooltip>
+                </Dropdown>
+                <Popconfirm
+                  title="Delete this session?"
+                  description="This will permanently delete the session and all its messages."
+                  onConfirm={() => onDelete(item.id)}
+                  okText="Delete"
+                  cancelText="Cancel"
+                  okButtonProps={{ danger: true }}
+                >
+                  <Tooltip title="Delete">
+                    <Button
+                      type="text"
+                      size="small"
+                      danger
+                      aria-label="Delete session"
+                      icon={<DeleteOutlined />}
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                  </Tooltip>
+                </Popconfirm>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+});
 
 export const SessionSidebar = React.memo(function SessionSidebar() {
   const { sessionId } = useParams<{ sessionId: string }>();
@@ -254,14 +491,54 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
   });
 
   // Sort: pinned first, then by updated_at.
-  const sortedSessions = [...(sessions || [])]
-    .sort((a, b) => {
-    if (a.is_pinned && !b.is_pinned) return -1;
-    if (!a.is_pinned && b.is_pinned) return 1;
-    return (
-      new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
-    );
-  });
+  const sortedSessions = useMemo(
+    () =>
+      [...(sessions || [])].sort((a, b) => {
+        if (a.is_pinned && !b.is_pinned) return -1;
+        if (!a.is_pinned && b.is_pinned) return 1;
+        return (
+          new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+        );
+      }),
+    [sessions],
+  );
+
+  // Stable callbacks for SessionListItem (avoids re-render when React.memo compares).
+  const handleNavigate = useCallback(
+    (path: string) => navigate(path),
+    [navigate],
+  );
+  const handleEditSession = useCallback(
+    (session: SessionData) => {
+      setEditingSession(session);
+      setEditTitle(session.title);
+    },
+    [],
+  );
+  const handlePinSession = useCallback(
+    (id: string, is_pinned: boolean) => {
+      pinMutation.mutate({ id, is_pinned });
+    },
+    [pinMutation],
+  );
+  const handleDeleteSession = useCallback(
+    (id: string) => deleteMutation.mutate(id),
+    [deleteMutation],
+  );
+  const handleToggleSelect = useCallback(
+    (id: string) => {
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) {
+          next.delete(id);
+        } else {
+          next.add(id);
+        }
+        return next;
+      });
+    },
+    [],
+  );
 
   // Auto-scroll to active session when it changes or data loads.
   useEffect(() => {
@@ -455,298 +732,119 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
         )}
       </div>
 
-      {/* Session List */}
-      <div style={{ flex: 1, overflow: "auto" }}>
-        {isError ? (
-          <div style={{ padding: 16 }}>
-            <Alert
-              type="error"
-              message="Failed to load sessions"
-              description={error?.message || "An error occurred"}
-              action={<Button size="small" onClick={() => refetch()}>Retry</Button>}
-              showIcon
-            />
-          </div>
-        ) : (
-          <List
-            loading={isLoading}
-            dataSource={sortedSessions}
-            locale={{ emptyText: "No sessions" }}
-            renderItem={(item) => (
-              <List.Item
-                data-session-id={item.id}
-                onClick={() => {
-                  if (selectMode) {
-                    setSelectedIds((prev) => {
-                      const next = new Set(prev);
-                      if (next.has(item.id)) {
-                        next.delete(item.id);
-                      } else {
-                        next.add(item.id);
-                      }
-                      return next;
-                    });
-                    return;
-                  }
-                  navigate(sessionId === item.id ? "/chat" : `/chat/${item.id}`);
-                  if (isMobile) setMobileOpen(false);
-                }}
-                style={{
-                  cursor: "pointer",
-                  padding: "8px 12px",
-                  background:
-                    sessionId === item.id && !selectMode ? "#e6f4ff" : "transparent",
-                  borderLeft:
-                    sessionId === item.id && !selectMode
-                      ? "3px solid #1677ff"
-                      : "3px solid transparent",
-                }}
-              >
-                <div
-                  style={{
-                    display: "flex",
-                    flexDirection: "column",
-                    width: "100%",
-                    gap: 2,
-                  }}
-                >
-                  {/* Row 1: Title + Checkbox + streaming spinner */}
-                  <div style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 0 }}>
-                    {selectMode && (
-                      <Checkbox
-                        checked={selectedIds.has(item.id)}
-                        disabled={streamingSessionIds.has(item.id)}
-                        onClick={(e) => e.stopPropagation()}
-                        onChange={() => {
-                          setSelectedIds((prev) => {
-                            const next = new Set(prev);
-                            if (next.has(item.id)) {
-                              next.delete(item.id);
-                            } else {
-                              next.add(item.id);
-                            }
-                            return next;
-                          });
-                        }}
-                      />
-                    )}
-                    {streamingSessionIds.has(item.id) && (
-                      <Tooltip title="Agent is running...">
-                        <Spin size="small" style={{ flexShrink: 0 }} />
-                      </Tooltip>
-                    )}
-                    <Tooltip title={item.title || "New Chat"}>
-                      <Text
-                        ellipsis
-                        style={{
-                          maxWidth: collapsed ? 0 : 180,
-                          display: "inline-block",
-                          fontSize: 13,
-                          lineHeight: "18px",
-                        }}
-                      >
-                        {item.is_temporary && "⚡ "}
-                        {item.title || "New Chat"}
-                      </Text>
-                    </Tooltip>
-                  </div>
-                  {!collapsed && (
-                    <>
-                      {/* Row 2: Date (no wrap) */}
-                      <Text
-                        type="secondary"
-                        style={{ fontSize: 11, whiteSpace: "nowrap", lineHeight: "16px" }}
-                      >
-                        {new Date(item.updated_at).toLocaleString("en-US", {
-                          month: "short",
-                          day: "numeric",
-                          hour: "numeric",
-                          minute: "2-digit",
-                        })}
-                      </Text>
-                      {/* Row 3: Tags (side by side) */}
-                      {(item.tags || []).length > 0 && (
-                        <div style={{ display: "flex", flexWrap: "wrap", gap: 2 }}>
-                          {(item.tags || []).slice(0, 3).map((t) => (
-                            <Tag
-                              key={t.id}
-                              style={{ fontSize: 10, lineHeight: "14px" }}
-                              color={t.color || "default"}
-                            >
-                              {t.name}
-                            </Tag>
-                          ))}
-                        </div>
-                      )}
-                      {/* Row 4: Action buttons at bottom */}
-                      {!selectMode && (
-                        <div style={{ display: "flex", gap: 2, marginTop: 4 }}>
-                          <Tooltip title="Edit">
-                            <Button
-                              type="text"
-                              size="small"
-                              aria-label="Edit session title"
-                              icon={<EditOutlined />}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setEditingSession(item);
-                                setEditTitle(item.title);
-                              }}
-                            />
-                          </Tooltip>
-                          <Tooltip title={item.is_pinned ? "Unpin" : "Pin"}>
-                            <Button
-                              type="text"
-                              size="small"
-                              aria-label={item.is_pinned ? "Unpin session" : "Pin session"}
-                              icon={
-                                item.is_pinned ? (
-                                  <PushpinFilled />
-                                ) : (
-                                  <PushpinOutlined />
-                                )
-                              }
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                pinMutation.mutate({
-                                  id: item.id,
-                                  is_pinned: !item.is_pinned,
-                                });
-                              }}
-                            />
-                          </Tooltip>
-                          <Dropdown
-                            menu={{
-                              items: [
-                                {
-                                  key: "json",
-                                  icon: <FileTextOutlined />,
-                                  label: "Download as JSON",
-                                  onClick: (e) => {
-                                    e.domEvent.stopPropagation();
-                                    exportSession(item.id, "json");
-                                  },
-                                },
-                                {
-                                  key: "txt",
-                                  icon: <FileOutlined />,
-                                  label: "Download as Text",
-                                  onClick: (e) => {
-                                    e.domEvent.stopPropagation();
-                                    exportSession(item.id, "txt");
-                                  },
-                                },
-                              ],
-                            }}
-                            trigger={["click"]}
-                          >
-                            <Tooltip title="Export">
-                              <Button
-                                type="text"
-                                size="small"
-                                aria-label="Export session"
-                                icon={<DownloadOutlined />}
-                                onClick={(e) => e.stopPropagation()}
-                              />
-                            </Tooltip>
-                          </Dropdown>
-                          <Popconfirm
-                            title="Delete this session?"
-                            description="This will permanently delete the session and all its messages."
-                            onConfirm={() => deleteMutation.mutate(item.id)}
-                            okText="Delete"
-                            cancelText="Cancel"
-                            okButtonProps={{ danger: true }}
-                          >
-                            <Tooltip title="Delete">
-                              <Button
-                                type="text"
-                                size="small"
-                                danger
-                                aria-label="Delete session"
-                                icon={<DeleteOutlined />}
-                                onClick={(e) => e.stopPropagation()}
-                              />
-                            </Tooltip>
-                          </Popconfirm>
-                        </div>
-                      )}
-                    </>
-                  )}
-                </div>
-              </List.Item>
-            )}
+      {/* Session List — virtualized for performance with many sessions */}
+      {isLoading ? (
+        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <Spin />
+        </div>
+      ) : isError ? (
+        <div style={{ padding: 16 }}>
+          <Alert
+            type="error"
+            message="Failed to load sessions"
+            description={error?.message || "An error occurred"}
+            action={<Button size="small" onClick={() => refetch()}>Retry</Button>}
+            showIcon
           />
-        )}
+        </div>
+      ) : (
+        <Virtuoso
+          style={{ flex: 1, height: "100%" }}
+          data={sortedSessions}
+          fixedItemHeight={72}
+          itemContent={(_index, item) => (
+            <SessionListItem
+              item={item}
+              isActive={sessionId === item.id}
+              isMobile={isMobile}
+              collapsed={collapsed}
+              selectMode={selectMode}
+              isSelected={selectedIds.has(item.id)}
+              isStreaming={streamingSessionIds.has(item.id)}
+              streamingSessionIds={streamingSessionIds}
+              selectedIds={selectedIds}
+              onNavigate={handleNavigate}
+              onToggleSelect={handleToggleSelect}
+              onEdit={handleEditSession}
+              onPin={handlePinSession}
+              onDelete={handleDeleteSession}
+              pinMutation={pinMutation}
+              deleteMutation={deleteMutation}
+              setSelectedIds={setSelectedIds}
+              setMobileOpen={setMobileOpen}
+            />
+          )}
+        />
+      )}
 
-        {selectMode && (
-          <div
-            style={{
-              position: "sticky",
-              bottom: 0,
-              background: "#fff",
-              borderTop: "1px solid #f0f0f0",
-              padding: "8px 12px",
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
+      {/* Select-mode bar — rendered outside Virtuoso so it's always visible */}
+      {selectMode && (
+        <div
+          style={{
+            background: "#fff",
+            borderTop: "1px solid #f0f0f0",
+            borderBottom: "1px solid #f0f0f0",
+            padding: "8px 12px",
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            flexShrink: 0,
+          }}
+        >
+          <Text type="secondary" style={{ fontSize: 13, flexShrink: 0 }}>
+            {selectedIds.size} selected
+          </Text>
+          <Button
+            size="small"
+            onClick={() => {
+              const selectable = sortedSessions.filter(
+                (s) => !streamingSessionIds.has(s.id)
+              );
+              if (selectable.length === selectedIds.size) {
+                setSelectedIds(new Set());
+              } else {
+                setSelectedIds(new Set(selectable.map((s) => s.id)));
+              }
             }}
           >
-            <Text type="secondary" style={{ fontSize: 13, flexShrink: 0 }}>
-              {selectedIds.size} selected
-            </Text>
-            <Button
-              size="small"
-              onClick={() => {
-                const selectable = sortedSessions.filter(
-                  (s) => !streamingSessionIds.has(s.id)
-                );
-                if (selectable.length === selectedIds.size) {
-                  setSelectedIds(new Set());
-                } else {
-                  setSelectedIds(new Set(selectable.map((s) => s.id)));
-                }
-              }}
-            >
-              {selectedIds.size ===
-              sortedSessions.filter((s) => !streamingSessionIds.has(s.id)).length
-                ? "Deselect All"
-                : "Select All"}
-            </Button>
-            <div style={{ flex: 1 }} />
-            <Button
-              type="primary"
-              danger
-              size="small"
-              disabled={selectedIds.size === 0}
-              loading={batchDeleteMutation.isPending}
-              onClick={() => {
-                const ids = [...selectedIds];
-                const isActiveSelected = sessionId && ids.includes(sessionId);
-                Modal.confirm({
-                  title: `Delete ${ids.length} session${ids.length !== 1 ? "s" : ""}?`,
-                  content: (
-                    <div>
-                      <p>This will permanently delete {ids.length} session{ids.length !== 1 ? "s" : ""} and all their messages. This action cannot be undone.</p>
-                      {isActiveSelected && (
-                        <p style={{ color: "#ff4d4f", fontWeight: 500 }}>
-                          Warning: Your current chat will also be deleted.
-                        </p>
-                      )}
-                    </div>
-                  ),
-                  okText: "Delete",
-                  okButtonProps: { danger: true },
-                  cancelText: "Cancel",
-                  onOk: () => batchDeleteMutation.mutate(ids),
-                });
-              }}
-            >
-              Delete Selected
-            </Button>
-          </div>
-        )}
-      </div>
+            {selectedIds.size ===
+            sortedSessions.filter((s) => !streamingSessionIds.has(s.id)).length
+              ? "Deselect All"
+              : "Select All"}
+          </Button>
+          <div style={{ flex: 1 }} />
+          <Button
+            type="primary"
+            danger
+            size="small"
+            disabled={selectedIds.size === 0}
+            loading={batchDeleteMutation.isPending}
+            onClick={() => {
+              const ids = [...selectedIds];
+              const isActiveSelected = sessionId && ids.includes(sessionId);
+              Modal.confirm({
+                title: `Delete ${ids.length} session${ids.length !== 1 ? "s" : ""}?`,
+                content: (
+                  <div>
+                    <p>This will permanently delete {ids.length} session{ids.length !== 1 ? "s" : ""} and all their messages. This action cannot be undone.</p>
+                    {isActiveSelected && (
+                      <p style={{ color: "#ff4d4f", fontWeight: 500 }}>
+                        Warning: Your current chat will also be deleted.
+                      </p>
+                    )}
+                  </div>
+                ),
+                okText: "Delete",
+                okButtonProps: { danger: true },
+                cancelText: "Cancel",
+                onOk: () => batchDeleteMutation.mutate(ids),
+              });
+            }}
+          >
+            Delete Selected
+          </Button>
+        </div>
+      )}
 
       {/* Footer */}
       <div

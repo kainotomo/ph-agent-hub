@@ -101,6 +101,19 @@ vi.mock("antd", async (importOriginal) => {
   };
 });
 
+// Mock react-virtuoso to render all items (not just visible ones) for tests
+vi.mock("react-virtuoso", () => ({
+  Virtuoso: ({ data, itemContent, style, ..._rest }: any) => (
+    <div style={style} data-testid="virtuoso-list">
+      {data.map((item: any, index: number) => (
+        <div key={item.id} data-testid="virtuoso-item">
+          {itemContent(index, item)}
+        </div>
+      ))}
+    </div>
+  ),
+}));
+
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------

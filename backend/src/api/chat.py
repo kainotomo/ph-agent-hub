@@ -653,40 +653,52 @@ async def list_sessions(
         tenant_id=current_user.tenant_id,
     )
 
-    # Fetch the last message content for each session.
+    # Fetch the last message content for each session using a single
+    # efficient subquery with ROW_NUMBER() window function — fetches
+    # exactly one row per session instead of all messages.
     if sessions:
         from ..db.orm.messages import Message as MsgORM
+        from sqlalchemy import func as sa_func, text as sa_text
 
         session_ids = [s.id for s in sessions]
-        # Fetch all non-deleted messages for these sessions, ordered by
-        # time descending, then keep the first (latest) per session_id.
-        all_msgs_sql = (
+
+        # Subquery: for each session, pick the latest non-deleted message.
+        subq = (
             select(
                 MsgORM.session_id,
                 MsgORM.content,
-                MsgORM.created_at,
+                sa_func.row_number().over(
+                    partition_by=MsgORM.session_id,
+                    order_by=MsgORM.created_at.desc(),
+                ).label("rn"),
             )
             .where(
                 MsgORM.session_id.in_(session_ids),
                 MsgORM.is_deleted == False,  # noqa: E712
             )
-            .order_by(MsgORM.created_at.desc())
+            .subquery()
         )
-        all_msgs = await db.execute(all_msgs_sql)
-        last_msg_map: dict[str, str | None] = {}
-        seen: set[str] = set()
-        for row in all_msgs:
-            if row.session_id in seen:
-                continue
-            seen.add(row.session_id)
-            content_list = row.content or []
-            preview = None
-            if isinstance(content_list, list):
-                for block in content_list:
+
+        latest_msgs_sql = select(
+            subq.c.session_id,
+            subq.c.content,
+        ).where(subq.c.rn == 1)
+
+        latest_msgs = await db.execute(latest_msgs_sql)
+
+        def _extract_preview(content: Any) -> str | None:
+            if isinstance(content, list):
+                for block in content:
                     if isinstance(block, dict) and block.get("type") == "text":
                         preview = block.get("text", "")[:120].strip()
-                        break
-            last_msg_map[row.session_id] = preview or None
+                        if preview:
+                            return preview
+            return None
+
+        last_msg_map: dict[str, str | None] = {
+            row.session_id: _extract_preview(row.content)
+            for row in latest_msgs
+        }
 
         result = []
         for s in sessions:

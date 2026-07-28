@@ -1185,7 +1185,8 @@ class TestListMessages:
             f"/api/chat/session/{test_session.id}/messages", headers=headers
         )
         assert resp.status_code == 200, resp.text
-        assert resp.json() == []
+        data = resp.json()
+        assert data == {"items": [], "has_more": False}
 
     async def test_list_messages_other_user_forbidden(
         self, async_client, auth_headers, test_user, second_user, test_session
@@ -1222,9 +1223,10 @@ class TestListMessages:
         )
         assert resp.status_code == 200, resp.text
         data = resp.json()
-        assert len(data) == 1
-        assert data[0]["id"] == msg.id
-        assert data[0]["sender"] == "user"
+        assert data["has_more"] is False
+        assert len(data["items"]) == 1
+        assert data["items"][0]["id"] == msg.id
+        assert data["items"][0]["sender"] == "user"
 
 
 # =============================================================================
@@ -1442,7 +1444,7 @@ class TestEditUserMessage:
             f"/api/chat/session/{test_session.id}/messages", headers=headers
         )
         assert list_resp.status_code == 200
-        remaining_ids = [m["id"] for m in list_resp.json()]
+        remaining_ids = [m["id"] for m in list_resp.json()["items"]]
         assert user1.id not in remaining_ids  # original was hard-deleted
         assert asst1.id not in remaining_ids
         assert user2.id not in remaining_ids
@@ -1519,7 +1521,7 @@ class TestDeleteMessage:
             f"/api/chat/session/{test_session.id}/messages", headers=headers
         )
         assert list_resp.status_code == 200
-        assert list_resp.json() == []
+        assert list_resp.json() == {"items": [], "has_more": False}
 
     async def test_delete_message_temp_session_rejected(
         self, async_client, auth_headers, test_user
@@ -1616,7 +1618,7 @@ class TestDeleteMessage:
         list_resp = await async_client.get(
             f"/api/chat/session/{test_session.id}/messages", headers=headers
         )
-        assert list_resp.json() == []
+        assert list_resp.json() == {"items": [], "has_more": False}
 
 
 class TestPatchAssistantMessage:
@@ -1780,7 +1782,7 @@ class TestPatchAssistantMessage:
         list_resp = await async_client.get(
             f"/api/chat/session/{test_session.id}/messages", headers=headers
         )
-        remaining = list_resp.json()
+        remaining = list_resp.json()["items"]
         assert len(remaining) == 1
         assert remaining[0]["id"] == asst1.id
 

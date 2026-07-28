@@ -3306,14 +3306,33 @@ async def upload_file(
     file_bytes = await file.read()
     content_type = file.content_type or "application/octet-stream"
 
-    upload = await upload_service.create_upload(
-        db=db,
-        session_data=data,
-        current_user=current_user,
-        file_bytes=file_bytes,
-        original_filename=file.filename,
-        content_type=content_type,
-    )
+    from sqlalchemy.exc import OperationalError as _OperationalError
+
+    try:
+        upload = await upload_service.create_upload(
+            db=db,
+            session_data=data,
+            current_user=current_user,
+            file_bytes=file_bytes,
+            original_filename=file.filename,
+            content_type=content_type,
+        )
+    except _OperationalError as exc:
+        if "1213" in str(exc):
+            logger.warning(
+                "Deadlock on file upload (session=%s). "
+                "Returning 503 so client can retry.",
+                session_id,
+            )
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "detail": "Upload temporarily unavailable due to a database "
+                              "conflict. Please retry.",
+                },
+            )
+        raise
 
     # Check whether the embedding API has credentials configured
     from ..tools.rag_search import _check_embedding_available

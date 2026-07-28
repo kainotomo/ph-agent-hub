@@ -374,38 +374,45 @@ async def create_upload(
             # Best-effort: extraction failure should not block upload
             pass
 
-    # 6. Persist DB row (with retry on deadlock — MySQL 1213)
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            upload = FileUpload(
-                id=file_id,
-                tenant_id=uploader_tenant_id,
-                user_id=uploader_id,
-                session_id=None if is_temp else session_data["id"],
-                original_filename=original_filename,
-                content_type=resolved_type,
-                size_bytes=len(file_bytes),
-                storage_key=key,
-                bucket=bucket,
-                is_temporary=is_temp,
-                extracted_text=extracted_text,
+    # 6. Persist DB row (no deadlock retry — intentional)
+    #
+    # InnoDB rolls back the *entire* transaction on deadlock (MySQL
+    # error 1213).  If this function is called after the caller has
+    # created a session in the same transaction (e.g. upload_file in
+    # chat.py promotes a temp session via _lazy_create_session), a
+    # retry would fail with a FK constraint because the session row
+    # was also rolled back.
+    #
+    # Deadlocks on file_uploads INSERT are vanishingly rare in
+    # production: the table has no concurrent-write pattern from the
+    # same user/session, and each row has a distinct UUID PK.  We
+    # still catch the deadlock for logging, but let it propagate so
+    # the client can retry the whole upload cleanly.
+    try:
+        upload = FileUpload(
+            id=file_id,
+            tenant_id=uploader_tenant_id,
+            user_id=uploader_id,
+            session_id=None if is_temp else session_data["id"],
+            original_filename=original_filename,
+            content_type=resolved_type,
+            size_bytes=len(file_bytes),
+            storage_key=key,
+            bucket=bucket,
+            is_temporary=is_temp,
+            extracted_text=extracted_text,
+        )
+        db.add(upload)
+        await db.commit()
+        await db.refresh(upload)
+    except OperationalError as exc:
+        if "1213" in str(exc):
+            logger.error(
+                "Deadlock on file_uploads insert (session=%s, file=%s). "
+                "Transaction rolled back by InnoDB. Client should retry.",
+                session_data.get("id"), file_id,
             )
-            db.add(upload)
-            await db.commit()
-            await db.refresh(upload)
-            break
-        except OperationalError as exc:
-            if "1213" in str(exc) and attempt < max_retries - 1:
-                logger.warning(
-                    "Deadlock on file_uploads insert (attempt %d/%d), retrying...",
-                    attempt + 1, max_retries,
-                )
-                await db.rollback()
-                backoff = 0.1 * (attempt + 1)
-                await asyncio.sleep(backoff)
-                continue
-            raise
+        raise
 
     # 7. Track file ID in Redis for temp sessions (cleanup on delete / TTL expiry)
     if is_temp:

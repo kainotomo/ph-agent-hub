@@ -208,8 +208,34 @@ export function summarizeSession(
 // Messages
 // ---------------------------------------------------------------------------
 
-export function listMessages(sessionId: string): Promise<MessageData[]> {
-  return api<MessageData[]>(`/chat/session/${sessionId}/messages`);
+export interface ListMessagesParams {
+  /** Cursor string in ``{created_at_iso}|{message_id}`` format.  Omit for the most recent messages. */
+  before?: string;
+  /** Number of messages per page (default 50, max 100). */
+  limit?: number;
+}
+
+export interface PaginatedMessagesResponse {
+  items: MessageData[];
+  has_more: boolean;
+}
+
+/** Build a cursor string from a message for cursor-based pagination. */
+export function buildCursor(msg: MessageData): string {
+  return `${msg.created_at}|${msg.id}`;
+}
+
+export function listMessages(
+  sessionId: string,
+  params?: ListMessagesParams,
+): Promise<PaginatedMessagesResponse> {
+  const query = new URLSearchParams();
+  if (params?.before) query.set("before", params.before);
+  if (params?.limit) query.set("limit", String(params.limit));
+  const qs = query.toString();
+  return api<PaginatedMessagesResponse>(
+    `/chat/session/${sessionId}/messages${qs ? `?${qs}` : ""}`,
+  );
 }
 
 export function editMessage(

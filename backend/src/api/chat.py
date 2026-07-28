@@ -16,10 +16,10 @@ from typing import Any, AsyncIterator
 
 logger = logging.getLogger(__name__)
 
-from fastapi import APIRouter, Depends, File, Request, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Query, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import delete, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
@@ -183,6 +183,11 @@ class MessageResponse(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class PaginatedMessagesResponse(BaseModel):
+    items: list[MessageResponse]
+    has_more: bool
 
 
 class SendMessageResponse(BaseModel):
@@ -1025,14 +1030,21 @@ async def finalize_temp_session(
 
 @router.get(
     "/session/{session_id}/messages",
-    response_model=list[MessageResponse],
+    response_model=PaginatedMessagesResponse,
 )
 async def list_messages(
     session_id: str,
+    before: str | None = None,
+    limit: int = Query(default=50, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     current_user: UserORM = Depends(get_current_user),
 ):
-    """List messages for a session (DB or Redis)."""
+    """List messages for a session (DB or Redis).
+
+    Supports cursor-based pagination with ``before`` (cursor string in
+    ``{created_at_iso}|{message_id}`` format) and ``limit`` (default 50,
+    max 100).  Omitting ``before`` returns the most recent messages.
+    """
     data = await _load_session(db, session_id)
     await _require_session_owner(data, current_user)
 
@@ -1040,55 +1052,116 @@ async def list_messages(
 
     if is_temp:
         msgs = await get_temp_messages(session_id)
-        return [
-            MessageResponse(
-                id=m.get("id", ""),
-                session_id=session_id,
-                sender=m.get("sender", "user"),
-                content=m.get("content"),
-                model_id=m.get("model_id"),
-                model_name=m.get("model_name"),
-                model_provider=m.get("model_provider"),
-                tool_calls=m.get("tool_calls"),
-                tokens_in=m.get("tokens_in"),
-                tokens_out=m.get("tokens_out"),
-                is_deleted=m.get("is_deleted", False),
-                summarized=m.get("summarized", False),
-                created_at=_parse_datetime(m.get("created_at")),
-                updated_at=_parse_datetime(m.get("updated_at")),
-            )
-            for m in msgs
-        ]
+        # Sort descending by created_at
+        msgs.sort(key=lambda m: _parse_datetime(m.get("created_at")), reverse=True)
+
+        # Apply cursor
+        if before:
+            cursor_ts_str, cursor_id = _parse_cursor(before)
+            cursor_ts = _parse_datetime(cursor_ts_str)
+            filtered = [
+                m for m in msgs
+                if _parse_datetime(m.get("created_at")) < cursor_ts
+                or (
+                    _parse_datetime(m.get("created_at")) == cursor_ts
+                    and m.get("id", "") < cursor_id
+                )
+            ]
+        else:
+            filtered = msgs
+
+        page = filtered[:limit]
+        has_more = len(filtered) > limit
+
+        # Reverse back to chronological order for display
+        page.reverse()
+
+        return PaginatedMessagesResponse(
+            items=[
+                MessageResponse(
+                    id=m.get("id", ""),
+                    session_id=session_id,
+                    sender=m.get("sender", "user"),
+                    content=m.get("content"),
+                    model_id=m.get("model_id"),
+                    model_name=m.get("model_name"),
+                    model_provider=m.get("model_provider"),
+                    tool_calls=m.get("tool_calls"),
+                    tokens_in=m.get("tokens_in"),
+                    tokens_out=m.get("tokens_out"),
+                    is_deleted=m.get("is_deleted", False),
+                    summarized=m.get("summarized", False),
+                    created_at=_parse_datetime(m.get("created_at")),
+                    updated_at=_parse_datetime(m.get("updated_at")),
+                )
+                for m in page
+            ],
+            has_more=has_more,
+        )
+
     else:
-        result = await db.execute(
+        # Build base query
+        query = (
             select(Message)
             .options(selectinload(Message.model))
             .where(
                 Message.session_id == session_id,
                 Message.is_deleted == False,  # noqa: E712
             )
-            .order_by(Message.created_at, Message.id)
         )
-        messages = result.scalars().all()
-        return [
-            MessageResponse(
-                id=m.id,
-                session_id=m.session_id,
-                sender=m.sender,
-                content=m.content,
-                model_id=m.model_id,
-                model_name=m.model.name if m.model else None,
-                model_provider=m.model.provider if m.model else None,
-                tool_calls=m.tool_calls,
-                tokens_in=m.tokens_in,
-                tokens_out=m.tokens_out,
-                is_deleted=m.is_deleted,
-                summarized=m.summarized,
-                created_at=m.created_at,
-                updated_at=m.updated_at,
+
+        # Apply cursor for pagination (fetch messages OLDER than cursor)
+        if before:
+            cursor_ts_str, cursor_id = _parse_cursor(before)
+            cursor_ts = _parse_datetime(cursor_ts_str)
+            query = query.where(
+                or_(
+                    Message.created_at < cursor_ts,
+                    and_(
+                        Message.created_at == cursor_ts,
+                        Message.id < cursor_id,
+                    ),
+                )
             )
-            for m in messages
-        ]
+
+        # Fetch one extra row to determine has_more
+        fetch_limit = limit + 1
+        result = await db.execute(
+            query
+            .order_by(Message.created_at.desc(), Message.id.desc())
+            .limit(fetch_limit)
+        )
+        rows = result.scalars().all()
+
+        # Determine if there are more rows
+        has_more = len(rows) > limit
+        page = rows[:limit]
+
+        # Reverse to chronological order for display
+        page.reverse()
+
+        return PaginatedMessagesResponse(
+            items=[
+                MessageResponse(
+                    id=m.id,
+                    session_id=m.session_id,
+                    sender=m.sender,
+                    content=m.content,
+                    model_id=m.model_id,
+                    model_name=m.model.name if m.model else None,
+                    model_provider=m.model.provider if m.model else None,
+                    tool_calls=m.tool_calls,
+                    tokens_in=m.tokens_in,
+                    tokens_out=m.tokens_out,
+                    is_deleted=m.is_deleted,
+                    summarized=m.summarized,
+                    created_at=m.created_at,
+                    updated_at=m.updated_at,
+                )
+                for m in page
+            ],
+            has_more=has_more,
+        )
 
 
 @router.post(
@@ -4014,6 +4087,20 @@ async def list_sessions_by_tag(
 # =============================================================================
 # Utility
 # =============================================================================
+
+
+def _parse_cursor(cursor: str) -> tuple[str, str]:
+    """Parse a cursor string ``{created_at_iso}|{message_id}`` into its parts.
+
+    Returns ``(created_at_iso, message_id)``.  Raises ``ValidationError``
+    if the format is invalid.
+    """
+    parts = cursor.split("|", 1)
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise ValidationError(
+            "Invalid cursor format. Expected '{created_at_iso}|{message_id}'."
+        )
+    return parts[0], parts[1]
 
 
 def _parse_datetime(val: Any) -> datetime:

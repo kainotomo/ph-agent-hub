@@ -88,15 +88,11 @@ interface SessionListItemProps {
   selectMode: boolean;
   isSelected: boolean;
   isStreaming: boolean;
-  streamingSessionIds: Set<string>;
-  selectedIds: Set<string>;
   onNavigate: (id: string) => void;
   onToggleSelect: (id: string) => void;
   onEdit: (session: SessionData) => void;
   onPin: (id: string, is_pinned: boolean) => void;
   onDelete: (id: string) => void;
-  pinMutation: ReturnType<typeof useMutation>;
-  deleteMutation: ReturnType<typeof useMutation>;
   setSelectedIds: React.Dispatch<React.SetStateAction<Set<string>>>;
   setMobileOpen: React.Dispatch<React.SetStateAction<boolean>>;
 }
@@ -109,15 +105,11 @@ const SessionListItem = React.memo(function SessionListItem({
   selectMode,
   isSelected,
   isStreaming,
-  streamingSessionIds,
-  selectedIds,
   onNavigate,
   onToggleSelect,
   onEdit,
   onPin,
   onDelete,
-  pinMutation,
-  deleteMutation,
   setSelectedIds,
   setMobileOpen,
 }: SessionListItemProps) {
@@ -767,15 +759,11 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
               selectMode={selectMode}
               isSelected={selectedIds.has(item.id)}
               isStreaming={streamingSessionIds.has(item.id)}
-              streamingSessionIds={streamingSessionIds}
-              selectedIds={selectedIds}
               onNavigate={handleNavigate}
               onToggleSelect={handleToggleSelect}
               onEdit={handleEditSession}
               onPin={handlePinSession}
               onDelete={handleDeleteSession}
-              pinMutation={pinMutation}
-              deleteMutation={deleteMutation}
               setSelectedIds={setSelectedIds}
               setMobileOpen={setMobileOpen}
             />

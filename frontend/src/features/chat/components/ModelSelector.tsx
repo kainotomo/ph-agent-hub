@@ -7,13 +7,11 @@
 // =============================================================================
 
 import React from "react";
-import { Select, Space, Typography, Button, Tooltip, message } from "antd";
+import { Select, Space, Button, Tooltip, message } from "antd";
 import { StarOutlined, StarFilled, ThunderboltOutlined } from "@ant-design/icons";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { setDefaultModel, getMe } from "../../../services/auth";
 import api from "../../../services/api";
-
-const { Text } = Typography;
 
 export const AUTO_ROUTE_VALUE = "__auto__";
 

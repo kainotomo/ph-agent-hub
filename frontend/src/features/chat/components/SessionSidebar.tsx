@@ -68,7 +68,6 @@ import {
   exportSession,
   importSession,
   getStreamStatus,
-  getSession,
 } from "../services/chat";
 import { ContextIndicator } from "./ContextIndicator";
 import { MemoryManager } from "./MemoryManager";

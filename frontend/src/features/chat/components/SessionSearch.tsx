@@ -18,7 +18,7 @@ interface SessionSearchProps {
   onSelect?: (session: SessionData) => void;
 }
 
-export function SessionSearch({ onClose }: SessionSearchProps) {
+export function SessionSearch({ onClose, onSelect }: SessionSearchProps) {
   const [results, setResults] = useState<SessionData[]>([]);
   const [searching, setSearching] = useState(false);
   const [searched, setSearched] = useState(false);

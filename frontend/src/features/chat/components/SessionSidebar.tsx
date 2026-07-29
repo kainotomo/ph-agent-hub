@@ -24,7 +24,7 @@ import {
   Popconfirm,
   Checkbox,
 } from "antd";
-import { Virtuoso } from "react-virtuoso";
+import { Virtuoso, VirtuosoHandle } from "react-virtuoso";
 import type { MenuProps } from "antd";
 import {
   PlusOutlined,
@@ -325,6 +325,7 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
+  const virtuosoRef = useRef<VirtuosoHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { streamingSessionIds, removeStreamingSession } = useStreamingContext();
   const streamingSessionIdsRef = useRef(streamingSessionIds);
@@ -539,16 +540,35 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
   );
 
   // Auto-scroll to active session when it changes or data loads.
+  // Uses Virtuoso's imperative scrollToIndex API instead of DOM querySelector
+  // because Virtuoso only renders visible items (virtualization), so the DOM
+  // element for off-screen sessions doesn't exist (Issue #501).
   useEffect(() => {
-    if (!sessionId) return;
-    const timer = setTimeout(() => {
-      const el = document.querySelector(`[data-session-id="${sessionId}"]`);
-      if (el) {
-        el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    if (!sessionId || !sessions) return;
+    const idx = sortedSessions.findIndex((s) => s.id === sessionId);
+    if (idx === -1) {
+      // Session might not be in the sidebar list (e.g. beyond the 2000-recent
+      // limit, or navigated from search).  Check if we have the session detail
+      // in the query cache (from ChatPage's fetch) and prepend it.
+      const cached = queryClient.getQueryData<SessionData>(["session", sessionId]);
+      if (cached) {
+        queryClient.setQueryData<SessionData[]>(["sessions"], (old) => {
+          if (!old) return [cached];
+          if (old.some((s) => s.id === sessionId)) return old;
+          return [cached, ...old];
+        });
       }
+      return;
+    }
+    const timer = setTimeout(() => {
+      virtuosoRef.current?.scrollToIndex({
+        index: idx,
+        behavior: "smooth",
+        align: "center",
+      });
     }, 100);
     return () => clearTimeout(timer);
-  }, [sessionId, sessions]);
+  }, [sessionId, sortedSessions, queryClient]);
 
   const handleNewChat = (temporary = false) => {
     if (temporary) {
@@ -632,6 +652,7 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
                   type="text"
                   icon={<SearchOutlined />}
                   size="small"
+                  data-testid="session-search-btn"
                   onClick={() => setSearchOpen(true)}
                 />
               </Tooltip>
@@ -747,6 +768,7 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
         </div>
       ) : (
         <Virtuoso
+          ref={virtuosoRef}
           style={{ flex: 1, height: "100%" }}
           data={sortedSessions}
           fixedItemHeight={72}
@@ -887,7 +909,18 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
         open={searchOpen}
         onClose={() => setSearchOpen(false)}
       >
-        <SessionSearch onClose={() => setSearchOpen(false)} />
+        <SessionSearch
+          onClose={() => setSearchOpen(false)}
+          onSelect={(session) => {
+            // If the selected session is not already in the sidebar list,
+            // prepend it to the cache so it appears and can be highlighted.
+            queryClient.setQueryData<SessionData[]>(["sessions"], (old) => {
+              if (!old) return [session];
+              if (old.some((s) => s.id === session.id)) return old;
+              return [session, ...old];
+            });
+          }}
+        />
       </Drawer>
 
       {/* Memory Manager */}

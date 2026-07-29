@@ -26,6 +26,8 @@ const {
   mockDeleteSessions,
   mockUpdateSession,
   mockImportSession,
+  mockGetSession,
+  mockScrollToIndex,
 } = vi.hoisted(() => ({
   mockListSessions: vi.fn(),
   mockCreateSession: vi.fn(),
@@ -33,6 +35,8 @@ const {
   mockDeleteSessions: vi.fn(),
   mockUpdateSession: vi.fn(),
   mockImportSession: vi.fn(),
+  mockGetSession: vi.fn(),
+  mockScrollToIndex: vi.fn(),
 }));
 
 vi.mock("../services/chat", () => ({
@@ -41,6 +45,7 @@ vi.mock("../services/chat", () => ({
   deleteSession: mockDeleteSession,
   deleteSessions: mockDeleteSessions,
   updateSession: mockUpdateSession,
+  getSession: mockGetSession,
   exportSession: vi.fn(),
   importSession: mockImportSession,
   addTagToSession: vi.fn(),
@@ -73,14 +78,30 @@ vi.mock("react-router-dom", () => ({
   useLocation: () => ({ pathname: "/chat/session-1" }),
 }));
 
+// Track onSelect calls for SessionSearch tests
+let sessionSearchOnSelect: ((session: any) => void) | null = null;
+
+// Mock SessionSearch directly (Sidebar imports from ./SessionSearch)
+vi.mock("./SessionSearch", () => ({
+  SessionSearch: ({ onSelect }: { onSelect?: (session: any) => void }) => {
+    sessionSearchOnSelect = onSelect ?? null;
+    return <div data-testid="session-search" />;
+  },
+  default: ({ onSelect }: { onSelect?: (session: any) => void }) => {
+    sessionSearchOnSelect = onSelect ?? null;
+    return <div data-testid="session-search" />;
+  },
+}));
+
 // Mock child components from barrel export
 vi.mock("./", () => ({
   ContextIndicator: () => <div data-testid="context-indicator" />,
   MemoryManager: ({ open }: { open: boolean }) =>
     open ? <div data-testid="memory-manager" /> : null,
-  SessionSearch: () => (
-    <div data-testid="session-search" />
-  ),
+  SessionSearch: ({ onSelect }: { onSelect?: (session: any) => void }) => {
+    sessionSearchOnSelect = onSelect ?? null;
+    return <div data-testid="session-search" />;
+  },
 }));
 
 // Mock shared Logo component
@@ -101,18 +122,27 @@ vi.mock("antd", async (importOriginal) => {
   };
 });
 
-// Mock react-virtuoso to render all items (not just visible ones) for tests
-vi.mock("react-virtuoso", () => ({
-  Virtuoso: ({ data, itemContent, style }: any) => (
-    <div style={style} data-testid="virtuoso-list">
-      {data.map((item: any, index: number) => (
-        <div key={item.id} data-testid="virtuoso-item">
-          {itemContent(index, item)}
+// Mock react-virtuoso: render all items + expose scrollToIndex via ref
+vi.mock("react-virtuoso", () => {
+  const React = require("react");
+  return {
+    VirtuosoHandle: class {},
+    Virtuoso: React.forwardRef<any, any>(({ data, itemContent, style }, ref) => {
+      React.useImperativeHandle(ref, () => ({
+        scrollToIndex: mockScrollToIndex,
+      }));
+      return (
+        <div style={style} data-testid="virtuoso-list">
+          {data.map((item: any, index: number) => (
+            <div key={item.id} data-testid="virtuoso-item">
+              {itemContent(index, item)}
+            </div>
+          ))}
         </div>
-      ))}
-    </div>
-  ),
-}));
+      );
+    }),
+  };
+});
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -229,6 +259,37 @@ describe("SessionSidebar", () => {
     expect(activeItem).toBeInTheDocument();
     // Active session gets a highlighted background
     expect(activeItem).toHaveStyle({ background: "#e6f4ff" });
+  });
+
+  // ── Scroll to active session via Virtuoso scrollToIndex ──────────────
+
+  it("scrolls to active session using scrollToIndex", async () => {
+    vi.useFakeTimers();
+    try {
+      renderSidebar();
+
+      // Wait for the query to resolve (React Query processes asynchronously)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(50);
+      });
+
+      // Advance past the 100ms setTimeout in the auto-scroll effect
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(200);
+      });
+
+      // The active session is session-1, which is at index 2
+      // (pinned-1, pinned-2, session-1, session-old)
+      expect(mockScrollToIndex).toHaveBeenCalledWith(
+        expect.objectContaining({
+          index: 2,
+          behavior: "smooth",
+          align: "center",
+        }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // ── New Chat (lazy UUID) ──────────────────────────────────────────────
@@ -483,5 +544,56 @@ describe("SessionSidebar", () => {
     // Select button should not be rendered when no sessions
     const selectBtn = document.querySelector(".anticon-check-square");
     expect(selectBtn).not.toBeInTheDocument();
+  });
+
+  // ── SessionSearch onSelect prepends session to cache ──────────────────
+
+  it("prepends searched session to sidebar query cache when onSelect is called", async () => {
+    // Create a query client we control so we can inspect cache state
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    // Pre-populate with the fixture sessions
+    queryClient.setQueryData(["sessions"], SESSIONS);
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <SessionSidebar />
+      </QueryClientProvider>,
+    );
+    await settle();
+
+    // Open the search drawer so SessionSearch renders and captures onSelect
+    const searchBtn = document.querySelector("[data-testid='session-search-btn']");
+    expect(searchBtn).toBeTruthy();
+    await act(async () => {
+      searchBtn!.click();
+    });
+    await settle();
+
+    expect(sessionSearchOnSelect).toBeTruthy();
+
+    const newSession = {
+      id: "session-searched",
+      title: "Searched Session",
+      is_pinned: false,
+      is_temporary: false,
+      updated_at: NOW,
+      tags: [],
+    };
+
+    // Call the SessionSearch onSelect callback
+    await act(async () => {
+      sessionSearchOnSelect?.(newSession);
+      // Advance microtasks so React Query subscribers fire synchronously
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await settle();
+
+    // Verify the cache was updated by reading from the same queryClient
+    const sessionIds = queryClient
+      .getQueryData<typeof SESSIONS>(["sessions"])
+      ?.map((s) => s.id) ?? [];
+    expect(sessionIds[0]).toBe("session-searched");
   });
 });

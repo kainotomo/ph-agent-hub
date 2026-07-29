@@ -14,6 +14,8 @@ const { Search } = Input;
 
 interface SessionSearchProps {
   onClose?: () => void;
+  /** Called when a session is selected from search results, before navigation. */
+  onSelect?: (session: SessionData) => void;
 }
 
 export function SessionSearch({ onClose }: SessionSearchProps) {
@@ -52,6 +54,7 @@ export function SessionSearch({ onClose }: SessionSearchProps) {
   };
 
   const handleSelect = (session: SessionData) => {
+    onSelect?.(session);
     navigate(`/chat/${session.id}`);
     onClose?.();
   };

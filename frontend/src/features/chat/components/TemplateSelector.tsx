@@ -4,8 +4,7 @@
 // Ant Design Select; fetches GET /templates.
 // =============================================================================
 
-import React from "react";
-import { Select, Space } from "antd";
+import { Select } from "antd";
 import { useQuery } from "@tanstack/react-query";
 import api from "../../../services/api";
 
@@ -25,13 +24,11 @@ interface TemplateData {
 interface TemplateSelectorProps {
   value?: string;
   onChange?: (templateId: string | undefined) => void;
-  style?: React.CSSProperties;
 }
 
 export function TemplateSelector({
   value,
   onChange,
-  style,
 }: TemplateSelectorProps) {
   const { data: templates, isLoading } = useQuery({
     queryKey: ["templates"],

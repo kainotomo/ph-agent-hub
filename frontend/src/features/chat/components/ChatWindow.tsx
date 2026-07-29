@@ -1496,11 +1496,11 @@ export const ChatWindow = React.memo(function ChatWindow({
           />
           <TemplateSelector
             value={pendingFlag ? pendTemplateId : selectedTemplateId}
-            onChange={(id) => handleSettingsUpdate({ selected_template_id: id })}
+            onChange={(id) => handleSettingsUpdate({ selected_template_id: id ?? null })}
           />
           <SkillSelector
             value={pendingFlag ? pendSkillId : selectedSkillId}
-            onChange={(id) => handleSettingsUpdate({ selected_skill_id: id })}
+            onChange={(id) => handleSettingsUpdate({ selected_skill_id: id ?? null })}
           />
           <PromptLibrary
             onUse={(resolvedText) => setInputValue(resolvedText)}
@@ -1535,9 +1535,6 @@ export const ChatWindow = React.memo(function ChatWindow({
             />
           )}
           <div style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 120 }}>
-            <Text type="secondary" style={{ fontSize: 11, whiteSpace: "nowrap" }}>
-              Temperature
-            </Text>
             <Slider
               min={0}
               max={2}
@@ -1549,6 +1546,7 @@ export const ChatWindow = React.memo(function ChatWindow({
                 handleSettingsUpdate({ temperature: val });
               }}
               style={{ width: 80, margin: 0 }}
+              tooltip={{ open: sessionTemperature !== null ? undefined : false }}
             />
           </div>
         </div>
@@ -1572,11 +1570,11 @@ export const ChatWindow = React.memo(function ChatWindow({
           />
           <TemplateSelector
             value={pendingFlag ? pendTemplateId : selectedTemplateId}
-            onChange={(id) => handleSettingsUpdate({ selected_template_id: id })}
+            onChange={(id) => handleSettingsUpdate({ selected_template_id: id ?? null })}
           />
           <SkillSelector
             value={pendingFlag ? pendSkillId : selectedSkillId}
-            onChange={(id) => handleSettingsUpdate({ selected_skill_id: id })}
+            onChange={(id) => handleSettingsUpdate({ selected_skill_id: id ?? null })}
           />
           <PromptLibrary
             onUse={(resolvedText) => setInputValue(resolvedText)}
@@ -1624,9 +1622,6 @@ export const ChatWindow = React.memo(function ChatWindow({
           />
           <div style={{ width: "100%" }}>
             <Space direction="vertical" style={{ width: "100%" }}>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                Temperature
-              </Text>
               <Slider
                 min={0}
                 max={2}

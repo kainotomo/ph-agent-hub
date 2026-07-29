@@ -6,13 +6,11 @@
 // =============================================================================
 
 import React, { useState } from "react";
-import { Select, Space, Tag, Typography, Button } from "antd";
+import { Select, Space, Tag, Button } from "antd";
 import { SettingOutlined } from "@ant-design/icons";
 import { useQuery } from "@tanstack/react-query";
 import api from "../../../services/api";
 import { PersonalSkillEditor } from "./PersonalSkillEditor";
-
-const { Text } = Typography;
 
 interface PaginatedResponse<T> {
   items: T[];
@@ -46,7 +44,7 @@ interface SkillData {
 
 interface SkillSelectorProps {
   value?: string;
-  onChange?: (skillId: string) => void;
+  onChange?: (skillId: string | undefined) => void;
   style?: React.CSSProperties;
 }
 
@@ -71,45 +69,42 @@ export function SkillSelector({
 
   return (
     <>
-      <Space direction="vertical" size={0} style={style}>
-        <Text type="secondary" style={{ fontSize: 12 }}>
-          Skill
-        </Text>
-        <Space.Compact>
-          <Select
-            value={value}
-            onChange={onChange}
-            loading={isLoading}
-            placeholder="Select skill"
-            style={{ minWidth: 160 }}
-            allowClear
-            options={skillsList.map((s) => ({
-              label: (
-                <Space size={4}>
-                  {s.title}
-                  {s.execution_type === "goal_based" && (
-                    <Tag color="green" style={{ fontSize: 11, lineHeight: "18px", margin: 0 }}>
-                      Goal
-                    </Tag>
-                  )}
-                  {s.tool_ids && s.tool_ids.length > 0 && (
-                    <Tag color="blue" style={{ fontSize: 11, lineHeight: "18px", margin: 0 }}>
-                      {s.tool_ids.length} tool{s.tool_ids.length !== 1 ? "s" : ""}
-                    </Tag>
-                  )}
-                </Space>
-              ),
-              value: s.id,
-            }))}
-            notFoundContent={isLoading ? "Loading..." : "No skills available"}
-          />
-          <Button
-            icon={<SettingOutlined />}
-            onClick={() => setEditorOpen(true)}
-            title="Manage personal skills"
-          />
-        </Space.Compact>
-      </Space>
+      <Space.Compact style={style}>
+        <Select
+          value={value}
+          onChange={onChange}
+          loading={isLoading}
+          placeholder="Select skill"
+          style={{ minWidth: 160 }}
+          size="small"
+          allowClear
+          options={skillsList.map((s) => ({
+            label: (
+              <Space size={4}>
+                {s.title}
+                {s.execution_type === "goal_based" && (
+                  <Tag color="green" style={{ fontSize: 11, lineHeight: "18px", margin: 0 }}>
+                    Goal
+                  </Tag>
+                )}
+                {s.tool_ids && s.tool_ids.length > 0 && (
+                  <Tag color="blue" style={{ fontSize: 11, lineHeight: "18px", margin: 0 }}>
+                    {s.tool_ids.length} tool{s.tool_ids.length !== 1 ? "s" : ""}
+                  </Tag>
+                )}
+              </Space>
+            ),
+            value: s.id,
+          }))}
+          notFoundContent={isLoading ? "Loading..." : "No skills available"}
+        />
+        <Button
+          size="small"
+          icon={<SettingOutlined />}
+          onClick={() => setEditorOpen(true)}
+          title="Manage personal skills"
+        />
+      </Space.Compact>
 
       <PersonalSkillEditor
         open={editorOpen}

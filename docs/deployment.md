@@ -266,7 +266,7 @@ curl http://localhost:11434/v1/chat/completions \
 1. Go to **Admin → Models → Create Model**
 2. Set **Provider** to `Ollama`
 3. Set **Model ID** to the model name you pulled (e.g., `llama3.2`)
-4. Set **Base URL** to your Ollama server URL (e.g., `http://localhost:11434/v1` or `http://host.docker.internal:11434/v1` when running PH Agent Hub in Docker and Ollama on the host)
+4. Set **Base URL** to your Ollama server URL — the `/v1` suffix is **required** (e.g., `http://localhost:11434/v1` or `http://host.docker.internal:11434/v1` when running PH Agent Hub in Docker and Ollama on the host). If you omit `/v1`, the hub now appends it automatically, but it's still best practice to include it. A base URL without `/v1` (e.g. `http://host:11434`) historically caused the request to hit the wrong endpoint and the chat to "start and then stop without a message".
 5. **API Key** is not required for Ollama — it's auto-filled with a placeholder
 6. Set **Max Tokens**, **Temperature**, and **Context Window** as desired (these are for PH Agent Hub's internal context management, not passed to Ollama)
 7. Click **OK**
@@ -281,9 +281,15 @@ When running PH Agent Hub in Docker:
 
 ## 7.6 Limitations
 
-- **Thinking/reasoning mode** is not supported (most local models don't emit reasoning tokens)
+- **Thinking/reasoning mode** is not surfaced in the UI for Ollama. Thinking models (e.g. `qwen3`-family or models that emit a `reasoning` field) produce their reasoning internally, but only the final `content` is streamed to the chat. The response itself still arrives normally.
 - **Tool calling** depends on the model — only recent models (e.g., `llama3.2`, `qwen2.5`) support native function calling
 - **Performance** varies by hardware — Ollama runs on CPU by default; GPU acceleration significantly improves throughput
+
+## 7.7 Troubleshooting
+
+- **Chat "starts working then stops with no message"** — almost always the OpenAI-compatible endpoint. Make sure the model's **Base URL** points at Ollama's `/v1/chat/completions` route (e.g. `http://host:11434/v1`). PH Agent Hub uses the Chat Completions API for Ollama; the Responses API (`/v1/responses`) is **not** implemented by Ollama.
+- **Verify from the host**: `curl http://<host>:11434/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"<model>","messages":[{"role":"user","content":"hi"}]}'` should return a `200` with an assistant message.
+- **No pricing configured** — Ollama models have no price by default, so usage is not deducted from the tenant balance. This is expected; the warning in the logs can be ignored.
 
 ---
 

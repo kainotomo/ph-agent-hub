@@ -32,6 +32,7 @@ export interface SessionData {
   auto_route_enabled?: boolean;
   auto_select_tools?: boolean;
   thinking_enabled?: boolean | null;
+  reasoning_effort?: string | null;
   temperature?: number | null;
   cross_session_retrieval_enabled?: boolean | null;
   tags?: TagData[];
@@ -110,6 +111,7 @@ export function createSession(data: {
   auto_route_enabled?: boolean;
   auto_select_tools?: boolean;
   thinking_enabled?: boolean;
+  reasoning_effort?: string | null;
   temperature?: number;
   active_tool_ids?: string[];
 }): Promise<SessionData> {
@@ -137,6 +139,9 @@ export function updateSession(
     selected_model_id?: string | null;
     auto_route_enabled?: boolean;
     auto_select_tools?: boolean;
+    thinking_enabled?: boolean | null;
+    reasoning_effort?: string | null;
+    temperature?: number | null;
   },
 ): Promise<SessionData> {
   return api<SessionData>(`/chat/session/${id}`, {

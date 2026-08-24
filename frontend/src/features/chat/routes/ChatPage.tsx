@@ -152,6 +152,8 @@ export function ChatPage() {
             selectedTemplateId={session?.selected_template_id ?? undefined}
             selectedSkillId={session?.selected_skill_id ?? undefined}
             temperature={session?.temperature ?? null}
+            thinkingEnabled={session?.thinking_enabled ?? null}
+            reasoningEffort={session?.reasoning_effort ?? null}
             crossSessionMemoryEnabled={session?.cross_session_retrieval_enabled ?? null}
             autoRouteEnabled={session?.auto_route_enabled ?? false}
             autoSelectTools={session?.auto_select_tools ?? true}

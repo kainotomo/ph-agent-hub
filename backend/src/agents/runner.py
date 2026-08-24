@@ -144,6 +144,11 @@ async def _resolve_session_config(
     reasoning_effort = session_data.get("reasoning_effort")
     if reasoning_effort is None:
         reasoning_effort = getattr(model, "reasoning_effort", None)
+    # Normalize legacy/aliased effort values. DeepSeek accepts "medium" and
+    # "xhigh" but maps both to "high" — collapse them so the request only
+    # ever carries low/high/max.
+    if reasoning_effort in ("medium", "xhigh"):
+        reasoning_effort = "high"
     # Clear reasoning_effort if thinking is disabled (no effect)
     if not thinking_enabled:
         reasoning_effort = None

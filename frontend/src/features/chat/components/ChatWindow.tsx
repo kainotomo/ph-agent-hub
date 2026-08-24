@@ -8,7 +8,7 @@
 
 import React, { useRef, useEffect, useState, useCallback, useMemo } from "react";
 import { Virtuoso, VirtuosoHandle } from "react-virtuoso";
-import { Button, Drawer, Grid, Input, Slider, Space, Spin, Empty, Alert, Switch, Tag, Typography, Upload, message, notification } from "antd";
+import { Button, Drawer, Grid, Input, Select, Slider, Space, Spin, Empty, Alert, Switch, Tag, Tooltip, Typography, Upload, message, notification } from "antd";
 import {
   SendOutlined,
   SettingOutlined,
@@ -149,6 +149,8 @@ interface ChatWindowProps {
   selectedTemplateId?: string;
   selectedSkillId?: string;
   temperature?: number | null;
+  thinkingEnabled?: boolean | null;
+  reasoningEffort?: string | null;
   crossSessionMemoryEnabled?: boolean | null;
   autoRouteEnabled?: boolean;
   autoSelectTools?: boolean;
@@ -169,6 +171,8 @@ export const ChatWindow = React.memo(function ChatWindow({
   selectedTemplateId,
   selectedSkillId,
   temperature,
+  thinkingEnabled: thinkingEnabledProp = null,
+  reasoningEffort: reasoningEffortProp = null,
   crossSessionMemoryEnabled = null,
   autoRouteEnabled = false,
   autoSelectTools = true,
@@ -210,6 +214,9 @@ export const ChatWindow = React.memo(function ChatWindow({
   const [streamError, setStreamError] = useState<string | null>(null);
   const [streamingTokens, setStreamingTokens] = useState<{ tokens_in: number; tokens_out: number } | null>(null);
   const [thinkingEnabled, setThinkingEnabled] = useState<boolean | null>(null);
+  const [reasoningEffort, setReasoningEffort] = useState<string | null>(
+    reasoningEffortProp ?? null,
+  );
   const [localCrossSessionMemory, setLocalCrossSessionMemory] = useState<boolean | null>(crossSessionMemoryEnabled);
   const [sessionTemperature, setSessionTemperature] = useState<number | null>(
     temperature ?? null,
@@ -316,6 +323,8 @@ export const ChatWindow = React.memo(function ChatWindow({
           setSessionTemperature(data.temperature as number | null);
         if ("thinking_enabled" in data)
           setThinkingEnabled(data.thinking_enabled as boolean | null);
+        if ("reasoning_effort" in data)
+          setReasoningEffort(data.reasoning_effort as string | null);
         if ("cross_session_retrieval_enabled" in data)
           setLocalCrossSessionMemory(
             data.cross_session_retrieval_enabled as boolean | null,
@@ -334,6 +343,29 @@ export const ChatWindow = React.memo(function ChatWindow({
         handleSettingsUpdate({ selected_model_id: null, auto_route_enabled: true });
       } else {
         handleSettingsUpdate({ selected_model_id: id, auto_route_enabled: false });
+      }
+    },
+    [handleSettingsUpdate],
+  );
+
+  // Reasoning-effort dropdown value derived from the effective session state.
+  const reasoningEffortValue =
+    thinkingEnabled === false ? "none" : (reasoningEffort ?? "default");
+
+  const handleReasoningEffortChange = useCallback(
+    (value: string) => {
+      if (value === "default") {
+        setThinkingEnabled(null);
+        setReasoningEffort(null);
+        handleSettingsUpdate({ thinking_enabled: null, reasoning_effort: null });
+      } else if (value === "none") {
+        setThinkingEnabled(false);
+        setReasoningEffort(null);
+        handleSettingsUpdate({ thinking_enabled: false, reasoning_effort: null });
+      } else {
+        setThinkingEnabled(true);
+        setReasoningEffort(value);
+        handleSettingsUpdate({ thinking_enabled: true, reasoning_effort: value });
       }
     },
     [handleSettingsUpdate],
@@ -512,6 +544,7 @@ export const ChatWindow = React.memo(function ChatWindow({
     id: string;
     name: string;
     thinking_enabled: boolean;
+    reasoning_effort?: string | null;
     provider: string;
     context_length?: number | null;
   }
@@ -520,11 +553,51 @@ export const ChatWindow = React.memo(function ChatWindow({
     queryFn: () => api<ModelInfo[]>("/models"),
     enabled: !demo,
   });
+  const effectiveModelId =
+    pendingFlag ? (pendModelId ?? undefined) : (selectedModelId ?? undefined);
   const selectedModel = useMemo(
-    () => (modelList || []).find((m) => m.id === selectedModelId),
-    [modelList, selectedModelId],
+    () => (modelList || []).find((m) => m.id === effectiveModelId),
+    [modelList, effectiveModelId],
   );
   const modelSupportsThinking = selectedModel?.thinking_enabled === true;
+
+  // DeepSeek ignores temperature while thinking is enabled (reasoning effort
+  // other than "none"). Disable the slider and hint so users aren't misled.
+  const temperatureDisabled =
+    modelSupportsThinking && reasoningEffortValue !== "none";
+
+  // Resolve the selected model's effective default reasoning effort so the
+  // "Default" dropdown option can show what it actually means (Issue #506).
+  const resolvedDefaultEffort = useMemo(() => {
+    if (!selectedModel) return null;
+    if (selectedModel.thinking_enabled === false) return "none";
+    if (selectedModel.reasoning_effort) {
+      const v = selectedModel.reasoning_effort;
+      // Collapse legacy aliases (DeepSeek maps medium/xhigh → high).
+      return v === "medium" || v === "xhigh" ? "high" : v;
+    }
+    // DeepSeek thinking defaults to "high" when the model leaves it unset.
+    if (selectedModel.provider === "deepseek") return "high";
+    return null;
+  }, [selectedModel]);
+
+  const defaultEffortLabel =
+    resolvedDefaultEffort === "none"
+      ? "Default (None)"
+      : resolvedDefaultEffort
+        ? `Default (${resolvedDefaultEffort.charAt(0).toUpperCase()}${resolvedDefaultEffort.slice(1)})`
+        : "Default";
+
+  const reasoningEffortOptions = useMemo(
+    () => [
+      { label: defaultEffortLabel, value: "default" },
+      { label: "None", value: "none" },
+      { label: "Low", value: "low" },
+      { label: "High", value: "high" },
+      { label: "Max", value: "max" },
+    ],
+    [defaultEffortLabel],
+  );
 
   // Auto-select a model for pending sessions (no backend session to provide
   // a default yet — mirrors backend create_session logic).
@@ -585,6 +658,8 @@ export const ChatWindow = React.memo(function ChatWindow({
     setEditingMsgId(null);
     setRegeneratingMsgId(null);
     setSessionTemperature(temperature ?? null);
+    setThinkingEnabled(thinkingEnabledProp ?? null);
+    setReasoningEffort(reasoningEffortProp ?? null);
     setLocalCrossSessionMemory(crossSessionMemoryEnabled ?? null);
     setAutopilotState(INITIAL_AUTOPILOT_STATE);
     setIsAutopilotMode(false);
@@ -601,6 +676,18 @@ export const ChatWindow = React.memo(function ChatWindow({
       return prev !== next ? next : prev;
     });
   }, [temperature]);
+  useEffect(() => {
+    setThinkingEnabled((prev) => {
+      const next = thinkingEnabledProp ?? null;
+      return prev !== next ? next : prev;
+    });
+  }, [thinkingEnabledProp]);
+  useEffect(() => {
+    setReasoningEffort((prev) => {
+      const next = reasoningEffortProp ?? null;
+      return prev !== next ? next : prev;
+    });
+  }, [reasoningEffortProp]);
   useEffect(() => {
     setLocalCrossSessionMemory((prev) => {
       const next = crossSessionMemoryEnabled ?? null;
@@ -1094,6 +1181,7 @@ export const ChatWindow = React.memo(function ChatWindow({
           selected_template_id: pendTemplateId || null,
           selected_skill_id: pendSkillId || null,
           thinking_enabled: thinkingEnabled,
+          reasoning_effort: reasoningEffort,
           temperature: sessionTemperature,
           active_tool_ids: pendActiveToolIds.length > 0 ? pendActiveToolIds : null,
         }
@@ -1170,7 +1258,7 @@ export const ChatWindow = React.memo(function ChatWindow({
         },
       );
     }
-  }, [inputValue, streaming, sessionId, startStream, queryClient, pendingFiles, editingMsgId, pendingFlag, pendModelId, pendTemplateId, pendSkillId, pendAutoRoute, pendAutoSelectTools, pendActiveToolIds, thinkingEnabled, sessionTemperature, isAutopilotMode, setAutopilotState]);
+  }, [inputValue, streaming, sessionId, startStream, queryClient, pendingFiles, editingMsgId, pendingFlag, pendModelId, pendTemplateId, pendSkillId, pendAutoRoute, pendAutoSelectTools, pendActiveToolIds, thinkingEnabled, reasoningEffort, sessionTemperature, isAutopilotMode, setAutopilotState]);
 
   const handleStop = async () => {
     // Clear the streaming ghost bubble immediately for instant UX.
@@ -1494,6 +1582,17 @@ export const ChatWindow = React.memo(function ChatWindow({
             }
             onChange={handleModelChange}
           />
+          {modelSupportsThinking && (
+            <Select
+              size="small"
+              style={{ minWidth: 110 }}
+              value={reasoningEffortValue}
+              options={reasoningEffortOptions}
+              onChange={handleReasoningEffortChange}
+              placeholder="Reasoning"
+              title="Reasoning effort (thinking mode)"
+            />
+          )}
           <TemplateSelector
             value={pendingFlag ? pendTemplateId : selectedTemplateId}
             onChange={(id) => handleSettingsUpdate({ selected_template_id: id ?? null })}
@@ -1521,33 +1620,25 @@ export const ChatWindow = React.memo(function ChatWindow({
               handleSettingsUpdate({ cross_session_retrieval_enabled: v });
             }}
           />
-          {modelSupportsThinking && (
-            <Switch
-              size="small"
-              checked={thinkingEnabled ?? true}
-              checkedChildren="🧠 Thinking"
-              unCheckedChildren="🧠 Thinking"
-              title="Thinking Mode"
-              onChange={(v) => {
-                setThinkingEnabled(v);
-                handleSettingsUpdate({ thinking_enabled: v });
-              }}
-            />
-          )}
           <div style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 120 }}>
-            <Slider
-              min={0}
-              max={2}
-              step={0.1}
-              value={sessionTemperature ?? 0.7}
-              onChange={(v) => {
-                const val = v as number;
-                setSessionTemperature(val);
-                handleSettingsUpdate({ temperature: val });
-              }}
-              style={{ width: 80, margin: 0 }}
-              tooltip={{ open: sessionTemperature !== null ? undefined : false }}
-            />
+            <Tooltip
+              title={temperatureDisabled ? "Temperature is ignored while thinking mode is on (DeepSeek)." : undefined}
+            >
+              <Slider
+                min={0}
+                max={2}
+                step={0.1}
+                value={sessionTemperature ?? 0.7}
+                disabled={temperatureDisabled}
+                onChange={(v) => {
+                  const val = v as number;
+                  setSessionTemperature(val);
+                  handleSettingsUpdate({ temperature: val });
+                }}
+                style={{ width: 80, margin: 0 }}
+                tooltip={{ open: sessionTemperature !== null ? undefined : false }}
+              />
+            </Tooltip>
           </div>
         </div>
       )}
@@ -1568,6 +1659,16 @@ export const ChatWindow = React.memo(function ChatWindow({
             }
             onChange={handleModelChange}
           />
+          {modelSupportsThinking && (
+            <Select
+              style={{ width: "100%" }}
+              value={reasoningEffortValue}
+              options={reasoningEffortOptions}
+              onChange={handleReasoningEffortChange}
+              placeholder="Reasoning effort (thinking mode)"
+              title="Reasoning effort — controls thinking depth. None disables thinking mode."
+            />
+          )}
           <TemplateSelector
             value={pendingFlag ? pendTemplateId : selectedTemplateId}
             onChange={(id) => handleSettingsUpdate({ selected_template_id: id ?? null })}
@@ -1597,19 +1698,6 @@ export const ChatWindow = React.memo(function ChatWindow({
           >
             Tools
           </Button>
-          {modelSupportsThinking && (
-            <Switch
-              size="small"
-              checked={thinkingEnabled ?? true}
-              checkedChildren="🧠 Thinking"
-              unCheckedChildren="🧠 Thinking"
-              title="Thinking Mode"
-              onChange={(v) => {
-                setThinkingEnabled(v);
-                handleSettingsUpdate({ thinking_enabled: v });
-              }}
-            />
-          )}
           <Switch
             size="small"
             checked={localCrossSessionMemory ?? false}
@@ -1622,18 +1710,23 @@ export const ChatWindow = React.memo(function ChatWindow({
           />
           <div style={{ width: "100%" }}>
             <Space direction="vertical" style={{ width: "100%" }}>
-              <Slider
-                min={0}
-                max={2}
-                step={0.1}
-                value={sessionTemperature ?? 0.7}
-                onChange={(v) => {
-                  const val = v as number;
-                  setSessionTemperature(val);
-                  handleSettingsUpdate({ temperature: val });
-                }}
-                marks={{ 0: "0", 1: "1", 2: "2" }}
-              />
+              <Tooltip
+                title={temperatureDisabled ? "Temperature is ignored while thinking mode is on (DeepSeek)." : undefined}
+              >
+                <Slider
+                  min={0}
+                  max={2}
+                  step={0.1}
+                  value={sessionTemperature ?? 0.7}
+                  disabled={temperatureDisabled}
+                  onChange={(v) => {
+                    const val = v as number;
+                    setSessionTemperature(val);
+                    handleSettingsUpdate({ temperature: val });
+                  }}
+                  marks={{ 0: "0", 1: "1", 2: "2" }}
+                />
+              </Tooltip>
             </Space>
           </div>
         </div>

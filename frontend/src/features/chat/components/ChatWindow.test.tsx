@@ -141,6 +141,15 @@ const FAKE_MODELS = [
   },
 ];
 
+// A DeepSeek model with thinking ENABLED — renders the reasoning dropdown.
+const THINKING_MODEL = {
+  id: "model-think",
+  name: "DeepSeek Thinking",
+  provider: "deepseek",
+  enabled: true,
+  thinking_enabled: true,
+};
+
 function renderChatWindow(props: Record<string, unknown> = {}) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
@@ -362,3 +371,128 @@ describe("ChatWindow — Stream reconnect on mount (Issue #457)", () => {
     expect(mockStartReconnect).not.toHaveBeenCalled();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Reasoning-effort dropdown (Issue #506)
+// ---------------------------------------------------------------------------
+
+describe("ChatWindow — reasoning effort dropdown (Issue #506)", () => {
+  beforeEach(() => {
+    mockApi.mockReset();
+    // A single DeepSeek model WITH thinking enabled so the dropdown renders.
+    mockApi.mockImplementation((url: string) => {
+      if (url === "/models") return Promise.resolve([THINKING_MODEL]);
+      return Promise.resolve([]);
+    });
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  const onSessionUpdate = vi.fn();
+
+  function renderThinkingChat() {
+    return renderChatWindow({
+      isPending: false,
+      sessionId: "test-session-1",
+      selectedModelId: THINKING_MODEL.id,
+      onSessionUpdate,
+    });
+  }
+
+  it("renders a reasoning dropdown for thinking-capable models", async () => {
+    renderThinkingChat();
+    await settle();
+    // The reasoning antd Select renders a combobox; the model selector is mocked
+    // as a native <select role="combobox">, so at least one combobox exists.
+    expect(screen.getAllByRole("combobox").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("labels the Default option with the resolved model default", async () => {
+    renderThinkingChat();
+    await settle();
+    // THINKING_MODEL is DeepSeek with thinking on and no explicit effort, so the
+    // resolved default is "high" → the "Default" option reads "Default (High)".
+    expect(screen.getByText("Default (High)")).toBeInTheDocument();
+  });
+
+  it("shows the reasoning dropdown in pending mode once a thinking model is selected", async () => {
+    // New (pending) chat with exactly one thinking model → auto-select picks it.
+    renderChatWindow({
+      isPending: true,
+      sessionId: "test-new-pending",
+      selectedModelId: undefined,
+    });
+    await settle();
+    // The reasoning dropdown (with its resolved default label) should render
+    // even before the session exists on the backend.
+    expect(screen.getByText("Default (High)")).toBeInTheDocument();
+  });
+
+  it("maps 'Low' to { thinking_enabled:true, reasoning_effort:'low' }", async () => {
+    const user = userEvent.setup();
+    renderThinkingChat();
+    await settle();
+
+    await selectReasoningOption(user, "Low");
+    await settle();
+
+    expect(onSessionUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ thinking_enabled: true, reasoning_effort: "low" }),
+    );
+  });
+
+  it("maps 'None' to { thinking_enabled:false, reasoning_effort:null }", async () => {
+    const user = userEvent.setup();
+    renderThinkingChat();
+    await settle();
+
+    await selectReasoningOption(user, "None");
+    await settle();
+
+    expect(onSessionUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ thinking_enabled: false, reasoning_effort: null }),
+    );
+  });
+
+  it("maps 'Default' to null-thought/null-effort (use admin default)", async () => {
+    const user = userEvent.setup();
+    renderThinkingChat();
+    await settle();
+
+    // First pick a concrete level so a subsequent change to "Default" fires.
+    await selectReasoningOption(user, "Max");
+    await settle();
+    expect(onSessionUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ thinking_enabled: true, reasoning_effort: "max" }),
+    );
+    onSessionUpdate.mockClear();
+
+    // Now returning to "Default" resets both fields to null → use admin default.
+    // The label shows the resolved model default ("High" for this DeepSeek model).
+    await selectReasoningOption(user, "Default (High)");
+    await settle();
+
+    expect(onSessionUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ thinking_enabled: null, reasoning_effort: null }),
+    );
+  });
+});
+
+// Open the reasoning-effort antd Select and click the given option label.
+// The existing model selector is mocked as a native <select>; the reasoning
+// control is the real antd Select, which we interact with via its dropdown.
+async function selectReasoningOption(
+  user: ReturnType<typeof userEvent.setup>,
+  label: string,
+) {
+  const comboboxes = screen.getAllByRole("combobox");
+  // The reasoning antd Select is the LAST combobox (the mocked model <select>
+  // is rendered first in the toolbar/options).
+  const target = comboboxes[comboboxes.length - 1] as HTMLElement;
+  await user.click(target);
+  const option = await screen.findByTitle(label);
+  await user.click(option);
+}

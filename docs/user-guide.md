@@ -519,7 +519,17 @@ After each response, three suggested follow-up questions appear below the assist
 
 When enabled, you'll see the model's internal reasoning process before the final answer. The reasoning appears in an expandable panel labeled **Reasoning**. This is useful for understanding *how* the model arrived at its answer, especially for complex or multi-step problems.
 
-Toggle thinking mode in your session settings. Your administrator controls whether a model supports this feature.
+In your session settings you can select a **reasoning effort** level, which controls how deeply the model thinks:
+
+- **None** — disables thinking mode.
+- **Low** — fastest responses, lighter reasoning.
+- **High** — balanced reasoning (the default).
+- **Max** — deepest reasoning for complex agent requests.
+- **Default** — uses the model's configured default.
+
+Your administrator controls whether a model supports thinking mode, and may set a baseline default effort.
+
+> Note: while thinking mode is enabled, the temperature setting has no effect — DeepSeek ignores it (and the temperature slider is disabled in the chat settings accordingly).
 
 ---
 

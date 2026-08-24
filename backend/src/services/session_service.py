@@ -37,6 +37,7 @@ async def create_session(
     selected_skill_id: str | None = None,
     selected_model_id: str | None = None,
     thinking_enabled: bool | None = None,
+    reasoning_effort: str | None = None,
     temperature: float | None = None,
     auto_route_enabled: bool = False,
     auto_select_tools: bool = True,
@@ -76,6 +77,7 @@ async def create_session(
         selected_skill_id=selected_skill_id,
         selected_model_id=selected_model_id,
         thinking_enabled=thinking_enabled,
+        reasoning_effort=reasoning_effort,
         temperature=temperature,
         auto_route_enabled=auto_route_enabled,
         auto_select_tools=auto_select_tools,
@@ -785,6 +787,7 @@ async def finalize_session(
         selected_skill_id=temp_data.get("selected_skill_id"),
         selected_model_id=selected_model_id,
         thinking_enabled=temp_data.get("thinking_enabled"),
+        reasoning_effort=temp_data.get("reasoning_effort"),
         temperature=temp_data.get("temperature"),
         cross_session_retrieval_enabled=temp_data.get(
             "cross_session_retrieval_enabled"

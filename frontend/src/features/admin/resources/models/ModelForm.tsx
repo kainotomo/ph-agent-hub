@@ -332,10 +332,11 @@ export function ModelForm({ open, model, duplicateFrom, onClose }: ModelFormProp
                   <Form.Item
                     name="reasoning_effort"
                     label="Reasoning Effort"
-                    tooltip="Controls reasoning depth in thinking mode. 'high' for most tasks, 'max' for complex agent requests."
+                    tooltip="Controls reasoning depth in thinking mode. 'low' for quick responses, 'high' for most tasks, 'max' for complex agent requests."
                   >
                     <Select
                       options={[
+                        { label: "Low", value: "low" },
                         { label: "High", value: "high" },
                         { label: "Max", value: "max" },
                       ]}

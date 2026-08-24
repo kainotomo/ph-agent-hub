@@ -372,6 +372,7 @@ A session belongs to a user and a tenant.
 - selected_skill_id (UUID, FK → skills.id, nullable)
 - selected_model_id (UUID, FK → models.id, nullable)
 - thinking_enabled (bool, nullable) — session-level override for reasoning mode; null means use model default
+- reasoning_effort (string, nullable) — session-level reasoning-effort level (e.g. low/high/max for DeepSeek thinking mode); null means use model default
 - cross_session_retrieval_enabled (boolean, default false) — when enabled, the agent can semantically retrieve memory entries from other sessions during the conversation
 - temperature (float, nullable) — session-level temperature override
 - created_at (timestamp)

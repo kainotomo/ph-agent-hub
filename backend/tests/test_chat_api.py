@@ -220,6 +220,23 @@ class TestCreateSession:
         assert data["thinking_enabled"] is True
         assert data["temperature"] == 0.5
 
+    async def test_create_session_with_reasoning_effort(
+        self, async_client, auth_headers, test_user, test_model
+    ):
+        """Verify session creation persists reasoning_effort."""
+        headers = auth_headers(test_user)
+        payload = {
+            "title": "Reasoning Chat",
+            "selected_model_id": test_model.id,
+            "thinking_enabled": True,
+            "reasoning_effort": "max",
+        }
+        resp = await async_client.post("/api/chat/session", json=payload, headers=headers)
+        assert resp.status_code == 201, resp.text
+        data = resp.json()
+        assert data["thinking_enabled"] is True
+        assert data["reasoning_effort"] == "max"
+
     async def test_create_session_with_auto_select_tools_false(
         self, async_client, auth_headers, test_user, test_model
     ):
@@ -3951,6 +3968,21 @@ class TestValidationErrors:
             headers=headers,
         )
         assert resp.status_code == 422
+
+    async def test_update_session_reasoning_effort(
+        self, async_client, auth_headers, test_user, test_session
+    ):
+        """Verify updating session persists reasoning_effort."""
+        headers = auth_headers(test_user)
+        resp = await async_client.put(
+            f"/api/chat/session/{test_session.id}",
+            json={"thinking_enabled": True, "reasoning_effort": "low"},
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["thinking_enabled"] is True
+        assert data["reasoning_effort"] == "low"
 
     async def test_delete_session_twice_returns_not_found(
         self, async_client, auth_headers, test_user, test_session

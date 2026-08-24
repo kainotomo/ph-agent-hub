@@ -86,6 +86,8 @@ const FAKE_SESSION = {
   selected_template_id: null,
   selected_skill_id: "skill-1",
   temperature: 0.7,
+  thinking_enabled: null,
+  reasoning_effort: null,
   cross_session_retrieval_enabled: true,
   auto_route_enabled: false,
   auto_select_tools: true,
@@ -245,6 +247,7 @@ describe("ChatPage", () => {
       tags: [],
       temperature: null,
       thinking_enabled: null,
+      reasoning_effort: null,
       created_at: "2024-01-01T00:00:00Z",
       updated_at: "2024-01-01T00:00:00Z",
     });

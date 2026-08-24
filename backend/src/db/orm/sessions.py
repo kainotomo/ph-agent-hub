@@ -43,6 +43,7 @@ class Session(Base):
         CHAR(36), ForeignKey("models.id"), nullable=True
     )
     thinking_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=None)
+    reasoning_effort: Mapped[str | None] = mapped_column(String(10), nullable=True, default=None)
     temperature: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
 
     auto_route_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

@@ -83,6 +83,7 @@ class SessionCreate(BaseModel):
     selected_model_id: str | None = None
     active_tool_ids: list[str] | None = None
     thinking_enabled: bool | None = None
+    reasoning_effort: str | None = None
     temperature: float | None = None
     auto_route_enabled: bool = False
     auto_select_tools: bool = True
@@ -95,6 +96,7 @@ class SessionUpdate(BaseModel):
     selected_skill_id: str | None = None
     selected_model_id: str | None = None
     thinking_enabled: bool | None = None
+    reasoning_effort: str | None = None
     temperature: float | None = None
     cross_session_retrieval_enabled: bool | None = None
     auto_route_enabled: bool | None = None
@@ -133,6 +135,7 @@ class SessionResponse(BaseModel):
     selected_skill_id: str | None
     selected_model_id: str | None
     thinking_enabled: bool | None
+    reasoning_effort: str | None = None
     temperature: float | None
     cross_session_retrieval_enabled: bool | None = None
     auto_route_enabled: bool = False
@@ -312,6 +315,7 @@ async def _lazy_create_session(
         selected_skill_id=session_data.selected_skill_id,
         selected_model_id=session_data.selected_model_id,
         thinking_enabled=session_data.thinking_enabled,
+        reasoning_effort=session_data.reasoning_effort,
         temperature=session_data.temperature,
         auto_route_enabled=session_data.auto_route_enabled,
         auto_select_tools=session_data.auto_select_tools,
@@ -360,6 +364,7 @@ def _session_to_dict(
         "selected_skill_id": session.selected_skill_id,
         "selected_model_id": session.selected_model_id,
         "thinking_enabled": session.thinking_enabled,
+        "reasoning_effort": session.reasoning_effort,
         "temperature": session.temperature,
         "auto_route_enabled": session.auto_route_enabled,
         "auto_select_tools": session.auto_select_tools,
@@ -579,6 +584,7 @@ async def create_session(
             "auto_route_enabled": body.auto_route_enabled,
             "auto_select_tools": body.auto_select_tools,
             "thinking_enabled": body.thinking_enabled,
+            "reasoning_effort": body.reasoning_effort,
             "temperature": body.temperature,
             "active_tool_ids": active_tool_ids,
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -600,6 +606,7 @@ async def create_session(
             "auto_route_enabled": body.auto_route_enabled,
             "auto_select_tools": body.auto_select_tools,
             "thinking_enabled": body.thinking_enabled,
+            "reasoning_effort": body.reasoning_effort,
             "temperature": body.temperature,
             "tags": [],
             "created_at": datetime.now(timezone.utc),
@@ -620,6 +627,7 @@ async def create_session(
             auto_route_enabled=body.auto_route_enabled,
             auto_select_tools=body.auto_select_tools,
             thinking_enabled=body.thinking_enabled,
+            reasoning_effort=body.reasoning_effort,
             temperature=body.temperature,
         )
 
@@ -743,6 +751,7 @@ async def get_session(
             "selected_skill_id": None,
             "selected_model_id": None,
             "thinking_enabled": None,
+            "reasoning_effort": None,
             "temperature": None,
             "auto_route_enabled": False,
             "auto_select_tools": True,
@@ -763,6 +772,7 @@ async def get_session(
         "selected_skill_id": data.get("selected_skill_id"),
         "selected_model_id": data.get("selected_model_id"),
         "thinking_enabled": data.get("thinking_enabled"),
+        "reasoning_effort": data.get("reasoning_effort"),
         "temperature": data.get("temperature"),
         "auto_route_enabled": data.get("auto_route_enabled", False),
         "auto_select_tools": data.get("auto_select_tools", True),
@@ -875,6 +885,7 @@ async def update_session(
             "selected_skill_id": data.get("selected_skill_id"),
             "selected_model_id": data.get("selected_model_id"),
             "thinking_enabled": data.get("thinking_enabled"),
+            "reasoning_effort": data.get("reasoning_effort"),
             "temperature": data.get("temperature"),
             "auto_select_tools": data.get("auto_select_tools", True),
             "cross_session_retrieval_enabled": data.get("cross_session_retrieval_enabled"),
@@ -3228,6 +3239,7 @@ async def upload_file(
             "auto_route_enabled": False,
             "auto_select_tools": True,
             "thinking_enabled": None,
+            "reasoning_effort": None,
             "temperature": None,
             "active_tool_ids": None,
             "created_at": now,
@@ -3258,6 +3270,7 @@ async def upload_file(
             selected_model_id=data.get("selected_model_id"),
             active_tool_ids=data.get("active_tool_ids"),
             thinking_enabled=data.get("thinking_enabled"),
+            reasoning_effort=data.get("reasoning_effort"),
             temperature=data.get("temperature"),
             auto_route_enabled=data.get("auto_route_enabled", False),
             auto_select_tools=data.get("auto_select_tools", True),

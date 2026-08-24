@@ -418,6 +418,19 @@ describe("ChatWindow — reasoning effort dropdown (Issue #506)", () => {
     expect(screen.getByText("Default (High)")).toBeInTheDocument();
   });
 
+  it("shows the reasoning dropdown in pending mode once a thinking model is selected", async () => {
+    // New (pending) chat with exactly one thinking model → auto-select picks it.
+    renderChatWindow({
+      isPending: true,
+      sessionId: "test-new-pending",
+      selectedModelId: undefined,
+    });
+    await settle();
+    // The reasoning dropdown (with its resolved default label) should render
+    // even before the session exists on the backend.
+    expect(screen.getByText("Default (High)")).toBeInTheDocument();
+  });
+
   it("maps 'Low' to { thinking_enabled:true, reasoning_effort:'low' }", async () => {
     const user = userEvent.setup();
     renderThinkingChat();

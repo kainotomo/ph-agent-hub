@@ -553,9 +553,11 @@ export const ChatWindow = React.memo(function ChatWindow({
     queryFn: () => api<ModelInfo[]>("/models"),
     enabled: !demo,
   });
+  const effectiveModelId =
+    pendingFlag ? (pendModelId ?? undefined) : (selectedModelId ?? undefined);
   const selectedModel = useMemo(
-    () => (modelList || []).find((m) => m.id === selectedModelId),
-    [modelList, selectedModelId],
+    () => (modelList || []).find((m) => m.id === effectiveModelId),
+    [modelList, effectiveModelId],
   );
   const modelSupportsThinking = selectedModel?.thinking_enabled === true;
 

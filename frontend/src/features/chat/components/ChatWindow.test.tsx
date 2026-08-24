@@ -410,6 +410,14 @@ describe("ChatWindow — reasoning effort dropdown (Issue #506)", () => {
     expect(screen.getAllByRole("combobox").length).toBeGreaterThanOrEqual(1);
   });
 
+  it("labels the Default option with the resolved model default", async () => {
+    renderThinkingChat();
+    await settle();
+    // THINKING_MODEL is DeepSeek with thinking on and no explicit effort, so the
+    // resolved default is "high" → the "Default" option reads "Default (High)".
+    expect(screen.getByText("Default (High)")).toBeInTheDocument();
+  });
+
   it("maps 'Low' to { thinking_enabled:true, reasoning_effort:'low' }", async () => {
     const user = userEvent.setup();
     renderThinkingChat();
@@ -450,7 +458,8 @@ describe("ChatWindow — reasoning effort dropdown (Issue #506)", () => {
     onSessionUpdate.mockClear();
 
     // Now returning to "Default" resets both fields to null → use admin default.
-    await selectReasoningOption(user, "Default");
+    // The label shows the resolved model default ("High" for this DeepSeek model).
+    await selectReasoningOption(user, "Default (High)");
     await settle();
 
     expect(onSessionUpdate).toHaveBeenCalledWith(

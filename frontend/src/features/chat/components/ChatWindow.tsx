@@ -52,16 +52,6 @@ const { TextArea } = Input;
 const { Text } = Typography;
 const { useBreakpoint } = Grid;
 
-// Reasoning-effort selector (DeepSeek thinking mode, Issue #506).
-// "default" = use the model/admin default; "none" = thinking disabled.
-const REASONING_EFFORT_OPTIONS = [
-  { label: "Default", value: "default" },
-  { label: "None", value: "none" },
-  { label: "Low", value: "low" },
-  { label: "High", value: "high" },
-  { label: "Max", value: "max" },
-];
-
 // ---------------------------------------------------------------------------
 // Draft persistence helpers
 // ---------------------------------------------------------------------------
@@ -554,6 +544,7 @@ export const ChatWindow = React.memo(function ChatWindow({
     id: string;
     name: string;
     thinking_enabled: boolean;
+    reasoning_effort?: string | null;
     provider: string;
     context_length?: number | null;
   }
@@ -572,6 +563,39 @@ export const ChatWindow = React.memo(function ChatWindow({
   // other than "none"). Disable the slider and hint so users aren't misled.
   const temperatureDisabled =
     modelSupportsThinking && reasoningEffortValue !== "none";
+
+  // Resolve the selected model's effective default reasoning effort so the
+  // "Default" dropdown option can show what it actually means (Issue #506).
+  const resolvedDefaultEffort = useMemo(() => {
+    if (!selectedModel) return null;
+    if (selectedModel.thinking_enabled === false) return "none";
+    if (selectedModel.reasoning_effort) {
+      const v = selectedModel.reasoning_effort;
+      // Collapse legacy aliases (DeepSeek maps medium/xhigh → high).
+      return v === "medium" || v === "xhigh" ? "high" : v;
+    }
+    // DeepSeek thinking defaults to "high" when the model leaves it unset.
+    if (selectedModel.provider === "deepseek") return "high";
+    return null;
+  }, [selectedModel]);
+
+  const defaultEffortLabel =
+    resolvedDefaultEffort === "none"
+      ? "Default (None)"
+      : resolvedDefaultEffort
+        ? `Default (${resolvedDefaultEffort.charAt(0).toUpperCase()}${resolvedDefaultEffort.slice(1)})`
+        : "Default";
+
+  const reasoningEffortOptions = useMemo(
+    () => [
+      { label: defaultEffortLabel, value: "default" },
+      { label: "None", value: "none" },
+      { label: "Low", value: "low" },
+      { label: "High", value: "high" },
+      { label: "Max", value: "max" },
+    ],
+    [defaultEffortLabel],
+  );
 
   // Auto-select a model for pending sessions (no backend session to provide
   // a default yet — mirrors backend create_session logic).
@@ -1556,6 +1580,17 @@ export const ChatWindow = React.memo(function ChatWindow({
             }
             onChange={handleModelChange}
           />
+          {modelSupportsThinking && (
+            <Select
+              size="small"
+              style={{ minWidth: 110 }}
+              value={reasoningEffortValue}
+              options={reasoningEffortOptions}
+              onChange={handleReasoningEffortChange}
+              placeholder="Reasoning"
+              title="Reasoning effort (thinking mode)"
+            />
+          )}
           <TemplateSelector
             value={pendingFlag ? pendTemplateId : selectedTemplateId}
             onChange={(id) => handleSettingsUpdate({ selected_template_id: id ?? null })}
@@ -1583,17 +1618,6 @@ export const ChatWindow = React.memo(function ChatWindow({
               handleSettingsUpdate({ cross_session_retrieval_enabled: v });
             }}
           />
-          {modelSupportsThinking && (
-            <Select
-              size="small"
-              style={{ minWidth: 110 }}
-              value={reasoningEffortValue}
-              options={REASONING_EFFORT_OPTIONS}
-              onChange={handleReasoningEffortChange}
-              placeholder="Reasoning"
-              title="Reasoning effort (thinking mode)"
-            />
-          )}
           <div style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 120 }}>
             <Tooltip
               title={temperatureDisabled ? "Temperature is ignored while thinking mode is on (DeepSeek)." : undefined}
@@ -1633,6 +1657,16 @@ export const ChatWindow = React.memo(function ChatWindow({
             }
             onChange={handleModelChange}
           />
+          {modelSupportsThinking && (
+            <Select
+              style={{ width: "100%" }}
+              value={reasoningEffortValue}
+              options={reasoningEffortOptions}
+              onChange={handleReasoningEffortChange}
+              placeholder="Reasoning effort (thinking mode)"
+              title="Reasoning effort — controls thinking depth. None disables thinking mode."
+            />
+          )}
           <TemplateSelector
             value={pendingFlag ? pendTemplateId : selectedTemplateId}
             onChange={(id) => handleSettingsUpdate({ selected_template_id: id ?? null })}
@@ -1662,16 +1696,6 @@ export const ChatWindow = React.memo(function ChatWindow({
           >
             Tools
           </Button>
-          {modelSupportsThinking && (
-            <Select
-              style={{ width: "100%" }}
-              value={reasoningEffortValue}
-              options={REASONING_EFFORT_OPTIONS}
-              onChange={handleReasoningEffortChange}
-              placeholder="Reasoning effort (thinking mode)"
-              title="Reasoning effort — controls thinking depth. None disables thinking mode."
-            />
-          )}
           <Switch
             size="small"
             checked={localCrossSessionMemory ?? false}

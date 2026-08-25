@@ -16,6 +16,7 @@ from unittest.mock import patch
 import pytest
 
 from src.db.orm.models import Model
+from src.models.customendpoint import build_custom_endpoint_client
 from src.models.ollama import build_ollama_client
 
 
@@ -79,3 +80,35 @@ def test_build_ollama_client_normalizes_base_url():
             assert kwargs["base_url"] == expected, (
                 f"for {given!r} expected {expected!r}, got {kwargs.get('base_url')!r}"
             )
+
+
+@pytest.mark.unit
+def test_build_custom_endpoint_client_uses_full_chat_completion_url():
+    """Custom endpoint URLs can point directly at /v1/chat/completions without double-appending."""
+    model = _make_model(
+        provider="customendpoint",
+        api_key="freetoken",
+        base_url="http://127.0.0.1:1919/v1/chat/completions",
+    )
+
+    with patch("openai.AsyncOpenAI") as mock_async_openai:
+        client = build_custom_endpoint_client(model)
+
+    assert client is not None
+    kwargs = mock_async_openai.call_args.kwargs
+    assert kwargs["base_url"] == "http://127.0.0.1:1919/v1"
+    assert kwargs["api_key"] == "freetoken"
+    assert kwargs["max_retries"] == 2
+
+
+@pytest.mark.unit
+def test_build_custom_endpoint_client_defaults_placeholders_and_requires_url():
+    """The custom endpoint provider must keep a non-empty placeholder key and reject empty URLs."""
+    with patch("openai.AsyncOpenAI") as mock_async_openai:
+        model = _make_model(provider="customendpoint", api_key="", base_url="http://127.0.0.1:1919/v1/chat/completions")
+        build_custom_endpoint_client(model)
+    assert mock_async_openai.call_args.kwargs["api_key"] == "customendpoint"
+
+    bad = _make_model(provider="customendpoint", api_key="freetoken", base_url="")
+    with pytest.raises(ValueError, match="base_url.*customendpoint|customendpoint.*base_url"):
+        build_custom_endpoint_client(bad)

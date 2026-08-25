@@ -261,6 +261,8 @@ export function ModelList() {
             { label: "OpenAI", value: "openai" },
             { label: "Anthropic", value: "anthropic" },
             { label: "DeepSeek", value: "deepseek" },
+            { label: "Ollama", value: "ollama" },
+            { label: "Custom Endpoint", value: "customendpoint" },
           ]}
         />
         <Select

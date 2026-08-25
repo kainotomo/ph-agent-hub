@@ -5,7 +5,7 @@
 from sqlalchemy import select, update, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..core.exceptions import NotFoundError
+from ..core.exceptions import NotFoundError, ValidationError
 from ..db.orm.models import Model
 from ..db.orm.groups import ModelGroup, UserGroupMember
 from ..db.orm.sessions import Session
@@ -111,9 +111,20 @@ async def create_model(
     For Ollama models, api_key is auto-filled with "ollama" when empty
     (Ollama does not require authentication but the column is non-nullable).
     """
-    # Auto-fill api_key for Ollama (no auth required)
-    if provider.lower() == "ollama" and not api_key:
+    provider_name = (provider or "").strip().lower()
+
+    # Auto-fill API key for local/placeholder providers.
+    if provider_name == "ollama" and not api_key:
         api_key = "ollama"
+    elif provider_name in {"customendpoint", "custom_endpoint", "custom-endpoint"} and not api_key:
+        api_key = "customendpoint"
+    elif provider_name in {"customendpoint", "custom_endpoint", "custom-endpoint"} and not api_key.strip():
+        api_key = "customendpoint"
+
+    if provider_name in {"customendpoint", "custom_endpoint", "custom-endpoint"} and not (base_url or "").strip():
+        raise ValidationError(
+            "Custom endpoint provider requires a base_url like 'http://127.0.0.1:1919/v1/chat/completions'"
+        )
 
     model = Model(
         tenant_id=tenant_id,
@@ -154,8 +165,18 @@ async def update_model(db: AsyncSession, model_id: str, **fields) -> Model:
     # Determine effective provider: use the incoming value if provided,
     # otherwise fall back to the current provider from DB.
     provider = fields.get("provider", model.provider)
-    if "api_key" in fields and not fields["api_key"] and provider.lower() == "ollama":
+    provider_name = (provider or "").strip().lower()
+
+    if "api_key" in fields and not fields["api_key"] and provider_name == "ollama":
         fields["api_key"] = "ollama"
+    if "api_key" in fields and not fields["api_key"] and provider_name in {"customendpoint", "custom_endpoint", "custom-endpoint"}:
+        fields["api_key"] = "customendpoint"
+    if provider_name in {"customendpoint", "custom_endpoint", "custom-endpoint"}:
+        base_url = fields.get("base_url", model.base_url)
+        if not (base_url or "").strip():
+            raise ValidationError(
+                "Custom endpoint provider requires a base_url like 'http://127.0.0.1:1919/v1/chat/completions'"
+            )
 
     for key, value in fields.items():
         if hasattr(model, key):

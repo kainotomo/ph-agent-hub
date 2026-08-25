@@ -289,9 +289,9 @@ Models are configured per tenant. Each model row represents an AI provider + API
 | Field | Description |
 |---|---|
 | **Name** | Display name, e.g. "DeepSeek R1" |
-| **Provider** | `deepseek`, `openai`, or `anthropic` |
-| **API Key** | Provider API key — **encrypted at rest** (Fernet). Never appears in API responses. |
-| **Base URL** | Optional. Custom endpoint for self-hosted or proxied models. |
+| **Provider** | `deepseek`, `openai`, `anthropic`, `ollama`, or `customendpoint` |
+| **API Key** | Provider API key — **encrypted at rest** (Fernet). Never appears in API responses. For custom endpoints, a placeholder such as `freetoken` is accepted when the endpoint is local or unauthenticated. |
+| **Base URL** | Optional for most providers. For `customendpoint`, use the full chat-completions URL, e.g. `http://host.docker.internal:1919/v1/chat/completions` (or the Linux host IP / gateway address if running in Docker). Do not use `127.0.0.1` when the backend runs inside Docker, because that points at the container instead of the host machine. The client normalizes it to the OpenAI-compatible base path automatically. |
 | **Enabled** | Toggle on to make available to users |
 | **Max Tokens** | Maximum output tokens per response |
 | **Temperature** | 0.0–2.0. Lower = more deterministic. |

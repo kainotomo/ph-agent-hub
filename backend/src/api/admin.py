@@ -9,7 +9,7 @@ from typing import Literal
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -273,6 +273,26 @@ class ModelCreate(BaseModel):
     output_price_per_1m: float | None = None
     cache_hit_price_per_1m: float | None = None
 
+    @field_validator("provider")
+    @classmethod
+    def normalize_provider(cls, value: str) -> str:
+        return value.strip().lower()
+
+    @field_validator("api_key")
+    @classmethod
+    def normalize_api_key(cls, value: str) -> str:
+        return value.strip() if value is not None else value
+
+    @model_validator(mode="after")
+    def validate_provider_fields(self):
+        provider = (self.provider or "").strip().lower()
+        if provider in {"customendpoint", "custom_endpoint", "custom-endpoint"}:
+            if not (self.base_url or "").strip():
+                raise ValueError("Custom endpoint provider requires a base_url like 'http://127.0.0.1:1919/v1/chat/completions'")
+            if not self.api_key or not self.api_key.strip():
+                self.api_key = "customendpoint"
+        return self
+
 
 class ModelUpdate(BaseModel):
     tenant_id: str | None = None  # admin only
@@ -293,6 +313,30 @@ class ModelUpdate(BaseModel):
     input_price_per_1m: float | None = None
     output_price_per_1m: float | None = None
     cache_hit_price_per_1m: float | None = None
+
+    @field_validator("provider")
+    @classmethod
+    def normalize_provider(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return value.strip().lower()
+
+    @field_validator("api_key")
+    @classmethod
+    def normalize_api_key(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return value.strip()
+
+    @model_validator(mode="after")
+    def validate_provider_fields(self):
+        provider = (self.provider or "").strip().lower()
+        if provider in {"customendpoint", "custom_endpoint", "custom-endpoint"}:
+            if not (self.base_url or "").strip():
+                raise ValueError("Custom endpoint provider requires a base_url like 'http://127.0.0.1:1919/v1/chat/completions'")
+            if self.api_key is not None and not self.api_key.strip():
+                self.api_key = "customendpoint"
+        return self
 
 
 class ModelResponse(BaseModel):

@@ -89,7 +89,7 @@ Administrators configure models per tenant.
 - tenant_id (UUID, FK → tenants.id)
 - name (string) — e.g., "deepseek-r1"
 - model_id (string) — provider's model identifier, e.g., "deepseek-reasoner"
-- provider (string) — e.g., "deepseek", "openai", "anthropic"
+- provider (string) — e.g., "deepseek", "openai", "anthropic", "ollama", "customendpoint"
 - api_key (string) — stored encrypted using Fernet symmetric encryption; decrypted in memory at runtime by `/backend/src/core/encryption.py`
 - base_url (string, nullable)
 - enabled (boolean)

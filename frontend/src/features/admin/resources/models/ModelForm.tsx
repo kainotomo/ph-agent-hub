@@ -253,6 +253,7 @@ export function ModelForm({ open, model, duplicateFrom, onClose }: ModelFormProp
               { label: "Anthropic", value: "anthropic" },
               { label: "DeepSeek", value: "deepseek" },
               { label: "Ollama", value: "ollama" },
+              { label: "Custom Endpoint", value: "customendpoint" },
             ]}
           />
         </Form.Item>
@@ -260,23 +261,38 @@ export function ModelForm({ open, model, duplicateFrom, onClose }: ModelFormProp
           {() => {
             const provider = form.getFieldValue("provider");
             const isOllama = provider === "ollama";
+            const isCustomEndpoint = provider === "customendpoint";
             return (
-              <Form.Item name="api_key" label={isOllama ? "API Key (optional)" : "API Key"}>
+              <Form.Item
+                name="api_key"
+                label={isOllama ? "API Key (optional)" : isCustomEndpoint ? "API Key (placeholder accepted)" : "API Key"}
+                extra={
+                  isCustomEndpoint
+                    ? "Use a placeholder such as 'freetoken' when the endpoint is local or unauthenticated."
+                    : undefined
+                }
+              >
                 <Input.Password
                   placeholder={
                     isOllama
                       ? "Not required for local models"
-                      : isEdit
-                        ? "Leave blank to keep current"
-                        : "Enter API key"
+                      : isCustomEndpoint
+                        ? "Enter a placeholder key, e.g. freetoken"
+                        : isEdit
+                          ? "Leave blank to keep current"
+                          : "Enter API key"
                   }
                 />
               </Form.Item>
             );
           }}
         </Form.Item>
-        <Form.Item name="base_url" label="Base URL">
-          <Input placeholder="e.g., https://api.openai.com/v1" />
+        <Form.Item
+          name="base_url"
+          label="Base URL"
+          tooltip="For custom endpoints, provide the full chat completions URL. If PH Agent Hub is running in Docker, use the host gateway (for example http://host.docker.internal:1919/v1/chat/completions or the Linux host IP) instead of 127.0.0.1, because 127.0.0.1 points to the backend container itself."
+        >
+          <Input placeholder="e.g., https://api.openai.com/v1 or http://host.docker.internal:1919/v1/chat/completions" />
         </Form.Item>
         <Form.Item name="max_tokens" label="Max Tokens">
           <InputNumber min={1} style={{ width: "100%" }} />

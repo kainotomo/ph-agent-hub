@@ -1,7 +1,8 @@
 # =============================================================================
 # PH Agent Hub — CI Pipeline
 # =============================================================================
-# Runs on pull requests to main. Validates backend tests and frontend build.
+# Manually triggered only (does NOT run automatically on push or PR).
+# Use the "Run workflow" button in the Actions tab to trigger it on demand.
 #
 # Backend requires:
 #   - MariaDB (service container) for ORM-based integration tests
@@ -17,8 +18,7 @@
 name: CI
 
 on:
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 env:
   # ── Database (simple test values — not production secrets) ───────────────
@@ -258,13 +258,12 @@ jobs:
         working-directory: frontend
 
   # ──────────────────────────────────────────────────────────────────────────
-  # E2E Tests (Tier 3) — runs on merge to main only
+  # E2E Tests (Tier 3) — included in manual workflow run
   # Requires full Docker Compose stack (MariaDB + Redis + MinIO)
   # ──────────────────────────────────────────────────────────────────────────
   e2e-tests:
     name: E2E Tests
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     services:
       mariadb:

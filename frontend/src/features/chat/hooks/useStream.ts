@@ -148,6 +148,14 @@ export interface HeartbeatEvent {
   data: Record<string, never>;
 }
 
+export interface StreamStartEvent {
+  event: "stream_start";
+  data: {
+    session_id: string;
+    message_id: string;
+  };
+}
+
 // ---- Autopilot events (Issue #446) ---------------------------------------
 
 export interface AutopilotTurnStartEvent {
@@ -222,6 +230,7 @@ export type StreamEvent =
   | FollowUpQuestionsEvent
   | SummarizedEvent
   | TagsUpdatedEvent
+  | StreamStartEvent
   | AutopilotTurnStartEvent
   | AutopilotTurnCompleteEvent
   | AutopilotCompleteEvent
@@ -285,7 +294,8 @@ export function useStream(apiPrefix: string = "chat") {
         onReasoningToken?: (delta: string, messageId: string) => void;
         onFollowUpQuestions?: (questions: string[]) => void;
         onSummarized?: (data: SummarizedEvent["data"]) => void;
-        onTagsUpdated?: (data: TagsUpdatedEvent["data"]) => void;
+        onTagsUpdated?: (data?: TagsUpdatedEvent["data"]) => void;
+        onStreamStart?: () => void;
         onAutopilotTurnStart?: (data: AutopilotTurnStartEvent["data"]) => void;
         onAutopilotTurnComplete?: (data: AutopilotTurnCompleteEvent["data"]) => void;
         onAutopilotComplete?: (data: AutopilotCompleteEvent["data"]) => void;
@@ -295,9 +305,6 @@ export function useStream(apiPrefix: string = "chat") {
         onProgress?: (data: ProgressEvent["data"]) => void;
         onError?: (error: string, messageId: string) => void;
         onClose?: () => void;
-        /** Fires inside the SSE onopen handler — the backend has confirmed
-         *  the session exists and processing has started. */
-        onStreamStart?: () => void;
       },
       autopilot?: boolean,
       background?: boolean,
@@ -307,6 +314,7 @@ export function useStream(apiPrefix: string = "chat") {
       setStreaming(true);
       setStreamingSessionId(sessionId);
       addStreamingSession(sessionId);
+      handlers.onStreamStart?.();
 
       const token = getToken();
 
@@ -582,7 +590,8 @@ export function useStream(apiPrefix: string = "chat") {
         onReasoningToken?: (delta: string, messageId: string) => void;
         onFollowUpQuestions?: (questions: string[]) => void;
         onSummarized?: (data: SummarizedEvent["data"]) => void;
-        onTagsUpdated?: (data: TagsUpdatedEvent["data"]) => void;
+        onTagsUpdated?: (data?: TagsUpdatedEvent["data"]) => void;
+        onStreamStart?: () => void;
         onAutopilotTurnStart?: (data: AutopilotTurnStartEvent["data"]) => void;
         onAutopilotTurnComplete?: (data: AutopilotTurnCompleteEvent["data"]) => void;
         onAutopilotComplete?: (data: AutopilotCompleteEvent["data"]) => void;
@@ -785,14 +794,18 @@ export function useStream(apiPrefix: string = "chat") {
         onReasoningToken?: (delta: string, messageId: string) => void;
         onFollowUpQuestions?: (questions: string[]) => void;
         onSummarized?: (data: SummarizedEvent["data"]) => void;
-        onTagsUpdated?: (data: TagsUpdatedEvent["data"]) => void;
+        onTagsUpdated?: (data?: TagsUpdatedEvent["data"]) => void;
+        onStreamStart?: () => void;
         onAutopilotTurnStart?: (data: AutopilotTurnStartEvent["data"]) => void;
         onAutopilotTurnComplete?: (data: AutopilotTurnCompleteEvent["data"]) => void;
         onAutopilotComplete?: (data: AutopilotCompleteEvent["data"]) => void;
         onAutopilotMaxTurns?: (data: AutopilotMaxTurnsEvent["data"]) => void;
+        onAutopilotPause?: (data: AutopilotPauseEvent["data"]) => void;
+        onAutopilotResume?: (data: AutopilotResumeEvent["data"]) => void;
+        onProgress?: (data: ProgressEvent["data"]) => void;
         onError?: (error: string, messageId: string) => void;
         onClose?: () => void;
-      },
+      } | undefined,
     ) => {
       const controller = new AbortController();
       abortRef.current = controller;
@@ -821,6 +834,143 @@ export function useStream(apiPrefix: string = "chat") {
                   .get("content-type")
                   ?.includes(EventStreamContentType)
               ) {
+                return;
+              }
+            },
+            onmessage(ev) {
+              try {
+                const parsed = JSON.parse(ev.data);
+                switch (ev.event) {
+                  case "token":
+                    if (handlers) handlers.onToken?.(parsed.delta, parsed.message_id);
+                    break;
+                  case "tool_start":
+                    if (handlers) handlers.onToolStart?.(parsed);
+                    break;
+                  case "tool_result":
+                    if (handlers) handlers.onToolResult?.(parsed);
+                    break;
+                  case "memory_updated":
+                    if (handlers) handlers.onMemoryUpdated?.(parsed);
+                    break;
+                  case "step_complete":
+                    if (handlers) handlers.onStepComplete?.(parsed);
+                    break;
+                  case "message_complete":
+                    if (handlers) handlers.onMessageComplete?.(parsed);
+                    break;
+                  case "reasoning_token":
+                    if (handlers) handlers.onReasoningToken?.(parsed.delta, parsed.message_id);
+                    break;
+                  case "follow_up_questions":
+                    if (handlers) handlers.onFollowUpQuestions?.(parsed.questions || []);
+                    break;
+                  case "summarized":
+                    if (handlers) handlers.onSummarized?.(parsed);
+                    break;
+                  case "tags_updated":
+                    if (handlers) handlers.onTagsUpdated?.(parsed);
+                    break;
+                  case "error":
+                    if (handlers) handlers.onError?.(parsed.message || parsed.error || "Unknown error", parsed.message_id);
+                    break;
+                  case "heartbeat":
+                    break;
+                }
+              } catch {
+                // Ignore parse errors on individual events
+              }
+            },
+            onclose() {
+              if (!controller.signal.aborted) {
+                removeStreamingSession(sessionId);
+              }
+              setStreaming(false);
+              setStreamingSessionId(null);
+              if (handlers) handlers.onClose?.();
+            },
+            onerror(_err) {
+              if (controller.signal.aborted) {
+                setStreaming(false);
+                setStreamingSessionId(null);
+                if (handlers) handlers.onClose?.();
+                return;
+              }
+              removeStreamingSession(sessionId);
+              setStreaming(false);
+              setStreamingSessionId(null);
+              if (handlers) handlers.onClose?.();
+              // Don't throw — prevents fetchEventSource retry loop.
+            },
+          },
+        );
+      } catch (err) {
+        if (!controller.signal.aborted) {
+          if (handlers) handlers.onError?.(String(err), "");
+          removeStreamingSession(sessionId);
+        }
+        setStreaming(false);
+        setStreamingSessionId(null);
+      }
+    },
+    [],
+  );
+
+  const startEditStream = useCallback(
+    async (
+      sessionId: string,
+      messageId: string,
+      content: string,
+      temperature: number | undefined,
+      handlers: {
+        onToken?: (token: string, messageId: string) => void;
+        onToolStart?: (data: ToolStartEvent["data"]) => void;
+        onToolResult?: (data: ToolResultEvent["data"]) => void;
+        onMemoryUpdated?: (data: MemoryUpdatedEvent["data"]) => void;
+        onStepComplete?: (data: StepCompleteEvent["data"]) => void;
+        onMessageComplete?: (data: MessageCompleteEvent["data"]) => void;
+        onReasoningToken?: (delta: string, messageId: string) => void;
+        onFollowUpQuestions?: (questions: string[]) => void;
+        onSummarized?: (data: SummarizedEvent["data"]) => void;
+        onTagsUpdated?: (data?: TagsUpdatedEvent["data"]) => void;
+        onStreamStart?: () => void;
+        onError?: (error: string, messageId: string) => void;
+        onClose?: () => void;
+      },
+    ) => {
+      const controller = new AbortController();
+      abortRef.current = controller;
+      setStreaming(true);
+      setStreamingSessionId(sessionId);
+      addStreamingSession(sessionId);
+
+      const token = getToken();
+
+      try {
+        await fetchEventSource(
+          `${BASE_URL}/chat/session/${sessionId}/message/${messageId}`,
+          {
+            method: "PUT",
+            headers: {
+              "Content-Type": "application/json",
+              Accept: "text/event-stream",
+              ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            body: JSON.stringify({
+              content,
+              ...(temperature !== undefined ? { temperature } : {}),
+            }),
+            openWhenHidden: true,
+            signal: controller.signal,
+            async onopen(response) {
+              if (
+                response.ok &&
+                response.headers
+                  .get("content-type")
+                  ?.includes(EventStreamContentType)
+              ) {
+                // Backend confirmed edit — start the duration timer.
+                handlers.onStreamStart?.();
                 return;
               }
             },
@@ -874,156 +1024,26 @@ export function useStream(apiPrefix: string = "chat") {
               }
               setStreaming(false);
               setStreamingSessionId(null);
-              handlers.onClose?.();
+              if (handlers) handlers.onClose?.();
             },
             onerror(_err) {
               if (controller.signal.aborted) {
                 setStreaming(false);
                 setStreamingSessionId(null);
-                handlers.onClose?.();
+                if (handlers) handlers.onClose?.();
                 return;
               }
               removeStreamingSession(sessionId);
               setStreaming(false);
               setStreamingSessionId(null);
-              handlers.onClose?.();
+              if (handlers) handlers.onClose?.();
               // Don't throw — prevents fetchEventSource retry loop.
             },
           },
         );
       } catch (err) {
         if (!controller.signal.aborted) {
-          handlers.onError?.(String(err), "");
-          removeStreamingSession(sessionId);
-        }
-        setStreaming(false);
-        setStreamingSessionId(null);
-      }
-    },
-    [],
-  );
-
-  const startEditStream = useCallback(
-    async (
-      sessionId: string,
-      messageId: string,
-      content: string,
-      temperature: number | undefined,
-      handlers: {
-        onToken?: (token: string, messageId: string) => void;
-        onToolStart?: (data: ToolStartEvent["data"]) => void;
-        onToolResult?: (data: ToolResultEvent["data"]) => void;
-        onMemoryUpdated?: (data: MemoryUpdatedEvent["data"]) => void;
-        onStepComplete?: (data: StepCompleteEvent["data"]) => void;
-        onMessageComplete?: (data: MessageCompleteEvent["data"]) => void;
-        onReasoningToken?: (delta: string, messageId: string) => void;
-        onFollowUpQuestions?: (questions: string[]) => void;
-        onSummarized?: (data: SummarizedEvent["data"]) => void;
-        onError?: (error: string, messageId: string) => void;
-        onClose?: () => void;
-      },
-    ) => {
-      const controller = new AbortController();
-      abortRef.current = controller;
-      setStreaming(true);
-      setStreamingSessionId(sessionId);
-      addStreamingSession(sessionId);
-
-      const token = getToken();
-
-      try {
-        await fetchEventSource(
-          `${BASE_URL}/chat/session/${sessionId}/message/${messageId}`,
-          {
-            method: "PUT",
-            headers: {
-              "Content-Type": "application/json",
-              Accept: "text/event-stream",
-              ...(token ? { Authorization: `Bearer ${token}` } : {}),
-            },
-            body: JSON.stringify({
-              content,
-              ...(temperature !== undefined ? { temperature } : {}),
-            }),
-            openWhenHidden: true,
-            signal: controller.signal,
-            async onopen(response) {
-              if (
-                response.ok &&
-                response.headers
-                  .get("content-type")
-                  ?.includes(EventStreamContentType)
-              ) {
-                return;
-              }
-            },
-            onmessage(ev) {
-              try {
-                const parsed = JSON.parse(ev.data);
-                switch (ev.event) {
-                  case "token":
-                    handlers.onToken?.(parsed.delta, parsed.message_id);
-                    break;
-                  case "tool_start":
-                    handlers.onToolStart?.(parsed);
-                    break;
-                  case "tool_result":
-                    handlers.onToolResult?.(parsed);
-                    break;
-                  case "memory_updated":
-                    handlers.onMemoryUpdated?.(parsed);
-                    break;
-                  case "step_complete":
-                    handlers.onStepComplete?.(parsed);
-                    break;
-                  case "message_complete":
-                    handlers.onMessageComplete?.(parsed);
-                    break;
-                  case "reasoning_token":
-                    handlers.onReasoningToken?.(parsed.delta, parsed.message_id);
-                    break;
-                  case "follow_up_questions":
-                    handlers.onFollowUpQuestions?.(parsed.questions || []);
-                    break;
-                  case "summarized":
-                    handlers.onSummarized?.(parsed);
-                    break;
-                  case "error":
-                    handlers.onError?.(parsed.message || parsed.error || "Unknown error", parsed.message_id);
-                    break;
-                  case "heartbeat":
-                    break;
-                }
-              } catch {
-                // Ignore parse errors on individual events
-              }
-            },
-            onclose() {
-              if (!controller.signal.aborted) {
-                removeStreamingSession(sessionId);
-              }
-              setStreaming(false);
-              setStreamingSessionId(null);
-              handlers.onClose?.();
-            },
-            onerror(_err) {
-              if (controller.signal.aborted) {
-                setStreaming(false);
-                setStreamingSessionId(null);
-                handlers.onClose?.();
-                return;
-              }
-              removeStreamingSession(sessionId);
-              setStreaming(false);
-              setStreamingSessionId(null);
-              handlers.onClose?.();
-              // Don't throw — prevents fetchEventSource retry loop.
-            },
-          },
-        );
-      } catch (err) {
-        if (!controller.signal.aborted) {
-          handlers.onError?.(String(err), "");
+          handlers?.onError?.(String(err), "");
           removeStreamingSession(sessionId);
         }
         setStreaming(false);

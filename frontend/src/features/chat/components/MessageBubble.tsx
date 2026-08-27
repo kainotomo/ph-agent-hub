@@ -79,6 +79,8 @@ interface MessageBubbleProps {
   disabled?: boolean;
   regenerating?: boolean;
   streaming?: boolean;
+  /** Live elapsed duration for the currently streaming assistant message (ms since start). */
+  streamingDuration?: number | null;
 }
 
 // ── Lazy-loaded syntax highlighter ──────────────────────────────────────
@@ -135,6 +137,7 @@ function MessageBubbleInner({
   disabled,
   regenerating,
   streaming,
+  streamingDuration,
 }: MessageBubbleProps) {
   const isUser = message.sender === "user";
   const isSystem = message.sender === "system";
@@ -222,6 +225,13 @@ function MessageBubbleInner({
             <Text type="secondary" style={{ fontSize: 10, color: "#bbb" }}>
               · {message.model_name || message.model_id?.slice(0, 8)}
               {message.model_provider && ` (${message.model_provider})`}
+            </Text>
+          )}
+          {/* Live response timer — shown only while streaming and only for the active assistant message. */}
+          {streaming && streamingDuration !== null && streamingDuration !== undefined && streamingDuration > 0 && (
+            <Text type="secondary" style={{ fontSize: 10, color: "#bbb" }}>
+              · {Math.floor(streamingDuration / 1000).toString().padStart(2, "0")}:
+              {String(Math.floor((streamingDuration % 1000) / 10)).padStart(2, "0")}s
             </Text>
           )}
         </Space>

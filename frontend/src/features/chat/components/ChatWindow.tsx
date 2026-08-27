@@ -6,7 +6,7 @@
 // renders MessageBubble list.
 // =============================================================================
 
-import React, { useRef, useEffect, useState, useCallback, useMemo } from "react";
+import React, { useRef, useState, useCallback, useMemo, useEffect } from "react";
 import { Virtuoso, VirtuosoHandle } from "react-virtuoso";
 import { Button, Drawer, Grid, Input, Select, Slider, Space, Spin, Empty, Alert, Switch, Tag, Tooltip, Typography, Upload, message, notification } from "antd";
 import {
@@ -213,6 +213,20 @@ export const ChatWindow = React.memo(function ChatWindow({
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null);
   const [streamError, setStreamError] = useState<string | null>(null);
   const [streamingTokens, setStreamingTokens] = useState<{ tokens_in: number; tokens_out: number } | null>(null);
+  /** Live elapsed time for the currently streaming assistant response. */
+  const [streamingStart, setStreamingStart] = useState<number | null>(null);
+  const [streamingDuration, setStreamingDuration] = useState<number | null>(null);
+
+  // Lightweight elapsed-time updater that ticks while streaming.
+  // Clears itself when streaming stops, errors, or the stream resets.
+  useEffect(() => {
+    if (streamingStart === null) return;
+    const interval = setInterval(() => {
+      setStreamingDuration(Date.now() - streamingStart);
+    }, 250);
+    return () => clearInterval(interval);
+  }, [streamingStart]);
+
   const [thinkingEnabled, setThinkingEnabled] = useState<boolean | null>(null);
   const [reasoningEffort, setReasoningEffort] = useState<string | null>(
     reasoningEffortProp ?? null,
@@ -523,7 +537,7 @@ export const ChatWindow = React.memo(function ChatWindow({
 
   // Flatten pages into a single messages array for backward compatibility
   const messages: any[] = useMemo(
-    () => (messagesData?.pages ?? []).flatMap((p) => p.items),
+    () => (messagesData?.pages ?? []).flatMap((p: { items: any[] }) => p.items),
     [messagesData],
   );
 
@@ -1075,6 +1089,9 @@ export const ChatWindow = React.memo(function ChatWindow({
           setStreamingMessageId(null);
           setToolEvents([]);
           setStreamingTokens(null);
+          // Stop the live duration timer when the stream ends.
+          setStreamingStart(null);
+          setStreamingDuration(null);
           if (isAutopilot) {
             // Do NOT reset autopilotState to INITIAL here.  The individual
             // event handlers (onAutopilotPause, onAutopilotComplete,
@@ -1138,6 +1155,10 @@ export const ChatWindow = React.memo(function ChatWindow({
 
       startEditStream(sessionId, msgId, content, sessionTemperature ?? undefined, {
         ...buildStreamHandlers('edit'),
+        onStreamStart: () => {
+          // Start the live duration timer for edit mode.
+          setStreamingStart(Date.now());
+        },
         onMessageComplete(data) {
           // Don't clear editingMsgId here — the refetch hasn't completed yet.
           // It gets cleared by the useEffect below when messages update.
@@ -1229,6 +1250,8 @@ export const ChatWindow = React.memo(function ChatWindow({
             // Keep pendingUserMessage — it's the optimistic bubble shown
             // until message_complete clears it.  Clearing it here would
             // leave a brief gap before the DB refetch arrives.
+            // Start the live duration timer.
+            setStreamingStart(Date.now());
           },
         },
         true,
@@ -1254,6 +1277,8 @@ export const ChatWindow = React.memo(function ChatWindow({
             // Keep pendingUserMessage — it's the optimistic bubble shown
             // until message_complete clears it.  Clearing it here would
             // leave a brief gap before the DB refetch arrives.
+            // Start the live duration timer.
+            setStreamingStart(Date.now());
           },
         },
       );
@@ -1271,6 +1296,9 @@ export const ChatWindow = React.memo(function ChatWindow({
     setStreamingMessageId(null);
     setStreamingTokens(null);
     setToolEvents([]);
+    // Stop the live duration timer when the user manually stops.
+    setStreamingStart(null);
+    setStreamingDuration(null);
     // Track that this session was explicitly stopped so reconnecting
     // won't attempt to rejoin a cancelled agent (Issue #457).
     if (sessionId) {
@@ -1334,8 +1362,160 @@ export const ChatWindow = React.memo(function ChatWindow({
     setFollowUpQuestions([]);
     setStreamingTokens(null);
 
-    startRegenerateStream(sessionId, messageId, buildStreamHandlers('regenerate'));
-  }, [streaming, sessionId, startRegenerateStream, queryClient]);
+    // Build handlers for regenerate mode (without onTagsUpdated)
+    const regenerateHandlers: {
+      mode?: 'regenerate';
+      onToken?: (token: string, msgId: string) => void;
+      onReasoningToken?: (delta: string, msgId: string) => void;
+      onToolStart?: (data: Record<string, unknown>) => void;
+      onToolResult?: (data: Record<string, unknown>) => void;
+      onMemoryUpdated?: (data: { action: string; key: string | null; success: boolean; tool_name: string }) => void;
+      onStepComplete?: (data: { step_name: string; batch_id?: string; batch_size?: number }) => void;
+      onMessageComplete?: (data: { message_id: string; tokens_in?: number; tokens_out?: number }) => void;
+      onFollowUpQuestions?: (questions: string[]) => void;
+      onTagsUpdated?: () => void;
+      onStreamStart?: () => void;
+      onAutopilotTurnStart?: (data: { turn: number; max_turns: number }) => void;
+      onAutopilotTurnComplete?: (data: { turn: number; max_turns: number }) => void;
+      onAutopilotComplete?: (data: { summary: string; turn: number }) => void;
+      onAutopilotMaxTurns?: (data: { max_turns: number }) => void;
+      onAutopilotPause?: (data: { reason: string; turn: number }) => void;
+      onAutopilotResume?: (data: { turn: number; max_turns: number }) => void;
+      onProgress?: (data: { turn: number; max_turns: number; message: string }) => void;
+      onError?: (error: string) => void;
+      onClose?: () => void;
+    } = {
+      onToken: (token: string, msgId: string) => {
+        setStreamingMessageId((prev) => prev ?? msgId);
+        setStreamingContent((prev) => prev + token);
+      },
+      onReasoningToken: (delta: string, msgId: string) => {
+        setStreamingMessageId((prev) => prev ?? msgId);
+        setStreamingReasoningContent((prev) => prev + delta);
+      },
+      onToolStart: (data: Record<string, unknown>) => {
+        setToolEvents((prev) => [...prev, { type: "function_call", data }]);
+      },
+      onToolResult: (data: Record<string, unknown>) => {
+        setToolEvents((prev) => [...prev, { type: "function_result", data }]);
+      },
+      onMemoryUpdated: (data: { action: string; key: string | null; success: boolean; tool_name: string }) => {
+        queryClient.invalidateQueries({ queryKey: ["memory", sessionId] });
+        notification.info({
+          message: data.action === "saved" ? "Information saved" : "Memory deleted",
+          description: data.action === "saved"
+            ? "I'll remember this for next time."
+            : "Memory entry has been removed.",
+          placement: "bottomRight",
+          duration: 4,
+        });
+      },
+      onStepComplete: () => { /* No UI update needed */ },
+      onFollowUpQuestions: (questions: string[]) => {
+        setFollowUpQuestions(questions);
+      },
+      onStreamStart: () => {
+        // Start the live duration timer for regenerate mode.
+        setStreamingStart(Date.now());
+      },
+      onAutopilotTurnStart: (data: { turn: number; max_turns: number }) => {
+        setStreamingContent("");
+        setStreamingReasoningContent("");
+        setStreamingMessageId(null);
+        setToolEvents([]);
+        refetchLatestPage();
+        setAutopilotState((prev) => ({
+          ...prev,
+          currentTurn: data.turn,
+          maxTurns: data.max_turns,
+          status: "executing" as const,
+        }));
+        setIsAutopilotMode(true);
+      },
+      onAutopilotTurnComplete: (_data: { turn: number; max_turns: number }) => {
+        // Progress updated on next turn start; nothing extra needed.
+      },
+      onAutopilotComplete: (data: { summary: string; turn: number }) => {
+        setAutopilotState((prev) => ({
+          ...prev,
+          status: "complete" as const,
+          summary: data.summary,
+        }));
+        refetchLatestPage();
+        queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
+      },
+      onAutopilotMaxTurns: (_data: { max_turns: number }) => {
+        setAutopilotState((prev) => ({
+          ...prev,
+          status: "max_turns" as const,
+        }));
+        queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+        queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
+      },
+      onAutopilotPause: (data: { reason: string; turn: number }) => {
+        autopilotPausedRef.current = true;
+        setAutopilotState((prev) => ({
+          ...prev,
+          status: "paused" as const,
+          pauseReason: data.reason,
+          currentTurn: data.turn,
+        }));
+      },
+      onAutopilotResume: (data: { turn: number; max_turns: number }) => {
+        autopilotPausedRef.current = false;
+        setAutopilotState((prev) => ({
+          ...prev,
+          currentTurn: data.turn,
+          maxTurns: data.max_turns,
+          status: "executing" as const,
+        }));
+      },
+      onProgress: (data: { turn: number; max_turns: number; message: string }) => {
+        setAutopilotState((prev) => ({
+          ...prev,
+          currentTurn: data.turn,
+          maxTurns: data.max_turns,
+        }));
+      },
+      onMessageComplete: (data: { message_id: string; tokens_in?: number; tokens_out?: number }) => {
+        if (regeneratingMsgId === messageId) setRegeneratingMsgId(null);
+        setPendingUserMessage(null);
+        setToolEvents([]);
+        if (data.tokens_in || data.tokens_out) {
+          setStreamingTokens({
+            tokens_in: data.tokens_in || 0,
+            tokens_out: data.tokens_out || 0,
+          });
+        }
+        refetchLatestPage();
+        queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
+      },
+      onError: (err: string) => {
+        if (regeneratingMsgId === messageId) setRegeneratingMsgId(null);
+        setToolEvents([]);
+        setStreamError(err);
+        message.error(err || "Regenerate failed");
+      },
+      onClose: () => {
+        if (regeneratingMsgId === messageId) setRegeneratingMsgId(null);
+        setPendingUserMessage(null);
+        setStreamingContent("");
+        setStreamingReasoningContent("");
+        setStreamingMessageId(null);
+        setToolEvents([]);
+        setStreamingTokens(null);
+        setStreamingStart(null);
+        setStreamingDuration(null);
+        refetchLatestPage();
+        queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
+      },
+    };
+    startRegenerateStream(sessionId, messageId, regenerateHandlers);
+  }, [streaming, sessionId, startRegenerateStream, queryClient, regeneratingMsgId, refetchLatestPage]);
 
   // File upload handlers
   const handleFileUpload = useCallback(
@@ -1799,6 +1979,11 @@ export const ChatWindow = React.memo(function ChatWindow({
                 disabled={streaming}
                 regenerating={regeneratingMsgId === msg.id}
                 streaming={msg.id === streamingMessageId}
+                streamingDuration={
+                  msg.id === streamingMessageId && msg.sender === "assistant"
+                    ? streamingDuration
+                    : null
+                }
               />
             </div>
           )}

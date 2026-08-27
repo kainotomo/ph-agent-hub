@@ -21,7 +21,7 @@ import {
   ToolOutlined,
   DatabaseOutlined,
 } from "@ant-design/icons";
-import { useQuery, useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useInfiniteQuery, useQueryClient, type InfiniteData } from "@tanstack/react-query";
 import { MessageBubble } from "./MessageBubble";
 import { useStream } from "../hooks/useStream";
 import {
@@ -32,6 +32,7 @@ import {
   updateAssistantMessage,
   listAlwaysOnTools,
   getStreamStatus,
+  type PaginatedMessagesResponse,
 } from "../services/chat";
 import { AutopilotPanel, INITIAL_AUTOPILOT_STATE, type AutopilotState } from "./AutopilotPanel";
 import { getDemoMessages } from "../services/demo";
@@ -483,7 +484,13 @@ export const ChatWindow = React.memo(function ChatWindow({
     fetchNextPage,
     hasNextPage,
     isFetchingNextPage,
-  } = useInfiniteQuery({
+  } = useInfiniteQuery<
+    PaginatedMessagesResponse,
+    Error,
+    InfiniteData<PaginatedMessagesResponse, string | undefined>,
+    ["messages", string],
+    string | undefined
+  >({
     queryKey: ["messages", sessionId],
     enabled: !!sessionId && (!isPending || demo || widget),
     retry: false,
@@ -1928,7 +1935,7 @@ export const ChatWindow = React.memo(function ChatWindow({
           data={displayMessages}
           firstItemIndex={firstItemIndex}
           startReached={handleStartReached}
-          followOutput="smooth"
+          followOutput={streaming ? "smooth" : false}
           atBottomThreshold={80}
           atBottomStateChange={(atBottom) => setShowScrollButton(!atBottom)}
           style={{ height: "100%" }}

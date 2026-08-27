@@ -1676,6 +1676,16 @@ export const ChatWindow = React.memo(function ChatWindow({
     toolEvents,
   ]);
 
+  const latestUserMessageId = useMemo(() => {
+    const userMessages = (displayMessages || []).filter((m: any) => m.sender === "user" && !m.is_deleted);
+    return userMessages[userMessages.length - 1]?.id ?? null;
+  }, [displayMessages]);
+
+  const latestAssistantMessageId = useMemo(() => {
+    const assistantMessages = (displayMessages || []).filter((m: any) => m.sender === "assistant" && !m.is_deleted);
+    return assistantMessages[assistantMessages.length - 1]?.id ?? null;
+  }, [displayMessages]);
+
   return (
     <div
       style={{
@@ -1945,6 +1955,8 @@ export const ChatWindow = React.memo(function ChatWindow({
                 key={msg.id}
                 message={msg}
                 sessionId={sessionId}
+                isLatestUserMessage={msg.sender === "user" && msg.id === latestUserMessageId}
+                isLatestAssistantMessage={msg.sender === "assistant" && msg.id === latestAssistantMessageId}
                 showFeedback={!embedded && !demo}
                 onEdit={
                   msg.sender === "user" && !isTemporary

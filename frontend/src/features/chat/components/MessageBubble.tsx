@@ -33,6 +33,17 @@ import { getToken } from "../../../services/api";
 
 const { Text, Paragraph } = Typography;
 
+function textUtilsToString(items: ContentItem[]): string {
+  return items.map((item) => item.text || "").join("\n").trim();
+}
+
+function truncateMessagePreview(text: string): string {
+  const compact = text.replace(/\s+/g, " ").trim();
+  const maxChars = 700;
+  if (compact.length <= maxChars) return compact;
+  return `${compact.slice(0, maxChars).trimEnd()}…`;
+}
+
 // ---------------------------------------------------------------------------
 // Internal: parse content into displayable items
 // ---------------------------------------------------------------------------
@@ -79,6 +90,8 @@ interface MessageBubbleProps {
   disabled?: boolean;
   regenerating?: boolean;
   streaming?: boolean;
+  isLatestUserMessage?: boolean;
+  isLatestAssistantMessage?: boolean;
   /** Live elapsed duration for the currently streaming assistant message (ms since start). */
   streamingDuration?: number | null;
 }
@@ -137,14 +150,29 @@ function MessageBubbleInner({
   disabled,
   regenerating,
   streaming,
+  isLatestUserMessage = false,
+  isLatestAssistantMessage = false,
   streamingDuration,
 }: MessageBubbleProps) {
   const isUser = message.sender === "user";
   const isSystem = message.sender === "system";
   const contentItems = parseContent(message.content);
 
+  // Separate text, reasoning, and tool events
+  const textItems = contentItems.filter((c) => c.type === "text");
+  const reasoningItems = contentItems.filter((c) => c.type === "reasoning");
+  const toolItems = contentItems.filter(
+    (c) => c.type === "function_call" || c.type === "function_result",
+  );
+
+  const rawText = textUtilsToString(textItems);
+  const previewText = truncateMessagePreview(rawText);
+  const isLatestVisibleMessage = isUser ? isLatestUserMessage : !isSystem && isLatestAssistantMessage;
+  const shouldCollapseText = !isSystem && !isLatestVisibleMessage && rawText.length > 0 && (rawText.length > 700 || rawText.split(/\r?\n/).length > 8);
+
   // Inline editing state for assistant messages
   const [isEditingAssistant, setIsEditingAssistant] = useState(false);
+  const [isExpandedText, setIsExpandedText] = useState(false);
   const [editContent, setEditContent] = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
 
@@ -156,12 +184,9 @@ function MessageBubbleInner({
     }
   }, [message.id]);
 
-  // Separate text, reasoning, and tool events
-  const textItems = contentItems.filter((c) => c.type === "text");
-  const reasoningItems = contentItems.filter((c) => c.type === "reasoning");
-  const toolItems = contentItems.filter(
-    (c) => c.type === "function_call" || c.type === "function_result",
-  );
+  useEffect(() => {
+    setIsExpandedText(false);
+  }, [message.id]);
 
   const bubbleStyle: React.CSSProperties = {
     padding: "12px 16px",
@@ -328,49 +353,69 @@ function MessageBubbleInner({
             </Space>
           </div>
         ) : (
-          textItems.map((item, i) => (
-            <div key={i} style={isUser ? undefined : { maxWidth: 750 }}>
-              {isUser ? (
-                <Text style={{ color: "#fff", whiteSpace: "pre-wrap" }}>
-                  {item.text}
-                </Text>
-              ) : (
-                <div className="markdown-body" style={{ fontSize: 14 }}>
-                  <ReactMarkdown
-                    remarkPlugins={[remarkGfm]}
-                    components={{
-                      code({ className, children, ...props }) {
-                        const match = /language-(\w+)/.exec(
-                          className || "",
-                        );
-                        const codeStr = String(children).replace(
-                          /\n$/,
-                          "",
-                        );
-                        if (match) {
-                          return (
-                            <CodeBlock language={match[1]}>
-                              {codeStr}
-                            </CodeBlock>
-                          );
-                        }
-                        return (
-                          <code
-                            className={className}
-                            {...(props as Record<string, unknown>)}
-                          >
-                            {children}
-                          </code>
-                        );
-                      },
-                    }}
-                  >
-                    {item.text || ""}
-                  </ReactMarkdown>
-                </div>
-              )}
-            </div>
-          ))
+          <>
+            {textItems.length === 0 ? null : (
+              <div style={isUser ? undefined : { maxWidth: 750 }}>
+                {isUser ? (
+                  <Text style={{ color: "#fff", whiteSpace: "pre-wrap" }}>
+                    {shouldCollapseText && !isExpandedText ? previewText : textItems.map((item) => item.text || "").join("\n")}
+                  </Text>
+                ) : (
+                  <div className="markdown-body" style={{ fontSize: 14 }}>
+                    {shouldCollapseText && !isExpandedText ? (
+                      <Text style={{ whiteSpace: "pre-wrap", color: "#333" }}>
+                        {previewText}
+                      </Text>
+                    ) : (
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        components={{
+                          code({ className, children, ...props }) {
+                            const match = /language-(\w+)/.exec(
+                              className || "",
+                            );
+                            const codeStr = String(children).replace(
+                              /\n$/,
+                              "",
+                            );
+                            if (match) {
+                              return (
+                                <CodeBlock language={match[1]}>
+                                  {codeStr}
+                                </CodeBlock>
+                              );
+                            }
+                            return (
+                              <code
+                                className={className}
+                                {...(props as Record<string, unknown>)}
+                              >
+                                {children}
+                              </code>
+                            );
+                          },
+                        }}
+                      >
+                        {textItems.map((item) => item.text || "").join("\n")}
+                      </ReactMarkdown>
+                    )}
+                  </div>
+                )}
+                {shouldCollapseText && (
+                  <div style={{ marginTop: 8 }}>
+                    <Button
+                      type="link"
+                      size="small"
+                      onClick={() => setIsExpandedText((v) => !v)}
+                      style={{ padding: 0, color: isUser ? "#fff" : undefined }}
+                    >
+                      {isExpandedText ? "Show less" : "Show more"}
+                    </Button>
+                  </div>
+                )}
+              </div>
+            )}
+          </>
         )}
 
         {/* Tool calls / results */}

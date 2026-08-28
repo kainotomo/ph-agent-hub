@@ -17,6 +17,8 @@ export interface TagData {
   color: string | null;
 }
 
+export type SearchScope = "all" | "title" | "content" | "tag";
+
 export interface SessionData {
   id: string;
   tenant_id: string;
@@ -36,6 +38,9 @@ export interface SessionData {
   temperature?: number | null;
   cross_session_retrieval_enabled?: boolean | null;
   tags?: TagData[];
+  /** Which search scopes matched this session (title/content/tag). Only
+   * populated on results from the session search endpoint. */
+  matched_fields?: string[];
   created_at: string;
   updated_at: string;
 }
@@ -421,9 +426,12 @@ export function listAlwaysOnTools(): Promise<string[]> {
 // Search
 // ---------------------------------------------------------------------------
 
-export function searchSessions(query: string): Promise<SessionData[]> {
+export function searchSessions(
+  query: string,
+  scope: SearchScope = "all",
+): Promise<SessionData[]> {
   return api<SessionData[]>(
-    `/chat/sessions/search?q=${encodeURIComponent(query)}`,
+    `/chat/sessions/search?q=${encodeURIComponent(query)}&scope=${scope}`,
   );
 }
 

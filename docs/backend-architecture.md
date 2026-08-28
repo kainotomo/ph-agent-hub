@@ -206,6 +206,11 @@ GET    /chat/sessions/search
 
 > **`POST /chat/session/:id/finalize`** — Converts a temporary (Redis) session into a permanent (MariaDB) session. Migrates messages, tool activations, and file uploads. Returns the new permanent session. Requires the session to be in temporary mode.
 
+> **`GET /chat/sessions/search?q=<term>&scope=<scope>`** — Full-text search across a user's permanent sessions.
+> - `q` (required): the search term.
+> - `scope` (optional, default `all`): limits which fields are searched — `all` (title + content + tag), `title`, `content`, or `tag`. Invalid values return 422.
+> - Each result extends the standard session payload with `matched_fields` (e.g. `["title", "content"]`) indicating which scopes matched, so clients can show *why* a session matched when searching `all`.
+
 ### **3.3 File Uploads**
 ```
 POST   /chat/session/:id/upload

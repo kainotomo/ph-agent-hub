@@ -42,9 +42,11 @@ export function SessionSearch({ onClose, onSelect }: SessionSearchProps) {
   const [searching, setSearching] = useState(false);
   const [searched, setSearched] = useState(false);
   const [scope, setScope] = useState<SearchScope>("all");
+  const [query, setQuery] = useState("");
   const navigate = useNavigate();
 
-  const handleSearch = async (value: string) => {
+  const runSearch = async (value: string, scopeOverride?: SearchScope) => {
+    const activeScope = scopeOverride ?? scope;
     if (!value.trim()) {
       setResults([]);
       setSearched(false);
@@ -66,7 +68,7 @@ export function SessionSearch({ onClose, onSelect }: SessionSearchProps) {
         const data = await listSessionsByTag(tagName);
         setResults(data);
       } else {
-        const data = await searchSessions(value, scope);
+        const data = await searchSessions(value, activeScope);
         setResults(data);
       }
     } catch {
@@ -74,6 +76,8 @@ export function SessionSearch({ onClose, onSelect }: SessionSearchProps) {
     }
     setSearching(false);
   };
+
+  const handleSearch = (value: string) => runSearch(value);
 
   const handleSelect = (session: SessionData) => {
     onSelect?.(session);
@@ -87,11 +91,20 @@ export function SessionSearch({ onClose, onSelect }: SessionSearchProps) {
         block
         options={SCOPE_OPTIONS}
         value={scope}
-        onChange={(value) => setScope(value as SearchScope)}
+        onChange={(value) => {
+          const next = value as SearchScope;
+          setScope(next);
+          // Re-run the search immediately if there is already text in the box.
+          if (query.trim()) {
+            runSearch(query, next);
+          }
+        }}
         style={{ marginBottom: 16 }}
       />
       <Search
         placeholder="Search sessions..."
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
         onSearch={handleSearch}
         allowClear
         style={{ marginBottom: 16 }}

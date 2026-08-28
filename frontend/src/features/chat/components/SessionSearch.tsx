@@ -5,12 +5,31 @@
 // =============================================================================
 
 import { useState } from "react";
-import { Input, List, Typography, Empty, Spin } from "antd";
+import { Input, List, Typography, Empty, Spin, Segmented, Tag, Space } from "antd";
 import { useNavigate } from "react-router-dom";
-import { searchSessions, listSessionsByTag, SessionData } from "../services/chat";
+import {
+  searchSessions,
+  listSessionsByTag,
+  SessionData,
+  SearchScope,
+} from "../services/chat";
 
 const { Text } = Typography;
 const { Search } = Input;
+
+const SCOPE_OPTIONS: { label: string; value: SearchScope }[] = [
+  { label: "Everything", value: "all" },
+  { label: "Title", value: "title" },
+  { label: "Content", value: "content" },
+  { label: "Tag", value: "tag" },
+];
+
+const SCOPE_LABELS: Record<SearchScope, string> = {
+  all: "Everything",
+  title: "Title",
+  content: "Content",
+  tag: "Tag",
+};
 
 interface SessionSearchProps {
   onClose?: () => void;
@@ -22,9 +41,12 @@ export function SessionSearch({ onClose, onSelect }: SessionSearchProps) {
   const [results, setResults] = useState<SessionData[]>([]);
   const [searching, setSearching] = useState(false);
   const [searched, setSearched] = useState(false);
+  const [scope, setScope] = useState<SearchScope>("all");
+  const [query, setQuery] = useState("");
   const navigate = useNavigate();
 
-  const handleSearch = async (value: string) => {
+  const runSearch = async (value: string, scopeOverride?: SearchScope) => {
+    const activeScope = scopeOverride ?? scope;
     if (!value.trim()) {
       setResults([]);
       setSearched(false);
@@ -33,7 +55,8 @@ export function SessionSearch({ onClose, onSelect }: SessionSearchProps) {
     setSearching(true);
     setSearched(true);
     try {
-      // #tag prefix → search by tag name
+      // #tag prefix → exact tag search (unchanged). Force the Tag scope
+      // option for visual consistency.
       if (value.startsWith("#")) {
         const tagName = value.slice(1).trim();
         if (!tagName) {
@@ -41,10 +64,11 @@ export function SessionSearch({ onClose, onSelect }: SessionSearchProps) {
           setSearching(false);
           return;
         }
+        setScope("tag");
         const data = await listSessionsByTag(tagName);
         setResults(data);
       } else {
-        const data = await searchSessions(value);
+        const data = await searchSessions(value, activeScope);
         setResults(data);
       }
     } catch {
@@ -52,6 +76,8 @@ export function SessionSearch({ onClose, onSelect }: SessionSearchProps) {
     }
     setSearching(false);
   };
+
+  const handleSearch = (value: string) => runSearch(value);
 
   const handleSelect = (session: SessionData) => {
     onSelect?.(session);
@@ -61,8 +87,24 @@ export function SessionSearch({ onClose, onSelect }: SessionSearchProps) {
 
   return (
     <div style={{ padding: 16 }}>
+      <Segmented
+        block
+        options={SCOPE_OPTIONS}
+        value={scope}
+        onChange={(value) => {
+          const next = value as SearchScope;
+          setScope(next);
+          // Re-run the search immediately if there is already text in the box.
+          if (query.trim()) {
+            runSearch(query, next);
+          }
+        }}
+        style={{ marginBottom: 16 }}
+      />
       <Search
         placeholder="Search sessions..."
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
         onSearch={handleSearch}
         allowClear
         style={{ marginBottom: 16 }}
@@ -84,10 +126,20 @@ export function SessionSearch({ onClose, onSelect }: SessionSearchProps) {
               <List.Item.Meta
                 title={item.title}
                 description={
-                  <Text type="secondary">
-                    {item.is_temporary ? "Temporary" : "Permanent"} ·{" "}
-                    {new Date(item.updated_at).toLocaleString()}
-                  </Text>
+                  <Space direction="vertical" size={4}>
+                    <Text type="secondary">
+                      {new Date(item.updated_at).toLocaleString()}
+                    </Text>
+                    {item.matched_fields && item.matched_fields.length > 0 && (
+                      <Space size={4}>
+                        {item.matched_fields.map((f) => (
+                          <Tag key={f} color="blue">
+                            {SCOPE_LABELS[f as SearchScope] ?? f}
+                          </Tag>
+                        ))}
+                      </Space>
+                    )}
+                  </Space>
                 }
               />
             </List.Item>

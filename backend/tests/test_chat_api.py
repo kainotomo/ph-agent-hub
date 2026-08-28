@@ -2863,6 +2863,236 @@ class TestSearchSessions:
         session_ids = [s["id"] for s in resp.json()]
         assert test_session.id not in session_ids
 
+    async def test_search_scope_title_only(
+        self, async_client, auth_headers, test_user, test_tenant, db_session
+    ):
+        """Verify scope=title returns only title matches (not content)."""
+        from src.db.orm.sessions import Session
+        from src.db.orm.messages import Message
+        from datetime import datetime, timezone
+
+        # Session whose title matches the query.
+        title_match = Session(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            title="Unicorn finance report",
+            is_temporary=False,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        # Session whose title does NOT match, but whose message content does.
+        content_match = Session(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            title="Ordinary title",
+            is_temporary=False,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        db_session.add_all([title_match, content_match])
+        await db_session.flush()
+        db_session.add(
+            Message(
+                id=str(uuid.uuid4()),
+                session_id=content_match.id,
+                sender="user",
+                content=[{"type": "text", "text": "We discussed unicorn budgets"}],
+                is_deleted=False,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+        await db_session.flush()
+
+        headers = auth_headers(test_user)
+        resp = await async_client.get(
+            "/api/chat/sessions/search?q=unicorn&scope=title", headers=headers
+        )
+        assert resp.status_code == 200, resp.text
+        ids = [s["id"] for s in resp.json()]
+        assert title_match.id in ids
+        assert content_match.id not in ids
+
+    async def test_search_scope_content_only(
+        self, async_client, auth_headers, test_user, test_tenant, db_session
+    ):
+        """Verify scope=content returns content matches and excludes title-only."""
+        from src.db.orm.sessions import Session
+        from src.db.orm.messages import Message
+        from datetime import datetime, timezone
+
+        title_match = Session(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            title="Wombat strategy",
+            is_temporary=False,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        content_match = Session(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            title="Untitled",
+            is_temporary=False,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        db_session.add_all([title_match, content_match])
+        await db_session.flush()
+        db_session.add(
+            Message(
+                id=str(uuid.uuid4()),
+                session_id=content_match.id,
+                sender="user",
+                content=[{"type": "text", "text": "Plan a wombat migration"}],
+                is_deleted=False,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+        await db_session.flush()
+
+        headers = auth_headers(test_user)
+        resp = await async_client.get(
+            "/api/chat/sessions/search?q=wombat&scope=content", headers=headers
+        )
+        assert resp.status_code == 200, resp.text
+        ids = [s["id"] for s in resp.json()]
+        assert content_match.id in ids
+        assert title_match.id not in ids
+        item = next(s for s in resp.json() if s["id"] == content_match.id)
+        assert item["matched_fields"] == ["content"]
+
+    async def test_search_scope_tag(
+        self, async_client, auth_headers, test_user, test_tenant, db_session
+    ):
+        """Verify scope=tag returns sessions whose tag names match."""
+        from src.db.orm.sessions import Session
+        from src.services.session_service import (
+            get_or_create_tag,
+            add_tag_to_session,
+        )
+        from datetime import datetime, timezone
+
+        tagged = Session(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            title="Tagged session",
+            is_temporary=False,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        db_session.add(tagged)
+        await db_session.flush()
+        tag = await get_or_create_tag(db_session, test_tenant.id, "mammoth")
+        await add_tag_to_session(db_session, tagged.id, tag.id)
+        await db_session.flush()
+
+        headers = auth_headers(test_user)
+        resp = await async_client.get(
+            "/api/chat/sessions/search?q=mammoth&scope=tag", headers=headers
+        )
+        assert resp.status_code == 200, resp.text
+        ids = [s["id"] for s in resp.json()]
+        assert tagged.id in ids
+        item = next(s for s in resp.json() if s["id"] == tagged.id)
+        assert item["matched_fields"] == ["tag"]
+
+    async def test_search_invalid_scope(
+        self, async_client, auth_headers, test_user
+    ):
+        """Verify an invalid scope value returns 422."""
+        headers = auth_headers(test_user)
+        resp = await async_client.get(
+            "/api/chat/sessions/search?q=Test&scope=bogus", headers=headers
+        )
+        assert resp.status_code == 422
+
+    async def test_search_matched_fields_all(
+        self, async_client, auth_headers, test_user, test_tenant, db_session
+    ):
+        """Verify default scope=all reports all fields a session matched."""
+        from src.db.orm.sessions import Session
+        from src.db.orm.messages import Message
+        from datetime import datetime, timezone
+
+        both = Session(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            title="Pineapple deployment",
+            is_temporary=False,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        db_session.add(both)
+        await db_session.flush()
+        db_session.add(
+            Message(
+                id=str(uuid.uuid4()),
+                session_id=both.id,
+                sender="user",
+                content=[{"type": "text", "text": "Pineapple rollout plan"}],
+                is_deleted=False,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+        await db_session.flush()
+
+        headers = auth_headers(test_user)
+        resp = await async_client.get(
+            "/api/chat/sessions/search?q=Pineapple", headers=headers
+        )
+        assert resp.status_code == 200, resp.text
+        item = next(s for s in resp.json() if s["id"] == both.id)
+        assert set(item["matched_fields"]) == {"title", "content"}
+
+    async def test_search_content_by_default(
+        self, async_client, auth_headers, test_user, test_tenant, db_session
+    ):
+        """Verify default scope=all still finds content matches (backward compat)."""
+        from src.db.orm.sessions import Session
+        from src.db.orm.messages import Message
+        from datetime import datetime, timezone
+
+        content_match = Session(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            title="No keyword here",
+            is_temporary=False,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        db_session.add(content_match)
+        await db_session.flush()
+        db_session.add(
+            Message(
+                id=str(uuid.uuid4()),
+                session_id=content_match.id,
+                sender="user",
+                content=[{"type": "text", "text": "quasar experiment results"}],
+                is_deleted=False,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+        await db_session.flush()
+
+        headers = auth_headers(test_user)
+        resp = await async_client.get(
+            "/api/chat/sessions/search?q=quasar", headers=headers
+        )
+        assert resp.status_code == 200, resp.text
+        ids = [s["id"] for s in resp.json()]
+        assert content_match.id in ids
+
 
 class TestSessionContext:
     """Tests for GET /chat/session/{session_id}/context."""

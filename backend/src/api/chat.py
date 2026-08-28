@@ -151,6 +151,18 @@ class SessionResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class SearchResultResponse(SessionResponse):
+    """A session returned by the search endpoint.
+
+    Extends :class:`SessionResponse` with ``matched_fields`` — the list of
+    search scopes (``title``, ``content``, ``tag``) that this session
+    matched.  Useful when searching with ``scope=all`` so the caller can
+    show *why* a session matched.  A single-field scope always reports
+    exactly one entry.
+    """
+    matched_fields: list[str] = []
+
+
 class MessageCreate(BaseModel):
     content: str
     file_ids: list[str] | None = None
@@ -3102,21 +3114,37 @@ async def summarize_session(
 
 @router.get(
     "/sessions/search",
-    response_model=list[SessionResponse],
+    response_model=list[SearchResultResponse],
 )
 async def search_sessions(
     q: str,
+    scope: str = Query("all"),
     db: AsyncSession = Depends(get_db),
     current_user: UserORM = Depends(get_current_user),
 ):
-    """Full-text search across session titles and message content.
+    """Full-text search across session titles, message content, and tags.
 
     Query is scoped to the authenticated user's tenant and user ID.
     Uses FULLTEXT index on ``sessions.title`` and ``LIKE`` on
     ``messages.content`` (JSON column).
+
+    ``scope`` controls which fields are searched:
+      - ``all`` (default): title, content, and tag
+      - ``title``: title only
+      - ``content``: message content only
+      - ``tag``: tag names only
+
+    Each returned session includes a ``matched_fields`` list indicating
+    which scopes matched (especially useful with ``scope=all``).
     """
     if not q or not q.strip():
         raise ValidationError("Search query 'q' is required")
+
+    allowed_scopes = {"all", "title", "content", "tag"}
+    if scope not in allowed_scopes:
+        raise ValidationError(
+            f"Invalid scope '{scope}'. Must be one of: all, title, content, tag"
+        )
 
     search_term = f"%{q.strip()}%"
 
@@ -3173,26 +3201,47 @@ async def search_sessions(
         )
     )
 
-    # Execute all queries
-    title_results = await db.execute(title_stmt)
-    like_results = await db.execute(like_stmt)
-    msg_results = await db.execute(msg_stmt)
-    tag_results = await db.execute(tag_stmt)
+    # (field_label, statement) pairs in priority order (title first).
+    # Only the queries relevant to the selected scope are executed.
+    queries: list[tuple[str, Any]] = []
+    if scope in ("all", "title"):
+        queries.append(("title", title_stmt))
+        queries.append(("title", like_stmt))
+    if scope in ("all", "content"):
+        queries.append(("content", msg_stmt))
+    if scope in ("all", "tag"):
+        queries.append(("tag", tag_stmt))
 
-    # Deduplicate by session ID (union of all four)
+    # Execute the selected queries, deduplicating by session ID while
+    # tracking which fields each session matched.
+    matched: dict[str, set[str]] = {}
     seen: set[str] = set()
     sessions: list[Session] = []
-    for s in (
-        list(title_results.scalars().all())
-        + list(like_results.scalars().all())
-        + list(msg_results.scalars().all())
-        + list(tag_results.scalars().all())
-    ):
-        if s.id not in seen:
-            seen.add(s.id)
-            sessions.append(s)
+    for field_label, stmt in queries:
+        result = await db.execute(stmt)
+        for s in result.scalars().all():
+            matched.setdefault(s.id, set()).add(field_label)
+            if s.id not in seen:
+                seen.add(s.id)
+                sessions.append(s)
 
-    return [SessionResponse.model_validate(s) for s in sessions]
+    # Order results so title matches come first (already first by query
+    # order; make it explicit).
+    sessions.sort(
+        key=lambda s: 0 if "title" in matched.get(s.id, set()) else 1
+    )
+
+    out: list[SearchResultResponse] = []
+    for s in sessions:
+        base = SessionResponse.model_validate(s).model_dump()
+        out.append(
+            SearchResultResponse(
+                **base,
+                matched_fields=sorted(matched.get(s.id, set())),
+            )
+        )
+
+    return out
 
 
 # =============================================================================

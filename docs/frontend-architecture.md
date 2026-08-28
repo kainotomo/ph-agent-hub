@@ -356,7 +356,9 @@ The chat area consumes these backend endpoints:
 | Category | Endpoints |
 |---|---|
 | **Auth** | `POST /auth/login`, `GET /auth/me` |
-| **Sessions** | `POST/GET/PUT/DELETE /chat/session`, `POST /chat/session/:id/finalize`, `GET /chat/sessions/search` |
+| **Sessions** | `POST/GET/PUT/DELETE /chat/session`, `POST /chat/session/:id/finalize`, `GET /chat/sessions/search?q=&scope=` |
+
+> The session search drawer (`SessionSearch`) lets the user scope results to **Everything / Title / Content / Tag** via an antd `Segmented` control. The selected scope is passed as the `scope` query param (`all`/`title`/`content`/`tag`). A `#tag` prefix performs an exact tag search via `/chat/sessions/by-tag`. In Everything mode, results show small badges for the `matched_fields` each session matched.
 | **Messages** | `POST/GET /chat/session/:id/message`, `PUT/DELETE /chat/session/:id/message/:msgId`, `POST .../regenerate`, `POST .../feedback` |
 | **Streaming** | `POST /chat/session/:id/message` (with `Accept: text/event-stream`), `DELETE /chat/session/:id/stream` |
 | **Config** | `GET /models`, `GET /templates` |

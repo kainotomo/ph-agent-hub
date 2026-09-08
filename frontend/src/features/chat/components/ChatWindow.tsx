@@ -240,6 +240,31 @@ export const ChatWindow = React.memo(function ChatWindow({
   const [followUpQuestions, setFollowUpQuestions] = useState<string[]>([]);
   const [finalizing, setFinalizing] = useState(false);
 
+  // ---- Stream→persisted handoff (Issue #515) -----------------------------
+  // After the SSE "message_complete" event the freshly persisted assistant
+  // message may not yet be reflected by the messages query (the refetch is
+  // async).  Clearing the streaming bubble immediately in onMessageComplete /
+  // onClose left a transient render where the last assistant message was
+  // missing until the refetch landed — reported as an "empty last message"
+  // that only reappeared after a full browser reload.  To fix it we keep the
+  // streaming bubble visible until the post-completion refetch confirms the
+  // new assistant row has arrived, then swap the bubble out for the persisted
+  // message.
+  const [streamHandoff, setStreamHandoff] = useState(false);
+  const streamHandoffRef = useRef(false);
+  const handoffBaselineAssistantRef = useRef<number | null>(null);
+
+  const beginStreamHandoff = useCallback(() => {
+    streamHandoffRef.current = true;
+    setStreamHandoff(true);
+  }, []);
+
+  const endStreamHandoff = useCallback(() => {
+    streamHandoffRef.current = false;
+    setStreamHandoff(false);
+    handoffBaselineAssistantRef.current = null;
+  }, []);
+
   // ---- Autopilot mode (Issue #446) ----------------------------------------
   const [isAutopilotMode, setIsAutopilotMode] = useState(false);
   // ---- Background task mode (Issue #449) -----------------------------------
@@ -556,6 +581,41 @@ export const ChatWindow = React.memo(function ChatWindow({
     queryClient.invalidateQueries({ queryKey: ["messages", sessionId], refetchType: "active" });
   }, [sessionId, queryClient]);
 
+  // Issue #515: capture how many persisted assistant rows exist in the query
+  // cache *at send time*.  When the post-completion refetch returns one more
+  // assistant row than this baseline, the freshly persisted message for the
+  // current turn has arrived and the local streaming bubble can be swapped out
+  // for it.
+  const captureAssistantBaseline = useCallback(() => {
+    const infinite = queryClient.getQueryData([
+      "messages", sessionId,
+    ]) as InfiniteData<PaginatedMessagesResponse, string | undefined> | undefined;
+    handoffBaselineAssistantRef.current = (infinite?.pages ?? [])
+      .flatMap((p) => p.items)
+      .filter((m: any) => m.sender === "assistant" && !m.is_deleted).length;
+  }, [queryClient, sessionId]);
+
+  // Issue #515: after the stream completes we need the freshly persisted
+  // assistant row to land in the messages query.  React Query can swallow an
+  // invalidate() when another fetch for the same query key is already in
+  // flight, which would otherwise leave the last message missing until a
+  // manual reload.  Retry a few times until the row is confirmed; if it is
+  // never confirmed the streamed content stays visible instead of vanishing.
+  const scheduleStreamHandoffRetry = useCallback(() => {
+    let attempts = 0;
+    const tryAgain = () => {
+      if (!streamHandoffRef.current) return; // already resolved
+      if (attempts >= 4) return; // give up — the local bubble remains visible
+      attempts += 1;
+      window.setTimeout(() => {
+        if (!streamHandoffRef.current) return;
+        refetchLatestPage();
+        tryAgain();
+      }, 350 * attempts);
+    };
+    tryAgain();
+  }, [refetchLatestPage]);
+
   // Count user messages for CTA trigger (demo mode only)
   const userMessageCount = (messages || []).filter((m: any) => m.sender === "user").length;
 
@@ -675,6 +735,7 @@ export const ChatWindow = React.memo(function ChatWindow({
     setToolEvents([]);
     setFollowUpQuestions([]);
     setStreamingTokens(null);
+    endStreamHandoff();
     setPendingUserMessage(null);
     setEditingMsgId(null);
     setRegeneratingMsgId(null);
@@ -685,7 +746,7 @@ export const ChatWindow = React.memo(function ChatWindow({
     setAutopilotState(INITIAL_AUTOPILOT_STATE);
     setIsAutopilotMode(false);
     queryClient.invalidateQueries({ queryKey: ["memory"] });
-  }, [sessionId, queryClient, resetStream]);
+  }, [sessionId, queryClient, resetStream, endStreamHandoff]);
 
   // Sync sessionTemperature and localCrossSessionMemory when their props
   // change (e.g., during the isPending→session-loaded transition).
@@ -840,6 +901,31 @@ export const ChatWindow = React.memo(function ChatWindow({
     }
     prevMessagesLenRef.current = messages?.length ?? 0;
   }, [demo, messages, streamingMessageId]);
+
+  // Issue #515: swap the streaming bubble for the persisted assistant message
+  // once the post-completion refetch returns one more assistant row than the
+  // baseline captured when the send started.  This prevents a transient empty
+  // tail between stream end and query hydration.  NOTE: we deliberately do NOT
+  // clear the streaming bubble on a timer — if the persisted row never shows up
+  // in the cache (e.g. a swallowed refetch), the fully-streamed content must
+  // stay visible rather than leaving an empty last message until a manual
+  // browser reload.
+  useEffect(() => {
+    if (!streamHandoff) return;
+    const persistedAssistantCount = (messages || []).filter(
+      (m: any) => m.sender === "assistant" && !m.is_deleted,
+    ).length;
+    const baseline = handoffBaselineAssistantRef.current;
+    if (baseline !== null && persistedAssistantCount > baseline) {
+      endStreamHandoff();
+      setStreamingContent("");
+      setStreamingReasoningContent("");
+      setStreamingMessageId(null);
+      setToolEvents([]);
+      setStreamingTokens(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [streamHandoff, messages]);
 
   // ---- Fetch follow-up questions after stream closes (Issue #126) -----------
   // The backend now generates follow-up questions in a background task so
@@ -1025,7 +1111,10 @@ export const ChatWindow = React.memo(function ChatWindow({
         }) => {
           if (isRegenerate) setRegeneratingMsgId(null);
           if (isSend || isEdit || isAutopilot) setPendingUserMessage(null);
-          if (!isAutopilot) setToolEvents([]);
+          // In normal chat send mode we keep the streaming bubble (and its
+          // tool events) visible during the handoff to the persisted message,
+          // so we defer clearing toolEvents to the Issue #515 swap effect.
+          if (!isAutopilot && !(isSend && !demo)) setToolEvents([]);
           if (data.tokens_in || data.tokens_out) {
             setStreamingTokens({
               tokens_in: data.tokens_in || 0,
@@ -1033,11 +1122,27 @@ export const ChatWindow = React.memo(function ChatWindow({
             });
           }
           if (isSend && !demo) {
-            // Chat mode: clear streaming state and refetch from API.
-            setStreamingContent("");
-            setStreamingReasoningContent("");
-            setStreamingMessageId(null);
+            // Chat mode: keep the streaming bubble visible while the persisted
+            // messages are refetched.  The bubble is only removed once the
+            // refetch returns the freshly persisted assistant row (see the
+            // Issue #515 handoff effect).  If the refetch is swallowed by React
+            // Query (coalesced with an in-flight fetch) we retry so the row is
+            // confirmed; if it never confirms, the fully-streamed content stays
+            // visible instead of leaving an empty tail until a manual reload.
+            if (handoffBaselineAssistantRef.current === null) {
+              const infinite = queryClient.getQueryData([
+                "messages", sessionId,
+              ]) as InfiniteData<PaginatedMessagesResponse, string | undefined> | undefined;
+              handoffBaselineAssistantRef.current = (infinite?.pages ?? [])
+                .flatMap((p) => p.items)
+                .filter((m) => m.sender === "assistant" && !m.is_deleted).length;
+            }
+            beginStreamHandoff();
+            // Stop the live duration timer — the response is complete.
+            setStreamingStart(null);
+            setStreamingDuration(null);
             refetchLatestPage();
+            scheduleStreamHandoffRetry();
             // Removed: session query not needed for lazy sessions
             queryClient.invalidateQueries({ queryKey: ["sessions"] });
             queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
@@ -1091,11 +1196,19 @@ export const ChatWindow = React.memo(function ChatWindow({
           if (isRegenerate) setRegeneratingMsgId(null);
           if (isEdit) setEditingMsgId(null);
           if (isSend || isEdit) setPendingUserMessage(null);
-          setStreamingContent("");
-          setStreamingReasoningContent("");
-          setStreamingMessageId(null);
-          setToolEvents([]);
-          setStreamingTokens(null);
+          // Issue #515: during a normal chat completion the streaming bubble is
+          // handed off to the persisted message by the handoff effect.  If that
+          // handoff is still pending when onClose fires (SSE closes right after
+          // message_complete), do NOT clear the streaming content here — doing
+          // so would leave an empty tail until the refetch lands.
+          const deferStreamClear = isSend && !demo && streamHandoffRef.current;
+          if (!deferStreamClear) {
+            setStreamingContent("");
+            setStreamingReasoningContent("");
+            setStreamingMessageId(null);
+            setToolEvents([]);
+            setStreamingTokens(null);
+          }
           // Stop the live duration timer when the stream ends.
           setStreamingStart(null);
           setStreamingDuration(null);
@@ -1135,6 +1248,7 @@ export const ChatWindow = React.memo(function ChatWindow({
       setStreamError, setToolEvents, setFollowUpQuestions, setStreamingTokens,
       setPendingUserMessage, setRegeneratingMsgId, setEditingMsgId,
       fetchFollowUpQuestions, refetchLatestPage,
+      beginStreamHandoff, endStreamHandoff, scheduleStreamHandoffRetry,
     ],
   );
 
@@ -1148,6 +1262,8 @@ export const ChatWindow = React.memo(function ChatWindow({
     setToolEvents([]);
     setFollowUpQuestions([]);
     setStreamingTokens(null);
+    // Reset any lingering stream handoff from a previous turn before sending.
+    endStreamHandoff();
 
     // ---- Edit mode: streaming, like regenerate but on the user message ----
     if (editingMsgId) {
@@ -1265,6 +1381,10 @@ export const ChatWindow = React.memo(function ChatWindow({
         isBackgroundMode,
       );
     } else {
+      // Normal send in an existing chat — snapshot the current persisted
+      // assistant count so the Issue #515 handoff can confirm THIS turn's
+      // assistant row when it lands in the messages query.
+      captureAssistantBaseline();
       const sendHandlers = buildStreamHandlers('send');
       startStream(
         sessionId,
@@ -1290,7 +1410,7 @@ export const ChatWindow = React.memo(function ChatWindow({
         },
       );
     }
-  }, [inputValue, streaming, sessionId, startStream, queryClient, pendingFiles, editingMsgId, pendingFlag, pendModelId, pendTemplateId, pendSkillId, pendAutoRoute, pendAutoSelectTools, pendActiveToolIds, thinkingEnabled, reasoningEffort, sessionTemperature, isAutopilotMode, setAutopilotState]);
+  }, [inputValue, streaming, sessionId, startStream, queryClient, pendingFiles, editingMsgId, pendingFlag, pendModelId, pendTemplateId, pendSkillId, pendAutoRoute, pendAutoSelectTools, pendActiveToolIds, thinkingEnabled, reasoningEffort, sessionTemperature, isAutopilotMode, setAutopilotState, endStreamHandoff, captureAssistantBaseline]);
 
   const handleStop = async () => {
     // Clear the streaming ghost bubble immediately for instant UX.
@@ -1303,6 +1423,8 @@ export const ChatWindow = React.memo(function ChatWindow({
     setStreamingMessageId(null);
     setStreamingTokens(null);
     setToolEvents([]);
+    // A manual stop aborts this turn — no handoff to the persisted message.
+    endStreamHandoff();
     // Stop the live duration timer when the user manually stops.
     setStreamingStart(null);
     setStreamingDuration(null);

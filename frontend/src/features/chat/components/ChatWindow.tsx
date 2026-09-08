@@ -2067,7 +2067,17 @@ export const ChatWindow = React.memo(function ChatWindow({
           data={displayMessages}
           firstItemIndex={firstItemIndex}
           startReached={handleStartReached}
-          followOutput={streaming ? "smooth" : false}
+          // Issue #515: only follow output while streaming OR while a just-
+          // completed message is still being handed off to its persisted row.
+          // The persisted message is appended asynchronously AFTER the SSE
+          // closes (streaming=false), so with a plain `streaming ? "smooth" :
+          // false` the final message could land below the fold and appear to
+          // "go blank" until a manual reload (regression from 2.3.2).  We still
+          // honour the user's scroll position via isAtBottom.
+          followOutput={
+            (isAtBottom) =>
+              isAtBottom && (streaming || streamHandoff) ? "smooth" : false
+          }
           atBottomThreshold={80}
           atBottomStateChange={(atBottom) => setShowScrollButton(!atBottom)}
           style={{ height: "100%" }}

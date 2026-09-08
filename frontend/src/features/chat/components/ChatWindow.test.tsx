@@ -59,7 +59,13 @@ const AUTO_ROUTE_VALUE = "__auto__";
 vi.mock("../hooks/useStream", () => ({
   useStream: () => ({
     sendMessage: vi.fn(),
-    startStream: vi.fn(),
+    startStream: (...args: any[]) => {
+      // 6th positional arg to startStream(sessionId, content, fileIds,
+      // temperature, sessionData, handlers, autopilot?, background?) is the
+      // handler object.  Capture it so tests can drive the stream lifecycle.
+      lastStreamHandlers.current = args[5] ?? null;
+      return Promise.resolve();
+    },
     stopStream: vi.fn(),
     startRegenerateStream: vi.fn(),
     startEditStream: vi.fn(),
@@ -71,7 +77,7 @@ vi.mock("../hooks/useStream", () => ({
 }));
 
 vi.mock("../services/chat", () => ({
-  listMessages: vi.fn().mockResolvedValue({ items: [], has_more: false }),
+  listMessages: mockListMessages,
   buildCursor: vi.fn((msg: any) => `${msg.created_at}|${msg.id}`),
   deleteMessage: vi.fn(),
   finalizeSession: vi.fn(),
@@ -84,6 +90,12 @@ const mockApi = vi.hoisted(() => vi.fn());
 const mockGetStreamStatus = vi.hoisted(() => vi.fn());
 const mockStartReconnect = vi.hoisted(() => vi.fn());
 const mockResetStream = vi.hoisted(() => vi.fn());
+const mockListMessages = vi.hoisted(() => vi.fn());
+const lastStreamHandlers = vi.hoisted<{ current: any }>(() => ({ current: null }));
+
+// Default: no messages, matching the previous mock's behaviour.  Individual
+// tests may override via mockImplementation / mockResolvedValueOnce.
+mockListMessages.mockResolvedValue({ items: [], has_more: false });
 
 vi.mock("../../../services/api", () => ({
   default: mockApi,
@@ -369,6 +381,109 @@ describe("ChatWindow — Stream reconnect on mount (Issue #457)", () => {
 
     expect(mockGetStreamStatus).not.toHaveBeenCalled();
     expect(mockStartReconnect).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #515 — last assistant message must not vanish after completion
+// ---------------------------------------------------------------------------
+
+describe("ChatWindow — stream→persisted handoff (Issue #515)", () => {
+  function msg(id: string, sender: "user" | "assistant", text: string) {
+    return {
+      id,
+      session_id: "test-session-1",
+      sender,
+      content: [{ type: "text" as const, text }],
+      model_id: null,
+      model_name: null,
+      model_provider: null,
+      tool_calls: null,
+      tokens_in: null,
+      tokens_out: null,
+      is_deleted: false,
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    };
+  }
+
+  beforeEach(() => {
+    mockApi.mockReset();
+    mockApi.mockImplementation((url: string) => {
+      if (url === "/models") return Promise.resolve(FAKE_MODELS);
+      return Promise.resolve([]);
+    });
+    mockGetStreamStatus.mockReset();
+    mockGetStreamStatus.mockResolvedValue({ active: false });
+    mockListMessages.mockReset();
+    mockListMessages.mockResolvedValue({ items: [], has_more: false });
+    lastStreamHandlers.current = null;
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  it("refetches the persisted assistant message when a normal-chat stream completes (multi-message chat)", async () => {
+    const user = userEvent.setup();
+    const history = [
+      msg("u1", "user", "First question"),
+      msg("a1", "assistant", "First answer"),
+    ];
+
+    // First listMessages call resolves the initial (multi-message) history;
+    // subsequent calls are the post-completion refetches that the handoff
+    // relies on to hydrate the freshly persisted assistant row.
+    let calls = 0;
+    mockListMessages.mockImplementation(() => {
+      calls += 1;
+      return Promise.resolve({
+        items:
+          calls === 1
+            ? history
+            : [
+                ...history,
+                msg("u2", "user", "Second question"),
+                msg("a2", "assistant", "Second answer"),
+              ],
+        has_more: false,
+      });
+    });
+
+    renderChatWindow({ isPending: false, sessionId: "test-session-1" });
+    await settle();
+
+    // Compose and send a new message to exercise the normal chat send flow.
+    const textarea = screen.getByPlaceholderText(/Type a message/);
+    await user.type(textarea, "Second question");
+    const sendButton = screen
+      .getAllByRole("button")
+      .find(
+        (btn) =>
+          btn.textContent?.includes("Send") &&
+          !(btn as HTMLButtonElement).disabled,
+      );
+    expect(sendButton).toBeTruthy();
+    await user.click(sendButton!);
+
+    const handlers = lastStreamHandlers.current;
+    expect(handlers).toBeTruthy();
+
+    const callsBeforeComplete = calls;
+
+    // Simulate the SSE lifecycle: a streamed token then message_complete.
+    await act(async () => {
+      handlers.onToken("Second answer", "stream-1");
+      handlers.onMessageComplete({ message_id: "stream-1", tokens_in: 10, tokens_out: 40 });
+    });
+    await settle();
+
+    // The completion path must trigger a refetch of the persisted messages so
+    // the freshly persisted assistant row is fetched from the API (Issue #515:
+    // without this refetch the UI can be left showing only the streamed
+    // content / follow-up questions until a manual browser reload).
+    expect(calls).toBeGreaterThan(callsBeforeComplete);
   });
 });
 

@@ -240,30 +240,21 @@ export const ChatWindow = React.memo(function ChatWindow({
   const [followUpQuestions, setFollowUpQuestions] = useState<string[]>([]);
   const [finalizing, setFinalizing] = useState(false);
 
-  // ---- Stream→persisted handoff (Issue #515) -----------------------------
-  // After the SSE "message_complete" event the freshly persisted assistant
-  // message may not yet be reflected by the messages query (the refetch is
-  // async).  Clearing the streaming bubble immediately in onMessageComplete /
-  // onClose left a transient render where the last assistant message was
-  // missing until the refetch landed — reported as an "empty last message"
-  // that only reappeared after a full browser reload.  To fix it we keep the
-  // streaming bubble visible until the post-completion refetch confirms the
-  // new assistant row has arrived, then swap the bubble out for the persisted
-  // message.
-  const [streamHandoff, setStreamHandoff] = useState(false);
-  const streamHandoffRef = useRef(false);
-  const handoffBaselineAssistantRef = useRef<number | null>(null);
+  // ---- Scroll behavior state (Issue #515) -------------------------------
+  // Track whether the user is at the bottom of the Virtuoso list.
+  // We use a ref (not useState) because Virtuoso's onScroll callback
+  // fires synchronously during scroll — a state update would cause
+  // a re-render mid-scroll and break the at-bottom detection.
+  const atBottomRef = useRef(true);
 
-  const beginStreamHandoff = useCallback(() => {
-    streamHandoffRef.current = true;
-    setStreamHandoff(true);
-  }, []);
-
-  const endStreamHandoff = useCallback(() => {
-    streamHandoffRef.current = false;
-    setStreamHandoff(false);
-    handoffBaselineAssistantRef.current = null;
-  }, []);
+  /**
+   * Capture the "at bottom" state at the moment the stream completes.
+   * Used by the reconciliation effect to decide whether to scroll
+   * after clearing the streaming bubble.  Captured in onMessageComplete
+   * (send mode) rather than onStreamStart because onStreamStart fires
+   * during scrolling (user typing) and the value would be stale.
+   */
+  const revealOnReconcileRef = useRef(false);
 
   // ---- Autopilot mode (Issue #446) ----------------------------------------
   const [isAutopilotMode, setIsAutopilotMode] = useState(false);
@@ -567,9 +558,15 @@ export const ChatWindow = React.memo(function ChatWindow({
     refetchInterval: false,
   });
 
-  // Flatten pages into a single messages array for backward compatibility
+  // Flatten pages into a single oldest→newest messages array for display.
+  // The backend returns each page's items already in chronological
+  // (oldest→newest) order, and pages are stored newest-chunk-first (page[0] =
+  // most recent, later pages = older).  So we reverse the pages array before
+  // flattening to yield a single fully-chronological list (Issue #515 page-
+  // flatten ordering bug).  Without the reverse, once older pages load on
+  // scroll-up the older messages get appended after (below) the newest ones.
   const messages: any[] = useMemo(
-    () => (messagesData?.pages ?? []).flatMap((p: { items: any[] }) => p.items),
+    () => [...(messagesData?.pages ?? [])].reverse().flatMap((p: { items: any[] }) => p.items),
     [messagesData],
   );
 
@@ -580,41 +577,6 @@ export const ChatWindow = React.memo(function ChatWindow({
     // Fallback: invalidate the query entirely if refetchPages is unavailable.
     queryClient.invalidateQueries({ queryKey: ["messages", sessionId], refetchType: "active" });
   }, [sessionId, queryClient]);
-
-  // Issue #515: capture how many persisted assistant rows exist in the query
-  // cache *at send time*.  When the post-completion refetch returns one more
-  // assistant row than this baseline, the freshly persisted message for the
-  // current turn has arrived and the local streaming bubble can be swapped out
-  // for it.
-  const captureAssistantBaseline = useCallback(() => {
-    const infinite = queryClient.getQueryData([
-      "messages", sessionId,
-    ]) as InfiniteData<PaginatedMessagesResponse, string | undefined> | undefined;
-    handoffBaselineAssistantRef.current = (infinite?.pages ?? [])
-      .flatMap((p) => p.items)
-      .filter((m: any) => m.sender === "assistant" && !m.is_deleted).length;
-  }, [queryClient, sessionId]);
-
-  // Issue #515: after the stream completes we need the freshly persisted
-  // assistant row to land in the messages query.  React Query can swallow an
-  // invalidate() when another fetch for the same query key is already in
-  // flight, which would otherwise leave the last message missing until a
-  // manual reload.  Retry a few times until the row is confirmed; if it is
-  // never confirmed the streamed content stays visible instead of vanishing.
-  const scheduleStreamHandoffRetry = useCallback(() => {
-    let attempts = 0;
-    const tryAgain = () => {
-      if (!streamHandoffRef.current) return; // already resolved
-      if (attempts >= 4) return; // give up — the local bubble remains visible
-      attempts += 1;
-      window.setTimeout(() => {
-        if (!streamHandoffRef.current) return;
-        refetchLatestPage();
-        tryAgain();
-      }, 350 * attempts);
-    };
-    tryAgain();
-  }, [refetchLatestPage]);
 
   // Count user messages for CTA trigger (demo mode only)
   const userMessageCount = (messages || []).filter((m: any) => m.sender === "user").length;
@@ -735,7 +697,6 @@ export const ChatWindow = React.memo(function ChatWindow({
     setToolEvents([]);
     setFollowUpQuestions([]);
     setStreamingTokens(null);
-    endStreamHandoff();
     setPendingUserMessage(null);
     setEditingMsgId(null);
     setRegeneratingMsgId(null);
@@ -746,7 +707,7 @@ export const ChatWindow = React.memo(function ChatWindow({
     setAutopilotState(INITIAL_AUTOPILOT_STATE);
     setIsAutopilotMode(false);
     queryClient.invalidateQueries({ queryKey: ["memory"] });
-  }, [sessionId, queryClient, resetStream, endStreamHandoff]);
+  }, [sessionId, queryClient, resetStream]);
 
   // Sync sessionTemperature and localCrossSessionMemory when their props
   // change (e.g., during the isPending→session-loaded transition).
@@ -902,30 +863,55 @@ export const ChatWindow = React.memo(function ChatWindow({
     prevMessagesLenRef.current = messages?.length ?? 0;
   }, [demo, messages, streamingMessageId]);
 
-  // Issue #515: swap the streaming bubble for the persisted assistant message
-  // once the post-completion refetch returns one more assistant row than the
-  // baseline captured when the send started.  This prevents a transient empty
-  // tail between stream end and query hydration.  NOTE: we deliberately do NOT
-  // clear the streaming bubble on a timer — if the persisted row never shows up
-  // in the cache (e.g. a swallowed refetch), the fully-streamed content must
-  // stay visible rather than leaving an empty last message until a manual
-  // browser reload.
+  // ---- Issue #515: Reconciliation effect ---------------------------------
+  // When the stream finishes (message_complete), the messages query refetch
+  // will eventually land.  The reconciliation effect:
+  //   1. Clears the streaming bubble (content, reasoning, tool events, tokens)
+  //      if a persisted assistant message with streamingMessageId exists.
+  //   2. If the user was at the bottom at send time, scrolls to LAST via
+  //      double rAF to let Virtuoso layout settle after clearing the bubble.
+  //   3. Resets the reveal flag.
+  // We intentionally do NOT add content to message_complete — the refetch is
+  // the single source of truth for persisted messages.
   useEffect(() => {
-    if (!streamHandoff) return;
-    const persistedAssistantCount = (messages || []).filter(
-      (m: any) => m.sender === "assistant" && !m.is_deleted,
-    ).length;
-    const baseline = handoffBaselineAssistantRef.current;
-    if (baseline !== null && persistedAssistantCount > baseline) {
-      endStreamHandoff();
+    // Only run in send mode (not demo, not autopilot, not regenerate/edit).
+    if (!streamingMessageId || demo || isAutopilotMode || (regeneratingMsgId != null) || (editingMsgId != null)) {
+      return;
+    }
+
+    const messagesArray = messages || [];
+    const hasPersistedStreamingRow = messagesArray.some(
+      (m: any) => m.id === streamingMessageId && m.sender === "assistant" && !m.is_deleted,
+    );
+
+    if (hasPersistedStreamingRow) {
+      // Persisted row has arrived — clear the local bubble.
       setStreamingContent("");
       setStreamingReasoningContent("");
       setStreamingMessageId(null);
       setToolEvents([]);
       setStreamingTokens(null);
+
+      // Scroll to bottom if the user was at the bottom at send time.
+      // We use revealOnReconcileRef to capture at-bottom at send time
+      // (onStreamStart fires during typing when at-bottom is stale).
+      if (revealOnReconcileRef.current) {
+        const scrollToBottom = () => {
+          virtuosoRef.current?.scrollToIndex({
+            index: "LAST",
+            align: "start",
+            behavior: "smooth",
+          });
+        };
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            scrollToBottom();
+            revealOnReconcileRef.current = false;
+          });
+        });
+      }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [streamHandoff, messages]);
+  }, [messages, streamingMessageId, demo, isAutopilotMode, regeneratingMsgId, editingMsgId, revealOnReconcileRef]);
 
   // ---- Fetch follow-up questions after stream closes (Issue #126) -----------
   // The backend now generates follow-up questions in a background task so
@@ -1111,9 +1097,16 @@ export const ChatWindow = React.memo(function ChatWindow({
         }) => {
           if (isRegenerate) setRegeneratingMsgId(null);
           if (isSend || isEdit || isAutopilot) setPendingUserMessage(null);
+
+          // In send mode: capture "at bottom" state for the reconciliation
+          // effect.  The effect will scroll after the persisted row arrives.
+          if (isSend && !demo) {
+            revealOnReconcileRef.current = atBottomRef.current;
+          }
+
           // In normal chat send mode we keep the streaming bubble (and its
-          // tool events) visible during the handoff to the persisted message,
-          // so we defer clearing toolEvents to the Issue #515 swap effect.
+          // tool events) visible during the handoff to the persisted message.
+          // The reconciliation effect clears it once the persisted row arrives.
           if (!isAutopilot && !(isSend && !demo)) setToolEvents([]);
           if (data.tokens_in || data.tokens_out) {
             setStreamingTokens({
@@ -1121,34 +1114,22 @@ export const ChatWindow = React.memo(function ChatWindow({
               tokens_out: data.tokens_out || 0,
             });
           }
+          // Stop the live duration timer — the response is complete.
+          setStreamingStart(null);
+          setStreamingDuration(null);
+
           if (isSend && !demo) {
-            // Chat mode: keep the streaming bubble visible while the persisted
-            // messages are refetched.  The bubble is only removed once the
-            // refetch returns the freshly persisted assistant row (see the
-            // Issue #515 handoff effect).  If the refetch is swallowed by React
-            // Query (coalesced with an in-flight fetch) we retry so the row is
-            // confirmed; if it never confirms, the fully-streamed content stays
-            // visible instead of leaving an empty tail until a manual reload.
-            if (handoffBaselineAssistantRef.current === null) {
-              const infinite = queryClient.getQueryData([
-                "messages", sessionId,
-              ]) as InfiniteData<PaginatedMessagesResponse, string | undefined> | undefined;
-              handoffBaselineAssistantRef.current = (infinite?.pages ?? [])
-                .flatMap((p) => p.items)
-                .filter((m) => m.sender === "assistant" && !m.is_deleted).length;
-            }
-            beginStreamHandoff();
-            // Stop the live duration timer — the response is complete.
-            setStreamingStart(null);
-            setStreamingDuration(null);
+            // Chat mode: keep the streaming bubble visible until the persisted
+            // assistant row (with the same message_id) lands in the messages
+            // query.  The reconciliation effect clears the bubble then.  We
+            // still refetch here to pull in the freshly persisted row.
             refetchLatestPage();
-            scheduleStreamHandoffRetry();
             // Removed: session query not needed for lazy sessions
             queryClient.invalidateQueries({ queryKey: ["sessions"] });
             queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
           } else if (isSend && demo) {
-            // Demo mode: keep streamingMessageId so the streaming
-            // content bubble remains visible as the final message.
+            // Demo mode: keep streamingMessageId so the streaming content
+            // bubble remains visible as the final message.
             setStreamingMessageId(data.message_id || "demo-response");
           } else if (isReconnect) {
             // Reconnect: update tokens without clearing streaming state;
@@ -1156,9 +1137,8 @@ export const ChatWindow = React.memo(function ChatWindow({
             refetchLatestPage();
             queryClient.invalidateQueries({ queryKey: ["sessions"] });
           } else if (isAutopilot) {
-            // Autopilot: don't clear streaming state between turns —
-            // the autopilot_turn_start/complete events handle the UI.
-            // Just refetch so persisted per-turn messages appear.
+            // Autopilot: don't clear streaming state between turns — the
+            // autopilot_turn_start/complete events handle the UI.
             refetchLatestPage();
             queryClient.invalidateQueries({ queryKey: ["sessions"] });
           } else {
@@ -1196,13 +1176,12 @@ export const ChatWindow = React.memo(function ChatWindow({
           if (isRegenerate) setRegeneratingMsgId(null);
           if (isEdit) setEditingMsgId(null);
           if (isSend || isEdit) setPendingUserMessage(null);
-          // Issue #515: during a normal chat completion the streaming bubble is
-          // handed off to the persisted message by the handoff effect.  If that
-          // handoff is still pending when onClose fires (SSE closes right after
-          // message_complete), do NOT clear the streaming content here — doing
-          // so would leave an empty tail until the refetch lands.
-          const deferStreamClear = isSend && !demo && streamHandoffRef.current;
-          if (!deferStreamClear) {
+          // Issue #515: in normal chat send mode we keep the streaming bubble
+          // visible until the reconciliation effect clears it — clearing here
+          // would leave an empty tail before the refetch lands.  For
+          // demo/widget/reconnect/autopilot the stream ending is terminal, so
+          // clear the bubble immediately.
+          if (!(isSend && !demo)) {
             setStreamingContent("");
             setStreamingReasoningContent("");
             setStreamingMessageId(null);
@@ -1248,7 +1227,6 @@ export const ChatWindow = React.memo(function ChatWindow({
       setStreamError, setToolEvents, setFollowUpQuestions, setStreamingTokens,
       setPendingUserMessage, setRegeneratingMsgId, setEditingMsgId,
       fetchFollowUpQuestions, refetchLatestPage,
-      beginStreamHandoff, endStreamHandoff, scheduleStreamHandoffRetry,
     ],
   );
 
@@ -1262,8 +1240,6 @@ export const ChatWindow = React.memo(function ChatWindow({
     setToolEvents([]);
     setFollowUpQuestions([]);
     setStreamingTokens(null);
-    // Reset any lingering stream handoff from a previous turn before sending.
-    endStreamHandoff();
 
     // ---- Edit mode: streaming, like regenerate but on the user message ----
     if (editingMsgId) {
@@ -1381,10 +1357,9 @@ export const ChatWindow = React.memo(function ChatWindow({
         isBackgroundMode,
       );
     } else {
-      // Normal send in an existing chat — snapshot the current persisted
-      // assistant count so the Issue #515 handoff can confirm THIS turn's
-      // assistant row when it lands in the messages query.
-      captureAssistantBaseline();
+      // Normal send in an existing chat — the reconciliation effect will
+      // handle clearing the streaming bubble and scrolling once the persisted
+      // row arrives.
       const sendHandlers = buildStreamHandlers('send');
       startStream(
         sessionId,
@@ -1410,7 +1385,7 @@ export const ChatWindow = React.memo(function ChatWindow({
         },
       );
     }
-  }, [inputValue, streaming, sessionId, startStream, queryClient, pendingFiles, editingMsgId, pendingFlag, pendModelId, pendTemplateId, pendSkillId, pendAutoRoute, pendAutoSelectTools, pendActiveToolIds, thinkingEnabled, reasoningEffort, sessionTemperature, isAutopilotMode, setAutopilotState, endStreamHandoff, captureAssistantBaseline]);
+  }, [inputValue, streaming, sessionId, startStream, queryClient, pendingFiles, editingMsgId, pendingFlag, pendModelId, pendTemplateId, pendSkillId, pendAutoRoute, pendAutoSelectTools, pendActiveToolIds, thinkingEnabled, reasoningEffort, sessionTemperature, isAutopilotMode, setAutopilotState]);
 
   const handleStop = async () => {
     // Clear the streaming ghost bubble immediately for instant UX.
@@ -1424,7 +1399,6 @@ export const ChatWindow = React.memo(function ChatWindow({
     setStreamingTokens(null);
     setToolEvents([]);
     // A manual stop aborts this turn — no handoff to the persisted message.
-    endStreamHandoff();
     // Stop the live duration timer when the user manually stops.
     setStreamingStart(null);
     setStreamingDuration(null);
@@ -1724,7 +1698,7 @@ export const ChatWindow = React.memo(function ChatWindow({
 
   // Build the flat message list — useMemo to avoid re-computation on every render.
   const displayMessages: Array<any> = useMemo(() => {
-    // Start with persisted messages minus filtered IDs
+    // Start with persisted messages minus filtered IDs.
     const base = (messages || []).filter(
       (m: any) => m.id !== regeneratingMsgId && m.id !== editingMsgId,
     );
@@ -1749,7 +1723,17 @@ export const ChatWindow = React.memo(function ChatWindow({
         updated_at: new Date().toISOString(),
       });
     }
-    if ((streamingContent || streamingReasoningContent) && streamingMessageId) {
+
+    // Issue #515: only append the streaming bubble if:
+    //   1. It has an id (streamingMessageId is set) — prevents showing the
+    //      bubble for demo/static messages that have no id.
+    //   2. No persisted row already has this id — dedupes the local bubble
+    //      against the persisted row that may have arrived via refetch.
+    if (
+      (streamingContent || streamingReasoningContent) &&
+      streamingMessageId &&
+      !base.some((m: any) => m.id === streamingMessageId)
+    ) {
       base.push({
         id: streamingMessageId,
         session_id: sessionId,
@@ -2067,21 +2051,25 @@ export const ChatWindow = React.memo(function ChatWindow({
           data={displayMessages}
           firstItemIndex={firstItemIndex}
           startReached={handleStartReached}
-          // Issue #515: only follow output while streaming OR while a just-
-          // completed message is still being handed off to its persisted row.
-          // The persisted message is appended asynchronously AFTER the SSE
-          // closes (streaming=false), so with a plain `streaming ? "smooth" :
-          // false` the final message could land below the fold and appear to
-          // "go blank" until a manual reload (regression from 2.3.2).  We still
-          // honour the user's scroll position via isAtBottom.
-          followOutput={
-            (isAtBottom) =>
-              isAtBottom && (streaming || streamHandoff) ? "smooth" : false
-          }
+          // Issue #515: only follow output while streaming.  The persisted
+          // message is appended asynchronously AFTER the SSE closes
+          // (streaming=false), but the reconciliation effect clears the
+          // streaming bubble immediately, so the new row is visible and
+          // atBottom=true.  We still honour the user's scroll position via
+          // isAtBottom.
+          followOutput={(isAtBottom) => isAtBottom && streaming ? "smooth" : false}
           atBottomThreshold={80}
-          atBottomStateChange={(atBottom) => setShowScrollButton(!atBottom)}
+          atBottomStateChange={(atBottom) => {
+            // Track at-bottom in a ref so the reconciliation effect can decide
+            // whether to scroll after the stream completes (Issue #515).
+            atBottomRef.current = atBottom;
+            setShowScrollButton(!atBottom);
+          }}
+          // Issue #515: use message id as the item key so Virtuoso can
+          // track position when the bubble is replaced by the persisted row.
+          computeItemKey={(_index, msg) => msg.id}
           style={{ height: "100%" }}
-          itemContent={(_index, msg) => (
+          itemContent={(_, msg) => (
             <div style={{ padding: "0 16px" }}>
               <MessageBubble
                 key={msg.id}

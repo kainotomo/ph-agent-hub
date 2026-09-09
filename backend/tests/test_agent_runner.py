@@ -1824,6 +1824,50 @@ class TestPersistAssistantMessage:
         assert msg_id is not None
         assert isinstance(msg_id, str)
 
+    async def test_honors_supplied_message_id(self, db_session, test_session, test_model):
+        """A supplied message_id is reused as the persisted row id.
+
+        This is the foundation of the Issue #515 fix: the SSE ``message_id``
+        streamed to the client must equal the persisted DB row id so the
+        frontend can reconcile the streaming bubble against the persisted
+        row without an id-swap.
+        """
+        import uuid
+        from src.db.orm.messages import Message
+        supplied = str(uuid.uuid4())
+        msg_id = await self.fn(
+            db_session, test_session.id, False,
+            "Hello!", test_model.id, "gpt-4", "openai",
+            [], 50, 30, reasoning="",
+            message_id=supplied,
+        )
+        assert msg_id == supplied
+        # The row is persisted with that exact id.
+        row = await db_session.get(Message, supplied)
+        assert row is not None
+        assert row.sender == "assistant"
+        assert row.content[0]["text"] == "Hello!"
+
+    async def test_empty_message_id_generates_new_uuid(self, db_session, test_session, test_model):
+        """An empty (or missing) message_id falls back to a fresh UUID."""
+        import uuid
+        # Verify the fallback path works for legacy/demo callers.
+        m1 = await self.fn(
+            db_session, test_session.id, False,
+            "A", test_model.id, "gpt-4", "openai",
+            [], 1, 1, reasoning="", message_id="",
+        )
+        m2 = await self.fn(
+            db_session, test_session.id, False,
+            "B", test_model.id, "gpt-4", "openai",
+            [], 1, 1, reasoning="", message_id="",
+        )
+        assert m1 != m2
+        # Both look like UUIDs.
+        for mid in (m1, m2):
+            uuid.UUID(mid)
+
+
 
 @pytest.mark.integration
 class TestPersistMessages:

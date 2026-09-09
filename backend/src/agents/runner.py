@@ -2727,8 +2727,13 @@ async def _persist_assistant_message(
     tokens_in: int = 0,
     tokens_out: int = 0,
     reasoning: str = "",
+    message_id: str = "",
 ) -> str:
-    """Persist just the assistant message, returning its ID."""
+    """Persist just the assistant message, returning its ID.
+
+    If message_id is provided, it is reused as the persisted row ID;
+    otherwise a new UUID is generated.
+    """
     content: list[dict] = []
 
     # Prepend reasoning content (always first, before tool events)
@@ -2744,7 +2749,7 @@ async def _persist_assistant_message(
     clean_text = _strip_raw_tool_xml(assistant_response)
     if clean_text.strip():
         content.append({"type": "text", "text": clean_text})
-    assistant_msg_id = str(uuid.uuid4())
+    assistant_msg_id = message_id or str(uuid.uuid4())
     now = datetime.now(timezone.utc)
 
     if is_temporary:
@@ -2887,7 +2892,10 @@ async def run_agent_stream(
         db: Active async DB session.
         current_user: The authenticated user (or None for guest sessions).
         message_id: Pre-generated UUID for the assistant message (used
-            for client-side correlation across all events).
+            for client-side correlation across all events AND, when provided,
+            reused as the persisted assistant row id so the frontend can
+            reconcile the streaming bubble against the DB row without an
+            id-swap — Issue #515).
         file_ids: Optional list of FileUpload IDs to link to the user message.
         extra_tools: Optional list of additional ``@tool``-decorated callables
             to inject beyond those resolved from the session configuration.
@@ -3124,6 +3132,7 @@ async def run_agent_stream(
                         tokens_in=tokens_in,
                         tokens_out=tokens_out,
                         reasoning=accumulated_reasoning,
+                        message_id=message_id,
                     )
 
                 if cfg is not None and current_user is not None:

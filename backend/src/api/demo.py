@@ -351,6 +351,7 @@ async def _stream_demo_response(
     converted to message_complete so the frontend gets a
     clean finish.
     """
+    message_id = str(uuid.uuid4())
     try:
         async for event in run_agent_stream(
             db=db,
@@ -358,6 +359,7 @@ async def _stream_demo_response(
             user_message=message_content,
             file_ids=file_ids,
             current_user=None,
+            message_id=message_id,
         ):
             # Convert cleanup ContextVar errors into message_complete
             if event.get("event") == "error" and "inner_response_telemetry_captured_fields" in str(event.get("data", "")):

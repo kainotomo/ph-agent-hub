@@ -92,6 +92,12 @@ const mockStartReconnect = vi.hoisted(() => vi.fn());
 const mockResetStream = vi.hoisted(() => vi.fn());
 const mockListMessages = vi.hoisted(() => vi.fn());
 const lastStreamHandlers = vi.hoisted<{ current: any }>(() => ({ current: null }));
+// Captures the props of the most recent <Virtuoso> render so tests can drive
+// and inspect `followOutput` (Issue #515 handoff window).
+const virtuosoState = vi.hoisted(() => ({
+  props: null as any,
+  scrollToIndex: vi.fn(),
+}));
 
 // Default: no messages, matching the previous mock's behaviour.  Individual
 // tests may override via mockImplementation / mockResolvedValueOnce.
@@ -102,12 +108,52 @@ vi.mock("../../../services/api", () => ({
   getToken: () => "test-token",
 }));
 
-vi.mock("react-virtuoso", () => ({
-  Virtuoso: ({ children }: { children: React.ReactNode }) => (
-    <div data-testid="virtuoso">{children}</div>
-  ),
-  VirtuosoHandle: {},
-}));
+// Faithful Virtuoso stub: unlike the old `({children}) => <div>` mock it
+// actually renders `data` through `computeItemKey`/`itemContent`, so a
+// regression where the final message is dropped/blank is observable.  It also
+// captures its props so tests can inspect/execute `followOutput`.
+vi.mock("react-virtuoso", async () => {
+  const React = await import("react");
+  const Virtuoso = React.forwardRef(function MockVirtuoso(props: any, ref: any) {
+    virtuosoState.props = props;
+    React.useImperativeHandle(ref, () => ({
+      scrollToIndex: virtuosoState.scrollToIndex,
+    }));
+    const data = props.data ?? [];
+    return React.createElement(
+      "div",
+      { "data-testid": "virtuoso" },
+      data.map((item: any, index: number) =>
+        React.createElement(
+          "div",
+          {
+            key: props.computeItemKey
+              ? props.computeItemKey(index, item)
+              : index,
+          },
+          props.itemContent ? props.itemContent(index, item) : null,
+        ),
+      ),
+    );
+  });
+  return { Virtuoso, VirtuosoHandle: {} };
+});
+
+// Focused MessageBubble stub: assert ChatWindow orchestration (which message
+// rows it renders and with what text) without antd/markdown/React Query noise.
+vi.mock("./MessageBubble", () => {
+  const MessageBubble = ({ message }: { message: any }) => (
+    <div data-testid={`msg-${message.id}`}>
+      {Array.isArray(message.content)
+        ? message.content
+            .filter((c: any) => c?.type === "text")
+            .map((c: any) => c.text)
+            .join("")
+        : String(message.content ?? "")}
+    </div>
+  );
+  return { MessageBubble, default: MessageBubble };
+});
 
 vi.mock("../services/demo", () => ({
   getDemoMessages: vi.fn().mockResolvedValue([]),
@@ -182,6 +228,25 @@ async function settle() {
     await new Promise((r) => setTimeout(r, 200));
   });
 }
+
+// A promise whose settlement the test controls, used to hold a refetch open so
+// the post-completion handoff window can be inspected.
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+// Reset the captured Virtuoso props before every test in this file so
+// assertions never observe a previous render's `followOutput` closure.
+beforeEach(() => {
+  virtuosoState.props = null;
+  virtuosoState.scrollToIndex.mockReset();
+});
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -425,6 +490,27 @@ describe("ChatWindow — stream→persisted handoff (Issue #515)", () => {
     vi.clearAllMocks();
   });
 
+  // Compose and send a message through the real ChatWindow send flow, then
+  // return the captured stream handlers so the test can drive the SSE.
+  async function sendMessage(
+    user: ReturnType<typeof userEvent.setup>,
+    text: string,
+  ) {
+    const textarea = screen.getByPlaceholderText(/Type a message/);
+    await user.clear(textarea);
+    await user.type(textarea, text);
+    const sendButton = screen
+      .getAllByRole("button")
+      .find(
+        (btn) =>
+          btn.textContent?.includes("Send") &&
+          !(btn as HTMLButtonElement).disabled,
+      );
+    expect(sendButton).toBeTruthy();
+    await user.click(sendButton!);
+    return lastStreamHandlers.current;
+  }
+
   it("refetches the persisted assistant message when a normal-chat stream completes (multi-message chat)", async () => {
     const user = userEvent.setup();
     const history = [
@@ -434,7 +520,9 @@ describe("ChatWindow — stream→persisted handoff (Issue #515)", () => {
 
     // First listMessages call resolves the initial (multi-message) history;
     // subsequent calls are the post-completion refetches that the handoff
-    // relies on to hydrate the freshly persisted assistant row.
+    // relies on to hydrate the freshly persisted assistant row.  The
+    // persisted row's id EQUALS the stream's message_id so this exercises the
+    // reconciliation (previously it was "a2", which never matched).
     let calls = 0;
     mockListMessages.mockImplementation(() => {
       calls += 1;
@@ -445,7 +533,7 @@ describe("ChatWindow — stream→persisted handoff (Issue #515)", () => {
             : [
                 ...history,
                 msg("u2", "user", "Second question"),
-                msg("a2", "assistant", "Second answer"),
+                msg("stream-1", "assistant", "Second answer"),
               ],
         has_more: false,
       });
@@ -454,20 +542,7 @@ describe("ChatWindow — stream→persisted handoff (Issue #515)", () => {
     renderChatWindow({ isPending: false, sessionId: "test-session-1" });
     await settle();
 
-    // Compose and send a new message to exercise the normal chat send flow.
-    const textarea = screen.getByPlaceholderText(/Type a message/);
-    await user.type(textarea, "Second question");
-    const sendButton = screen
-      .getAllByRole("button")
-      .find(
-        (btn) =>
-          btn.textContent?.includes("Send") &&
-          !(btn as HTMLButtonElement).disabled,
-      );
-    expect(sendButton).toBeTruthy();
-    await user.click(sendButton!);
-
-    const handlers = lastStreamHandlers.current;
+    const handlers = await sendMessage(user, "Second question");
     expect(handlers).toBeTruthy();
 
     const callsBeforeComplete = calls;
@@ -484,6 +559,186 @@ describe("ChatWindow — stream→persisted handoff (Issue #515)", () => {
     // without this refetch the UI can be left showing only the streamed
     // content / follow-up questions until a manual browser reload).
     expect(calls).toBeGreaterThan(callsBeforeComplete);
+    // The matched persisted row must be rendered exactly once.
+    expect(screen.getAllByTestId("msg-stream-1")).toHaveLength(1);
+  });
+
+  it("keeps the final assistant message rendered and de-duplicates the streaming bubble", async () => {
+    const user = userEvent.setup();
+    const history = [
+      msg("u1", "user", "First question"),
+      msg("a1", "assistant", "First answer"),
+    ];
+
+    // The post-completion refetch returns the persisted assistant row with the
+    // SAME id as the streaming bubble (message_id), so the reconciliation must
+    // replace the local bubble rather than render both.
+    let calls = 0;
+    mockListMessages.mockImplementation(() => {
+      calls += 1;
+      return Promise.resolve({
+        items:
+          calls === 1
+            ? history
+            : [
+                ...history,
+                msg("u2", "user", "Second question"),
+                msg("stream-1", "assistant", "Second answer"),
+              ],
+        has_more: false,
+      });
+    });
+
+    renderChatWindow({ isPending: false, sessionId: "test-session-1" });
+    await settle();
+
+    const handlers = await sendMessage(user, "Second question");
+
+    // While streaming, the optimistic bubble carries the streamed text.
+    await act(async () => {
+      handlers.onToken("Second answer", "stream-1");
+    });
+    expect(screen.getByTestId("msg-stream-1")).toHaveTextContent("Second answer");
+
+    await act(async () => {
+      handlers.onMessageComplete({
+        message_id: "stream-1",
+        tokens_in: 10,
+        tokens_out: 40,
+      });
+    });
+    await settle();
+
+    // Exactly one row, still showing the streamed text — not blank, no dupes.
+    expect(screen.getAllByTestId("msg-stream-1")).toHaveLength(1);
+    expect(screen.getByTestId("msg-stream-1")).toHaveTextContent("Second answer");
+  });
+
+  it("keeps the streamed text visible when the refetch never returns the persisted row", async () => {
+    const user = userEvent.setup();
+    const history = [
+      msg("u1", "user", "First question"),
+      msg("a1", "assistant", "First answer"),
+    ];
+
+    // Every refetch returns the history WITHOUT the new persisted row.
+    mockListMessages.mockResolvedValue({ items: history, has_more: false });
+
+    renderChatWindow({ isPending: false, sessionId: "test-session-1" });
+    await settle();
+
+    const handlers = await sendMessage(user, "Second question");
+
+    await act(async () => {
+      handlers.onToken("Second answer", "stream-1");
+      handlers.onMessageComplete({
+        message_id: "stream-1",
+        tokens_in: 10,
+        tokens_out: 40,
+      });
+    });
+    await settle();
+
+    // The reconciliation never runs (no persisted row), so the streamed bubble
+    // must remain visible — the UI must never go blank.
+    expect(screen.getByTestId("msg-stream-1")).toHaveTextContent("Second answer");
+  });
+
+  it("follows output through the post-completion handoff window", async () => {
+    const user = userEvent.setup();
+    const history = [
+      msg("u1", "user", "First question"),
+      msg("a1", "assistant", "First answer"),
+    ];
+    const persisted = [
+      ...history,
+      msg("u2", "user", "Second question"),
+      msg("stream-1", "assistant", "Second answer"),
+    ];
+
+    // Hold the post-completion refetch open so the handoff window can be
+    // observed before the persisted row lands.
+    let calls = 0;
+    const handoffRefetch = deferred<{ items: unknown[]; has_more: boolean }>();
+    mockListMessages.mockImplementation(() => {
+      calls += 1;
+      if (calls === 1) {
+        return Promise.resolve({ items: history, has_more: false });
+      }
+      return handoffRefetch.promise;
+    });
+
+    renderChatWindow({ isPending: false, sessionId: "test-session-1" });
+    await settle();
+
+    expect(typeof virtuosoState.props.followOutput).toBe("function");
+    // Nothing streaming and no handoff → do not force-follow.
+    expect(virtuosoState.props.followOutput(true)).toBeFalsy();
+
+    const handlers = await sendMessage(user, "Second question");
+    expect(handlers).toBeTruthy();
+
+    await act(async () => {
+      handlers.onToken("Second answer", "stream-1");
+    });
+    // The mocked useStream always reports streaming=false, so this isolates
+    // `handoffPending`: it is still false here → do not follow.
+    expect(virtuosoState.props.followOutput(true)).toBeFalsy();
+
+    await act(async () => {
+      handlers.onMessageComplete({
+        message_id: "stream-1",
+        tokens_in: 10,
+        tokens_out: 40,
+      });
+    });
+    // SSE has closed (streaming=false) but the persisted row has not arrived:
+    // handoffPending keeps Virtuoso following so the final row lands in view.
+    expect(virtuosoState.props.followOutput(true)).toBe("smooth");
+
+    await act(async () => {
+      handoffRefetch.resolve({ items: persisted, has_more: false });
+      await Promise.resolve();
+    });
+    await settle();
+
+    // Persisted row landed and the reconciliation effect cleared the handoff.
+    expect(screen.getAllByTestId("msg-stream-1")).toHaveLength(1);
+    expect(virtuosoState.props.followOutput(true)).toBeFalsy();
+  });
+
+  it("attributes a new turn's tokens to the new stream id after an errored turn", async () => {
+    const user = userEvent.setup();
+    const history = [
+      msg("u1", "user", "First question"),
+      msg("a1", "assistant", "First answer"),
+    ];
+    mockListMessages.mockResolvedValue({ items: history, has_more: false });
+
+    renderChatWindow({ isPending: false, sessionId: "test-session-1" });
+    await settle();
+
+    // Turn 1: stream a token, then fail and close the stream.  `onClose`
+    // deliberately keeps the streaming bubble for a normal send, so the stale
+    // `streamingMessageId` ("stream-old") survives into the next send.
+    const firstHandlers = await sendMessage(user, "Old question");
+    await act(async () => {
+      firstHandlers.onToken("old answer", "stream-old");
+      firstHandlers.onError("boom");
+      firstHandlers.onClose();
+    });
+    await settle();
+
+    // Turn 2: handleSend must reset the stale id, so the new turn's tokens are
+    // attributed to "stream-new" and not merged into "stream-old".
+    const secondHandlers = await sendMessage(user, "New question");
+    await act(async () => {
+      secondHandlers.onToken("new answer", "stream-new");
+    });
+    await settle();
+
+    expect(screen.getByTestId("msg-stream-new")).toHaveTextContent("new answer");
+    expect(screen.queryByTestId("msg-stream-old")).toBeNull();
   });
 });
 

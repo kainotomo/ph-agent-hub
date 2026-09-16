@@ -724,6 +724,10 @@ export const MessageBubble = React.memo(MessageBubbleInner, (prev, next) =>
   prev.message.tokens_out === next.message.tokens_out &&
   prev.message.model_name === next.message.model_name &&
   prev.streaming === next.streaming &&
+  prev.streamingDuration === next.streamingDuration &&
+  prev.isLatestUserMessage === next.isLatestUserMessage &&
+  prev.isLatestAssistantMessage === next.isLatestAssistantMessage &&
+  prev.showFeedback === next.showFeedback &&
   prev.regenerating === next.regenerating &&
   prev.disabled === next.disabled &&
   prev.onEdit === next.onEdit &&

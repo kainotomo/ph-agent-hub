@@ -1592,6 +1592,19 @@ async def _generate_title_async(
 # ---------------------------------------------------------------------------
 
 
+def _synthetic_message_complete(session_id: str, message_id: str) -> dict:
+    """Terminal ``message_complete`` event synthesized when the underlying
+    stream surfaced a swallowed error after tokens were already delivered.
+
+    Carries the real correlation ids so clients can reconcile the final
+    assistant message instead of receiving an empty payload.
+    """
+    return {
+        "event": "message_complete",
+        "data": json.dumps({"session_id": session_id, "message_id": message_id}),
+    }
+
+
 async def _run_agent_background(
     session_id: str,
     data: dict[str, Any],
@@ -1656,7 +1669,7 @@ async def _run_agent_background(
                         "Swallowing httpx ContextVar error — tokens already delivered"
                     )
                     await bridge.put(
-                        {"event": "message_complete", "data": "{}"}
+                        _synthetic_message_complete(session_id, message_id)
                     )
                     return
 

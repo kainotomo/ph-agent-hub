@@ -375,6 +375,21 @@ class TestSseEvent:
         assert data["message_id"] == "m1"
 
 
+@pytest.mark.unit
+class TestSyntheticMessageComplete:
+    """Tests for ``chat._synthetic_message_complete`` (swallowed-error path)."""
+
+    def test_carries_real_correlation_ids(self):
+        from src.api.chat import _synthetic_message_complete
+
+        event = _synthetic_message_complete("sess-123", "msg-456")
+        assert event["event"] == "message_complete"
+        data = json.loads(event["data"])
+        assert data["session_id"] == "sess-123"
+        assert data["message_id"] == "msg-456"
+        assert data["message_id"]  # non-empty
+
+
 class TestMaybeAccumulateText:
     """Tests for ``_maybe_accumulate_text``."""
 

@@ -52,7 +52,13 @@ pdfminer-six
 pypdfium2
 
 # AI Agent Framework
-agent-framework
+# Pinned exactly: MAF marks [BREAKING] changes inside 1.x minors, so an open range
+# can silently accept breaking changes. Bump deliberately and re-run the suite.
+# agent-framework==X pins agent-framework-core[all]==X.
+agent-framework==1.19.0
+# MAF permits openai>=2.25,<4; held below 3.x because src/models/deepseek.py relies
+# on a deep openai type path (openai.types.chat.chat_completion_message_tool_call).
+openai>=2.25.0,<3
 
 # Async HTTP (ERPNext tool calls + fetch_url, weather, wikipedia, currency tools)
 httpx

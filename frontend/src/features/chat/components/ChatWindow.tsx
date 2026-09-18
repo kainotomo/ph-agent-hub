@@ -8,7 +8,7 @@
 
 import React, { useRef, useState, useCallback, useMemo, useEffect } from "react";
 import { Virtuoso, VirtuosoHandle } from "react-virtuoso";
-import { Button, Drawer, Grid, Input, Select, Slider, Space, Spin, Empty, Alert, Switch, Tag, Tooltip, Typography, Upload, message, notification } from "antd";
+import { Badge, Button, Drawer, Grid, Input, Select, Slider, Space, Spin, Empty, Alert, Switch, Tag, Tooltip, Typography, Upload, message, notification } from "antd";
 import {
   SendOutlined,
   SettingOutlined,
@@ -24,6 +24,7 @@ import {
 import { useQuery, useInfiniteQuery, useQueryClient, type InfiniteData } from "@tanstack/react-query";
 import { MessageBubble } from "./MessageBubble";
 import { useStream } from "../hooks/useStream";
+import { useStickToBottom } from "../hooks/useStickToBottom";
 import { computeFirstItemIndex } from "../services/messagePaging";
 import {
   listMessages,
@@ -433,7 +434,6 @@ export const ChatWindow = React.memo(function ChatWindow({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const [uploading, setUploading] = useState(false);
-  const [showScrollButton, setShowScrollButton] = useState(false);
 
   // Restore pending files from sessionStorage on mount for pending sessions
   useEffect(() => {
@@ -486,6 +486,29 @@ export const ChatWindow = React.memo(function ChatWindow({
   const { streaming, startStream, startRegenerateStream, startEditStream, stopStream, startReconnect, resetStream } = useStream(
     demo ? "demo" : widget ? "widget" : "chat"
   );
+
+  // ---- Issue #521: sticky scroll intent (no auto-scroll on finish) --------
+  const scrollToBottom = useCallback(() => {
+    virtuosoRef.current?.scrollToIndex({
+      index: "LAST",
+      align: "end",
+      behavior: "smooth",
+    });
+  }, []);
+
+  const {
+    scrollerRef,
+    showScrollButton,
+    followOutput,
+    atBottomStateChange,
+    markTurnEnded,
+    followNow,
+    unseenComplete,
+  } = useStickToBottom({
+    streaming,
+    handoffPending,
+    scrollToBottom,
+  });
 
   const {
     data: messagesData,
@@ -1109,17 +1132,22 @@ export const ChatWindow = React.memo(function ChatWindow({
             // Removed: session query not needed for lazy sessions
             queryClient.invalidateQueries({ queryKey: ["sessions"] });
             queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
+            // Mark the turn ended so the scroll-to-bottom badge appears
+            // if the user is not at the bottom.
+            markTurnEnded();
           } else if (isSend && demo) {
             // Demo mode: keep streamingMessageId so the streaming content
             // bubble remains visible as the final message.
             setHandoffPending(false);
             setStreamingMessageId(data.message_id || "demo-response");
+            markTurnEnded();
           } else if (isReconnect) {
             // Reconnect: update tokens without clearing streaming state;
             // onClose handles the final cleanup.
             setHandoffPending(false);
             refetchLatestPage();
             queryClient.invalidateQueries({ queryKey: ["sessions"] });
+            markTurnEnded();
           } else if (isAutopilot) {
             // Autopilot: don't clear streaming state between turns — the
             // autopilot_turn_start/complete events handle the UI.
@@ -1136,6 +1164,7 @@ export const ChatWindow = React.memo(function ChatWindow({
             // Removed: session query not needed for lazy sessions
             queryClient.invalidateQueries({ queryKey: ["sessions"] });
             queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
+            markTurnEnded();
           }
         },
         onError: (err: string) => {
@@ -1252,6 +1281,9 @@ export const ChatWindow = React.memo(function ChatWindow({
         content,
       });
 
+      // Jump to bottom and re-engage following when editing.
+      followNow();
+
       startEditStream(sessionId, msgId, content, sessionTemperature ?? undefined, {
         ...buildStreamHandlers('edit'),
         onStreamStart: () => {
@@ -1287,6 +1319,9 @@ export const ChatWindow = React.memo(function ChatWindow({
 
     const fileIds = pendingFiles.map((f) => f.file_id);
     setPendingFiles([]);
+
+    // Jump to bottom and re-engage following when sending a new message.
+    followNow();
 
     // Build session_data for lazy session creation (Phase 2)
     // This is kept as a fallback even with eager creation (Issue #478):
@@ -1325,6 +1360,8 @@ export const ChatWindow = React.memo(function ChatWindow({
         maxTurns: 20,
         status: "executing",
       });
+      // Jump to bottom and re-engage following when starting autopilot.
+      followNow();
       const apHandlers = buildStreamHandlers('autopilot');
       startStream(
         sessionId,
@@ -1403,6 +1440,9 @@ export const ChatWindow = React.memo(function ChatWindow({
     // Stop the live duration timer when the user manually stops.
     setStreamingStart(null);
     setStreamingDuration(null);
+    // Mark the turn ended so the scroll-to-bottom badge appears
+    // if the user is not at the bottom.
+    markTurnEnded();
     // Track that this session was explicitly stopped so reconnecting
     // won't attempt to rejoin a cancelled agent (Issue #457).
     if (sessionId) {
@@ -1468,6 +1508,9 @@ export const ChatWindow = React.memo(function ChatWindow({
     setToolEvents([]);
     setFollowUpQuestions([]);
     setStreamingTokens(null);
+
+    // Jump to bottom and re-engage following when regenerating.
+    followNow();
 
     // Build handlers for regenerate mode (without onTagsUpdated)
     const regenerateHandlers: {
@@ -2032,22 +2075,13 @@ export const ChatWindow = React.memo(function ChatWindow({
           data={displayMessages}
           firstItemIndex={firstItemIndex}
           startReached={handleStartReached}
-          // Issue #515: keep following output while streaming AND through the
-          // post-completion handoff window.  The persisted assistant row is
-          // appended asynchronously AFTER the SSE closes (streaming=false), so
-          // gating only on `streaming` lets Virtuoso stop following before the
-          // row lands — the final message can then sit below the fold and
-          // appear blank until a manual reload.  `handoffPending` bridges that
-          // window and is cleared once the persisted row arrives.  We still
-          // honour the user's scroll position via isAtBottom.
-          followOutput={(isAtBottom) => (isAtBottom && (streaming || handoffPending) ? "smooth" : false)}
-          atBottomThreshold={80}
-          atBottomStateChange={(atBottom) => {
-            setShowScrollButton(!atBottom);
-          }}
           // Issue #515: use message id as the item key so Virtuoso can
           // track position when the bubble is replaced by the persisted row.
           computeItemKey={(_index, msg) => msg.id}
+          scrollerRef={scrollerRef}
+          followOutput={followOutput}
+          atBottomThreshold={80}
+          atBottomStateChange={atBottomStateChange}
           style={{ height: "100%" }}
           itemContent={(_, msg) => (
             <div style={{ padding: "0 16px" }}>
@@ -2307,29 +2341,35 @@ export const ChatWindow = React.memo(function ChatWindow({
           ),
         }}
       />
-      {/* Scroll-to-bottom floating button — rendered outside Virtuoso's scroll container */}
+      {/* Scroll-to-bottom floating button — rendered outside Virtuoso's scroll container.
+          NOTE: the positioning lives on the wrapper div, NOT on <Badge>.  antd's
+          Badge forwards its `style` prop to the *indicator* (the dot) when it has
+          children, so putting it on the Badge left the button in normal flow
+          (bottom-left) and misplaced the unseen-completion dot. */}
       {showScrollButton && (
-        <Button
-          shape="circle"
-          size="small"
-          icon={<DownOutlined />}
-          onClick={() => {
-            virtuosoRef.current?.scrollToIndex({
-              index: "LAST",
-              align: "end",
-              behavior: "smooth",
-            });
-          }}
+        <div
           style={{
             position: "absolute",
             bottom: 16,
             left: "50%",
             transform: "translateX(-50%)",
             zIndex: 10,
-            boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+            lineHeight: 0,
           }}
-          title="Scroll to bottom"
-        />
+        >
+          <Badge dot={unseenComplete} offset={[-2, 0]}>
+            <Button
+              shape="circle"
+              size="small"
+              icon={<DownOutlined />}
+              onClick={followNow}
+              style={{
+                boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+              }}
+              title="Scroll to bottom"
+            />
+          </Badge>
+        </div>
       )}
       </div>
 

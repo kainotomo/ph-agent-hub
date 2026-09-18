@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Admin session deletion now works correctly. ([#460])
+- Chat no longer auto-scrolls to the end when a response finishes while the user
+  is reading earlier messages; a badge on the scroll-to-bottom button indicates
+  the finished response. ([#521])
 
 ---
 

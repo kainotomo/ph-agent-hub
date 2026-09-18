@@ -176,6 +176,13 @@ function MessageBubbleInner({
   const [editContent, setEditContent] = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
 
+  const [reasoningExpanded, setReasoningExpanded] = useState(false);
+
+  // Reset expanded state when the message changes (e.g. after Virtuoso remount)
+  useEffect(() => {
+    setReasoningExpanded(false);
+  }, [message.id]);
+
   // Reset editing state when the message changes (e.g. after Virtuoso remount)
   useEffect(() => {
     if (isEditingAssistant) {
@@ -264,13 +271,19 @@ function MessageBubbleInner({
 
       {/* Bubble */}
       <div style={bubbleStyle}>
-        {/* Reasoning panel — auto-expanded during streaming so user can see
-            the model think in real-time, collapsed otherwise. */}
+        {/* Reasoning panel — collapsed by default; user-expandable, same as
+            Tool Activity below. No auto-expand while streaming. */}
         {reasoningItems.length > 0 && (
           <Collapse
             ghost
             size="small"
-            defaultActiveKey={streaming ? ["reasoning"] : []}
+            destroyInactivePanel
+            activeKey={reasoningExpanded ? ["reasoning"] : []}
+            onChange={(keys) =>
+              setReasoningExpanded(
+                Array.isArray(keys) ? keys.includes("reasoning") : keys === "reasoning",
+              )
+            }
             items={[
               {
                 key: "reasoning",

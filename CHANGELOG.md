@@ -39,6 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Chat no longer auto-scrolls to the end when a response finishes while the user
   is reading earlier messages; a badge on the scroll-to-bottom button indicates
   the finished response. ([#521])
+- Reasoning panel now stays collapsed by default during streaming and expands
+  only when clicked, matching Tool Activity. ([#524])
 
 ---
 
@@ -179,3 +181,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#460]: https://github.com/kainotomo/ph-agent-hub/issues/460
 [#466]: https://github.com/kainotomo/ph-agent-hub/issues/466
 [#467]: https://github.com/kainotomo/ph-agent-hub/issues/467
+[#521]: https://github.com/kainotomo/ph-agent-hub/issues/521
+[#524]: https://github.com/kainotomo/ph-agent-hub/issues/524

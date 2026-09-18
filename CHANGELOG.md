@@ -23,6 +23,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Mobile Compatible Scheduled Tasks** — scheduled tasks view is now mobile-responsive. ([#466])
 - **Mass Delete Chat Sessions** — admin can delete multiple chat sessions at once. ([#460])
 
+### Changed
+- **Microsoft Agent Framework 1.12.1 → 1.19.0**, now pinned exactly in `backend/requirements.txt`
+  (`agent-framework==1.19.0`). The dependency was previously unpinned, so image builds could silently
+  resolve a different framework version than the one that was tested. `openai` is held at `>=2.25.0,<3`
+  because `src/models/deepseek.py` relies on a deep OpenAI type path.
+- Test suite result is unchanged from the pre-upgrade baseline (2 pre-existing failures, 1866 passed,
+  5 skipped).
+- **MCP behaviour changes** in the framework: server-initiated *sampling* requests are now denied by
+  default, and framework-created MCP HTTP clients no longer persist response cookies. MCP servers
+  configured in PH Agent Hub are unaffected (their HTTP client is caller-supplied).
+
 ### Fixed
 - Admin session deletion now works correctly. ([#460])
 - Chat no longer auto-scrolls to the end when a response finishes while the user

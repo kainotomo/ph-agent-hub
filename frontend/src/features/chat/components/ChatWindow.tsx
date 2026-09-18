@@ -2341,30 +2341,35 @@ export const ChatWindow = React.memo(function ChatWindow({
           ),
         }}
       />
-      {/* Scroll-to-bottom floating button — rendered outside Virtuoso's scroll container */}
+      {/* Scroll-to-bottom floating button — rendered outside Virtuoso's scroll container.
+          NOTE: the positioning lives on the wrapper div, NOT on <Badge>.  antd's
+          Badge forwards its `style` prop to the *indicator* (the dot) when it has
+          children, so putting it on the Badge left the button in normal flow
+          (bottom-left) and misplaced the unseen-completion dot. */}
       {showScrollButton && (
-        <Badge
-          dot={unseenComplete}
-          offset={[-2, 0]}
+        <div
           style={{
             position: "absolute",
             bottom: 16,
             left: "50%",
             transform: "translateX(-50%)",
             zIndex: 10,
+            lineHeight: 0,
           }}
         >
-          <Button
-            shape="circle"
-            size="small"
-            icon={<DownOutlined />}
-            onClick={followNow}
-            style={{
-              boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
-            }}
-            title="Scroll to bottom"
-          />
-        </Badge>
+          <Badge dot={unseenComplete} offset={[-2, 0]}>
+            <Button
+              shape="circle"
+              size="small"
+              icon={<DownOutlined />}
+              onClick={followNow}
+              style={{
+                boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+              }}
+              title="Scroll to bottom"
+            />
+          </Badge>
+        </div>
       )}
       </div>
 

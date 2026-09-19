@@ -17,6 +17,13 @@ export interface TagData {
   color: string | null;
 }
 
+export interface FolderData {
+  id: string;
+  name: string;
+  color: string | null;
+  sort_order: number;
+}
+
 export type SearchScope = "all" | "title" | "content" | "tag";
 
 export interface SessionData {
@@ -38,6 +45,8 @@ export interface SessionData {
   temperature?: number | null;
   cross_session_retrieval_enabled?: boolean | null;
   tags?: TagData[];
+  /** Folder this session belongs to (Issue #526). null/undefined = "Unfiled". */
+  folder_id?: string | null;
   /** Which search scopes matched this session (title/content/tag). Only
    * populated on results from the session search endpoint. */
   matched_fields?: string[];
@@ -147,6 +156,8 @@ export function updateSession(
     thinking_enabled?: boolean | null;
     reasoning_effort?: string | null;
     temperature?: number | null;
+    /** Issue #526 — move the session into a folder, or null for "Unfiled". */
+    folder_id?: string | null;
   },
 ): Promise<SessionData> {
   return api<SessionData>(`/chat/session/${id}`, {
@@ -513,6 +524,40 @@ export function updateMemory(
   return api<MemoryEntry>(`/memory/${id}`, {
     method: "PUT",
     body: data,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Session Folders (Issue #526)
+// ---------------------------------------------------------------------------
+
+export function listFolders(): Promise<FolderData[]> {
+  return api<FolderData[]>("/chat/folders");
+}
+
+export function createFolder(data: {
+  name: string;
+  color?: string | null;
+}): Promise<FolderData> {
+  return api<FolderData>("/chat/folders", {
+    method: "POST",
+    body: data,
+  });
+}
+
+export function updateFolder(
+  id: string,
+  data: { name?: string; color?: string | null; sort_order?: number },
+): Promise<FolderData> {
+  return api<FolderData>(`/chat/folders/${id}`, {
+    method: "PUT",
+    body: data,
+  });
+}
+
+export function deleteFolder(id: string): Promise<void> {
+  return api<void>(`/chat/folders/${id}`, {
+    method: "DELETE",
   });
 }
 

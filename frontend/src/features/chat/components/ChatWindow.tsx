@@ -164,6 +164,10 @@ interface ChatWindowProps {
   logoUrl?: string;
   featureFlags?: Record<string, boolean>;
   isPending?: boolean;
+  /** Folder a lazily-created session should be filed into (Issue #526).
+   * Only used while isPending is true — it rides along with the first
+   * message's session_data so the backend creates the session in place. */
+  folderId?: string;
   onSessionUpdate?: (data: Record<string, unknown>) => void;
 }
 
@@ -186,6 +190,7 @@ export const ChatWindow = React.memo(function ChatWindow({
   logoUrl = "",
   featureFlags = {},
   isPending = false,
+  folderId,
   onSessionUpdate,
 }: ChatWindowProps) {
   // ---- Draft persistence for pending (lazy) sessions --------------------
@@ -1339,6 +1344,10 @@ export const ChatWindow = React.memo(function ChatWindow({
           reasoning_effort: reasoningEffort,
           temperature: sessionTemperature,
           active_tool_ids: pendActiveToolIds.length > 0 ? pendActiveToolIds : null,
+          // Issue #526 — file the lazily-created session into the folder the
+          // user started it from.  undefined (no folder pick) becomes null,
+          // which means "Unfiled".
+          folder_id: folderId ?? null,
         }
       : undefined;
 
@@ -1422,7 +1431,7 @@ export const ChatWindow = React.memo(function ChatWindow({
         },
       );
     }
-  }, [inputValue, streaming, sessionId, startStream, queryClient, pendingFiles, editingMsgId, pendingFlag, pendModelId, pendTemplateId, pendSkillId, pendAutoRoute, pendAutoSelectTools, pendActiveToolIds, thinkingEnabled, reasoningEffort, sessionTemperature, isAutopilotMode, setAutopilotState]);
+  }, [inputValue, streaming, sessionId, startStream, queryClient, pendingFiles, editingMsgId, pendingFlag, folderId, pendModelId, pendTemplateId, pendSkillId, pendAutoRoute, pendAutoSelectTools, pendActiveToolIds, thinkingEnabled, reasoningEffort, sessionTemperature, isAutopilotMode, setAutopilotState]);
 
   const handleStop = async () => {
     // Clear the streaming ghost bubble immediately for instant UX.

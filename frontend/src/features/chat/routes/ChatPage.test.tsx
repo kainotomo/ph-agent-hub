@@ -58,6 +58,7 @@ vi.mock("../components/ChatWindow", () => ({
       data-session-id={props.sessionId as string}
       data-is-pending={String(!!props.isPending)}
       data-is-temporary={String(!!props.isTemporary)}
+      data-folder-id={String(props.folderId ?? "")}
     />
   ),
 }));
@@ -101,13 +102,15 @@ const FAKE_SESSION = {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function renderChatPage() {
+function renderChatPage(
+  initialEntries: Parameters<typeof MemoryRouter>[0]["initialEntries"] = ["/"],
+) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   return render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter>
+      <MemoryRouter initialEntries={initialEntries}>
         <ChatPage />
       </MemoryRouter>
     </QueryClientProvider>,
@@ -277,5 +280,37 @@ describe("ChatPage", () => {
     await settle();
 
     expect(screen.getByTestId("session-sidebar")).toBeInTheDocument();
+  });
+
+  // ── Issue #526: "new chat in folder" navigation state ─────────────────
+
+  it("passes the folder from navigation state to a pending ChatWindow", async () => {
+    mockSessionId = "lazy-session";
+    mockGetSession.mockResolvedValue({ ...FAKE_SESSION, is_pending: true });
+
+    renderChatPage([
+      { pathname: "/chat/lazy-session", state: { folderId: "folder-work" } },
+    ]);
+    await settle();
+
+    expect(screen.getByTestId("chat-window")).toHaveAttribute(
+      "data-folder-id",
+      "folder-work",
+    );
+  });
+
+  it("does not pass a folder once the session is persisted", async () => {
+    mockSessionId = "persisted-session";
+    mockGetSession.mockResolvedValue({ ...FAKE_SESSION, is_pending: false });
+
+    renderChatPage([
+      { pathname: "/chat/persisted-session", state: { folderId: "folder-work" } },
+    ]);
+    await settle();
+
+    expect(screen.getByTestId("chat-window")).toHaveAttribute(
+      "data-folder-id",
+      "",
+    );
   });
 });

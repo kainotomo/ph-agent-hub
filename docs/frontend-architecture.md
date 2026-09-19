@@ -309,6 +309,7 @@ It does **not** include any admin functionality.
 | **Templates & Prompts** | Dropdown for tenant templates; personal prompt library for reusable user-authored prompts |
 | **Skills** | Dropdown for tenant and personal skills; maps to MAF agents/workflows; auto-syncs session tools on skill change; users can create/edit/delete personal skills |
 | **Session Management** | Create (permanent or temporary), rename, delete (with confirmation), pin/unpin, convert temp→permanent, collapsible session list |
+| **Session Folders** | User-scoped, single-level folders; collapsible folder groups in the sidebar with "Unfiled" last; move by native drag & drop or the per-row "Move to folder" menu; create/rename/recolour/delete; collapse state persisted in localStorage (Issue #526) |
 | **Message Management** | Edit (creates branch + auto-regenerates), delete (soft-delete), regenerate (creates branch), branch navigation, thumbs up/down feedback |
 | **Search** | Full-text search across user's own sessions and messages |
 | **Memory** | Paginated view, filter by session, delete, manually add entries, cross-session retrieval, automatic vs. manual entry markers |
@@ -333,6 +334,8 @@ It does **not** include any admin functionality.
     PersonalSkillEditor.tsx
     FileUpload.tsx
     SessionSidebar.tsx
+    SessionFolderHeader.tsx
+    sessionRows.ts
     SessionSearch.tsx
     MemoryManager.tsx
     SessionToolActivation.tsx
@@ -345,7 +348,7 @@ It does **not** include any admin functionality.
 
 ### 12.4 Navigation Structure
 
-**Sidebar:** New Chat (with temp/permanent toggle), sessions list (pinned first), search, memory manager, user settings, logout
+**Sidebar:** New Chat (with temp/permanent toggle), sessions grouped into collapsible folders (pinned first within each group, "Unfiled" last), search, memory manager, user settings, logout
 
 **Main Area:** Chat window, input box, model/template/prompt/skill selectors, tool activation panel, file upload button
 

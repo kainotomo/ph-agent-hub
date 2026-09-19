@@ -4,7 +4,7 @@
 // Main chat layout: SessionSidebar + ChatWindow + input area.
 // =============================================================================
 
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams, useNavigate, useLocation } from "react-router-dom";
 import { Layout, Button, Typography, message, Space } from "antd";
 import { PlusOutlined, ThunderboltOutlined, FolderOpenOutlined, ClockCircleOutlined } from "@ant-design/icons";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -19,7 +19,15 @@ const { Title, Text } = Typography;
 export function ChatPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const queryClient = useQueryClient();
+
+  // Issue #526 — starting a chat from a folder's "+" button passes the target
+  // folder through navigation state.  It only matters while the session is
+  // still pending (lazy creation): the folder id rides along with the first
+  // message's session_data so the backend creates the session in place.
+  const pendingFolderId = (location.state as { folderId?: string } | null)
+    ?.folderId;
 
   const { data: session } = useQuery({
     queryKey: ["session", sessionId],
@@ -147,6 +155,7 @@ export function ChatPage() {
           <ChatWindow
             sessionId={sessionId!}
             isPending={isPending}
+            folderId={isPending ? pendingFolderId : undefined}
             isTemporary={session?.is_temporary}
             selectedModelId={session?.selected_model_id ?? undefined}
             selectedTemplateId={session?.selected_template_id ?? undefined}

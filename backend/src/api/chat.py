@@ -64,7 +64,7 @@ from ..db.orm.sessions import Session, SessionActiveTool
 from ..db.orm.tools import Tool
 from ..db.orm.user_tool_preferences import UserToolPreference
 from ..db.orm.users import User as UserORM
-from ..services import audit_service, session_service, upload_service
+from ..services import audit_service, folder_service, session_service, upload_service
 from ..storage import s3
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -87,6 +87,7 @@ class SessionCreate(BaseModel):
     temperature: float | None = None
     auto_route_enabled: bool = False
     auto_select_tools: bool = True
+    folder_id: str | None = None
 
 
 class SessionUpdate(BaseModel):
@@ -101,6 +102,7 @@ class SessionUpdate(BaseModel):
     cross_session_retrieval_enabled: bool | None = None
     auto_route_enabled: bool | None = None
     auto_select_tools: bool | None = None
+    folder_id: str | None = None
 
 
 class BatchDeleteSessionsRequest(BaseModel):
@@ -118,6 +120,32 @@ class TagResponse(BaseModel):
     color: str | None = None
 
     model_config = {"from_attributes": True}
+
+
+class FolderResponse(BaseModel):
+    """A user-scoped session folder (Issue #526)."""
+
+    id: str
+    tenant_id: str
+    user_id: str
+    name: str
+    color: str | None = None
+    sort_order: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class FolderCreate(BaseModel):
+    name: str
+    color: str | None = None
+
+
+class FolderUpdate(BaseModel):
+    name: str | None = None
+    color: str | None = None
+    sort_order: int | None = None
 
 
 class SessionResponse(BaseModel):
@@ -140,6 +168,7 @@ class SessionResponse(BaseModel):
     cross_session_retrieval_enabled: bool | None = None
     auto_route_enabled: bool = False
     auto_select_tools: bool = True
+    folder_id: str | None = None
     tags: list[TagResponse] = []
     last_message: str | None = None
     """Preview text of the most recent user or assistant message in the
@@ -285,6 +314,9 @@ async def _lazy_create_session(
     request includes ``session_data`` (first message sent from a pending
     / lazy frontend session).
     """
+    # Issue #526 — validate the target folder before creating the session.
+    folder_id = await _resolve_folder_id(db, session_data.folder_id, current_user)
+
     # Resolve active tool IDs (mirrors create_session endpoint logic)
     active_tool_ids = session_data.active_tool_ids
     if not active_tool_ids:
@@ -331,6 +363,7 @@ async def _lazy_create_session(
         temperature=session_data.temperature,
         auto_route_enabled=session_data.auto_route_enabled,
         auto_select_tools=session_data.auto_select_tools,
+        folder_id=folder_id,
     )
 
     # Activate tools for the new session
@@ -381,6 +414,7 @@ def _session_to_dict(
         "auto_route_enabled": session.auto_route_enabled,
         "auto_select_tools": session.auto_select_tools,
         "cross_session_retrieval_enabled": session.cross_session_retrieval_enabled,
+        "folder_id": session.folder_id,
         "created_at": session.created_at.isoformat(),
         "updated_at": session.updated_at.isoformat(),
     }
@@ -429,6 +463,31 @@ async def _require_session_owner(
         raise ForbiddenError("You do not own this session")
     if session_data.get("tenant_id") != current_user.tenant_id:
         raise ForbiddenError("Session belongs to a different tenant")
+
+
+async def _resolve_folder_id(
+    db: AsyncSession,
+    folder_id: str | None,
+    current_user: UserORM,
+) -> str | None:
+    """Validate that *folder_id* belongs to the current user.
+
+    Returns the folder id, or None when no folder was requested.  Lookups are
+    scoped to the caller, so a user can never file a session into someone
+    else's folder (Issue #526).
+    """
+    if not folder_id:
+        return None
+
+    folder = await folder_service.get_folder(
+        db,
+        folder_id,
+        user_id=current_user.id,
+        tenant_id=current_user.tenant_id,
+    )
+    if folder is None:
+        raise ValidationError("Folder not found")
+    return folder.id
 
 
 async def _truncate_after_message(
@@ -549,6 +608,13 @@ async def create_session(
     If ``active_tool_ids`` is not provided, auto-activates tools that the
     user has marked as "always on" in their preferences.
     """
+    # Issue #526 — folders only apply to permanent sessions.
+    folder_id = await _resolve_folder_id(db, body.folder_id, current_user)
+    if body.is_temporary and folder_id is not None:
+        raise ValidationError(
+            "Folders are not supported for temporary sessions"
+        )
+
     # Resolve active tool IDs: explicit list > always-on + skill tools > empty
     active_tool_ids = body.active_tool_ids
     if not active_tool_ids:
@@ -621,6 +687,7 @@ async def create_session(
             "reasoning_effort": body.reasoning_effort,
             "temperature": body.temperature,
             "tags": [],
+            "folder_id": None,
             "created_at": datetime.now(timezone.utc),
             "updated_at": datetime.now(timezone.utc),
         }
@@ -641,6 +708,7 @@ async def create_session(
             thinking_enabled=body.thinking_enabled,
             reasoning_effort=body.reasoning_effort,
             temperature=body.temperature,
+            folder_id=folder_id,
         )
 
         # Auto-activate always-on tools for permanent session
@@ -769,6 +837,7 @@ async def get_session(
             "auto_select_tools": True,
             "cross_session_retrieval_enabled": None,
             "tags": [],
+            "folder_id": None,
             "created_at": now,
             "updated_at": now,
         }
@@ -790,6 +859,7 @@ async def get_session(
         "auto_select_tools": data.get("auto_select_tools", True),
         "cross_session_retrieval_enabled": data.get("cross_session_retrieval_enabled"),
         "tags": data.get("tags", []),
+        "folder_id": data.get("folder_id"),
         "created_at": _parse_datetime(data.get("created_at")),
         "updated_at": _parse_datetime(data.get("updated_at")),
     }
@@ -808,6 +878,16 @@ async def update_session(
 
     is_temp = data.get("is_temporary", False)
     update_fields = body.model_dump(exclude_unset=True)
+
+    # Issue #526 — moving a session between folders.
+    if "folder_id" in update_fields:
+        if is_temp:
+            raise ValidationError(
+                "Folders are not supported for temporary sessions"
+            )
+        update_fields["folder_id"] = await _resolve_folder_id(
+            db, update_fields["folder_id"], current_user
+        )
 
     # Detect skill change
     old_skill_id = data.get("selected_skill_id")
@@ -902,6 +982,7 @@ async def update_session(
             "auto_select_tools": data.get("auto_select_tools", True),
             "cross_session_retrieval_enabled": data.get("cross_session_retrieval_enabled"),
             "tags": [],
+            "folder_id": data.get("folder_id"),
             "created_at": _parse_datetime(data.get("created_at")),
             "updated_at": datetime.now(timezone.utc),
         }
@@ -4176,6 +4257,71 @@ async def list_sessions_by_tag(
         tag_name=tag,
     )
     return [SessionResponse.model_validate(s) for s in sessions]
+
+
+# =============================================================================
+# Session Folders (Issue #526)
+# =============================================================================
+
+
+@router.get("/folders", response_model=list[FolderResponse])
+async def list_folders(
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(get_current_user),
+):
+    """List the current user's folders, ordered by sort_order then name."""
+    folders = await folder_service.list_folders(db, user_id=current_user.id)
+    return [FolderResponse.model_validate(f) for f in folders]
+
+
+@router.post("/folders", response_model=FolderResponse, status_code=201)
+async def create_folder(
+    body: FolderCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(get_current_user),
+):
+    """Create a folder owned by the current user."""
+    folder = await folder_service.create_folder(
+        db,
+        tenant_id=current_user.tenant_id,
+        user_id=current_user.id,
+        name=body.name,
+        color=body.color,
+    )
+    return FolderResponse.model_validate(folder)
+
+
+@router.put("/folders/{folder_id}", response_model=FolderResponse)
+async def update_folder(
+    folder_id: str,
+    body: FolderUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(get_current_user),
+):
+    """Rename, recolour, or reorder one of the current user's folders."""
+    folder = await folder_service.update_folder(
+        db,
+        folder_id,
+        user_id=current_user.id,
+        tenant_id=current_user.tenant_id,
+        **body.model_dump(exclude_unset=True),
+    )
+    return FolderResponse.model_validate(folder)
+
+
+@router.delete("/folders/{folder_id}", status_code=204)
+async def delete_folder(
+    folder_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(get_current_user),
+):
+    """Delete a folder. Its sessions are kept and moved to Unfiled."""
+    await folder_service.delete_folder(
+        db,
+        folder_id,
+        user_id=current_user.id,
+        tenant_id=current_user.tenant_id,
+    )
 
 
 # =============================================================================

@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Chat Folders** — organise chat sessions into collapsible folders in the sidebar, with native drag & drop and a Move-to-folder menu. ([#526])
 - **Parallel Tool Execution** — multiple independent tool calls run concurrently via `asyncio.gather`. Parallel batches count as a single step toward `AGENT_MAX_STEPS`. ([#447])
 - **Self-Improving Agent** — agent learns from feedback, usage patterns, and outcomes to improve over time. ([#451])
 - **Stream Resilience** — preserves partial response when user navigates away mid-stream; reconnects to live agent stream after page navigation. ([#455], [#457])
@@ -183,3 +184,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#467]: https://github.com/kainotomo/ph-agent-hub/issues/467
 [#521]: https://github.com/kainotomo/ph-agent-hub/issues/521
 [#524]: https://github.com/kainotomo/ph-agent-hub/issues/524
+[#526]: https://github.com/kainotomo/ph-agent-hub/issues/526

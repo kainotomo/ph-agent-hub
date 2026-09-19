@@ -86,6 +86,19 @@ On desktop, click the minimize button on the session sidebar to collapse it and 
 
 Use the search bar at the top of the session sidebar. Search matches both session titles and message content.
 
+### 2.6 Organize Sessions into Folders
+
+Create a folder from the **New Chat** dropdown (**New Folder**), then group your chats:
+
+- **Move a chat**: drag a session onto a folder in the sidebar, or use the **Move to folder** icon on the session row. Choose **Unfiled** to remove it from its folder.
+- **Collapse a folder**: click the folder name to collapse or expand it. The state is remembered on your next visit.
+- **Rename or recolour**: open the folder's **⋯** menu and choose **Rename** or **Change colour**.
+- **Start a chat in a folder**: click **+** on the folder header. The new chat is filed there as soon as you send your first message.
+- **Delete a folder**: choose **Delete** from the folder menu. The chats inside are kept and move to **Unfiled**.
+- **Unfiled** always sits at the bottom of the list and holds every chat without a folder.
+
+Folders are personal to your account and apply to permanent sessions only.
+
 ---
 
 ## 3. Chatting with AI

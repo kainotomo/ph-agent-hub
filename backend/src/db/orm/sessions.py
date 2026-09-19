@@ -16,6 +16,7 @@ from .templates import Template
 from .skills import Skill
 from .tools import Tool
 from .tags import Tag
+from .folders import Folder
 
 
 class Session(Base):
@@ -33,6 +34,11 @@ class Session(Base):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     is_temporary: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_pinned: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Issue #526 — a session belongs to at most one folder; NULL = "Unfiled".
+    folder_id: Mapped[str | None] = mapped_column(
+        CHAR(36), ForeignKey("folders.id", ondelete="SET NULL"),
+        nullable=True, index=True
+    )
     selected_template_id: Mapped[str | None] = mapped_column(
         CHAR(36), ForeignKey("templates.id"), nullable=True
     )

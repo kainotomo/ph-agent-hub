@@ -24,6 +24,7 @@ const {
   mockCreateSession,
   mockDeleteSession,
   mockDeleteSessions,
+  mockMoveSessions,
   mockUpdateSession,
   mockImportSession,
   mockGetSession,
@@ -36,6 +37,7 @@ const {
   mockCreateSession: vi.fn(),
   mockDeleteSession: vi.fn(),
   mockDeleteSessions: vi.fn(),
+  mockMoveSessions: vi.fn(),
   mockUpdateSession: vi.fn(),
   mockImportSession: vi.fn(),
   mockGetSession: vi.fn(),
@@ -50,6 +52,7 @@ vi.mock("../services/chat", () => ({
   createSession: mockCreateSession,
   deleteSession: mockDeleteSession,
   deleteSessions: mockDeleteSessions,
+  moveSessions: mockMoveSessions,
   updateSession: mockUpdateSession,
   getSession: mockGetSession,
   exportSession: vi.fn(),
@@ -222,6 +225,7 @@ describe("SessionSidebar", () => {
     mockListSessions.mockResolvedValue(SESSIONS);
     mockCreateSession.mockResolvedValue({ id: "new-session", title: "New Chat" });
     mockDeleteSession.mockResolvedValue(undefined);
+    mockMoveSessions.mockResolvedValue({ moved: 0, skipped: [] });
     mockUpdateSession.mockResolvedValue(undefined);
     mockImportSession.mockResolvedValue({ session_id: "imported-session", message_count: 5 });
     mockListFolders.mockResolvedValue([]);
@@ -957,5 +961,114 @@ describe("SessionSidebar — folders (Issue #526)", () => {
 
     expect(await screen.findByText("Edit Folder")).toBeInTheDocument();
     expect(screen.getByPlaceholderText("Folder name")).toHaveValue("Work");
+  });
+
+  // ── Bulk Move Chats (Issue #526) ────────────────────────────────────────
+
+  it("moves selected chats to a folder via the Move dropdown", async () => {
+    const user = userEvent.setup();
+    mockListFolders.mockResolvedValue(FOLDERS);
+    renderSidebar();
+    await settle();
+
+    // Enter select mode
+    const selectBtn = document.querySelector(".anticon-check-square");
+    await user.click(selectBtn!.closest("button")!);
+
+    // Tick two chats by clicking session items
+    const sessionItems = document.querySelectorAll("[data-session-id]");
+    fireEvent.click(sessionItems[0]); // session-w
+    fireEvent.click(sessionItems[1]); // session-h
+
+    // Verify selection worked
+    expect(screen.getByText("2 selected")).toBeInTheDocument();
+
+    // Click Move dropdown
+    const moveBtn = screen.getByRole("button", { name: /move selected sessions to folder/i });
+    await user.click(moveBtn);
+
+    // Click "Personal" in the dropdown (the folder header has the same text)
+    const menu = within(await screen.findByRole("menu"));
+    await user.click(menu.getByText("Personal"));
+
+    expect(mockMoveSessions).toHaveBeenCalledWith(
+      ["session-w", "session-h"],
+      "folder-home",
+    );
+    // Selection mode should exit (checkboxes gone)
+    expect(document.querySelectorAll(".ant-checkbox").length).toBe(0);
+  });
+
+  it("moves selected chats to Unfiled via the Move dropdown", async () => {
+    const user = userEvent.setup();
+    mockListFolders.mockResolvedValue([
+      { id: "folder-home", name: "Personal", color: null, sort_order: 0 },
+    ]);
+    renderSidebar();
+    await settle();
+
+    const selectBtn = document.querySelector(".anticon-check-square");
+    await user.click(selectBtn!.closest("button")!);
+
+    // Use action bar "Select All" button (outside Virtuoso, reliable)
+    await user.click(screen.getByText("Select All"));
+
+    // Verify selection worked
+    expect(screen.getByText("3 selected")).toBeInTheDocument();
+
+    const moveBtn = screen.getByRole("button", { name: /move selected sessions to folder/i });
+    fireEvent.click(moveBtn);
+
+    // "Unfiled" also appears as the last folder header — scope to the menu.
+    const menu = within(await screen.findByRole("menu"));
+    await user.click(menu.getByText("Unfiled"));
+
+    expect(mockMoveSessions).toHaveBeenCalledWith(
+      ["session-w", "session-h", "session-1"],
+      null,
+    );
+  });
+
+  it("creates a new folder and moves selected chats into it", async () => {
+    const user = userEvent.setup();
+    mockListFolders.mockResolvedValue([]);
+    mockCreateFolder.mockResolvedValue({
+      id: "folder-new",
+      name: "New Folder",
+      color: null,
+      sort_order: 0,
+    });
+    renderSidebar();
+    await settle();
+
+    // Enter select mode
+    const selectBtn = document.querySelector(".anticon-check-square");
+    await user.click(selectBtn!.closest("button")!);
+
+    // Use action bar "Select All" button (outside Virtuoso, reliable)
+    await user.click(screen.getByText("Select All"));
+
+    // Verify selection worked
+    expect(screen.getByText("3 selected")).toBeInTheDocument();
+
+    const moveBtn = screen.getByRole("button", { name: /move selected sessions to folder/i });
+    fireEvent.click(moveBtn);
+
+    const newFolder = await screen.findByText("New folder…");
+    await user.click(newFolder);
+
+    // Folder creation dialog appears
+    expect(await screen.findByText("New Folder")).toBeInTheDocument();
+    await user.type(screen.getByPlaceholderText("Folder name"), "New Folder");
+    await user.click(screen.getByRole("button", { name: /^Create$/i }));
+
+    expect(mockCreateFolder).toHaveBeenCalledWith({
+      name: "New Folder",
+      color: null,
+    });
+    expect(mockMoveSessions).toHaveBeenCalledWith(
+      ["session-w", "session-h", "session-1"],
+      "folder-new",
+    );
   });
 });

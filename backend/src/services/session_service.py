@@ -6,7 +6,7 @@ import asyncio
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import delete, exists, select
+from sqlalchemy import delete, exists, select, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -564,6 +564,81 @@ async def delete_sessions_batch(
         "deleted": deleted_count,
         "skipped": skipped,
         "errors": errors,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Batch move sessions into a folder
+# ---------------------------------------------------------------------------
+
+
+async def move_sessions_batch(
+    db: AsyncSession,
+    session_ids: list[str],
+    folder_id: str | None,
+    user_id: str,
+    tenant_id: str,
+) -> dict:
+    """Move multiple sessions into a folder (None = Unfiled) in one call.
+
+    Skips (rather than fails) ids that are missing, not owned, cross-tenant,
+    temporary, or already in the target folder.  Returns
+    ``{"moved": int, "skipped": [{"id", "reason"}]}``.
+
+    No ``errors`` list: the write is one statement, so an unexpected DB
+    failure propagates as an HTTP error (frontend ``onError``).
+    """
+    from ..core.redis import get_temp_session
+
+    # --- Phase 1: Resolve session ids (DB + Redis) -------------------------
+    stmt = select(Session).where(Session.id.in_(session_ids))
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+    row_map: dict[str, Session] = {row.id: row for row in rows}
+
+    to_move: list[str] = []
+    skipped: list[dict[str, str]] = []
+
+    for sid in session_ids:
+        # --- DB session ---
+        if sid in row_map:
+            row = row_map[sid]
+            if row.user_id != user_id:
+                skipped.append({"id": sid, "reason": "Not owned by current user"})
+                continue
+            if row.tenant_id != tenant_id:
+                skipped.append({"id": sid, "reason": "Session belongs to a different tenant"})
+                continue
+            if row.is_temporary:
+                skipped.append({"id": sid, "reason": "Temporary chats cannot be filed"})
+                continue
+            if (row.folder_id or None) == folder_id:
+                skipped.append({"id": sid, "reason": "Already in this folder"})
+                continue
+            to_move.append(sid)
+            continue
+
+        # --- Redis (temporary) session ---
+        temp = await get_temp_session(sid)
+        if temp is not None:
+            skipped.append({"id": sid, "reason": "Temporary chats cannot be filed"})
+            continue
+
+        # --- Not found anywhere ---
+        skipped.append({"id": sid, "reason": "Session not found"})
+
+    # --- Phase 2: Single UPDATE for all sessions to move -------------------
+    if to_move:
+        await db.execute(
+            update(Session)
+            .where(Session.id.in_(to_move))
+            .values(folder_id=folder_id)
+        )
+        await db.commit()
+
+    return {
+        "moved": len(to_move),
+        "skipped": skipped,
     }
 
 

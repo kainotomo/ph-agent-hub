@@ -856,6 +856,262 @@ class TestBatchDeleteSessions:
         assert result["skipped"][0]["id"] == fake_id
 
 
+class TestMoveSessionsBatch:
+    """Verify move_sessions_batch moves sessions into a folder."""
+
+    async def test_batch_move_into_folder(
+        self,
+        db_session: AsyncSession,
+        test_tenant,
+        test_user,
+        test_model,
+    ):
+        """Move multiple sessions into a folder."""
+        from src.db.orm.folders import Folder
+        from src.db.orm.sessions import Session
+        from src.services.session_service import move_sessions_batch
+
+        # Create a folder
+        folder = Folder(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            name="Test Folder",
+        )
+        db_session.add(folder)
+        await db_session.flush()
+
+        # Create 2 sessions
+        sessions = []
+        for i in range(2):
+            s = Session(
+                id=str(uuid.uuid4()),
+                tenant_id=test_tenant.id,
+                user_id=test_user.id,
+                title=f"Session {i}",
+                selected_model_id=test_model.id,
+            )
+            db_session.add(s)
+            sessions.append(s)
+        await db_session.flush()
+        session_ids = [s.id for s in sessions]
+
+        result = await move_sessions_batch(
+            db_session, session_ids, folder.id, test_user.id, test_tenant.id
+        )
+
+        assert result["moved"] == 2
+        assert result["skipped"] == []
+
+        # Verify sessions are in the folder
+        for sid in session_ids:
+            row = await get_session_by_id(db_session, sid)
+            assert row is not None
+            assert row.folder_id == folder.id
+
+    async def test_batch_move_back_to_unfiled(
+        self,
+        db_session: AsyncSession,
+        test_tenant,
+        test_user,
+        test_model,
+    ):
+        """Move sessions back to Unfiled (folder_id=None)."""
+        from src.db.orm.folders import Folder
+        from src.db.orm.sessions import Session
+        from src.services.session_service import move_sessions_batch
+
+        # Create a folder and move a session into it
+        folder = Folder(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            name="Test Folder",
+        )
+        db_session.add(folder)
+        await db_session.flush()
+
+        s = Session(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            title="Session in folder",
+            selected_model_id=test_model.id,
+            folder_id=folder.id,
+        )
+        db_session.add(s)
+        await db_session.flush()
+
+        result = await move_sessions_batch(
+            db_session, [s.id], None, test_user.id, test_tenant.id
+        )
+
+        assert result["moved"] == 1
+        assert result["skipped"] == []
+
+        row = await get_session_by_id(db_session, s.id)
+        assert row is not None
+        assert row.folder_id is None
+
+    async def test_batch_move_skips_unknown_id(
+        self,
+        db_session: AsyncSession,
+        test_tenant,
+        test_user,
+    ):
+        """Move should skip non-existent session ids."""
+        from src.services.session_service import move_sessions_batch
+
+        fake_id = str(uuid.uuid4())
+        result = await move_sessions_batch(
+            db_session, [fake_id], "some-folder", test_user.id, test_tenant.id
+        )
+
+        assert result["moved"] == 0
+        assert len(result["skipped"]) == 1
+        assert result["skipped"][0]["id"] == fake_id
+        assert "not found" in result["skipped"][0]["reason"].lower()
+
+    async def test_batch_move_skips_unowned(
+        self,
+        db_session: AsyncSession,
+        test_tenant,
+        test_user,
+        test_model,
+    ):
+        """Move should skip sessions not owned by the user."""
+        from src.db.orm.folders import Folder
+        from src.db.orm.sessions import Session
+        from src.db.orm.users import User
+        from src.services.session_service import move_sessions_batch
+
+        # Create a folder
+        folder = Folder(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            name="Test Folder",
+        )
+        db_session.add(folder)
+        await db_session.flush()
+
+        # Create a session for another user
+        other_user = User(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            email=f"other-{uuid.uuid4().hex[:8]}@example.com",
+            password_hash="pbkdf2:sha256:600000$test-salt$test-hash",
+            display_name="Other User",
+            role="user",
+            is_active=True,
+        )
+        db_session.add(other_user)
+        await db_session.flush()
+
+        other_session = Session(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=other_user.id,
+            title="Other User Session",
+            selected_model_id=test_model.id,
+        )
+        db_session.add(other_session)
+        await db_session.flush()
+
+        result = await move_sessions_batch(
+            db_session,
+            [other_session.id],
+            folder.id,
+            test_user.id,
+            test_tenant.id,
+        )
+
+        assert result["moved"] == 0
+        assert len(result["skipped"]) == 1
+        assert result["skipped"][0]["id"] == other_session.id
+        assert "not owned" in result["skipped"][0]["reason"].lower()
+
+    async def test_batch_move_skips_already_in_target(
+        self,
+        db_session: AsyncSession,
+        test_tenant,
+        test_user,
+        test_model,
+    ):
+        """Move should skip sessions already in the target folder."""
+        from src.db.orm.folders import Folder
+        from src.db.orm.sessions import Session
+        from src.services.session_service import move_sessions_batch
+
+        # Create a folder
+        folder = Folder(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            name="Test Folder",
+        )
+        db_session.add(folder)
+        await db_session.flush()
+
+        # Create a session already in the folder
+        s = Session(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            title="Already in folder",
+            selected_model_id=test_model.id,
+            folder_id=folder.id,
+        )
+        db_session.add(s)
+        await db_session.flush()
+
+        result = await move_sessions_batch(
+            db_session, [s.id], folder.id, test_user.id, test_tenant.id
+        )
+
+        assert result["moved"] == 0
+        assert len(result["skipped"]) == 1
+        assert result["skipped"][0]["id"] == s.id
+        assert "already" in result["skipped"][0]["reason"].lower()
+
+    async def test_batch_move_skips_temp_redis_session(
+        self,
+        db_session: AsyncSession,
+        test_tenant,
+        test_user,
+    ):
+        """Move should skip temporary sessions stored in Redis."""
+        from src.core.redis import store_temp_session
+        from src.services.session_service import move_sessions_batch
+
+        # Store a temp session in Redis
+        temp_data = {
+            "id": str(uuid.uuid4()),
+            "tenant_id": test_tenant.id,
+            "user_id": test_user.id,
+            "title": "Temp Session",
+            "is_temporary": True,
+            "is_pinned": False,
+            "selected_model_id": None,
+            "selected_skill_id": None,
+            "selected_template_id": None,
+            "active_tool_ids": [],
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-01T00:00:00Z",
+        }
+        temp_id = temp_data["id"]
+        await store_temp_session(temp_id, temp_data)
+
+        result = await move_sessions_batch(
+            db_session, [temp_id], "some-folder", test_user.id, test_tenant.id
+        )
+
+        assert result["moved"] == 0
+        assert len(result["skipped"]) == 1
+        assert result["skipped"][0]["id"] == temp_id
+        assert "temporary" in result["skipped"][0]["reason"].lower()
+
+
 class TestListSessions:
     """Tests for list_sessions_for_user and list_admin_sessions."""
 

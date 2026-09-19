@@ -183,6 +183,18 @@ export function deleteSessions(ids: string[]): Promise<BatchDeleteResult> {
   });
 }
 
+export interface BatchMoveResult {
+  moved: number;
+  skipped: Array<{ id: string; reason: string }>;
+}
+
+export function moveSessions(ids: string[], folderId: string | null): Promise<BatchMoveResult> {
+  return api<BatchMoveResult>("/chat/sessions/move", {
+    method: "POST",
+    body: { ids, folder_id: folderId },
+  });
+}
+
 export function finalizeSession(id: string): Promise<SessionData> {
   return api<SessionData>(`/chat/session/${id}/finalize`, {
     method: "POST",

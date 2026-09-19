@@ -101,6 +101,7 @@ icon with unread badge.
 - Temporary chat sessions (Redis with TTL; purged on logout or expiry, convertible to permanent)
 - Message branches, soft-deleted messages, and message feedback
 - Session-level active tool associations (auto-synced on skill change)
+- User-scoped session folders (single-level; a session belongs to at most one folder, NULL = "Unfiled") — Issue #526
 - Memory items (per user, optionally per session; supports manual user entries, pagination, and cross-session retrieval)
 - RAG documents
 - ERPNext instance configurations
@@ -202,6 +203,10 @@ GET    /chat/session/:id/stream
 DELETE /chat/session/:id
 POST   /chat/session/:id/finalize       # Convert temp → permanent (v1.10)
 GET    /chat/sessions/search
+GET    /chat/folders                    # List folders (Issue #526)
+POST   /chat/folders                    # Create folder
+PUT    /chat/folders/:id                # Rename / recolour / reorder
+DELETE /chat/folders/:id                # Delete folder (sessions move to Unfiled)
 ```
 
 > **`POST /chat/session/:id/finalize`** — Converts a temporary (Redis) session into a permanent (MariaDB) session. Migrates messages, tool activations, and file uploads. Returns the new permanent session. Requires the session to be in temporary mode.
@@ -210,6 +215,8 @@ GET    /chat/sessions/search
 > - `q` (required): the search term.
 > - `scope` (optional, default `all`): limits which fields are searched — `all` (title + content + tag), `title`, `content`, or `tag`. Invalid values return 422.
 > - Each result extends the standard session payload with `matched_fields` (e.g. `["title", "content"]`) indicating which scopes matched, so clients can show *why* a session matched when searching `all`.
+
+> **Session folders** (Issue #526) — Sessions can be grouped into user-scoped, single-level folders. `sessions.folder_id` is nullable; `NULL` means the session appears under "Unfiled" in the sidebar. Folder ids are validated against the caller's own folders on both session creation and update, so a session can never be filed into another user's folder. Move a session with `PUT /chat/session/:id` and `{"folder_id": "<id>"}`, or `{"folder_id": null}` to unfile it. Deleting a folder keeps its sessions and moves them to Unfiled. Folders are not supported for temporary (Redis) sessions.
 
 ### **3.3 File Uploads**
 ```

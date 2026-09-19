@@ -367,6 +367,7 @@ A session belongs to a user and a tenant.
 - title (string)
 - is_temporary (boolean, default false) — temporary sessions are not persisted to MariaDB; they are stored in Redis with a TTL and purged on logout or expiry
 - is_pinned (boolean, default false) — pinned sessions appear at the top of the session list
+- folder_id (UUID, FK → folders.id, nullable) — the single folder this session belongs to (Issue #526); NULL means the session shows under "Unfiled" in the sidebar
 - selected_template_id (UUID, FK → templates.id, nullable)
 - selected_prompt_id (UUID, FK → prompts.id, nullable)
 - selected_skill_id (UUID, FK → skills.id, nullable)
@@ -391,6 +392,19 @@ Sessions have a many-to-many relationship with tags via the `session_tags` join 
 - name (string, 50) — unique per tenant
 - color (string, nullable) — hex color for badge display
 - created_at (timestamp)
+
+**Table: folders** (Issue #526)
+
+Folders are per-user (not tenant-wide) and single-level. A session belongs to at most one folder; sessions with no folder appear under "Unfiled" in the sidebar.
+
+- id (UUID, PK)
+- tenant_id (UUID, FK → tenants.id)
+- user_id (UUID, FK → users.id)
+- name (string, 100) — unique per user
+- color (string, nullable) — hex color for the folder icon
+- sort_order (integer, default 0) — reserved for manual folder ordering
+- created_at (timestamp)
+- updated_at (timestamp)
 
 Active tools for a session are tracked via a join table. A user can only activate tools that are enabled for their tenant. Users can also mark tools as "always on" to automatically activate them in new sessions.
 

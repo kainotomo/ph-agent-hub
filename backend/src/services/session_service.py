@@ -41,6 +41,7 @@ async def create_session(
     temperature: float | None = None,
     auto_route_enabled: bool = False,
     auto_select_tools: bool = True,
+    folder_id: str | None = None,
 ) -> Session:
     """Create a new permanent session.
 
@@ -81,6 +82,7 @@ async def create_session(
         temperature=temperature,
         auto_route_enabled=auto_route_enabled,
         auto_select_tools=auto_select_tools,
+        folder_id=folder_id,
     )
     if id is not None:
         session.id = id

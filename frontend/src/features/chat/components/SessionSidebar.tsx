@@ -23,6 +23,7 @@ import {
   Tag,
   Popconfirm,
   Checkbox,
+  Select,
 } from "antd";
 import { Virtuoso, VirtuosoHandle } from "react-virtuoso";
 import type { MenuProps } from "antd";
@@ -47,6 +48,8 @@ import {
   FileTextOutlined,
   FileOutlined,
   FolderOpenOutlined,
+  FolderOutlined,
+  FolderAddOutlined,
   ClockCircleOutlined,
   CheckSquareOutlined,
   CloseOutlined,
@@ -63,6 +66,11 @@ import {
   deleteSessions,
   updateSession,
   SessionData,
+  FolderData,
+  listFolders,
+  createFolder,
+  updateFolder,
+  deleteFolder,
   addTagToSession,
   removeTagFromSession,
   exportSession,
@@ -72,9 +80,35 @@ import {
 import { ContextIndicator } from "./ContextIndicator";
 import { MemoryManager } from "./MemoryManager";
 import { SessionSearch } from "./SessionSearch";
+import { SessionFolderHeader } from "./SessionFolderHeader";
+import {
+  UNFILED_ID,
+  buildSidebarRows,
+  findSessionRowIndex,
+  groupKeyForFolderId,
+  moveTargets,
+  readDraggedSessionId,
+  rowKey,
+  type SidebarRow,
+} from "./sessionRows";
 
 const { Sider } = Layout;
 const { Text } = Typography;
+
+/** localStorage key for the collapsed-folder set (Issue #526). */
+const FOLDER_COLLAPSE_KEY = "ph.sidebar.collapsedFolders";
+
+/** Preset folder tints offered in the create/edit folder dialog. */
+const FOLDER_COLORS = [
+  "#1677ff",
+  "#52c41a",
+  "#faad14",
+  "#eb2f96",
+  "#722ed1",
+  "#13c2c2",
+  "#fa541c",
+  "#8c8c8c",
+];
 
 // =============================================================================
 // SessionListItem — individual session row (React.memo-wrapped for perf)
@@ -95,6 +129,13 @@ interface SessionListItemProps {
   onDelete: (id: string) => void;
   setSelectedIds: React.Dispatch<React.SetStateAction<Set<string>>>;
   setMobileOpen: React.Dispatch<React.SetStateAction<boolean>>;
+  /** Issue #526 — folders available as move targets. */
+  folders: FolderData[];
+  isDragging: boolean;
+  onMove: (sessionId: string, folderId: string | null) => void;
+  onNewFolder: (sessionId: string) => void;
+  onDragStart: (event: React.DragEvent<HTMLDivElement>, id: string) => void;
+  onDragEnd: () => void;
 }
 
 const SessionListItem = React.memo(function SessionListItem({
@@ -112,10 +153,19 @@ const SessionListItem = React.memo(function SessionListItem({
   onDelete,
   setSelectedIds,
   setMobileOpen,
+  folders,
+  isDragging,
+  onMove,
+  onNewFolder,
+  onDragStart,
+  onDragEnd,
 }: SessionListItemProps) {
   return (
     <div
       data-session-id={item.id}
+      draggable={!selectMode}
+      onDragStart={(e) => onDragStart(e, item.id)}
+      onDragEnd={onDragEnd}
       onClick={() => {
         if (selectMode) {
           setSelectedIds((prev) => {
@@ -135,6 +185,7 @@ const SessionListItem = React.memo(function SessionListItem({
       style={{
         cursor: "pointer",
         padding: "8px 12px",
+        opacity: isDragging ? 0.4 : 1,
         background:
           isActive && !selectMode ? "#e6f4ff" : "transparent",
         borderLeft:
@@ -228,6 +279,44 @@ const SessionListItem = React.memo(function SessionListItem({
                     />
                   </span>
                 </Tooltip>
+                {/* Issue #526 — move this session to a folder (accessible and
+                    mobile-friendly alternative to dragging). */}
+                <Dropdown
+                  menu={{
+                    items: [
+                      ...moveTargets(folders).map((target) => ({
+                        key: target.id ?? UNFILED_ID,
+                        label: target.name,
+                        disabled: (item.folder_id ?? null) === target.id,
+                        onClick: (e: { domEvent: { stopPropagation: () => void } }) => {
+                          e.domEvent.stopPropagation();
+                          onMove(item.id, target.id);
+                        },
+                      })),
+                      { type: "divider" as const },
+                      {
+                        key: "new-folder",
+                        icon: <FolderAddOutlined />,
+                        label: "New folder…",
+                        onClick: (e: { domEvent: { stopPropagation: () => void } }) => {
+                          e.domEvent.stopPropagation();
+                          onNewFolder(item.id);
+                        },
+                      },
+                    ] as MenuProps["items"],
+                  }}
+                  trigger={["click"]}
+                >
+                  <Tooltip title="Move to folder">
+                    <Button
+                      type="text"
+                      size="small"
+                      aria-label="Move session to folder"
+                      icon={<FolderOutlined />}
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                  </Tooltip>
+                </Dropdown>
                 <Tooltip title={item.is_pinned ? "Unpin" : "Pin"}>
                   <span>
                     <Button
@@ -320,10 +409,32 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [editingSession, setEditingSession] = useState<SessionData | null>(null);
   const [editTitle, setEditTitle] = useState("");
+  const [editFolderId, setEditFolderId] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  // ---- Issue #526: folders -------------------------------------------------
+  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem(FOLDER_COLLAPSE_KEY);
+      return raw ? new Set(JSON.parse(raw) as string[]) : new Set<string>();
+    } catch {
+      return new Set<string>();
+    }
+  });
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [dropTargetId, setDropTargetId] = useState<string | null>(null);
+  const [folderModal, setFolderModal] = useState<{
+    mode: "create" | "edit";
+    folder: FolderData | null;
+  } | null>(null);
+  const [folderName, setFolderName] = useState("");
+  const [folderColor, setFolderColor] = useState<string | null>(null);
+  /** Session waiting to be filed into a folder that is being created. */
+  const [pendingMoveSessionId, setPendingMoveSessionId] = useState<
+    string | null
+  >(null);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -341,6 +452,19 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
     mql.addEventListener("change", handleChange);
     return () => mql.removeEventListener("change", handleChange);
   }, []);
+
+  // Issue #526 — remember which folders are collapsed across reloads.
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        FOLDER_COLLAPSE_KEY,
+        JSON.stringify([...collapsedFolders]),
+      );
+    } catch {
+      // Storage can be unavailable (private mode); collapsing still works
+      // for the current session.
+    }
+  }, [collapsedFolders]);
 
   // ---- Issue #455: Poll streaming session status -------------------------
   // Poll ALL active sessions every 10 seconds.  When an agent finishes
@@ -411,6 +535,13 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
     queryFn: listSessions,
   });
 
+  // Issue #526 — folders are a separate, small collection; session counts are
+  // derived client-side from `sessions` so they can never drift.
+  const { data: folders } = useQuery({
+    queryKey: ["folders"],
+    queryFn: listFolders,
+  });
+
   // Only show context indicator when the session actually exists (avoids 404
   // for lazy-created sessions that haven't been persisted yet).
   const sessionExists = sessions?.some(s => s.id === sessionId) ?? false;
@@ -432,10 +563,22 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
   });
 
   const updateMutation = useMutation({
-    mutationFn: () =>
-      updateSession(editingSession!.id, {
-        title: editTitle || editingSession!.title,
-      }),
+    mutationFn: () => {
+      // Issue #526 — send only what actually changed.  `folder_id: null`
+      // explicitly moves the session back to Unfiled.
+      const payload: { title?: string; folder_id?: string | null } = {};
+      const nextTitle = editTitle || editingSession!.title;
+      if (nextTitle !== editingSession!.title) {
+        payload.title = nextTitle;
+      }
+      if ((editFolderId ?? null) !== (editingSession!.folder_id ?? null)) {
+        payload.folder_id = editFolderId ?? null;
+      }
+      if (Object.keys(payload).length === 0) {
+        payload.title = nextTitle;
+      }
+      return updateSession(editingSession!.id, payload);
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["sessions"] });
       queryClient.invalidateQueries({ queryKey: ["session", editingSession?.id] });
@@ -461,6 +604,58 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["sessions"] });
     },
+  });
+
+  // ---- Issue #526: folder mutations ---------------------------------------
+  const moveSessionMutation = useMutation({
+    mutationFn: ({ id, folderId }: { id: string; folderId: string | null }) =>
+      updateSession(id, { folder_id: folderId }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+    },
+    onError: (err: Error) =>
+      message.error(`Failed to move session: ${err.message}`),
+  });
+
+  const createFolderMutation = useMutation({
+    mutationFn: (data: { name: string; color: string | null }) =>
+      createFolder(data),
+    onSuccess: (folder) => {
+      queryClient.invalidateQueries({ queryKey: ["folders"] });
+      const sessionToFile = pendingMoveSessionId;
+      closeFolderModal();
+      // A "New folder…" started from a session's move menu files that
+      // session into the folder that was just created.
+      if (sessionToFile) {
+        moveSessionMutation.mutate({
+          id: sessionToFile,
+          folderId: folder.id,
+        });
+      }
+    },
+    onError: (err: Error) =>
+      message.error(`Failed to create folder: ${err.message}`),
+  });
+
+  const saveFolderMutation = useMutation({
+    mutationFn: (data: { id: string; name: string; color: string | null }) =>
+      updateFolder(data.id, { name: data.name, color: data.color }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["folders"] });
+      closeFolderModal();
+    },
+    onError: (err: Error) =>
+      message.error(`Failed to save folder: ${err.message}`),
+  });
+
+  const deleteFolderMutation = useMutation({
+    mutationFn: (id: string) => deleteFolder(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["folders"] });
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+    },
+    onError: (err: Error) =>
+      message.error(`Failed to delete folder: ${err.message}`),
   });
 
   const batchDeleteMutation = useMutation({
@@ -511,6 +706,7 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
     (session: SessionData) => {
       setEditingSession(session);
       setEditTitle(session.title);
+      setEditFolderId(session.folder_id ?? null);
     },
     [],
   );
@@ -539,14 +735,265 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
     [],
   );
 
+  // -------------------------------------------------------------------------
+  // Issue #526 — folded sidebar: rows, folder CRUD, drag & drop
+  // -------------------------------------------------------------------------
+
+  // Flatten folders + sessions into the single list Virtuoso renders.
+  const rows = useMemo(
+    () => buildSidebarRows(sessions || [], folders || [], collapsedFolders),
+    [sessions, folders, collapsedFolders],
+  );
+
+  function closeFolderModal() {
+    setFolderModal(null);
+    setFolderName("");
+    setFolderColor(null);
+    setPendingMoveSessionId(null);
+  }
+
+  const toggleFolder = useCallback((groupId: string) => {
+    setCollapsedFolders((prev) => {
+      const next = new Set(prev);
+      if (next.has(groupId)) {
+        next.delete(groupId);
+      } else {
+        next.add(groupId);
+      }
+      return next;
+    });
+  }, []);
+
+  const handleMoveSession = useCallback(
+    (id: string, folderId: string | null) => {
+      moveSessionMutation.mutate({ id, folderId });
+    },
+    [moveSessionMutation],
+  );
+
+  const handleSessionDragStart = useCallback(
+    (event: React.DragEvent<HTMLDivElement>, id: string) => {
+      event.dataTransfer.setData("text/plain", id);
+      event.dataTransfer.effectAllowed = "move";
+      setDraggingId(id);
+    },
+    [],
+  );
+
+  const handleSessionDragEnd = useCallback(() => {
+    setDraggingId(null);
+    setDropTargetId(null);
+  }, []);
+
+  const handleFolderDragOver = useCallback(
+    (event: React.DragEvent<HTMLDivElement>, groupId: string) => {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      setDropTargetId(groupId);
+    },
+    [],
+  );
+
+  const handleFolderDragLeave = useCallback(() => {
+    setDropTargetId(null);
+  }, []);
+
+  const handleFolderDrop = useCallback(
+    (event: React.DragEvent<HTMLDivElement>, groupId: string) => {
+      event.preventDefault();
+      setDropTargetId(null);
+      setDraggingId(null);
+
+      const draggedSessionId = readDraggedSessionId(event.dataTransfer);
+      if (!draggedSessionId) return;
+
+      const targetFolderId = groupId === UNFILED_ID ? null : groupId;
+      const dragged = (sessions || []).find((s) => s.id === draggedSessionId);
+      if (!dragged) return;
+      // Dropping a session on the folder it already lives in is a no-op.
+      if ((dragged.folder_id ?? null) === targetFolderId) return;
+
+      handleMoveSession(draggedSessionId, targetFolderId);
+    },
+    [sessions, handleMoveSession],
+  );
+
+  const openCreateFolder = useCallback((sessionIdToFile?: string) => {
+    setPendingMoveSessionId(sessionIdToFile ?? null);
+    setFolderName("");
+    setFolderColor(null);
+    setFolderModal({ mode: "create", folder: null });
+  }, []);
+
+  const openEditFolder = useCallback((folder: FolderData) => {
+    setPendingMoveSessionId(null);
+    setFolderName(folder.name);
+    setFolderColor(folder.color);
+    setFolderModal({ mode: "edit", folder });
+  }, []);
+
+  const submitFolderModal = useCallback(() => {
+    if (!folderModal) return;
+    const name = folderName.trim();
+    if (!name) {
+      message.warning("Folder name is required");
+      return;
+    }
+    if (folderModal.mode === "create") {
+      createFolderMutation.mutate({ name, color: folderColor });
+    } else if (folderModal.folder) {
+      saveFolderMutation.mutate({
+        id: folderModal.folder.id,
+        name,
+        color: folderColor,
+      });
+    }
+  }, [
+    folderModal,
+    folderName,
+    folderColor,
+    createFolderMutation,
+    saveFolderMutation,
+  ]);
+
+  const confirmDeleteFolder = useCallback(
+    (folder: FolderData) => {
+      const count = (sessions || []).filter(
+        (s) => (s.folder_id ?? null) === folder.id,
+      ).length;
+      Modal.confirm({
+        title: `Delete "${folder.name}"?`,
+        content:
+          count > 0
+            ? `${count} chat${count === 1 ? "" : "s"} will move to Unfiled. No chats are deleted.`
+            : "This folder is empty. No chats are deleted.",
+        okText: "Delete",
+        okButtonProps: { danger: true },
+        cancelText: "Cancel",
+        onOk: () => deleteFolderMutation.mutate(folder.id),
+      });
+    },
+    [sessions, deleteFolderMutation],
+  );
+
+  const handleNewChatInFolder = useCallback(
+    (folderId: string) => {
+      // Same lazy-persistence flow as the plain New Chat button; the folder
+      // rides along in navigation state until the first message creates the
+      // session (Issue #526).
+      const uuid = crypto.randomUUID();
+      navigate(`/chat/${uuid}`, { state: { folderId } });
+      if (isMobile) setMobileOpen(false);
+    },
+    [navigate, isMobile],
+  );
+
+  const renderRow = useCallback(
+    (row: SidebarRow) => {
+      if (row.kind === "folder") {
+        const folder = (folders || []).find((f) => f.id === row.id) ?? null;
+        return (
+          <SessionFolderHeader
+            id={row.id}
+            name={row.name}
+            color={row.color}
+            count={row.count}
+            collapsed={row.collapsed}
+            isUnfiled={row.isUnfiled}
+            isDropTarget={dropTargetId === row.id}
+            onToggle={() => toggleFolder(row.id)}
+            onNewChatHere={() => handleNewChatInFolder(row.id)}
+            onRename={() => folder && openEditFolder(folder)}
+            onChangeColor={() => folder && openEditFolder(folder)}
+            onDelete={() => folder && confirmDeleteFolder(folder)}
+            onDragOver={handleFolderDragOver}
+            onDragLeave={handleFolderDragLeave}
+            onDrop={handleFolderDrop}
+          />
+        );
+      }
+
+      if (row.kind === "placeholder") {
+        return (
+          <div
+            style={{
+              padding: "6px 24px 10px",
+              color: "#8c8c8c",
+              fontSize: 12,
+            }}
+          >
+            No chats yet
+          </div>
+        );
+      }
+
+      return (
+        <SessionListItem
+          item={row.session}
+          isActive={sessionId === row.session.id}
+          isMobile={isMobile}
+          collapsed={collapsed}
+          selectMode={selectMode}
+          isSelected={selectedIds.has(row.session.id)}
+          isStreaming={streamingSessionIds.has(row.session.id)}
+          onNavigate={handleNavigate}
+          onToggleSelect={handleToggleSelect}
+          onEdit={handleEditSession}
+          onPin={handlePinSession}
+          onDelete={handleDeleteSession}
+          setSelectedIds={setSelectedIds}
+          setMobileOpen={setMobileOpen}
+          folders={folders || []}
+          isDragging={draggingId === row.session.id}
+          onMove={handleMoveSession}
+          onNewFolder={openCreateFolder}
+          onDragStart={handleSessionDragStart}
+          onDragEnd={handleSessionDragEnd}
+        />
+      );
+    },
+    [
+      folders,
+      sessionId,
+      isMobile,
+      collapsed,
+      selectMode,
+      selectedIds,
+      streamingSessionIds,
+      handleNavigate,
+      handleToggleSelect,
+      handleEditSession,
+      handlePinSession,
+      handleDeleteSession,
+      dropTargetId,
+      draggingId,
+      toggleFolder,
+      handleNewChatInFolder,
+      openEditFolder,
+      confirmDeleteFolder,
+      handleMoveSession,
+      openCreateFolder,
+      handleSessionDragStart,
+      handleSessionDragEnd,
+      handleFolderDragOver,
+      handleFolderDragLeave,
+      handleFolderDrop,
+    ],
+  );
+
   // Auto-scroll to active session when it changes or data loads.
   // Uses Virtuoso's imperative scrollToIndex API instead of DOM querySelector
   // because Virtuoso only renders visible items (virtualization), so the DOM
   // element for off-screen sessions doesn't exist (Issue #501).
+  //
+  // Issue #526: the index is the session's position in the *flattened* row
+  // list, and a session inside a collapsed folder is expanded first.
   useEffect(() => {
     if (!sessionId || !sessions) return;
-    const idx = sortedSessions.findIndex((s) => s.id === sessionId);
-    if (idx === -1) {
+
+    let target = sessions.find((s) => s.id === sessionId);
+
+    if (!target) {
       // Session might not be in the sidebar list (e.g. beyond the 2000-recent
       // limit, or navigated from search).  Check if we have the session detail
       // in the query cache (from ChatPage's fetch) and prepend it.
@@ -557,9 +1004,26 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
           if (old.some((s) => s.id === sessionId)) return old;
           return [cached, ...old];
         });
+        target = cached;
       }
+      if (!target) return;
+    }
+
+    // A session hidden inside a collapsed folder is not rendered: expand its
+    // group and let the rebuilt rows bring the effect back around.
+    const groupKey = groupKeyForFolderId(target.folder_id ?? null);
+    if (collapsedFolders.has(groupKey)) {
+      setCollapsedFolders((prev) => {
+        const next = new Set(prev);
+        next.delete(groupKey);
+        return next;
+      });
       return;
     }
+
+    const idx = findSessionRowIndex(rows, sessionId);
+    if (idx === -1) return;
+
     const timer = setTimeout(() => {
       virtuosoRef.current?.scrollToIndex({
         index: idx,
@@ -568,7 +1032,7 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
       });
     }, 100);
     return () => clearTimeout(timer);
-  }, [sessionId, sortedSessions, queryClient]);
+  }, [sessionId, sessions, rows, collapsedFolders, queryClient]);
 
   const handleNewChat = (temporary = false) => {
     if (temporary) {
@@ -591,6 +1055,13 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
       label: "Temporary Chat",
       icon: <ThunderboltOutlined />,
       onClick: () => handleNewChat(true),
+    },
+    { type: "divider" },
+    {
+      key: "new-folder",
+      label: "New Folder",
+      icon: <FolderAddOutlined />,
+      onClick: () => openCreateFolder(),
     },
   ];
 
@@ -770,26 +1241,9 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
         <Virtuoso
           ref={virtuosoRef}
           style={{ flex: 1, height: "100%" }}
-          data={sortedSessions}
-          fixedItemHeight={72}
-          itemContent={(_index, item) => (
-            <SessionListItem
-              item={item}
-              isActive={sessionId === item.id}
-              isMobile={isMobile}
-              collapsed={collapsed}
-              selectMode={selectMode}
-              isSelected={selectedIds.has(item.id)}
-              isStreaming={streamingSessionIds.has(item.id)}
-              onNavigate={handleNavigate}
-              onToggleSelect={handleToggleSelect}
-              onEdit={handleEditSession}
-              onPin={handlePinSession}
-              onDelete={handleDeleteSession}
-              setSelectedIds={setSelectedIds}
-              setMobileOpen={setMobileOpen}
-            />
-          )}
+          data={rows}
+          computeItemKey={rowKey}
+          itemContent={(_index, row) => renderRow(row)}
         />
       )}
 
@@ -946,6 +1400,30 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
           />
           <div>
             <Text type="secondary" style={{ fontSize: 12, marginBottom: 4, display: "block" }}>
+              Folder
+            </Text>
+            <Select
+              style={{ width: "100%" }}
+              value={editFolderId}
+              onChange={(value) => setEditFolderId(value ?? null)}
+              disabled={editingSession?.is_temporary}
+              placeholder="Unfiled"
+              options={[
+                { value: null, label: "Unfiled" },
+                ...(folders || []).map((f) => ({
+                  value: f.id,
+                  label: f.name,
+                })),
+              ]}
+            />
+            {editingSession?.is_temporary && (
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                Temporary chats cannot be filed.
+              </Text>
+            )}
+          </div>
+          <div>
+            <Text type="secondary" style={{ fontSize: 12, marginBottom: 4, display: "block" }}>
               Tags
             </Text>
             <Space wrap style={{ marginBottom: 8 }}>
@@ -986,6 +1464,66 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
                 }).catch(() => message.error("Failed to add tag"));
               }}
             />
+          </div>
+        </Space>
+      </Modal>
+
+      {/* Create / edit folder modal (Issue #526) */}
+      <Modal
+        title={folderModal?.mode === "create" ? "New Folder" : "Edit Folder"}
+        open={folderModal !== null}
+        onOk={submitFolderModal}
+        onCancel={closeFolderModal}
+        okText={folderModal?.mode === "create" ? "Create" : "Save"}
+        confirmLoading={
+          createFolderMutation.isPending || saveFolderMutation.isPending
+        }
+      >
+        <Space direction="vertical" style={{ width: "100%" }}>
+          <Input
+            placeholder="Folder name"
+            value={folderName}
+            maxLength={100}
+            onChange={(e) => setFolderName(e.target.value)}
+            onPressEnter={submitFolderModal}
+          />
+          <div>
+            <Text
+              type="secondary"
+              style={{ fontSize: 12, marginBottom: 4, display: "block" }}
+            >
+              Colour
+            </Text>
+            <Space wrap>
+              {FOLDER_COLORS.map((preset) => (
+                <button
+                  key={preset}
+                  type="button"
+                  aria-label={`Folder colour ${preset}`}
+                  onClick={() =>
+                    setFolderColor(folderColor === preset ? null : preset)
+                  }
+                  style={{
+                    width: 22,
+                    height: 22,
+                    borderRadius: "50%",
+                    background: preset,
+                    border:
+                      folderColor === preset
+                        ? "2px solid #141414"
+                        : "1px solid #d9d9d9",
+                    cursor: "pointer",
+                  }}
+                />
+              ))}
+              <Button
+                size="small"
+                type="link"
+                onClick={() => setFolderColor(null)}
+              >
+                No colour
+              </Button>
+            </Space>
           </div>
         </Space>
       </Modal>

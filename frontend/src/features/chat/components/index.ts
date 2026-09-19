@@ -17,4 +17,5 @@ export { ContextIndicator } from "./ContextIndicator";
 export { SessionSearch } from "./SessionSearch";
 export { MemoryManager } from "./MemoryManager";
 export { SessionSidebar } from "./SessionSidebar";
+export { SessionFolderHeader } from "./SessionFolderHeader";
 export { AutopilotPanel } from "./AutopilotPanel";

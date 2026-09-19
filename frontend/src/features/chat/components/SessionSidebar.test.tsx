@@ -7,7 +7,7 @@
 // =============================================================================
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { cleanup, render, screen, act } from "@testing-library/react";
+import { cleanup, render, screen, act, within, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { SessionSidebar } from "./SessionSidebar";
@@ -27,6 +27,10 @@ const {
   mockUpdateSession,
   mockImportSession,
   mockGetSession,
+  mockListFolders,
+  mockCreateFolder,
+  mockUpdateFolder,
+  mockDeleteFolder,
 } = vi.hoisted(() => ({
   mockListSessions: vi.fn(),
   mockCreateSession: vi.fn(),
@@ -35,6 +39,10 @@ const {
   mockUpdateSession: vi.fn(),
   mockImportSession: vi.fn(),
   mockGetSession: vi.fn(),
+  mockListFolders: vi.fn(),
+  mockCreateFolder: vi.fn(),
+  mockUpdateFolder: vi.fn(),
+  mockDeleteFolder: vi.fn(),
 }));
 
 vi.mock("../services/chat", () => ({
@@ -48,6 +56,10 @@ vi.mock("../services/chat", () => ({
   importSession: mockImportSession,
   addTagToSession: vi.fn(),
   removeTagFromSession: vi.fn(),
+  listFolders: mockListFolders,
+  createFolder: mockCreateFolder,
+  updateFolder: mockUpdateFolder,
+  deleteFolder: mockDeleteFolder,
 }));
 
 // Mock AuthProvider
@@ -128,7 +140,7 @@ vi.mock("react-virtuoso", () => ({
   Virtuoso: ({ data, itemContent, style }: any) => (
     <div style={style} data-testid="virtuoso-list">
       {data.map((item: any, index: number) => (
-        <div key={item.id} data-testid="virtuoso-item">
+        <div key={index} data-testid="virtuoso-item">
           {itemContent(index, item)}
         </div>
       ))}
@@ -212,6 +224,7 @@ describe("SessionSidebar", () => {
     mockDeleteSession.mockResolvedValue(undefined);
     mockUpdateSession.mockResolvedValue(undefined);
     mockImportSession.mockResolvedValue({ session_id: "imported-session", message_count: 5 });
+    mockListFolders.mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -575,5 +588,374 @@ describe("SessionSidebar", () => {
       .getQueryData<typeof SESSIONS>(["sessions"])
       ?.map((s) => s.id) ?? [];
     expect(sessionIds[0]).toBe("session-searched");
+  });
+});
+
+// =============================================================================
+// Issue #526 — folders in the chat sidebar
+// =============================================================================
+
+const FOLDERS = [
+  { id: "folder-work", name: "Work", color: "#1677ff", sort_order: 0 },
+  { id: "folder-home", name: "Personal", color: null, sort_order: 1 },
+];
+
+const FOLDER_SESSIONS = [
+  {
+    id: "session-w",
+    title: "Work chat",
+    is_pinned: false,
+    is_temporary: false,
+    folder_id: "folder-work",
+    updated_at: NOW,
+    tags: [],
+  },
+  {
+    id: "session-h",
+    title: "Home chat",
+    is_pinned: false,
+    is_temporary: false,
+    folder_id: "folder-home",
+    updated_at: EARLIER,
+    tags: [],
+  },
+  {
+    id: "session-1",
+    title: "Unfiled chat",
+    is_pinned: false,
+    is_temporary: false,
+    folder_id: null,
+    updated_at: EARLIEST,
+    tags: [],
+  },
+];
+
+const COLLAPSE_KEY = "ph.sidebar.collapsedFolders";
+
+/** Minimal DataTransfer stand-in — jsdom does not implement one. */
+function makeDataTransfer() {
+  const store: Record<string, string> = {};
+  return {
+    setData: (type: string, value: string) => {
+      store[type] = value;
+    },
+    getData: (type: string) => store[type] ?? "",
+    effectAllowed: "",
+    dropEffect: "",
+  };
+}
+
+function rowFor(sessionId: string): HTMLElement {
+  const el = document.querySelector(`[data-session-id="${sessionId}"]`);
+  if (!el) throw new Error(`No row rendered for session ${sessionId}`);
+  return el as HTMLElement;
+}
+
+async function openFolderMenu(
+  user: ReturnType<typeof userEvent.setup>,
+  folderName: string,
+) {
+  const trigger = document.querySelector(
+    `[aria-label="Folder actions for ${folderName}"]`,
+  );
+  expect(trigger).toBeTruthy();
+  await user.click(trigger as HTMLElement);
+  return within(await screen.findByRole("menu"));
+}
+
+describe("SessionSidebar — folders (Issue #526)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+    // antd's imperative Modal.confirm renders into its own root, which
+    // RTL's cleanup() does not unmount — drop anything left by earlier tests.
+    document
+      .querySelectorAll(".ant-modal-root")
+      .forEach((node) => node.remove());
+    mockListSessions.mockResolvedValue(FOLDER_SESSIONS);
+    mockListFolders.mockResolvedValue(FOLDERS);
+    mockCreateFolder.mockResolvedValue({
+      id: "folder-new",
+      name: "Research",
+      color: null,
+      sort_order: 2,
+    });
+    mockUpdateFolder.mockResolvedValue(FOLDERS[0]);
+    mockDeleteFolder.mockResolvedValue(undefined);
+    mockUpdateSession.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    localStorage.clear();
+  });
+
+  // ── Grouping ──────────────────────────────────────────────────────────
+
+  it("groups sessions under their folders, with Unfiled last", async () => {
+    renderSidebar();
+    await settle();
+
+    const headers = Array.from(
+      document.querySelectorAll('[aria-label^="Collapse "], [aria-label^="Expand "]'),
+    );
+    expect(headers).toHaveLength(3); // Work, Personal, Unfiled
+
+    // Each session renders under its own folder.
+    expect(rowFor("session-w")).toBeInTheDocument();
+    expect(rowFor("session-h")).toBeInTheDocument();
+    expect(rowFor("session-1")).toBeInTheDocument();
+
+    // Headers carry their session count.
+    expect(screen.getByText("Work").closest("div")).toHaveTextContent("1");
+    expect(screen.getByText("Personal").closest("div")).toHaveTextContent("1");
+    expect(screen.getByText("Unfiled").closest("div")).toHaveTextContent("1");
+  });
+
+  it("shows a placeholder for an empty folder", async () => {
+    mockListFolders.mockResolvedValue([
+      { id: "folder-empty", name: "Empty", color: null, sort_order: 0 },
+    ]);
+
+    renderSidebar();
+    await settle();
+
+    expect(screen.getByText("Empty")).toBeInTheDocument();
+    expect(screen.getByText("No chats yet")).toBeInTheDocument();
+  });
+
+  // ── Collapse ──────────────────────────────────────────────────────────
+
+  it("collapses a folder on click and remembers it in localStorage", async () => {
+    const user = userEvent.setup();
+    renderSidebar();
+    await settle();
+
+    expect(rowFor("session-w")).toBeInTheDocument();
+
+    await user.click(
+      document.querySelector('[aria-label="Collapse Work"]') as HTMLElement,
+    );
+    await settle();
+
+    expect(document.querySelector('[data-session-id="session-w"]')).toBeNull();
+    // Other folders are unaffected.
+    expect(rowFor("session-h")).toBeInTheDocument();
+
+    expect(
+      JSON.parse(localStorage.getItem(COLLAPSE_KEY) || "[]"),
+    ).toContain("folder-work");
+  });
+
+  it("restores the collapsed state from localStorage", async () => {
+    localStorage.setItem(COLLAPSE_KEY, JSON.stringify(["folder-work"]));
+
+    renderSidebar();
+    await settle();
+
+    expect(document.querySelector('[data-session-id="session-w"]')).toBeNull();
+    expect(
+      document.querySelector('[aria-label="Expand Work"]'),
+    ).toBeInTheDocument();
+  });
+
+  it("auto-expands the folder holding the active session", async () => {
+    // The mocked useParams() reports sessionId "session-1"; put it in a
+    // folder that starts collapsed.
+    localStorage.setItem(COLLAPSE_KEY, JSON.stringify(["folder-work"]));
+    mockListSessions.mockResolvedValue([
+      {
+        id: "session-1",
+        title: "Active in Work",
+        is_pinned: false,
+        is_temporary: false,
+        folder_id: "folder-work",
+        updated_at: NOW,
+        tags: [],
+      },
+    ]);
+
+    renderSidebar();
+    await settle();
+
+    expect(rowFor("session-1")).toBeInTheDocument();
+  });
+
+  // ── Moving sessions ───────────────────────────────────────────────────
+
+  it("moves a session from the row's move menu", async () => {
+    const user = userEvent.setup();
+    renderSidebar();
+    await settle();
+
+    const row = rowFor("session-1");
+    await user.click(
+      row.querySelector('[aria-label="Move session to folder"]') as HTMLElement,
+    );
+
+    const menu = within(await screen.findByRole("menu"));
+    await user.click(menu.getByText("Personal"));
+
+    expect(mockUpdateSession).toHaveBeenCalledWith("session-1", {
+      folder_id: "folder-home",
+    });
+  });
+
+  it("disables the move target the session is already in", async () => {
+    const user = userEvent.setup();
+    renderSidebar();
+    await settle();
+
+    await user.click(
+      rowFor("session-w").querySelector(
+        '[aria-label="Move session to folder"]',
+      ) as HTMLElement,
+    );
+
+    const menu = within(await screen.findByRole("menu"));
+    const workItem = menu.getByText("Work").closest("li");
+    expect(workItem).toHaveClass("ant-dropdown-menu-item-disabled");
+  });
+
+  it("moves a session when it is dropped on a folder header", async () => {
+    renderSidebar();
+    await settle();
+
+    const row = rowFor("session-1");
+    const header = screen.getByText("Personal").closest("div") as HTMLElement;
+    const dataTransfer = makeDataTransfer();
+
+    await act(async () => {
+      fireEvent.dragStart(row, { dataTransfer });
+      fireEvent.dragOver(header, { dataTransfer });
+      fireEvent.drop(header, { dataTransfer });
+    });
+
+    expect(mockUpdateSession).toHaveBeenCalledWith("session-1", {
+      folder_id: "folder-home",
+    });
+  });
+
+  it("ignores a drop on the folder the session already lives in", async () => {
+    renderSidebar();
+    await settle();
+
+    const row = rowFor("session-w");
+    const header = screen.getByText("Work").closest("div") as HTMLElement;
+    const dataTransfer = makeDataTransfer();
+
+    await act(async () => {
+      fireEvent.dragStart(row, { dataTransfer });
+      fireEvent.drop(header, { dataTransfer });
+    });
+
+    expect(mockUpdateSession).not.toHaveBeenCalled();
+  });
+
+  it("files a session into Unfiled when dropped there", async () => {
+    renderSidebar();
+    await settle();
+
+    const row = rowFor("session-w");
+    const header = screen.getByText("Unfiled").closest("div") as HTMLElement;
+    const dataTransfer = makeDataTransfer();
+
+    await act(async () => {
+      fireEvent.dragStart(row, { dataTransfer });
+      fireEvent.drop(header, { dataTransfer });
+    });
+
+    expect(mockUpdateSession).toHaveBeenCalledWith("session-w", {
+      folder_id: null,
+    });
+  });
+
+  // ── Folder CRUD ───────────────────────────────────────────────────────
+
+  it("creates a folder from the New Chat menu", async () => {
+    const user = userEvent.setup();
+    renderSidebar();
+    await settle();
+
+    await user.click(
+      document.querySelector(".ant-dropdown-trigger") as HTMLElement,
+    );
+    const menu = within(await screen.findByRole("menu"));
+    await user.click(menu.getByText("New Folder"));
+
+    const nameInput = await screen.findByPlaceholderText("Folder name");
+    await user.type(nameInput, "Research");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    expect(mockCreateFolder).toHaveBeenCalledWith({
+      name: "Research",
+      color: null,
+    });
+  });
+
+  it("deletes a folder after confirmation, keeping its chats", async () => {
+    const user = userEvent.setup();
+    renderSidebar();
+    await settle();
+
+    const menu = await openFolderMenu(user, "Work");
+    await user.click(menu.getByText("Delete folder"));
+    await settle();
+
+    // The confirmation dialog states that chats move to Unfiled.
+    expect(
+      await screen.findByText(/will move to Unfiled/),
+    ).toBeInTheDocument();
+
+    // Scope to the confirmation dialog itself (rows also have delete buttons).
+    const dialogs = document.querySelectorAll(".ant-modal-confirm");
+    const dialog = dialogs[dialogs.length - 1] as HTMLElement;
+    await user.click(
+      within(dialog).getByRole("button", { name: "Delete" }),
+    );
+
+    expect(mockDeleteFolder).toHaveBeenCalledWith("folder-work");
+  });
+
+  it("sends folder_id when the folder changes in the edit dialog", async () => {
+    const user = userEvent.setup();
+    renderSidebar();
+    await settle();
+
+    const row = rowFor("session-1");
+    await user.click(
+      row.querySelector(".anticon-edit")!.closest("button") as HTMLElement,
+    );
+    await screen.findByPlaceholderText("Chat title");
+
+    // Open the folder Select and choose "Personal".
+    await user.click(
+      document.querySelector(".ant-select-selector") as HTMLElement,
+    );
+    const options = Array.from(
+      document.querySelectorAll(".ant-select-item-option"),
+    );
+    const personal = options.find((o) => o.textContent === "Personal");
+    expect(personal).toBeTruthy();
+    await user.click(personal as HTMLElement);
+
+    await user.click(screen.getByRole("button", { name: /^ok$/i }));
+
+    expect(mockUpdateSession).toHaveBeenCalledWith("session-1", {
+      folder_id: "folder-home",
+    });
+  });
+
+  it("shows the folder dialog with colours when editing a folder", async () => {
+    const user = userEvent.setup();
+    renderSidebar();
+    await settle();
+
+    const menu = await openFolderMenu(user, "Work");
+    await user.click(menu.getByText("Rename"));
+
+    expect(await screen.findByText("Edit Folder")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Folder name")).toHaveValue("Work");
   });
 });

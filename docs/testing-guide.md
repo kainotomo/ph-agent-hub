@@ -46,6 +46,7 @@ The project uses **pytest** for backend testing. Tests are organized by marker a
 | File | Tests | What It Covers |
 |------|-------|----------------|
 | `test_chat_api.py` | 27 | Session CRUD, message send, file upload, feedback, ownership, tenant isolation |
+| `test_folders_api.py` | 24 | Session folders: CRUD, ownership/tenant isolation, move session between folders, folder delete unfiles sessions, temporary-session guard (Issue #526) |
 | `test_memory_api.py` | 15 | Memory CRUD, pagination, cross-user/tenant isolation |
 | `test_credentials_api.py` | 16 | Credential CRUD, OAuth URLs, ownership, tenant isolation with tenant_id column |
 | `test_upload_flow.py` | 11 | File type/size validation, temp session guard, ownership, DeepSeek+image rejection |

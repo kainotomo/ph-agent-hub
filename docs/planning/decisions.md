@@ -212,3 +212,13 @@ A log of key design decisions made during the design phase, with rationale. Orde
 **Rationale:** Complex tasks are better expressed as goals rather than detailed prompts. The agent's planning capabilities can break down objectives into actionable steps.
 **Alternatives considered:** Prompt-based only (rejected — requires users to specify every step).
 **Reference:** `backend/src/db/orm/skills.py` (execution_type enum), frontend skill creation UI, [Issue #448](https://github.com/kainotomo/ph-agent-hub/issues/448)
+
+---
+
+## D-22 — Folders in the chat sidebar: single-folder membership and native drag & drop
+
+**Date:** 2026-09-19
+**Decision:** Chat sessions can be organised into user-scoped, single-level folders via a nullable `sessions.folder_id` foreign key. A session belongs to at most one folder; sessions with no folder appear under "Unfiled". Moving a session uses native HTML5 drag & drop, with a "Move to folder" menu as the accessible and mobile path.
+**Rationale:** Folder membership is exclusive by nature, so a nullable FK keeps the sidebar deterministic and moves atomic — unlike a `session_folders` join table, which would need a tie-break rule for which folder displays a session. Multi-label organisation is already served by tags. Native drag & drop avoids adding a runtime dependency (`@dnd-kit`), and the menu path keeps the feature usable on touch devices and by keyboard.
+**Alternatives considered:** Many-to-many `session_folders` join table (rejected — ambiguous "primary folder" rule, more complex move semantics); `@dnd-kit/core` (rejected — new dependency for a desktop-only affordance); menu-only moves (rejected — drag & drop is the expected interaction for folders); nested folders (deferred — no parent column).
+**Reference:** [Issue #526](https://github.com/kainotomo/ph-agent-hub/issues/526), `backend/src/db/orm/folders.py`, `frontend/src/features/chat/components/SessionSidebar.tsx`

@@ -17,6 +17,7 @@ from .tools import Tool
 from .templates import Template
 from .prompts import Prompt
 from .skills import Skill, SkillAllowedTool
+from .folders import Folder
 from .sessions import Session, SessionActiveTool
 from .tags import Tag, SessionTag
 from .user_tool_credentials import UserToolCredential
@@ -54,6 +55,7 @@ __all__ = [
     "SkillAllowedTool",
     "Session",
     "SessionActiveTool",
+    "Folder",
     "Tag",
     "SessionTag",
     "UserToolCredential",

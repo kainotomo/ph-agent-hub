@@ -26,6 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Mass Delete Chat Sessions** — admin can delete multiple chat sessions at once. ([#460])
 
 ### Changed
+- **In-Sidebar Session Search** — session search now filters the left sidebar in place
+  instead of opening a separate results drawer. The magnifier icon toggles an inline
+  search field (scope: All / Title / Content / Tag, plus the `#tag` exact-tag form).
+  Results keep folder grouping: groups without matches are hidden, and the remaining
+  groups are shown expanded. Filtered rows carry matched-field badges, and queries are
+  debounced so the list updates
+  as you type. The old right-side `SessionSearch` drawer was replaced by
+  `SessionSearchBar` and the `useSessionSearch` hook.
 - **Microsoft Agent Framework 1.12.1 → 1.19.0**, now pinned exactly in `backend/requirements.txt`
   (`agent-framework==1.19.0`). The dependency was previously unpinned, so image builds could silently
   resolve a different framework version than the one that was tested. `openai` is held at `>=2.25.0,<3`

@@ -74,19 +74,25 @@ Click the session title to edit it directly. Good titles help you find conversat
 
 If you started a temporary session and later decide you want to keep it, click the **Finalize** button. This converts the session to permanent — all messages are migrated from Redis to the database, and the session appears permanently in your session list.
 
-### 2.5 Search Sessions
+### 2.5 Delete a Session
 
 Click the delete icon on a session. A confirmation dialog will appear to prevent accidental deletion. Once confirmed, the session and all its messages are permanently removed.
 
-### 2.5 Collapse the Session List
+### 2.6 Collapse the Session List
 
 On desktop, click the minimize button on the session sidebar to collapse it and give the chat area more space.
 
-### 2.4 Search Sessions
+### 2.7 Search Sessions
 
-Use the search bar at the top of the session sidebar. Search matches both session titles and message content.
+Click the magnifier icon in the sidebar header to open the search field inside the sidebar. As you type, the session list itself is filtered in place — there is no separate results window.
 
-### 2.6 Organize Sessions into Folders
+- Search matches session titles, message content, and tags.
+- Use the **All / Title / Content / Tag** control to narrow the search scope.
+- Type `#tagname` (for example `#work`) for an exact tag search.
+- Results keep your folder grouping: a folder only appears while it contains a match, and matching fields are shown as small badges on each row.
+- Press **Esc**, click the **✕**, or clear the field to restore the full list. Temporary chats are not included in search results.
+
+### 2.8 Organize Sessions into Folders
 
 Create a folder from the **New Chat** dropdown (**New Folder**), then group your chats:
 

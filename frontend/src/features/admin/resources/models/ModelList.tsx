@@ -32,7 +32,7 @@ import {
   ModelData,
 } from "../../services/admin";
 import { useAdminTable } from "../../hooks/useAdminTable";
-import { useDebounce } from "../../hooks/useDebounce";
+import { useDebounce } from "../../../../shared/hooks/useDebounce";
 import { ModelForm } from "./ModelForm";
 
 const { useBreakpoint } = Grid;

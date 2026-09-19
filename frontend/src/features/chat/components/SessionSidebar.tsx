@@ -24,9 +24,10 @@ import {
   Popconfirm,
   Checkbox,
   Select,
+  Empty,
 } from "antd";
 import { Virtuoso, VirtuosoHandle } from "react-virtuoso";
-import type { MenuProps } from "antd";
+import type { MenuProps, InputRef } from "antd";
 import {
   PlusOutlined,
   SearchOutlined,
@@ -77,10 +78,10 @@ import {
   exportSession,
   importSession,
   getStreamStatus,
+  SearchScope,
 } from "../services/chat";
 import { ContextIndicator } from "./ContextIndicator";
 import { MemoryManager } from "./MemoryManager";
-import { SessionSearch } from "./SessionSearch";
 import { SessionFolderHeader } from "./SessionFolderHeader";
 import {
   UNFILED_ID,
@@ -92,6 +93,8 @@ import {
   rowKey,
   type SidebarRow,
 } from "./sessionRows";
+import { useSessionSearch } from "../hooks/useSessionSearch";
+import { SessionSearchBar, SEARCH_SCOPE_LABELS } from "./SessionSearchBar";
 
 const { Sider } = Layout;
 const { Text } = Typography;
@@ -123,7 +126,7 @@ interface SessionListItemProps {
   selectMode: boolean;
   isSelected: boolean;
   isStreaming: boolean;
-  onNavigate: (id: string) => void;
+  onNavigate: (session: SessionData) => void;
   onToggleSelect: (id: string) => void;
   onEdit: (session: SessionData) => void;
   onPin: (id: string, is_pinned: boolean) => void;
@@ -137,6 +140,8 @@ interface SessionListItemProps {
   onNewFolder: (sessionId: string) => void;
   onDragStart: (event: React.DragEvent<HTMLDivElement>, id: string) => void;
   onDragEnd: () => void;
+  /** Show matched-field badges from search results. */
+  showMatchedFields?: boolean;
 }
 
 const SessionListItem = React.memo(function SessionListItem({
@@ -160,6 +165,7 @@ const SessionListItem = React.memo(function SessionListItem({
   onNewFolder,
   onDragStart,
   onDragEnd,
+  showMatchedFields,
 }: SessionListItemProps) {
   return (
     <div
@@ -180,7 +186,7 @@ const SessionListItem = React.memo(function SessionListItem({
           });
           return;
         }
-        onNavigate(isActive ? "/chat" : `/chat/${item.id}`);
+        onNavigate(item);
         if (isMobile) setMobileOpen(false);
       }}
       style={{
@@ -259,6 +265,20 @@ const SessionListItem = React.memo(function SessionListItem({
                     color={t.color || "default"}
                   >
                     {t.name}
+                  </Tag>
+                ))}
+              </div>
+            )}
+            {/* Row 3b: Matched-field badges (search results only) */}
+            {showMatchedFields && item.matched_fields && item.matched_fields.length > 0 && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 2 }}>
+                {item.matched_fields.slice(0, 3).map((f) => (
+                  <Tag
+                    key={f}
+                    style={{ fontSize: 10, lineHeight: "14px" }}
+                    color="blue"
+                  >
+                    {SEARCH_SCOPE_LABELS[f as SearchScope] ?? f}
                   </Tag>
                 ))}
               </div>
@@ -412,6 +432,8 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
   const [editTitle, setEditTitle] = useState("");
   const [editFolderId, setEditFolderId] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
+  const search = useSessionSearch();
+  const searchInputRef = useRef<InputRef>(null);
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -466,6 +488,27 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
       // for the current session.
     }
   }, [collapsedFolders]);
+
+  // Focus the search input when the panel opens.
+  useEffect(() => {
+    if (searchOpen && searchInputRef.current) {
+      searchInputRef.current.focus();
+    }
+  }, [searchOpen]);
+
+  // Collapsing the sidebar hides the inline search field, so it must also
+  // clear the active filter (otherwise rows stay filtered with no visible way
+  // to clear them).
+  const handleCollapse = useCallback(
+    (next: boolean) => {
+      setCollapsed(next);
+      if (next) {
+        search.clear();
+        setSearchOpen(false);
+      }
+    },
+    [search],
+  );
 
   // ---- Issue #455: Poll streaming session status -------------------------
   // Poll ALL active sessions every 10 seconds.  When an agent finishes
@@ -547,6 +590,13 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
   // for lazy-created sessions that haven't been persisted yet).
   const sessionExists = sessions?.some(s => s.id === sessionId) ?? false;
 
+  // Invalidate both the session list and the search cache so mutations
+  // (delete, pin, rename, move, tag) are reflected in an active filter.
+  const invalidateSessionLists = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ["sessions"] });
+    queryClient.invalidateQueries({ queryKey: ["session-search"] });
+  }, [queryClient]);
+
   const createMutation = useMutation({
     mutationFn: () =>
       createSession({
@@ -581,7 +631,7 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
       return updateSession(editingSession!.id, payload);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      invalidateSessionLists();
       queryClient.invalidateQueries({ queryKey: ["session", editingSession?.id] });
       setEditingSession(null);
     },
@@ -591,7 +641,7 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
   const deleteMutation = useMutation({
     mutationFn: (id: string) => deleteSession(id),
     onSuccess: (_data, id) => {
-      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      invalidateSessionLists();
       if (sessionId === id) {
         navigate("/chat");
       }
@@ -603,7 +653,7 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
     mutationFn: ({ id, is_pinned }: { id: string; is_pinned: boolean }) =>
       updateSession(id, { is_pinned }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      invalidateSessionLists();
     },
   });
 
@@ -612,7 +662,7 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
     mutationFn: ({ id, folderId }: { id: string; folderId: string | null }) =>
       updateSession(id, { folder_id: folderId }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      invalidateSessionLists();
     },
     onError: (err: Error) =>
       message.error(`Failed to move session: ${err.message}`),
@@ -668,7 +718,7 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
   const batchDeleteMutation = useMutation({
     mutationFn: (ids: string[]) => deleteSessions(ids),
     onSuccess: (data, ids) => {
-      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      invalidateSessionLists();
       if (data.deleted > 0) {
         message.success(`Deleted ${data.deleted} session${data.deleted !== 1 ? "s" : ""}`);
       }
@@ -701,7 +751,7 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
       folderName: string;
     }) => moveSessions(ids, folderId),
     onSuccess: (data, { folderName }) => {
-      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      invalidateSessionLists();
       if (data.moved > 0) {
         message.success(
           `Moved ${data.moved} chat${data.moved !== 1 ? "s" : ""} to "${folderName}"`,
@@ -739,8 +789,16 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
 
   // Stable callbacks for SessionListItem (avoids re-render when React.memo compares).
   const handleNavigate = useCallback(
-    (path: string) => navigate(path),
-    [navigate],
+    (session: SessionData) => {
+      // Ensure the session is in the sidebar cache (prepends if absent).
+      queryClient.setQueryData<SessionData[]>(["sessions"], (old) => {
+        if (!old) return [session];
+        if (old.some((s) => s.id === session.id)) return old;
+        return [session, ...old];
+      });
+      navigate(session.id === sessionId ? "/chat" : `/chat/${session.id}`);
+    },
+    [navigate, sessionId, queryClient],
   );
   const handleEditSession = useCallback(
     (session: SessionData) => {
@@ -780,9 +838,16 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
   // -------------------------------------------------------------------------
 
   // Flatten folders + sessions into the single list Virtuoso renders.
+  const visibleSessions = search.active ? search.results : (sessions ?? []);
   const rows = useMemo(
-    () => buildSidebarRows(sessions || [], folders || [], collapsedFolders),
-    [sessions, folders, collapsedFolders],
+    () =>
+      buildSidebarRows(
+        visibleSessions,
+        folders || [],
+        collapsedFolders,
+        { filtering: search.active },
+      ),
+    [visibleSessions, folders, collapsedFolders, search.active],
   );
 
   function closeFolderModal() {
@@ -848,14 +913,16 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
       if (!draggedSessionId) return;
 
       const targetFolderId = groupId === UNFILED_ID ? null : groupId;
-      const dragged = (sessions || []).find((s) => s.id === draggedSessionId);
+      const dragged =
+        (sessions || []).find((s) => s.id === draggedSessionId) ??
+        search.results.find((s) => s.id === draggedSessionId);
       if (!dragged) return;
       // Dropping a session on the folder it already lives in is a no-op.
       if ((dragged.folder_id ?? null) === targetFolderId) return;
 
       handleMoveSession(draggedSessionId, targetFolderId);
     },
-    [sessions, handleMoveSession],
+    [sessions, search.results, handleMoveSession],
   );
 
   const handleMoveSelected = useCallback(
@@ -963,6 +1030,7 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
             collapsed={row.collapsed}
             isUnfiled={row.isUnfiled}
             isDropTarget={dropTargetId === row.id}
+            toggleDisabled={search.active}
             onToggle={() => toggleFolder(row.id)}
             onNewChatHere={() => handleNewChatInFolder(row.id)}
             onRename={() => folder && openEditFolder(folder)}
@@ -1011,6 +1079,7 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
           onNewFolder={handleNewFolderForSession}
           onDragStart={handleSessionDragStart}
           onDragEnd={handleSessionDragEnd}
+          showMatchedFields={search.active}
         />
       );
     },
@@ -1040,6 +1109,7 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
       handleFolderDragOver,
       handleFolderDragLeave,
       handleFolderDrop,
+      search.active,
     ],
   );
 
@@ -1180,13 +1250,21 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
                   />
                 </Tooltip>
               )}
-              <Tooltip title="Search">
+              <Tooltip title={searchOpen ? "Close search" : "Search"}>
                 <Button
                   type="text"
                   icon={<SearchOutlined />}
                   size="small"
                   data-testid="session-search-btn"
-                  onClick={() => setSearchOpen(true)}
+                  aria-expanded={searchOpen}
+                  onClick={() => {
+                    if (searchOpen) {
+                      search.clear();
+                      setSearchOpen(false);
+                    } else {
+                      setSearchOpen(true);
+                    }
+                  }}
                 />
               </Tooltip>
               <Tooltip title="Memory">
@@ -1241,13 +1319,31 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
                   type="text"
                   icon={<MenuFoldOutlined />}
                   size="small"
-                  onClick={() => setCollapsed(true)}
+                  onClick={() => handleCollapse(true)}
                 />
               </Tooltip>
             </Space>
           )}
         </div>
       </div>
+
+      {/* Inline Search Panel — rendered under the header, above New Chat */}
+      {searchOpen && !collapsed && (
+        <SessionSearchBar
+          value={search.query}
+          onChange={search.setQuery}
+          scope={search.scope}
+          onScopeChange={search.setScope}
+          tagMode={search.tagMode}
+          busy={search.isFetching}
+          resultCount={search.results.length}
+          onClose={() => {
+            search.clear();
+            setSearchOpen(false);
+          }}
+          inputRef={searchInputRef}
+        />
+      )}
 
       {/* New Chat Button */}
       <div style={{ padding: "8px 12px" }}>
@@ -1299,6 +1395,27 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
             showIcon
           />
         </div>
+      ) : search.active && search.isLoading ? (
+        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <Spin />
+        </div>
+      ) : search.active && search.error ? (
+        <div style={{ padding: 16 }}>
+          <Alert
+            type="error"
+            message="Search failed"
+            description="Could not search sessions. Please try again."
+            action={<Button size="small" onClick={() => search.refetch()}>Retry</Button>}
+            showIcon
+          />
+        </div>
+      ) : search.active && search.results.length === 0 && !search.isFetching ? (
+        <div style={{ padding: 16, textAlign: "center" }}>
+          <Empty description={`No chats match "${search.query}"`} />
+          <Button size="small" style={{ marginTop: 8 }} onClick={() => { search.clear(); setSearchOpen(false); }}>
+            Clear search
+          </Button>
+        </div>
       ) : (
         <Virtuoso
           ref={virtuosoRef}
@@ -1329,7 +1446,7 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
           <Button
             size="small"
             onClick={() => {
-              const selectable = sortedSessions.filter(
+              const selectable = (search.active ? search.results : sortedSessions).filter(
                 (s) => !streamingSessionIds.has(s.id)
               );
               if (selectable.length === selectedIds.size) {
@@ -1340,7 +1457,7 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
             }}
           >
             {selectedIds.size ===
-            sortedSessions.filter((s) => !streamingSessionIds.has(s.id)).length
+            (search.active ? search.results : sortedSessions).filter((s) => !streamingSessionIds.has(s.id)).length
               ? "Deselect All"
               : "Select All"}
           </Button>
@@ -1455,26 +1572,6 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
           </Tooltip>
         </Space>
       </div>
-
-      {/* Search Drawer */}
-      <Drawer
-        title="Search Sessions"
-        open={searchOpen}
-        onClose={() => setSearchOpen(false)}
-      >
-        <SessionSearch
-          onClose={() => setSearchOpen(false)}
-          onSelect={(session) => {
-            // If the selected session is not already in the sidebar list,
-            // prepend it to the cache so it appears and can be highlighted.
-            queryClient.setQueryData<SessionData[]>(["sessions"], (old) => {
-              if (!old) return [session];
-              if (old.some((s) => s.id === session.id)) return old;
-              return [session, ...old];
-            });
-          }}
-        />
-      </Drawer>
 
       {/* Memory Manager */}
       <MemoryManager
@@ -1660,7 +1757,7 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
       collapsed={collapsed}
       collapsedWidth={0}
       trigger={null}
-      onCollapse={setCollapsed}
+      onCollapse={handleCollapse}
       theme="light"
       style={{
         borderRight: collapsed ? "none" : "1px solid #f0f0f0",

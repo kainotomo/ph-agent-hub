@@ -22,7 +22,7 @@ import { SearchOutlined } from "@ant-design/icons";
 import { useQuery as _useQuery } from "@tanstack/react-query";
 import { listAuditLogs, AuditData } from "../../services/admin";
 import { useAdminTable } from "../../hooks/useAdminTable";
-import { useDebounce } from "../../hooks/useDebounce";
+import { useDebounce } from "../../../../shared/hooks/useDebounce";
 
 const { useBreakpoint } = Grid;
 const { Text, Paragraph } = Typography;

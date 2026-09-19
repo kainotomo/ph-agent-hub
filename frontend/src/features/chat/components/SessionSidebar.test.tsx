@@ -32,6 +32,8 @@ const {
   mockCreateFolder,
   mockUpdateFolder,
   mockDeleteFolder,
+  mockSearchSessions,
+  mockListSessionsByTag,
 } = vi.hoisted(() => ({
   mockListSessions: vi.fn(),
   mockCreateSession: vi.fn(),
@@ -45,6 +47,8 @@ const {
   mockCreateFolder: vi.fn(),
   mockUpdateFolder: vi.fn(),
   mockDeleteFolder: vi.fn(),
+  mockSearchSessions: vi.fn(),
+  mockListSessionsByTag: vi.fn(),
 }));
 
 vi.mock("../services/chat", () => ({
@@ -63,6 +67,8 @@ vi.mock("../services/chat", () => ({
   createFolder: mockCreateFolder,
   updateFolder: mockUpdateFolder,
   deleteFolder: mockDeleteFolder,
+  searchSessions: mockSearchSessions,
+  listSessionsByTag: mockListSessionsByTag,
 }));
 
 // Mock AuthProvider
@@ -91,19 +97,31 @@ vi.mock("react-router-dom", () => ({
   useLocation: () => ({ pathname: "/chat/session-1" }),
 }));
 
-// Track onSelect calls for SessionSearch tests
-let sessionSearchOnSelect: ((session: any) => void) | null = null;
-
-// Mock SessionSearch directly (Sidebar imports from ./SessionSearch)
-vi.mock("./SessionSearch", () => ({
-  SessionSearch: ({ onSelect }: { onSelect?: (session: any) => void }) => {
-    sessionSearchOnSelect = onSelect ?? null;
-    return <div data-testid="session-search" />;
-  },
-  default: ({ onSelect }: { onSelect?: (session: any) => void }) => {
-    sessionSearchOnSelect = onSelect ?? null;
-    return <div data-testid="session-search" />;
-  },
+// Lightweight stand-in for the inline search bar: exposes just the controlled
+// input and the close button the sidebar tests interact with.  The real bar
+// has its own spec (SessionSearchBar.test.tsx).
+vi.mock("./SessionSearchBar", () => ({
+  SessionSearchBar: ({
+    value,
+    onChange,
+    busy,
+    resultCount,
+    onClose,
+  }: any) => (
+    <div data-testid="session-search-panel">
+      <input
+        data-testid="session-search-input"
+        value={value}
+        onChange={(e: any) => onChange(e.target.value)}
+      />
+      <button data-testid="close-search-btn" onClick={onClose}>
+        Close
+      </button>
+      <div data-testid="result-count">{resultCount}</div>
+      {busy && <div data-testid="searching-indicator">Searching…</div>}
+    </div>
+  ),
+  SEARCH_SCOPE_LABELS: { title: "Title", content: "Content", tag: "Tag" },
 }));
 
 // Mock child components from barrel export
@@ -111,10 +129,6 @@ vi.mock("./", () => ({
   ContextIndicator: () => <div data-testid="context-indicator" />,
   MemoryManager: ({ open }: { open: boolean }) =>
     open ? <div data-testid="memory-manager" /> : null,
-  SessionSearch: ({ onSelect }: { onSelect?: (session: any) => void }) => {
-    sessionSearchOnSelect = onSelect ?? null;
-    return <div data-testid="session-search" />;
-  },
 }));
 
 // Mock shared Logo component
@@ -215,6 +229,34 @@ async function settle() {
   });
 }
 
+/** Wait out the 300 ms search debounce plus the mocked request. */
+async function settleSearch() {
+  // First wait: the debounce fires and the query starts.
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 350));
+  });
+  // Second wait: the mocked request resolves and React re-renders.
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 50));
+  });
+}
+
+/** Type a query into the inline search input and let the debounce settle. */
+async function typeSearch(user: ReturnType<typeof userEvent.setup>, text: string) {
+  await user.type(screen.getByTestId("session-search-input"), text);
+  await settleSearch();
+}
+
+/** Open the inline search panel. */
+async function openSearch(user: ReturnType<typeof userEvent.setup>) {
+  const searchBtn = document.querySelector<HTMLElement>(
+    "[data-testid='session-search-btn']",
+  );
+  expect(searchBtn).toBeTruthy();
+  await user.click(searchBtn!);
+  await settle();
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -229,6 +271,8 @@ describe("SessionSidebar", () => {
     mockUpdateSession.mockResolvedValue(undefined);
     mockImportSession.mockResolvedValue({ session_id: "imported-session", message_count: 5 });
     mockListFolders.mockResolvedValue([]);
+    mockSearchSessions.mockResolvedValue([]);
+    mockListSessionsByTag.mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -508,16 +552,19 @@ describe("SessionSidebar", () => {
     // The action bar should show "2 selected"
     expect(screen.getByText("2 selected")).toBeInTheDocument();
 
-    // Click "Delete Selected" button
-    const deleteSelectedBtn = screen.getByRole("button", { name: /delete selected/i });
-    await user.click(deleteSelectedBtn);
+    // Click "Delete" button (the action bar button is now just "Delete")
+    const deleteBtn = screen.getByRole("button", { name: "Delete" });
+    await user.click(deleteBtn);
 
     // Confirmation modal should appear — check that modal exists
     expect(document.querySelector(".ant-modal-confirm-title")).toBeInTheDocument();
 
-    // Click the OK button in the modal
-    const confirmBtn = screen.getByRole("button", { name: "Delete" });
-    await user.click(confirmBtn);
+    // Scope to the confirmation dialog itself (rows also have delete buttons).
+    const dialogs = document.querySelectorAll(".ant-modal-confirm");
+    const dialog = dialogs[dialogs.length - 1] as HTMLElement;
+    await user.click(
+      within(dialog).getByRole("button", { name: "Delete" }),
+    );
 
     // Wait for the mutation to resolve
     await settle();
@@ -543,15 +590,126 @@ describe("SessionSidebar", () => {
     expect(selectBtn).not.toBeInTheDocument();
   });
 
-  // ── SessionSearch onSelect prepends session to cache ──────────────────
+  // ── Inline search panel ─────────────────────────────────────────────────
 
-  it("prepends searched session to sidebar query cache when onSelect is called", async () => {
-    // Create a query client we control so we can inspect cache state
+  it("toggles the search panel when the magnifier icon is clicked", async () => {
+    renderSidebar();
+    await settle();
+
+    // Panel absent when closed
+    expect(screen.queryByTestId("session-search-panel")).not.toBeInTheDocument();
+
+    const user = userEvent.setup();
+    const searchBtn = document.querySelector<HTMLElement>("[data-testid='session-search-btn']");
+    expect(searchBtn).toBeTruthy();
+
+    // Open the panel
+    await user.click(searchBtn!);
+    await settle();
+
+    expect(screen.getByTestId("session-search-panel")).toBeInTheDocument();
+    expect(screen.getByTestId("session-search-input")).toBeInTheDocument();
+
+    // Close the panel
+    await user.click(screen.getByTestId("close-search-btn"));
+    await settle();
+
+    expect(screen.queryByTestId("session-search-panel")).not.toBeInTheDocument();
+  });
+
+  it("filters session rows when a query is typed", async () => {
+    mockSearchSessions.mockResolvedValue([SESSIONS[2]]); // Active Session
+    renderSidebar();
+    await settle();
+
+    const user = userEvent.setup();
+    await openSearch(user);
+
+    // All sessions visible before filtering
+    expect(document.querySelectorAll("[data-session-id]")).toHaveLength(4);
+
+    await typeSearch(user, "Active");
+
+    expect(mockSearchSessions).toHaveBeenCalledWith("Active", "all");
+    const ids = Array.from(document.querySelectorAll("[data-session-id]")).map(
+      (el) => el.getAttribute("data-session-id"),
+    );
+    expect(ids).toEqual(["session-1"]);
+    expect(screen.getByTestId("session-search-input")).toHaveValue("Active");
+  });
+
+  it("shows matched-field badges on filtered rows", async () => {
+    mockSearchSessions.mockResolvedValue([
+      { ...SESSIONS[0], matched_fields: ["title"] },
+    ]);
+    renderSidebar();
+    await settle();
+
+    const user = userEvent.setup();
+    await openSearch(user);
+    await typeSearch(user, "Pinned");
+
+    expect(document.querySelectorAll("[data-session-id]")).toHaveLength(1);
+    expect(screen.getByText("Title")).toBeInTheDocument();
+  });
+
+  it("shows grouped filter with only matching folder headers", async () => {
+    // Use the folder test fixture
+    mockListSessions.mockResolvedValue(FOLDER_SESSIONS);
+    mockListFolders.mockResolvedValue(FOLDERS);
+    mockSearchSessions.mockResolvedValue([FOLDER_SESSIONS[1]]); // Home chat
+    renderSidebar();
+    await settle();
+
+    const user = userEvent.setup();
+    await openSearch(user);
+    await typeSearch(user, "Home");
+
+    // Only the Personal folder header should be visible
+    expect(screen.queryByText("Work")).not.toBeInTheDocument();
+    expect(screen.queryByText("Unfiled")).not.toBeInTheDocument();
+    expect(screen.getByText("Personal")).toBeInTheDocument();
+    // Chevron should be disabled (toggleDisabled)
+    const chevron = screen.getByText("Personal").closest("div")?.querySelector("button");
+    expect(chevron).toHaveAttribute("disabled");
+  });
+
+  it("shows empty state when no matches", async () => {
+    mockSearchSessions.mockResolvedValue([]);
+    renderSidebar();
+    await settle();
+
+    const user = userEvent.setup();
+    await openSearch(user);
+    await typeSearch(user, "zzznonexistent");
+
+    expect(screen.getByText(/No chats match/)).toBeInTheDocument();
+    expect(document.querySelectorAll("[data-session-id]")).toHaveLength(0);
+  });
+
+  it("shows an error alert when the search fails", async () => {
+    mockSearchSessions.mockRejectedValue(new Error("boom"));
+    renderSidebar();
+    await settle();
+
+    const user = userEvent.setup();
+    await openSearch(user);
+    await typeSearch(user, "Pinned");
+
+    expect(screen.getByText("Search failed")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+  });
+
+  it("row click navigates and prepends the searched session to the cache", async () => {
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
     });
-    // Pre-populate with the fixture sessions
     queryClient.setQueryData(["sessions"], SESSIONS);
+
+    // A session that is NOT in the sidebar list yet (e.g. beyond the recent
+    // 2000-row cap) — clicking it must add it to the cache.
+    const found = { ...SESSIONS[0], id: "session-found", title: "Found" };
+    mockSearchSessions.mockResolvedValue([found]);
 
     render(
       <QueryClientProvider client={queryClient}>
@@ -560,38 +718,84 @@ describe("SessionSidebar", () => {
     );
     await settle();
 
-    // Open the search drawer so SessionSearch renders and captures onSelect
-    const searchBtn = document.querySelector<HTMLElement>("[data-testid='session-search-btn']");
-    expect(searchBtn).toBeTruthy();
-    await act(async () => {
-      searchBtn!.click();
-    });
+    const user = userEvent.setup();
+    await openSearch(user);
+    await typeSearch(user, "Found");
+
+    const sessionRow = document.querySelector("[data-session-id='session-found']");
+    expect(sessionRow).toBeInTheDocument();
+    await user.click(sessionRow!);
+
+    expect(mockNavigate).toHaveBeenCalledWith("/chat/session-found");
+    const cached = queryClient.getQueryData<typeof SESSIONS>(["sessions"]);
+    expect(cached?.[0]?.id).toBe("session-found");
+  });
+
+  it("Select All uses the filtered pool", async () => {
+    mockSearchSessions.mockResolvedValue([SESSIONS[0], SESSIONS[1]]);
+    renderSidebar();
     await settle();
 
-    expect(sessionSearchOnSelect).toBeTruthy();
+    const user = userEvent.setup();
+    await openSearch(user);
+    await typeSearch(user, "Pinned");
 
-    const newSession = {
-      id: "session-searched",
-      title: "Searched Session",
-      is_pinned: false,
-      is_temporary: false,
-      updated_at: NOW,
-      tags: [],
-    };
+    // Only 2 sessions visible
+    expect(document.querySelectorAll("[data-session-id]")).toHaveLength(2);
 
-    // Call the SessionSearch onSelect callback
-    await act(async () => {
-      sessionSearchOnSelect?.(newSession);
-      // Advance microtasks so React Query subscribers fire synchronously
-      await new Promise((r) => setTimeout(r, 0));
-    });
+    // Enter select mode
+    const selectBtn = document.querySelector(".anticon-check-square");
+    await user.click(selectBtn!.closest("button")!);
+
+    // Select All should only select the 2 visible sessions
+    await user.click(screen.getByText("Select All"));
+    expect(screen.getByText("2 selected")).toBeInTheDocument();
+  });
+
+  it("clearing search restores all rows", async () => {
+    mockSearchSessions.mockResolvedValue([SESSIONS[0], SESSIONS[1]]);
+    renderSidebar();
     await settle();
 
-    // Verify the cache was updated by reading from the same queryClient
-    const sessionIds = queryClient
-      .getQueryData<typeof SESSIONS>(["sessions"])
-      ?.map((s) => s.id) ?? [];
-    expect(sessionIds[0]).toBe("session-searched");
+    const user = userEvent.setup();
+    await openSearch(user);
+    await typeSearch(user, "Pinned");
+
+    expect(document.querySelectorAll("[data-session-id]")).toHaveLength(2);
+
+    // Clear the search
+    await user.clear(screen.getByTestId("session-search-input"));
+    await settleSearch();
+
+    // All rows restored
+    expect(document.querySelectorAll("[data-session-id]")).toHaveLength(4);
+  });
+
+  it("collapsing the sidebar clears an active search filter", async () => {
+    mockSearchSessions.mockResolvedValue([SESSIONS[0], SESSIONS[1]]);
+    renderSidebar();
+    await settle();
+
+    const user = userEvent.setup();
+    await openSearch(user);
+    await typeSearch(user, "Pinned");
+    expect(document.querySelectorAll("[data-session-id]")).toHaveLength(2);
+
+    // Collapse the sidebar from the header button.
+    await user.click(
+      document.querySelector(".anticon-menu-fold")!.closest("button")!,
+    );
+    await settleSearch();
+
+    // Expand again via the floating expand button.
+    await user.click(
+      document.querySelector(".anticon-menu-unfold")!.closest("button")!,
+    );
+    await settle();
+
+    // The filter was cleared with the sidebar, so the full list is back.
+    expect(screen.queryByTestId("session-search-panel")).not.toBeInTheDocument();
+    expect(document.querySelectorAll("[data-session-id]")).toHaveLength(4);
   });
 });
 

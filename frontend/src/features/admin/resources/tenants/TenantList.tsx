@@ -39,7 +39,7 @@ import {
 } from "../../services/admin";
 import type { TenantStatusData } from "../../services/admin";
 import { useAdminTable } from "../../hooks/useAdminTable";
-import { useDebounce } from "../../hooks/useDebounce";
+import { useDebounce } from "../../../../shared/hooks/useDebounce";
 import { TenantForm } from "./TenantForm";
 import { BalanceModal } from "./BalanceModal";
 import { TransactionHistory } from "./TransactionHistory";

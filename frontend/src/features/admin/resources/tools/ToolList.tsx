@@ -32,7 +32,7 @@ import {
   ToolData,
 } from "../../services/admin";
 import { useAdminTable } from "../../hooks/useAdminTable";
-import { useDebounce } from "../../hooks/useDebounce";
+import { useDebounce } from "../../../../shared/hooks/useDebounce";
 import { ToolForm } from "./ToolForm";
 
 const { useBreakpoint } = Grid;

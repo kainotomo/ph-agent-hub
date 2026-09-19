@@ -37,7 +37,7 @@ import {
   UserData,
 } from "../../services/admin";
 import { useAdminTable } from "../../hooks/useAdminTable";
-import { useDebounce } from "../../hooks/useDebounce";
+import { useDebounce } from "../../../../shared/hooks/useDebounce";
 import { UserForm } from "./UserForm";
 import { formatCurrency } from "../../../../shared/utils/formatCurrency";
 

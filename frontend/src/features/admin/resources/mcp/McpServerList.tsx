@@ -42,7 +42,7 @@ import {
   McpServerData,
 } from "../../services/admin";
 import { useAdminTable } from "../../hooks/useAdminTable";
-import { useDebounce } from "../../hooks/useDebounce";
+import { useDebounce } from "../../../../shared/hooks/useDebounce";
 import { McpServerForm } from "./McpServerForm";
 
 const { useBreakpoint } = Grid;

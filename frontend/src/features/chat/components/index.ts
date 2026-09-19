@@ -14,7 +14,7 @@ export { MessageFeedback } from "./MessageFeedback";
 export { MessageBubble } from "./MessageBubble";
 export { ChatWindow } from "./ChatWindow";
 export { ContextIndicator } from "./ContextIndicator";
-export { SessionSearch } from "./SessionSearch";
+export { SessionSearchBar, SEARCH_SCOPE_LABELS } from "./SessionSearchBar";
 export { MemoryManager } from "./MemoryManager";
 export { SessionSidebar } from "./SessionSidebar";
 export { SessionFolderHeader } from "./SessionFolderHeader";

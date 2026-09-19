@@ -69,6 +69,14 @@ export function effectiveFolderId(
   return knownFolderIds.has(claimed) ? claimed : null;
 }
 
+/** Options for {@link buildSidebarRows} when used in search-filter mode. */
+export interface BuildSidebarRowsOptions {
+  /** When true, preserve the input (relevance) order instead of pinned-first
+   *  sorting, force-expand all groups, omit empty-group headers and
+   *  placeholders. */
+  filtering?: boolean;
+}
+
 /**
  * Flatten folders and sessions into the rows the sidebar renders.
  *
@@ -76,14 +84,21 @@ export function effectiveFolderId(
  * then name), followed by "Unfiled" which is always last and always present
  * so it remains a valid drop target.  A collapsed folder contributes only its
  * header; an expanded but empty group contributes a placeholder row.
+ *
+ * When `options.filtering` is true the sidebar is in search mode:
+ * sessions keep their API relevance order (no pinned-first sort), all groups
+ * are treated as expanded, and groups with zero matches / placeholders are
+ * omitted so the list shows only matching sessions.
  */
 export function buildSidebarRows(
   sessions: SessionData[],
   folders: FolderData[],
   collapsed: Set<string>,
+  options: BuildSidebarRowsOptions = {},
 ): SidebarRow[] {
+  const { filtering } = options;
   const rows: SidebarRow[] = [];
-  const ordered = [...sessions].sort(compareSessions);
+  const ordered = filtering ? sessions : [...sessions].sort(compareSessions);
   const knownFolderIds = new Set(folders.map((folder) => folder.id));
 
   const pushGroup = (
@@ -96,6 +111,10 @@ export function buildSidebarRows(
       const groupId = effectiveFolderId(session, knownFolderIds);
       return isUnfiled ? groupId === null : groupId === id;
     });
+
+    // In filtering mode: skip groups with no matches and placeholders.
+    if (filtering && members.length === 0) return;
+
     const isCollapsed = collapsed.has(id);
 
     rows.push({
@@ -104,9 +123,22 @@ export function buildSidebarRows(
       name,
       color,
       count: members.length,
-      collapsed: isCollapsed,
+      // In filtering mode every group is force-expanded.
+      collapsed: filtering ? false : isCollapsed,
       isUnfiled,
     });
+
+    if (filtering) {
+      // In filtering mode all groups are expanded; no placeholders.
+      for (const session of members) {
+        rows.push({
+          kind: "session",
+          session,
+          folderId: isUnfiled ? null : id,
+        });
+      }
+      return;
+    }
 
     if (isCollapsed) return;
 

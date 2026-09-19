@@ -32,7 +32,7 @@ import {
   RagDocumentData,
 } from "../../services/admin";
 import { useAdminTable } from "../../hooks/useAdminTable";
-import { useDebounce } from "../../hooks/useDebounce";
+import { useDebounce } from "../../../../shared/hooks/useDebounce";
 
 const { useBreakpoint } = Grid;
 const { Text } = Typography;

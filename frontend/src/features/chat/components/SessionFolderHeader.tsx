@@ -36,6 +36,9 @@ export interface SessionFolderHeaderProps {
   isUnfiled: boolean;
   /** Highlight while a session is dragged over this folder. */
   isDropTarget: boolean;
+  /** When true, the chevron and folder-name click are disabled (e.g. during
+   *  search filtering where groups are always expanded). */
+  toggleDisabled?: boolean;
   onToggle: () => void;
   onNewChatHere: () => void;
   onRename: () => void;
@@ -54,6 +57,7 @@ export const SessionFolderHeader = React.memo(function SessionFolderHeader({
   collapsed,
   isUnfiled,
   isDropTarget,
+  toggleDisabled,
   onToggle,
   onNewChatHere,
   onRename,
@@ -110,17 +114,19 @@ export const SessionFolderHeader = React.memo(function SessionFolderHeader({
         aria-label={collapsed ? `Expand ${name}` : `Collapse ${name}`}
         icon={collapsed ? <CaretRightOutlined /> : <CaretDownOutlined />}
         onClick={onToggle}
+        disabled={toggleDisabled}
         style={{ flexShrink: 0, width: 18, minWidth: 18, padding: 0 }}
       />
 
       <span
-        onClick={onToggle}
+        onClick={toggleDisabled ? undefined : onToggle}
         style={{
           display: "flex",
           alignItems: "center",
           gap: 6,
           minWidth: 0,
           flex: 1,
+          cursor: toggleDisabled ? "default" : "pointer",
         }}
       >
         {isUnfiled ? (

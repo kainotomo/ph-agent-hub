@@ -336,7 +336,7 @@ It does **not** include any admin functionality.
     SessionSidebar.tsx
     SessionFolderHeader.tsx
     sessionRows.ts
-    SessionSearch.tsx
+    SessionSearchBar.tsx
     MemoryManager.tsx
     SessionToolActivation.tsx
     TemporaryChatBadge.tsx
@@ -348,7 +348,7 @@ It does **not** include any admin functionality.
 
 ### 12.4 Navigation Structure
 
-**Sidebar:** New Chat (with temp/permanent toggle), sessions grouped into collapsible folders (pinned first within each group, "Unfiled" last), search, memory manager, user settings, logout
+**Sidebar:** New Chat (with temp/permanent toggle), sessions grouped into collapsible folders (pinned first within each group, "Unfiled" last), in-place filter search (magnifier toggles an inline `SessionSearchBar`), memory manager, user settings, logout
 
 **Main Area:** Chat window, input box, model/template/prompt/skill selectors, tool activation panel, file upload button
 
@@ -361,7 +361,14 @@ The chat area consumes these backend endpoints:
 | **Auth** | `POST /auth/login`, `GET /auth/me` |
 | **Sessions** | `POST/GET/PUT/DELETE /chat/session`, `POST /chat/session/:id/finalize`, `GET /chat/sessions/search?q=&scope=` |
 
-> The session search drawer (`SessionSearch`) lets the user scope results to **Everything / Title / Content / Tag** via an antd `Segmented` control. The selected scope is passed as the `scope` query param (`all`/`title`/`content`/`tag`). A `#tag` prefix performs an exact tag search via `/chat/sessions/by-tag`. In Everything mode, results show small badges for the `matched_fields` each session matched.
+> Session search filters the sidebar **in place**: the magnifier icon toggles an inline
+> search field (`SessionSearchBar`) at the top of the sidebar, and matching sessions
+> replace the normal rows (folder grouping preserved, groups without matches hidden).
+> The `All / Title / Content / Tag` scope control maps to the `scope` query param
+> (`all`/`title`/`content`/`tag`), and a `#tag` prefix performs an exact tag search via
+> `/chat/sessions/by-tag`. While a filter is active, rows show small badges for the
+> `matched_fields` each session matched. Debouncing, the `#tag` handling and the
+> react-query cache live in `features/chat/hooks/useSessionSearch.ts`.
 | **Messages** | `POST/GET /chat/session/:id/message`, `PUT/DELETE /chat/session/:id/message/:msgId`, `POST .../regenerate`, `POST .../feedback` |
 | **Streaming** | `POST /chat/session/:id/message` (with `Accept: text/event-stream`), `DELETE /chat/session/:id/stream` |
 | **Config** | `GET /models`, `GET /templates` |

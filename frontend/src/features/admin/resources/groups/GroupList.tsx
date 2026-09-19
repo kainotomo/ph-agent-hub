@@ -54,7 +54,7 @@ import {
   GroupToolData,
 } from "../../services/admin";
 import { useAdminTable } from "../../hooks/useAdminTable";
-import { useDebounce } from "../../hooks/useDebounce";
+import { useDebounce } from "../../../../shared/hooks/useDebounce";
 import { GroupForm } from "./GroupForm";
 
 const { Text } = Typography;

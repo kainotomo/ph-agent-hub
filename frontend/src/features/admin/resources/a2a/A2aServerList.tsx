@@ -46,7 +46,7 @@ import {
   A2aServerData,
 } from "../../services/admin";
 import { useAdminTable } from "../../hooks/useAdminTable";
-import { useDebounce } from "../../hooks/useDebounce";
+import { useDebounce } from "../../../../shared/hooks/useDebounce";
 import { A2aServerForm } from "./A2aServerForm";
 
 const { useBreakpoint } = Grid;

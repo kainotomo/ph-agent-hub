@@ -30,7 +30,7 @@ import {
   TemplateData,
 } from "../../services/admin";
 import { useAdminTable } from "../../hooks/useAdminTable";
-import { useDebounce } from "../../hooks/useDebounce";
+import { useDebounce } from "../../../../shared/hooks/useDebounce";
 import { TemplateForm } from "./TemplateForm";
 
 const { useBreakpoint } = Grid;

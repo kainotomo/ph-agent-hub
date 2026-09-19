@@ -305,3 +305,67 @@ describe("readDraggedSessionId", () => {
     expect(readDraggedSessionId(null)).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Filtering mode (in-sidebar session search)
+// ---------------------------------------------------------------------------
+
+describe("buildSidebarRows filtering", () => {
+  it("preserves the API relevance order instead of pinned-first sorting", () => {
+    const sessions = [
+      makeSession({ id: "b", is_pinned: false, updated_at: "2026-09-01T00:00:00Z" }),
+      makeSession({ id: "a", is_pinned: true, updated_at: "2026-01-01T00:00:00Z" }),
+    ];
+
+    const rows = buildSidebarRows(sessions, [], NO_COLLAPSE, { filtering: true });
+
+    // Normal mode would put the pinned "a" first; filtering keeps API order.
+    expect(sessionIds(rows)).toEqual(["b", "a"]);
+  });
+
+  it("omits groups without matches and never emits placeholders", () => {
+    const folders = [
+      makeFolder({ id: "f1", name: "Work" }),
+      makeFolder({ id: "f2", name: "Empty" }),
+    ];
+    const sessions = [makeSession({ id: "a", folder_id: "f1" })];
+
+    const rows = buildSidebarRows(sessions, folders, NO_COLLAPSE, {
+      filtering: true,
+    });
+
+    expect(folderHeaders(rows).map((f) => f.name)).toEqual(["Work"]);
+    expect(rows.filter((r) => r.kind === "placeholder")).toHaveLength(0);
+    expect(sessionIds(rows)).toEqual(["a"]);
+  });
+
+  it("force-expands collapsed groups and reports match counts", () => {
+    const folders = [makeFolder({ id: "f1", name: "Work" })];
+    const sessions = [
+      makeSession({ id: "a", folder_id: "f1" }),
+      makeSession({ id: "b", folder_id: "f1" }),
+    ];
+
+    const rows = buildSidebarRows(sessions, folders, new Set(["f1"]), {
+      filtering: true,
+    });
+
+    const header = folderHeaders(rows)[0];
+    expect(header.collapsed).toBe(false);
+    expect(header.count).toBe(2);
+    expect(sessionIds(rows)).toEqual(["a", "b"]);
+  });
+
+  it("still falls back to Unfiled for unknown folder ids", () => {
+    const sessions = [makeSession({ id: "a", folder_id: "gone" })];
+
+    const rows = buildSidebarRows(sessions, [], NO_COLLAPSE, {
+      filtering: true,
+    });
+
+    const headers = folderHeaders(rows);
+    expect(headers).toHaveLength(1);
+    expect(headers[0].isUnfiled).toBe(true);
+    expect(sessionIds(rows)).toEqual(["a"]);
+  });
+});

@@ -1410,7 +1410,7 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
               });
             }}
           >
-            Delete Selected
+            Delete
           </Button>
         </div>
       )}

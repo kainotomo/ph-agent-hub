@@ -64,6 +64,7 @@ import {
   createSession,
   deleteSession,
   deleteSessions,
+  moveSessions,
   updateSession,
   SessionData,
   FolderData,
@@ -431,10 +432,10 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
   } | null>(null);
   const [folderName, setFolderName] = useState("");
   const [folderColor, setFolderColor] = useState<string | null>(null);
-  /** Session waiting to be filed into a folder that is being created. */
-  const [pendingMoveSessionId, setPendingMoveSessionId] = useState<
-    string | null
-  >(null);
+  /** Session IDs waiting to be filed into a folder that is being created. */
+  const [pendingMoveSessionIds, setPendingMoveSessionIds] = useState<
+    string[]
+  >([]);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -622,14 +623,20 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
       createFolder(data),
     onSuccess: (folder) => {
       queryClient.invalidateQueries({ queryKey: ["folders"] });
-      const sessionToFile = pendingMoveSessionId;
+      const ids = pendingMoveSessionIds;
       closeFolderModal();
       // A "New folder…" started from a session's move menu files that
       // session into the folder that was just created.
-      if (sessionToFile) {
+      if (ids.length === 1) {
         moveSessionMutation.mutate({
-          id: sessionToFile,
+          id: ids[0],
           folderId: folder.id,
+        });
+      } else if (ids.length > 1) {
+        batchMoveMutation.mutate({
+          ids,
+          folderId: folder.id,
+          folderName: folder.name,
         });
       }
     },
@@ -681,6 +688,39 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
       message.error(`Failed to delete sessions: ${err.message}`);
       setSelectMode(false);
       setSelectedIds(new Set());
+    },
+  });
+
+  const batchMoveMutation = useMutation({
+    mutationFn: ({
+      ids,
+      folderId,
+    }: {
+      ids: string[];
+      folderId: string | null;
+      folderName: string;
+    }) => moveSessions(ids, folderId),
+    onSuccess: (data, { folderName }) => {
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      if (data.moved > 0) {
+        message.success(
+          `Moved ${data.moved} chat${data.moved !== 1 ? "s" : ""} to "${folderName}"`,
+        );
+      }
+      if (data.skipped.length > 0) {
+        const reasons = Array.from(
+          new Set(data.skipped.map((s) => s.reason)),
+        );
+        message.warning(
+          `${data.skipped.length} chat${data.skipped.length !== 1 ? "s" : ""} skipped (${reasons.join("; ")})`,
+        );
+      }
+      setSelectMode(false);
+      setSelectedIds(new Set());
+    },
+    onError: (err: Error) => {
+      message.error(`Failed to move chats: ${err.message}`);
+      // Keep selection so the user can retry
     },
   });
 
@@ -749,7 +789,7 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
     setFolderModal(null);
     setFolderName("");
     setFolderColor(null);
-    setPendingMoveSessionId(null);
+    setPendingMoveSessionIds([]);
   }
 
   const toggleFolder = useCallback((groupId: string) => {
@@ -818,15 +858,37 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
     [sessions, handleMoveSession],
   );
 
-  const openCreateFolder = useCallback((sessionIdToFile?: string) => {
-    setPendingMoveSessionId(sessionIdToFile ?? null);
+  const handleMoveSelected = useCallback(
+    (target: { id: string | null; name: string }) => {
+      const ids = [...selectedIds];
+      if (ids.length === 0) return;
+      if (ids.length > 100) {
+        message.warning("Select at most 100 chats to move at once");
+        return;
+      }
+      batchMoveMutation.mutate({
+        ids,
+        folderId: target.id,
+        folderName: target.name,
+      });
+    },
+    [selectedIds, batchMoveMutation],
+  );
+
+  const openCreateFolder = useCallback((sessionIds: string[] = []) => {
+    setPendingMoveSessionIds(sessionIds);
     setFolderName("");
     setFolderColor(null);
     setFolderModal({ mode: "create", folder: null });
   }, []);
 
+  const handleNewFolderForSession = useCallback(
+    (id: string) => openCreateFolder([id]),
+    [openCreateFolder],
+  );
+
   const openEditFolder = useCallback((folder: FolderData) => {
-    setPendingMoveSessionId(null);
+    setPendingMoveSessionIds([]);
     setFolderName(folder.name);
     setFolderColor(folder.color);
     setFolderModal({ mode: "edit", folder });
@@ -946,7 +1008,7 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
           folders={folders || []}
           isDragging={draggingId === row.session.id}
           onMove={handleMoveSession}
-          onNewFolder={openCreateFolder}
+          onNewFolder={handleNewFolderForSession}
           onDragStart={handleSessionDragStart}
           onDragEnd={handleSessionDragEnd}
         />
@@ -972,7 +1034,7 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
       openEditFolder,
       confirmDeleteFolder,
       handleMoveSession,
-      openCreateFolder,
+      handleNewFolderForSession,
       handleSessionDragStart,
       handleSessionDragEnd,
       handleFolderDragOver,
@@ -1283,6 +1345,43 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
               : "Select All"}
           </Button>
           <div style={{ flex: 1 }} />
+          <Dropdown
+            disabled={selectedIds.size === 0 || batchMoveMutation.isPending}
+            menu={{
+              items: [
+                ...moveTargets(folders || []).map((target) => ({
+                  key: target.id ?? UNFILED_ID,
+                  label: target.name,
+                  onClick: () => handleMoveSelected(target),
+                })),
+                { type: "divider" as const },
+                {
+                  key: "new-folder",
+                  icon: <FolderAddOutlined />,
+                  label: "New folder…",
+                  onClick: () => {
+                    const ids = [...selectedIds];
+                    if (ids.length > 100) {
+                      message.warning("Select at most 100 chats to move at once");
+                      return;
+                    }
+                    openCreateFolder(ids);
+                  },
+                },
+              ],
+            }}
+            trigger={["click"]}
+          >
+            <Button
+              size="small"
+              icon={<FolderOutlined />}
+              disabled={selectedIds.size === 0}
+              loading={batchMoveMutation.isPending}
+              aria-label="Move selected sessions to folder"
+            >
+              Move
+            </Button>
+          </Dropdown>
           <Button
             type="primary"
             danger

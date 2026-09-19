@@ -114,6 +114,17 @@ class BatchDeleteSessionsRequest(BaseModel):
     ids: list[str]
 
 
+class BatchMoveSessionsRequest(BaseModel):
+    """Request body for moving sessions into a folder.
+
+    Accepts a list of session IDs and a target folder id (or ``None`` for
+    "Unfiled").  Max 100 sessions per call.
+    """
+
+    ids: list[str]
+    folder_id: str | None = None
+
+
 class TagResponse(BaseModel):
     id: str
     name: str
@@ -1087,6 +1098,41 @@ async def delete_sessions_batch(
     result = await session_service.delete_sessions_batch(
         db=db,
         session_ids=ids,
+        user_id=current_user.id,
+        tenant_id=current_user.tenant_id,
+    )
+
+    return result
+
+
+@router.post("/sessions/move")
+async def move_sessions_batch_endpoint(
+    body: BatchMoveSessionsRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(get_current_user),
+):
+    """Batch-move multiple sessions into a folder (or Unfiled).
+
+    Accepts up to 100 session IDs.  Returns a structured response with
+    counts of moved / skipped sessions.
+
+    Skips (rather than fails) sessions that don't exist, aren't owned,
+    are temporary, or are already in the target folder.
+    """
+    ids = body.ids
+
+    if not ids:
+        raise ValidationError("ids must be a non-empty list of session IDs")
+
+    if len(ids) > 100:
+        raise ValidationError("Cannot move more than 100 sessions at once")
+
+    folder_id = await _resolve_folder_id(db, body.folder_id, current_user)
+
+    result = await session_service.move_sessions_batch(
+        db=db,
+        session_ids=ids,
+        folder_id=folder_id,
         user_id=current_user.id,
         tenant_id=current_user.tenant_id,
     )

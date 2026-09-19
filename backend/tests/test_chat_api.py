@@ -701,6 +701,248 @@ class TestBatchDeleteSessions:
         assert data["skipped"][0]["id"] == test_session.id
 
 
+class TestBatchMoveSessions:
+    """Tests for POST /chat/sessions/move."""
+
+    async def test_batch_move_multiple_sessions(
+        self,
+        async_client,
+        auth_headers,
+        test_user,
+        test_tenant,
+        test_model,
+        db_session,
+    ):
+        """Verify moving multiple sessions into a folder at once."""
+        from src.db.orm.folders import Folder
+        from src.db.orm.sessions import Session
+
+        # Create a folder
+        folder = Folder(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            name="Test Folder",
+        )
+        db_session.add(folder)
+        await db_session.flush()
+
+        # Create 3 sessions owned by test_user
+        sessions = []
+        for i in range(3):
+            s = Session(
+                id=str(uuid.uuid4()),
+                tenant_id=test_tenant.id,
+                user_id=test_user.id,
+                title=f"Session {i}",
+                selected_model_id=test_model.id,
+            )
+            db_session.add(s)
+            sessions.append(s)
+        await db_session.flush()
+        session_ids = [s.id for s in sessions]
+
+        headers = auth_headers(test_user)
+        resp = await async_client.post(
+            "/api/chat/sessions/move",
+            json={"ids": session_ids, "folder_id": folder.id},
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["moved"] == 3
+        assert data["skipped"] == []
+
+        # Verify sessions are now in the folder
+        for sid in session_ids:
+            get_resp = await async_client.get(
+                f"/api/chat/session/{sid}", headers=headers
+            )
+            assert get_resp.status_code == 200
+            assert get_resp.json()["folder_id"] == folder.id
+
+    async def test_batch_move_partial_skip_unauthorized(
+        self,
+        async_client,
+        auth_headers,
+        test_user,
+        second_user,
+        test_tenant,
+        test_session,
+        test_model,
+        db_session,
+    ):
+        """Verify batch move skips sessions not owned by the current user."""
+        from src.db.orm.folders import Folder
+        from src.db.orm.sessions import Session
+
+        # Create a folder
+        folder = Folder(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            name="Test Folder",
+        )
+        db_session.add(folder)
+        await db_session.flush()
+
+        # second_user's session (should be skipped)
+        other_session = Session(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=second_user.id,
+            title="Other User Session",
+            selected_model_id=test_model.id,
+        )
+        db_session.add(other_session)
+        await db_session.flush()
+
+        # Mix of owned + not-owned + non-existent
+        ids = [test_session.id, other_session.id, str(uuid.uuid4())]
+
+        headers = auth_headers(test_user)
+        resp = await async_client.post(
+            "/api/chat/sessions/move",
+            json={"ids": ids, "folder_id": folder.id},
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["moved"] == 1  # Only test_session
+        assert len(data["skipped"]) == 2  # other_session + non-existent
+
+        # Verify own session is in the folder
+        get_resp = await async_client.get(
+            f"/api/chat/session/{test_session.id}", headers=headers
+        )
+        assert get_resp.status_code == 200
+        assert get_resp.json()["folder_id"] == folder.id
+
+        # Verify the other user's session was left untouched.  It cannot be
+        # fetched over HTTP as test_user (403), so inspect the row directly.
+        await db_session.refresh(other_session)
+        assert other_session.folder_id is None
+
+    async def test_batch_move_to_unfiled(
+        self,
+        async_client,
+        auth_headers,
+        test_user,
+        test_tenant,
+        test_model,
+        db_session,
+    ):
+        """Verify moving sessions back to Unfiled (folder_id=null)."""
+        from src.db.orm.folders import Folder
+        from src.db.orm.sessions import Session
+
+        # Create a folder and move a session into it
+        folder = Folder(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            name="Test Folder",
+        )
+        db_session.add(folder)
+        await db_session.flush()
+
+        s = Session(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            title="Session in folder",
+            selected_model_id=test_model.id,
+            folder_id=folder.id,
+        )
+        db_session.add(s)
+        await db_session.flush()
+
+        headers = auth_headers(test_user)
+        resp = await async_client.post(
+            "/api/chat/sessions/move",
+            json={"ids": [s.id], "folder_id": None},
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["moved"] == 1
+
+        get_resp = await async_client.get(
+            f"/api/chat/session/{s.id}", headers=headers
+        )
+        assert get_resp.status_code == 200
+        assert get_resp.json()["folder_id"] is None
+
+    async def test_batch_move_empty_ids_rejected(
+        self, async_client, auth_headers, test_user
+    ):
+        """Verify empty ids list returns validation error."""
+        headers = auth_headers(test_user)
+        resp = await async_client.post(
+            "/api/chat/sessions/move",
+            json={"ids": [], "folder_id": None},
+            headers=headers,
+        )
+        assert resp.status_code == 422
+
+    async def test_batch_move_too_many_ids_rejected(
+        self, async_client, auth_headers, test_user
+    ):
+        """Verify more than 100 ids returns validation error."""
+        headers = auth_headers(test_user)
+        ids = [str(uuid.uuid4()) for _ in range(101)]
+        resp = await async_client.post(
+            "/api/chat/sessions/move",
+            json={"ids": ids, "folder_id": None},
+            headers=headers,
+        )
+        assert resp.status_code == 422
+
+    async def test_batch_move_foreign_folder_rejected(
+        self,
+        async_client,
+        auth_headers,
+        test_user,
+        second_user,
+        test_tenant,
+        test_model,
+        db_session,
+    ):
+        """Verify moving into a foreign folder returns 422."""
+        from src.db.orm.folders import Folder
+        from src.db.orm.sessions import Session
+
+        # Create a folder for second_user
+        folder = Folder(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=second_user.id,
+            name="Other User Folder",
+        )
+        db_session.add(folder)
+        await db_session.flush()
+
+        headers = auth_headers(test_user)
+        resp = await async_client.post(
+            "/api/chat/sessions/move",
+            json={"ids": [str(uuid.uuid4())], "folder_id": folder.id},
+            headers=headers,
+        )
+        assert resp.status_code == 422
+
+    async def test_batch_move_unknown_folder_rejected(
+        self, async_client, auth_headers, test_user
+    ):
+        """Verify moving into a non-existent folder returns 422."""
+        headers = auth_headers(test_user)
+        resp = await async_client.post(
+            "/api/chat/sessions/move",
+            json={"ids": [str(uuid.uuid4())], "folder_id": str(uuid.uuid4())},
+            headers=headers,
+        )
+        assert resp.status_code == 422
+
+
 # =============================================================================
 # Message Tests  (with mocked agent runner)
 # =============================================================================

@@ -91,6 +91,7 @@ Use the search bar at the top of the session sidebar. Search matches both sessio
 Create a folder from the **New Chat** dropdown (**New Folder**), then group your chats:
 
 - **Move a chat**: drag a session onto a folder in the sidebar, or use the **Move to folder** icon on the session row. Choose **Unfiled** to remove it from its folder.
+- **Move several chats at once**: click the select (☑) icon in the sidebar header, tick the chats, then choose **Move** in the action bar and pick a folder (or **Unfiled**).
 - **Collapse a folder**: click the folder name to collapse or expand it. The state is remembered on your next visit.
 - **Rename or recolour**: open the folder's **⋯** menu and choose **Rename** or **Change colour**.
 - **Start a chat in a folder**: click **+** on the folder header. The new chat is filed there as soon as you send your first message.

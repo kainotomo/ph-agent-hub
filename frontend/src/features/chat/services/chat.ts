@@ -209,12 +209,37 @@ export interface SessionContextData {
   tokens_used: number;
   context_length: number | null;
   percentage: number | null;
+  system_prompt_tokens: number | null;
+  tool_definition_tokens: number | null;
+  messages_tokens: number | null;
 }
 
 export function getSessionContext(
   sessionId: string,
 ): Promise<SessionContextData> {
   return api<SessionContextData>(`/chat/session/${sessionId}/context`);
+}
+
+export interface SessionUsageData {
+  turns: number;
+  steps: number;
+  tokens_in: number;
+  tokens_out: number;
+  tokens_total: number;
+  cached_input_tokens: number;
+  uncached_input_tokens: number;
+  cache_hit_percent: number | null;
+  llm_time_ms: number;
+  tool_time_ms: number;
+  avg_ttft_ms: number | null;
+  tps: number | null;
+  has_timing_data: boolean;
+}
+
+export function getSessionUsage(
+  sessionId: string,
+): Promise<SessionUsageData> {
+  return api<SessionUsageData>(`/chat/session/${sessionId}/usage`);
 }
 
 // ---------------------------------------------------------------------------

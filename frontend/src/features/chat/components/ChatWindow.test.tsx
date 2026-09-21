@@ -49,6 +49,9 @@ vi.mock("./", () => ({
   SessionToolActivation: () => <div data-testid="tools-activation" />,
   MemoryManager: () => <div data-testid="memory-manager" />,
   ContextIndicator: () => <div data-testid="context-indicator" />,
+  SessionStatsButton: () => <div data-testid="session-stats-button" />,
+  TokenUsageButton: () => <div data-testid="token-usage-button" />,
+  SessionUsageToolbar: () => <div data-testid="session-usage-toolbar" />,
 }));
 
 const AUTO_ROUTE_VALUE = "__auto__";

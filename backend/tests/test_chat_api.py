@@ -3491,6 +3491,310 @@ class TestSessionContext:
         )
         assert resp.status_code == 404
 
+    async def test_get_context_new_fields_populated(
+        self, async_client, auth_headers, test_user, test_session, test_model, db_session
+    ):
+        """Verify /context returns system_prompt_tokens, tool_definition_tokens,
+        messages_tokens from the most recent assistant's metrics part."""
+        from src.db.orm.messages import Message
+        from datetime import datetime, timezone, timedelta
+
+        base_time = datetime.now(timezone.utc)
+        asst_msg = Message(
+            id=str(uuid.uuid4()),
+            session_id=test_session.id,
+            sender="assistant",
+            content=[
+                {"type": "text", "text": "resp"},
+                {
+                    "type": "metrics",
+                    "llm_ms": 180000,
+                    "tool_ms": 60000,
+                    "ttft_ms": 1200,
+                    "steps": 39,
+                    "cache_hit_tokens": 1718912,
+                    "system_prompt_tokens": 3000,
+                    "tool_definition_tokens": 8000,
+                    "messages_tokens": 1750749,
+                },
+            ],
+            model_id=test_model.id,
+            tokens_in=1761749,
+            tokens_out=36808,
+            is_deleted=False,
+            created_at=base_time + timedelta(seconds=1),
+            updated_at=base_time + timedelta(seconds=1),
+        )
+        db_session.add(asst_msg)
+        await db_session.flush()
+
+        headers = auth_headers(test_user)
+        resp = await async_client.get(
+            f"/api/chat/session/{test_session.id}/context", headers=headers
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["system_prompt_tokens"] == 3000
+        assert data["tool_definition_tokens"] == 8000
+        assert data["messages_tokens"] == 1750749
+        # tokens_used is unchanged: based on most recent assistant's tokens_in
+        assert data["tokens_used"] == 1761749
+
+    async def test_get_context_legacy_no_metrics(
+        self, async_client, auth_headers, test_user, test_session, test_model, db_session
+    ):
+        """Verify /context returns None for breakdown fields when no metrics part."""
+        from src.db.orm.messages import Message
+        from datetime import datetime, timezone, timedelta
+
+        base_time = datetime.now(timezone.utc)
+        asst_msg = Message(
+            id=str(uuid.uuid4()),
+            session_id=test_session.id,
+            sender="assistant",
+            content=[{"type": "text", "text": "legacy"}],
+            model_id=test_model.id,
+            tokens_in=1500,
+            tokens_out=50,
+            is_deleted=False,
+            created_at=base_time + timedelta(seconds=1),
+            updated_at=base_time + timedelta(seconds=1),
+        )
+        db_session.add(asst_msg)
+        await db_session.flush()
+
+        headers = auth_headers(test_user)
+        resp = await async_client.get(
+            f"/api/chat/session/{test_session.id}/context", headers=headers
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["system_prompt_tokens"] is None
+        assert data["tool_definition_tokens"] is None
+        assert data["messages_tokens"] is None
+        assert data["tokens_used"] == 1500
+
+
+class TestSessionUsage:
+    """Tests for GET /chat/session/{session_id}/usage."""
+
+    async def test_usage_empty_session(
+        self, async_client, auth_headers, test_user, test_session
+    ):
+        """Verify usage for an empty session returns all-zero metrics."""
+        headers = auth_headers(test_user)
+        resp = await async_client.get(
+            f"/api/chat/session/{test_session.id}/usage", headers=headers
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["turns"] == 0
+        assert data["steps"] == 0
+        assert data["tokens_in"] == 0
+        assert data["tokens_out"] == 0
+        assert data["tokens_total"] == 0
+        assert data["cached_input_tokens"] == 0
+        assert data["uncached_input_tokens"] == 0
+        assert data["cache_hit_percent"] is None
+        assert data["llm_time_ms"] == 0
+        assert data["tool_time_ms"] == 0
+        assert data["avg_ttft_ms"] is None
+        assert data["tps"] is None
+        assert data["has_timing_data"] is False
+
+    async def test_usage_populated_session(
+        self, async_client, auth_headers, test_user, test_session, test_model, db_session
+    ):
+        """Verify usage aggregates tokens and timing across all messages."""
+        from src.db.orm.messages import Message
+        from datetime import datetime, timezone, timedelta
+
+        base_time = datetime.now(timezone.utc)
+        # User message
+        user_msg = Message(
+            id=str(uuid.uuid4()),
+            session_id=test_session.id,
+            sender="user",
+            content=[{"type": "text", "text": "Hello"}],
+            is_deleted=False,
+            created_at=base_time,
+            updated_at=base_time,
+        )
+        db_session.add(user_msg)
+        # Assistant message with metrics
+        asst_msg = Message(
+            id=str(uuid.uuid4()),
+            session_id=test_session.id,
+            sender="assistant",
+            content=[
+                {"type": "text", "text": "resp"},
+                {
+                    "type": "metrics",
+                    "llm_ms": 180000,
+                    "tool_ms": 60000,
+                    "ttft_ms": 1200,
+                    "steps": 39,
+                    "cache_hit_tokens": 1718912,
+                    "system_prompt_tokens": 3000,
+                    "tool_definition_tokens": 8000,
+                    "messages_tokens": 1750749,
+                },
+            ],
+            model_id=test_model.id,
+            tokens_in=1761749,
+            tokens_out=36808,
+            is_deleted=False,
+            created_at=base_time + timedelta(seconds=1),
+            updated_at=base_time + timedelta(seconds=1),
+        )
+        db_session.add(asst_msg)
+        await db_session.flush()
+
+        headers = auth_headers(test_user)
+        resp = await async_client.get(
+            f"/api/chat/session/{test_session.id}/usage", headers=headers
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["turns"] == 1
+        assert data["steps"] == 39
+        assert data["tokens_in"] == 1761749
+        assert data["tokens_out"] == 36808
+        assert data["tokens_total"] == 1798557
+        assert data["cached_input_tokens"] == 1718912
+        assert data["uncached_input_tokens"] == 42837
+        assert data["cache_hit_percent"] == 97.6
+        assert data["llm_time_ms"] == 180000
+        assert data["tool_time_ms"] == 60000
+        assert data["avg_ttft_ms"] == 1200
+        assert data["tps"] == 204.5
+        assert data["has_timing_data"] is True
+
+    async def test_usage_token_summing_regression(
+        self, async_client, auth_headers, test_user, test_session, test_model, db_session
+    ):
+        """Regression guard: token totals are SUMMED across multiple assistant messages,
+        not taken from the first message only."""
+        from src.db.orm.messages import Message
+        from datetime import datetime, timezone, timedelta
+
+        base_time = datetime.now(timezone.utc)
+        # User message
+        user_msg = Message(
+            id=str(uuid.uuid4()),
+            session_id=test_session.id,
+            sender="user",
+            content=[{"type": "text", "text": "Hello"}],
+            is_deleted=False,
+            created_at=base_time,
+            updated_at=base_time,
+        )
+        db_session.add(user_msg)
+        # First assistant message
+        asst1 = Message(
+            id=str(uuid.uuid4()),
+            session_id=test_session.id,
+            sender="assistant",
+            content=[{"type": "text", "text": "first"}],
+            model_id=test_model.id,
+            tokens_in=1000,
+            tokens_out=50,
+            is_deleted=False,
+            created_at=base_time + timedelta(seconds=1),
+            updated_at=base_time + timedelta(seconds=1),
+        )
+        db_session.add(asst1)
+        # Second assistant message
+        asst2 = Message(
+            id=str(uuid.uuid4()),
+            session_id=test_session.id,
+            sender="assistant",
+            content=[{"type": "text", "text": "second"}],
+            model_id=test_model.id,
+            tokens_in=2000,
+            tokens_out=100,
+            is_deleted=False,
+            created_at=base_time + timedelta(seconds=2),
+            updated_at=base_time + timedelta(seconds=2),
+        )
+        db_session.add(asst2)
+        await db_session.flush()
+
+        headers = auth_headers(test_user)
+        resp = await async_client.get(
+            f"/api/chat/session/{test_session.id}/usage", headers=headers
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        # Both assistant messages' tokens_in are summed: 1000 + 2000 = 3000
+        assert data["tokens_in"] == 3000
+        assert data["tokens_out"] == 150
+        assert data["tokens_total"] == 3150
+
+    async def test_usage_other_user_forbidden(
+        self, async_client, auth_headers, test_user, second_user, test_session
+    ):
+        """Verify user B cannot access user A's session usage."""
+        headers = auth_headers(second_user)
+        resp = await async_client.get(
+            f"/api/chat/session/{test_session.id}/usage", headers=headers
+        )
+        assert resp.status_code == 403
+
+    async def test_usage_legacy_message_no_metrics(
+        self, async_client, auth_headers, test_user, test_session, test_model, db_session
+    ):
+        """Verify legacy messages without a metrics part produce correct
+        aggregate values and None for derived fields."""
+        from src.db.orm.messages import Message
+        from datetime import datetime, timezone, timedelta
+
+        base_time = datetime.now(timezone.utc)
+        # User message
+        user_msg = Message(
+            id=str(uuid.uuid4()),
+            session_id=test_session.id,
+            sender="user",
+            content=[{"type": "text", "text": "Hello"}],
+            is_deleted=False,
+            created_at=base_time,
+            updated_at=base_time,
+        )
+        db_session.add(user_msg)
+        # Legacy assistant message (no metrics part)
+        asst_msg = Message(
+            id=str(uuid.uuid4()),
+            session_id=test_session.id,
+            sender="assistant",
+            content=[{"type": "text", "text": "legacy"}],
+            model_id=test_model.id,
+            tokens_in=1500,
+            tokens_out=50,
+            is_deleted=False,
+            created_at=base_time + timedelta(seconds=1),
+            updated_at=base_time + timedelta(seconds=1),
+        )
+        db_session.add(asst_msg)
+        await db_session.flush()
+
+        headers = auth_headers(test_user)
+        resp = await async_client.get(
+            f"/api/chat/session/{test_session.id}/usage", headers=headers
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["tokens_in"] == 1500
+        assert data["tokens_out"] == 50
+        assert data["tokens_total"] == 1550
+        assert data["cached_input_tokens"] == 0
+        assert data["uncached_input_tokens"] == 1500
+        assert data["cache_hit_percent"] is None
+        assert data["llm_time_ms"] == 0
+        assert data["tool_time_ms"] == 0
+        assert data["avg_ttft_ms"] is None
+        assert data["tps"] is None
+        assert data["has_timing_data"] is False
+
 
 class TestFollowUpQuestions:
     """Tests for GET /chat/session/{session_id}/follow-up-questions."""

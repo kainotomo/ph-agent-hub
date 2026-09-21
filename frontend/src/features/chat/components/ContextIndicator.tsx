@@ -17,13 +17,14 @@
 // =============================================================================
 
 import React, { useState, useCallback } from "react";
-import { Button, Popover, Progress, Typography, message } from "antd";
+import { Button, Divider, Popover, Progress, Typography, message } from "antd";
 import { WarningOutlined, CompressOutlined, ExclamationCircleOutlined } from "@ant-design/icons";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   getSessionContext,
   summarizeSession,
 } from "../services/chat";
+import { formatTokensApprox, formatTokensCompact } from "../utils/formatMetrics";
 
 const { Text } = Typography;
 
@@ -164,17 +165,40 @@ export const ContextIndicator = React.memo(function ContextIndicator({ sessionId
   // Popover content
   const popoverContent = (
     <div style={{ minWidth: 200 }}>
-      <Text strong style={{ fontSize: 13, display: "block", marginBottom: 8 }}>
-        Context Window
+      <Text style={{ fontSize: 13, fontWeight: 600, display: "block", marginBottom: 2 }}>
+        {Math.round(percentage ?? 0)}%
       </Text>
-      <Text style={{ fontSize: 12, display: "block", marginBottom: 12 }}>
-        {formatTokenCount(tokensUsed)} / {formatTokenCount(contextLength!)} tokens
-        {" "}
-        <Text type="secondary" style={{ fontSize: 11 }}>
-          ({(percentage ?? 0).toFixed(1)}%)
-        </Text>
+      <Text style={{ fontSize: 11, color: "#8c8c8c", display: "block", marginBottom: 8 }}>
+        of context used
       </Text>
-      <Text type="secondary" style={{ fontSize: 11, display: "block", marginBottom: 12 }}>
+      <Text style={{ fontSize: 12, display: "block", marginBottom: 8 }}>
+        {formatTokensApprox(tokensUsed)} / {formatTokensCompact(contextLength!)}
+      </Text>
+      <Divider style={{ margin: "8px 0" }} />
+      {(data?.system_prompt_tokens ?? data?.tool_definition_tokens ?? data?.messages_tokens) != null && (
+        <div data-testid="context-breakdown">
+          {data?.system_prompt_tokens != null && (
+            <div data-testid="context-breakdown-system" style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 4 }}>
+              <Text type="secondary">System prompt</Text>
+              <Text>{formatTokensApprox(data.system_prompt_tokens)}</Text>
+            </div>
+          )}
+          {data?.tool_definition_tokens != null && (
+            <div data-testid="context-breakdown-tools" style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 4 }}>
+              <Text type="secondary">Tool definitions</Text>
+              <Text>{formatTokensApprox(data.tool_definition_tokens)}</Text>
+            </div>
+          )}
+          {data?.messages_tokens != null && (
+            <div data-testid="context-breakdown-messages" style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 4 }}>
+              <Text type="secondary">Messages</Text>
+              <Text>{formatTokensApprox(data.messages_tokens)}</Text>
+            </div>
+          )}
+        </div>
+      )}
+      <Divider style={{ margin: "8px 0" }} />
+      <Text type="secondary" style={{ fontSize: 11, display: "block", marginBottom: 8 }}>
         Auto-compact at 75% usage
       </Text>
       <Button

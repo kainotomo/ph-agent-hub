@@ -7,7 +7,7 @@
 // =============================================================================
 
 import React, { useState, useEffect } from "react";
-import { Typography, Space, Collapse, Tag, Button, Popconfirm, App, Spin, Tooltip, Input } from "antd";
+import { Typography, Space, Collapse, Tag, Button, Popconfirm, App, Spin, Input } from "antd";
 import {
   UserOutlined,
   RobotOutlined,
@@ -19,7 +19,6 @@ import {
   FileOutlined,
   CopyOutlined,
   CompressOutlined,
-  DollarOutlined,
   CheckOutlined,
   CloseOutlined,
 } from "@ant-design/icons";
@@ -596,33 +595,6 @@ function MessageBubbleInner({
             }}
             disabled={disabled}
           />
-          {(message.tokens_in != null || message.tokens_out != null) && (
-            <Tooltip
-              title={
-                <span>
-                  Input: ~{message.tokens_in ?? "?"} tokens<br />
-                  Output: ~{message.tokens_out ?? "?"} tokens
-                  {(message.tokens_in != null && message.tokens_out != null) && (
-                    <>
-                      <br />Total: ~{(message.tokens_in ?? 0) + (message.tokens_out ?? 0)} tokens
-                    </>
-                  )}
-                </span>
-              }
-            >
-              <Button
-                type="text"
-                size="small"
-                icon={<DollarOutlined />}
-                style={{ color: "#8c8c8c" }}
-                disabled={disabled}
-              >
-                <Text style={{ fontSize: 11, color: "#8c8c8c" }}>
-                  {message.tokens_out ?? message.tokens_in ?? 0}
-                </Text>
-              </Button>
-            </Tooltip>
-          )}
           {onEditAssistant && (
             <Button
               type="text"
@@ -733,8 +705,6 @@ function MessageBubbleInner({
 export const MessageBubble = React.memo(MessageBubbleInner, (prev, next) =>
   prev.message.id === next.message.id &&
   prev.message.content === next.message.content &&
-  prev.message.tokens_in === next.message.tokens_in &&
-  prev.message.tokens_out === next.message.tokens_out &&
   prev.message.model_name === next.message.model_name &&
   prev.streaming === next.streaming &&
   prev.streamingDuration === next.streamingDuration &&

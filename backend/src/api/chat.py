@@ -2999,6 +2999,10 @@ class SessionContextResponse(BaseModel):
     context_length: int | None = None
     percentage: float | None = None
     """Computed percentage (0.0–100.0), or None if context_length is unknown."""
+    # NEW: breakdown from the most recent assistant message's metrics part
+    system_prompt_tokens: int | None = None
+    tool_definition_tokens: int | None = None
+    messages_tokens: int | None = None
 
 
 @router.get(
@@ -3082,10 +3086,168 @@ async def get_session_context(
     if context_length is not None and context_length > 0:
         percentage = round(tokens_used / context_length * 100, 1)
 
+    # Extract breakdown fields from the most recent assistant message's metrics part
+    system_prompt_tokens: int | None = None
+    tool_definition_tokens: int | None = None
+    messages_tokens: int | None = None
+    for msg in reversed(all_messages):
+        sender = _msg_get(msg, "sender", "")
+        if sender != "assistant":
+            continue
+        content = _msg_get(msg, "content")
+        if not isinstance(content, list):
+            break
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "metrics":
+                system_prompt_tokens = part.get("system_prompt_tokens")
+                tool_definition_tokens = part.get("tool_definition_tokens")
+                messages_tokens = part.get("messages_tokens")
+                break
+        break
+
     return SessionContextResponse(
         tokens_used=tokens_used,
         context_length=context_length,
         percentage=percentage,
+        system_prompt_tokens=system_prompt_tokens,
+        tool_definition_tokens=tool_definition_tokens,
+        messages_tokens=messages_tokens,
+    )
+
+
+# =============================================================================
+# Session Usage — Issue #531
+# =============================================================================
+
+
+class SessionUsageResponse(BaseModel):
+    """Aggregate usage metrics for a session.
+
+    Counts turns, sums token and timing metrics across all non-deleted
+    messages, and derives derived fields (cache_hit_percent, tps, avg_ttft_ms).
+    """
+    turns: int = 0
+    steps: int = 0
+    tokens_in: int = 0
+    tokens_out: int = 0
+    tokens_total: int = 0
+    cached_input_tokens: int = 0
+    uncached_input_tokens: int = 0
+    cache_hit_percent: float | None = None
+    llm_time_ms: int = 0
+    tool_time_ms: int = 0
+    avg_ttft_ms: int | None = None
+    tps: float | None = None
+    has_timing_data: bool = False
+
+
+@router.get(
+    "/session/{session_id}/usage",
+    response_model=SessionUsageResponse,
+)
+async def get_session_usage(
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(get_current_user),
+):
+    """Aggregate usage metrics for a session.
+
+    Returns turn count, token totals, timing metrics, and cache statistics
+    across all non-deleted messages in the session.
+    """
+    data = await _load_session(db, session_id)
+    await _require_session_owner(data, current_user)
+
+    is_temporary = data.get("is_temporary", False)
+
+    from ..agents.runner import _get_messages_for_session
+
+    all_messages = await _get_messages_for_session(db, session_id, is_temporary)
+
+    turns = 0
+    steps = 0
+    tokens_in = 0
+    tokens_out = 0
+    cached_input_tokens = 0
+    llm_time_ms = 0
+    tool_time_ms = 0
+    ttft_values: list[int] = []
+    has_timing_data = False
+    metrics_seen = False
+
+    for msg in all_messages:
+        sender = _msg_get(msg, "sender", "")
+        if sender == "user":
+            turns += 1
+
+        # Token totals come from the ORM-level columns (None -> 0), summed
+        # across every message independent of the metrics part.
+        orm_ti = _msg_get(msg, "tokens_in", None)
+        if orm_ti is not None:
+            tokens_in += orm_ti
+        orm_to = _msg_get(msg, "tokens_out", None)
+        if orm_to is not None:
+            tokens_out += orm_to
+
+        # Summarized messages are INCLUDED in usage aggregation
+        content = _msg_get(msg, "content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "metrics":
+                continue
+            metrics_seen = True
+            s = part.get("steps")
+            if s is not None:
+                steps += s
+            ch = part.get("cache_hit_tokens")
+            if ch is not None:
+                cached_input_tokens += ch
+            llm = part.get("llm_ms")
+            if llm is not None:
+                llm_time_ms += llm
+                has_timing_data = True
+            tl = part.get("tool_ms")
+            if tl is not None:
+                tool_time_ms += tl
+                has_timing_data = True
+            ttft = part.get("ttft_ms")
+            if ttft is not None:
+                ttft_values.append(ttft)
+                has_timing_data = True
+
+    tokens_total = tokens_in + tokens_out
+    uncached_input_tokens = max(0, tokens_in - cached_input_tokens)
+
+    # cache_hit_percent: round(cached/tokens_in*100, 1) if metrics seen AND tokens_in>0
+    cache_hit_percent: float | None = None
+    if metrics_seen and tokens_in > 0:
+        cache_hit_percent = round(cached_input_tokens / tokens_in * 100, 1)
+
+    # avg_ttft_ms: mean of ttft_ms values, None if none
+    avg_ttft_ms: int | None = None
+    if ttft_values:
+        avg_ttft_ms = round(sum(ttft_values) / len(ttft_values))
+
+    # tps: round(tokens_out / (llm_time_ms/1000), 1) if llm_time_ms>0
+    tps: float | None = None
+    if llm_time_ms > 0:
+        tps = round(tokens_out / (llm_time_ms / 1000), 1)
+
+    return SessionUsageResponse(
+        turns=turns,
+        steps=steps,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        tokens_total=tokens_total,
+        cached_input_tokens=cached_input_tokens,
+        uncached_input_tokens=uncached_input_tokens,
+        cache_hit_percent=cache_hit_percent,
+        llm_time_ms=llm_time_ms,
+        tool_time_ms=tool_time_ms,
+        avg_ttft_ms=avg_ttft_ms,
+        tps=tps,
+        has_timing_data=has_timing_data,
     )
 
 

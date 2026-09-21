@@ -43,6 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **MCP behaviour changes** in the framework: server-initiated *sampling* requests are now denied by
   default, and framework-created MCP HTTP clients no longer persist response cookies. MCP servers
   configured in PH Agent Hub are unaffected (their HTTP client is caller-supplied).
+- **Session Usage Toolbar** — a session-level usage toolbar now renders below the message input with (a) session statistics — turns, steps, tok/s, with a popover showing LLM time, tool time, average TTFT, and TPS; (b) token usage — total, cache hit %, uncached input, cached input, and output; (c) the context ring moved from the chat top bar into that toolbar and its popover now shows a context breakdown (system prompt, tool definitions, messages); and (d) the per-response token chip was removed from assistant messages because it presented a truncated per-message count as a precise measure. ([#531])
 
 ### Fixed
 - Admin session deletion now works correctly. ([#460])
@@ -198,3 +199,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#524]: https://github.com/kainotomo/ph-agent-hub/issues/524
 [#526]: https://github.com/kainotomo/ph-agent-hub/issues/526
 [#530]: https://github.com/kainotomo/ph-agent-hub/issues/530
+[#531]: https://github.com/kainotomo/ph-agent-hub/issues/531

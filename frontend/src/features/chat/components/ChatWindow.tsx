@@ -8,7 +8,7 @@
 
 import React, { useRef, useState, useCallback, useMemo, useEffect } from "react";
 import { Virtuoso, VirtuosoHandle } from "react-virtuoso";
-import { Badge, Button, Drawer, Grid, Input, Select, Slider, Space, Spin, Empty, Alert, Switch, Tag, Tooltip, Typography, Upload, message, notification } from "antd";
+import { Badge, Button, Drawer, Grid, Input, Select, Slider, Space, Spin, Empty, Alert, Switch, Tag, Typography, Upload, message, notification } from "antd";
 import {
   SendOutlined,
   SettingOutlined,
@@ -48,7 +48,7 @@ import {
   TemporaryChatBadge,
   SessionToolActivation,
   MemoryManager,
-  ContextIndicator,
+  SessionUsageToolbar,
 } from "./";
 import { AUTO_ROUTE_VALUE } from "./ModelSelector";
 
@@ -1055,6 +1055,7 @@ export const ChatWindow = React.memo(function ChatWindow({
           // Removed: session query not needed for lazy sessions
           queryClient.invalidateQueries({ queryKey: ["sessions"] });
           queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
+          queryClient.invalidateQueries({ queryKey: ["sessionUsage", sessionId] });
         },
         onAutopilotMaxTurns: (_data: { max_turns: number }) => {
           setAutopilotState((prev) => ({
@@ -1065,6 +1066,7 @@ export const ChatWindow = React.memo(function ChatWindow({
           // Removed: session query not needed for lazy sessions
           queryClient.invalidateQueries({ queryKey: ["sessions"] });
           queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
+          queryClient.invalidateQueries({ queryKey: ["sessionUsage", sessionId] });
         },
         onAutopilotPause: (data: { reason: string; turn: number }) => {
           autopilotPausedRef.current = true;
@@ -1138,6 +1140,7 @@ export const ChatWindow = React.memo(function ChatWindow({
             // Removed: session query not needed for lazy sessions
             queryClient.invalidateQueries({ queryKey: ["sessions"] });
             queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
+            queryClient.invalidateQueries({ queryKey: ["sessionUsage", sessionId] });
             // Mark the turn ended so the scroll-to-bottom badge appears
             // if the user is not at the bottom.
             markTurnEnded();
@@ -1170,6 +1173,7 @@ export const ChatWindow = React.memo(function ChatWindow({
             // Removed: session query not needed for lazy sessions
             queryClient.invalidateQueries({ queryKey: ["sessions"] });
             queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
+            queryClient.invalidateQueries({ queryKey: ["sessionUsage", sessionId] });
             markTurnEnded();
           }
         },
@@ -1238,6 +1242,7 @@ export const ChatWindow = React.memo(function ChatWindow({
             // Removed: session query not needed for lazy sessions
             queryClient.invalidateQueries({ queryKey: ["sessions"] });
             queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
+            queryClient.invalidateQueries({ queryKey: ["sessionUsage", sessionId] });
           } else {
             refetchLatestPage();
           }
@@ -1311,6 +1316,7 @@ export const ChatWindow = React.memo(function ChatWindow({
           // Removed: session query not needed for lazy sessions
           queryClient.invalidateQueries({ queryKey: ["sessions"] });
           queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
+          queryClient.invalidateQueries({ queryKey: ["sessionUsage", sessionId] });
         },
       });
       return;
@@ -1604,6 +1610,7 @@ export const ChatWindow = React.memo(function ChatWindow({
         refetchLatestPage();
         queryClient.invalidateQueries({ queryKey: ["sessions"] });
         queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
+        queryClient.invalidateQueries({ queryKey: ["sessionUsage", sessionId] });
       },
       onAutopilotMaxTurns: (_data: { max_turns: number }) => {
         setAutopilotState((prev) => ({
@@ -1613,6 +1620,7 @@ export const ChatWindow = React.memo(function ChatWindow({
         queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
         queryClient.invalidateQueries({ queryKey: ["sessions"] });
         queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
+        queryClient.invalidateQueries({ queryKey: ["sessionUsage", sessionId] });
       },
       onAutopilotPause: (data: { reason: string; turn: number }) => {
         autopilotPausedRef.current = true;
@@ -1652,6 +1660,7 @@ export const ChatWindow = React.memo(function ChatWindow({
         refetchLatestPage();
         queryClient.invalidateQueries({ queryKey: ["sessions"] });
         queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
+        queryClient.invalidateQueries({ queryKey: ["sessionUsage", sessionId] });
       },
       onError: (err: string) => {
         if (regeneratingMsgId === messageId) setRegeneratingMsgId(null);
@@ -1672,6 +1681,7 @@ export const ChatWindow = React.memo(function ChatWindow({
         refetchLatestPage();
         queryClient.invalidateQueries({ queryKey: ["sessions"] });
         queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
+        queryClient.invalidateQueries({ queryKey: ["sessionUsage", sessionId] });
       },
     };
     startRegenerateStream(sessionId, messageId, regenerateHandlers);
@@ -1886,7 +1896,6 @@ export const ChatWindow = React.memo(function ChatWindow({
               loading={finalizing}
             />
           )}
-          {!pendingFlag && <ContextIndicator sessionId={sessionId} />}
           <Button
             size="small"
             icon={<SettingOutlined />}
@@ -1913,7 +1922,6 @@ export const ChatWindow = React.memo(function ChatWindow({
               loading={finalizing}
             />
           )}
-          {!pendingFlag && <ContextIndicator sessionId={sessionId} />}
           <ModelSelector
             value={pendingFlag
               ? (pendAutoRoute && !pendModelId ? AUTO_ROUTE_VALUE : pendModelId)
@@ -1960,6 +1968,11 @@ export const ChatWindow = React.memo(function ChatWindow({
             }}
           />
           <div style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 120 }}>
+            {/* antd 5.29 Slider no longer accepts `title`; keep the native hint on a wrapper. */}
+            <span
+              style={{ display: "inline-flex", width: 80 }}
+              title={temperatureDisabled ? "Temperature is ignored while thinking mode is on (DeepSeek)." : undefined}
+            >
             <Slider
               min={0}
               max={2}
@@ -1973,8 +1986,8 @@ export const ChatWindow = React.memo(function ChatWindow({
               }}
               style={{ width: 80, margin: 0 }}
               tooltip={{ open: sessionTemperature !== null ? undefined : false }}
-              title={temperatureDisabled ? "Temperature is ignored while thinking mode is on (DeepSeek)." : undefined}
             />
+            </span>
           </div>
         </div>
       )}
@@ -2046,6 +2059,10 @@ export const ChatWindow = React.memo(function ChatWindow({
           />
           <div style={{ width: "100%" }}>
             <Space direction="vertical" style={{ width: "100%" }}>
+              {/* antd 5.29 Slider no longer accepts `title`; keep the native hint on a wrapper. */}
+              <span
+                title={temperatureDisabled ? "Temperature is ignored while thinking mode is on (DeepSeek)." : undefined}
+              >
               <Slider
                 min={0}
                 max={2}
@@ -2058,8 +2075,8 @@ export const ChatWindow = React.memo(function ChatWindow({
                   handleSettingsUpdate({ temperature: val });
                 }}
                 marks={{ 0: "0", 1: "1", 2: "2" }}
-                title={temperatureDisabled ? "Temperature is ignored while thinking mode is on (DeepSeek)." : undefined}
               />
+              </span>
             </Space>
           </div>
         </div>
@@ -2602,6 +2619,9 @@ export const ChatWindow = React.memo(function ChatWindow({
             </Button>
           )}
         </div>
+        {!pendingFlag && (
+          <SessionUsageToolbar sessionId={sessionId} streaming={streaming} />
+        )}
       </div>
 
       {/* Tools drawer */}

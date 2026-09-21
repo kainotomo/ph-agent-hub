@@ -340,6 +340,10 @@ It does **not** include any admin functionality.
     MemoryManager.tsx
     SessionToolActivation.tsx
     TemporaryChatBadge.tsx
+    SessionUsageToolbar.tsx
+    SessionStatsButton.tsx
+    TokenUsageButton.tsx
+    ContextIndicator.tsx (now renders inside the toolbar)
   /hooks
   /services
     chat.ts

@@ -18,6 +18,7 @@
 import asyncio
 import json
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -911,6 +912,7 @@ async def run_agent(
     # ---- 7. Run agent or workflow ----------------------------------------
     raw_response: str
 
+    _nonstream_metrics: dict = {}
     try:
         try:
             if cfg.execution_type == "workflow":
@@ -938,6 +940,7 @@ async def run_agent(
                     temperature=cfg.temperature,
                     reasoning_effort=cfg.reasoning_effort,
                     function_invocation_kwargs=function_invocation_kwargs,
+                    metrics_out=_nonstream_metrics,
                 )
         except Exception as exc:
             logger.error("Agent run failed: %s", exc)
@@ -957,6 +960,7 @@ async def run_agent(
             model_provider=cfg.model.provider,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
+            metrics=_nonstream_metrics or None,
         )
 
         # ---- Background: embed user message for cross-session retrieval -----
@@ -2548,12 +2552,15 @@ async def _run_agent(
     temperature: float = 0.7,
     reasoning_effort: str | None = None,
     function_invocation_kwargs: dict | None = None,
+    metrics_out: dict | None = None,
 ) -> tuple[str, int, int, int]:
     """Run a simple MAF Agent.
 
     Args:
         function_invocation_kwargs: Forwarded to ``agent.run()`` for tool
             invocation layers (A2A ``ask_user`` tool uses ``task_id``).
+        metrics_out: If not None, a dict that will be updated with
+            per-turn timing and context-breakdown metrics.
 
     Returns:
         A tuple of (response_text, tokens_in, tokens_out, cache_hit_tokens).
@@ -2584,13 +2591,29 @@ async def _run_agent(
         tokenizer=tokenizer,
     )
 
+    _turn_start_s = time.monotonic()
     result = await agent.run(
         user_message,
         function_invocation_kwargs=function_invocation_kwargs,
     )
+    _turn_end_s = time.monotonic()
 
     # Extract token counts (best-effort)
     tokens_in, tokens_out, cache_hit = _extract_token_counts(result)
+
+    # Populate metrics if requested
+    if metrics_out is not None:
+        metrics_out.update(_compute_turn_metrics(
+            turn_start_s=_turn_start_s,
+            turn_end_s=_turn_end_s,
+            first_token_at_s=None,
+            tool_durations_s=[],
+            steps=0,
+            cache_hit_tokens=cache_hit,
+            system_prompt_tokens=_estimate_tokens(system_prompt or ""),
+            tool_definition_tokens=_estimate_tool_definitions(tools),
+            tokens_in=tokens_in,
+        ))
 
     # result could be a string or a structured object
     if isinstance(result, str):
@@ -2728,6 +2751,7 @@ async def _persist_assistant_message(
     tokens_out: int = 0,
     reasoning: str = "",
     message_id: str = "",
+    metrics: dict | None = None,
 ) -> str:
     """Persist just the assistant message, returning its ID.
 
@@ -2749,6 +2773,10 @@ async def _persist_assistant_message(
     clean_text = _strip_raw_tool_xml(assistant_response)
     if clean_text.strip():
         content.append({"type": "text", "text": clean_text})
+
+    # Issue #531 — session usage metrics (last element).
+    if metrics:
+        content.append({"type": "metrics", **metrics})
     assistant_msg_id = message_id or str(uuid.uuid4())
     now = datetime.now(timezone.utc)
 
@@ -2795,6 +2823,7 @@ async def _persist_messages(
     model_provider: str | None = None,
     tokens_in: int = 0,
     tokens_out: int = 0,
+    metrics: dict | None = None,
 ) -> tuple[str, str]:
     """Persist the user message and assistant response.
 
@@ -2804,6 +2833,10 @@ async def _persist_messages(
     user_msg_content = [{"type": "text", "text": user_message}]
     clean_response = _strip_raw_tool_xml(assistant_response)
     assistant_msg_content = [{"type": "text", "text": clean_response}]
+
+    # Issue #531 — session usage metrics (last element).
+    if metrics:
+        assistant_msg_content.append({"type": "metrics", **metrics})
 
     if is_temporary:
         # Store in Redis
@@ -3119,6 +3152,8 @@ async def run_agent_stream(
                 tokens_out = _stream_token_info.get("out", 0) or 0
                 cache_hit_tokens_stream = _stream_token_info.get("cache_hit", 0) or 0
 
+                metrics_payload: dict | None = _stream_token_info.get("metrics")
+
                 if accumulated_text or accumulated_reasoning or accumulated_tool_events:
                     await _persist_assistant_message(
                         db=_persist_db,
@@ -3133,6 +3168,7 @@ async def run_agent_stream(
                         tokens_out=tokens_out,
                         reasoning=accumulated_reasoning,
                         message_id=message_id,
+                        metrics=metrics_payload,
                     )
 
                 if cfg is not None and current_user is not None:
@@ -3420,6 +3456,11 @@ async def _run_agent_stream(
     )
 
     step_index = 0
+    # Timing: measure per-turn wall-clock and tool durations.
+    turn_start_s = time.monotonic()
+    first_token_at_s: float | None = None
+    tool_started_at_s: dict[str, float] = {}
+    tool_durations_s: list[float] = []
     # Aggregate streaming tool calls: call_id -> {name, args_str}
     pending_calls: dict[str, dict] = {}
 
@@ -3462,6 +3503,8 @@ async def _run_agent_stream(
             if content_type == "text":
                 delta = getattr(content, "text", "")
                 if delta:
+                    if first_token_at_s is None:
+                        first_token_at_s = time.monotonic()
                     yield _sse_event("token", {
                         "delta": delta,
                     }, session_id=session_id, message_id=message_id)
@@ -3472,9 +3515,15 @@ async def _run_agent_stream(
                         "delta": delta,
                     }, session_id=session_id, message_id=message_id)
             elif content_type in ("function_call", "tool_call"):
+                call_id = getattr(content, "call_id", None)
+                if call_id:
+                    tool_started_at_s[call_id] = time.monotonic()
                 _handle_streaming_function_call(content, pending_calls)
             elif content_type in ("function_result", "tool_result"):
                 tool_call_id = getattr(content, "call_id", None) or ""
+                started = tool_started_at_s.pop(tool_call_id, None)
+                if started is not None:
+                    tool_durations_s.append(time.monotonic() - started)
                 tool_name = getattr(content, "name", "unknown")
                 output = getattr(content, "output", None) or getattr(content, "result", None)
                 success = not _is_tool_error(output)
@@ -3616,6 +3665,20 @@ async def _run_agent_stream(
                     cache_hit = usage.get("cached_tokens", 0) or 0
                 token_counts["cache_hit"] = cache_hit
 
+        # Hand off timing/metrics to the caller via token_counts["metrics"].
+        if token_counts is not None:
+            token_counts["metrics"] = _compute_turn_metrics(
+                turn_start_s=turn_start_s,
+                turn_end_s=time.monotonic(),
+                first_token_at_s=first_token_at_s,
+                tool_durations_s=tool_durations_s,
+                steps=step_index,
+                cache_hit_tokens=token_counts.get("cache_hit", 0) or 0,
+                system_prompt_tokens=_estimate_tokens(system_prompt or ""),
+                tool_definition_tokens=_estimate_tool_definitions(tools),
+                tokens_in=token_counts.get("in", 0) or 0,
+            )
+
 
 async def _run_workflow_stream(
     model: Model,
@@ -3741,6 +3804,74 @@ def _strip_raw_tool_xml(text: str) -> str:
         text,
         flags=re.DOTALL | re.IGNORECASE,
     ).strip()
+
+
+def _estimate_tool_definitions(tools: list | None) -> int:
+    """Estimate token count for tool definitions.
+
+    Sums ``_estimate_tokens(json.dumps(t.to_json_schema_spec(), default=str))``
+    over *tools*, with a per-tool ``try/except`` falling back to
+    ``_estimate_tokens(f"{getattr(t,'name','')} {getattr(t,'description','')}")``
+    (MCP/A2A tools may lack the method).  Returns 0 for ``None``/empty.
+    """
+    if not tools:
+        return 0
+    total = 0
+    for t in tools:
+        try:
+            total += _estimate_tokens(json.dumps(t.to_json_schema_spec(), default=str))
+        except Exception:
+            total += _estimate_tokens(f"{getattr(t, 'name', '')} {getattr(t, 'description', '')}")
+    return total
+
+
+def _compute_turn_metrics(
+    *,
+    turn_start_s: float,
+    turn_end_s: float,
+    first_token_at_s: float | None,
+    tool_durations_s: list[float],
+    steps: int,
+    cache_hit_tokens: int,
+    system_prompt_tokens: int,
+    tool_definition_tokens: int,
+    tokens_in: int,
+) -> dict:
+    """Compute per-turn timing and context-breakdown metrics.
+
+    Returns a dict with keys:
+        ``llm_ms``, ``tool_ms``, ``ttft_ms``, ``steps``,
+        ``cache_hit_tokens``, ``system_prompt_tokens``,
+        ``tool_definition_tokens``, ``messages_tokens``.
+    """
+    tool_ms = int(round(sum(tool_durations_s) * 1000))
+    turn_wall_ms = int(round((turn_end_s - turn_start_s) * 1000))
+    llm_ms = max(0, turn_wall_ms - tool_ms)
+    ttft_ms = None if first_token_at_s is None else int(round((first_token_at_s - turn_start_s) * 1000))
+
+    if tokens_in == 0:
+        return {
+            "llm_ms": llm_ms,
+            "tool_ms": tool_ms,
+            "ttft_ms": ttft_ms,
+            "steps": steps,
+            "cache_hit_tokens": cache_hit_tokens,
+            "system_prompt_tokens": None,
+            "tool_definition_tokens": None,
+            "messages_tokens": None,
+        }
+
+    messages_tokens = max(0, tokens_in - system_prompt_tokens - tool_definition_tokens)
+    return {
+        "llm_ms": llm_ms,
+        "tool_ms": tool_ms,
+        "ttft_ms": ttft_ms,
+        "steps": steps,
+        "cache_hit_tokens": cache_hit_tokens,
+        "system_prompt_tokens": system_prompt_tokens,
+        "tool_definition_tokens": tool_definition_tokens,
+        "messages_tokens": messages_tokens,
+    }
 
 
 def _maybe_accumulate_tool_events(

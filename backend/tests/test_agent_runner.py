@@ -2080,3 +2080,159 @@ class TestRunAgentStreamPipeline:
         error_events = [e for e in events if e["event"] == "error"]
         assert len(error_events) >= 0  # may or may not have error depending on mock setup
 
+
+# ===========================================================================
+# T7 — Runner timing + context-breakdown capture
+# ===========================================================================
+
+
+class TestEstimateToolDefinitions:
+    """Tests for ``_estimate_tool_definitions``."""
+
+    def test_empty_list(self):
+        from src.agents.runner import _estimate_tool_definitions
+        assert _estimate_tool_definitions([]) == 0
+
+    def test_none(self):
+        from src.agents.runner import _estimate_tool_definitions
+        assert _estimate_tool_definitions(None) == 0
+
+    def test_with_to_json_schema_spec(self):
+        from src.agents.runner import _estimate_tool_definitions
+
+        class StubTool:
+            def to_json_schema_spec(self):
+                return {"name": "my_tool", "description": "does something"}
+
+        result = _estimate_tool_definitions([StubTool()])
+        assert isinstance(result, int)
+        assert result > 0
+
+    def test_fallback_when_no_to_json_schema_spec(self):
+        from src.agents.runner import _estimate_tool_definitions
+
+        class StubTool:
+            name = "mcp_tool"
+            description = "an MCP tool without schema spec"
+
+        result = _estimate_tool_definitions([StubTool()])
+        assert isinstance(result, int)
+        assert result > 0
+
+    def test_mixed_tools(self):
+        from src.agents.runner import _estimate_tool_definitions
+
+        class WithSpec:
+            def to_json_schema_spec(self):
+                return {"name": "w", "description": "w"}
+
+        class WithoutSpec:
+            name = "w"
+            description = "w"
+
+        result = _estimate_tool_definitions([WithSpec(), WithoutSpec()])
+        assert isinstance(result, int)
+        assert result > 0
+
+
+class TestComputeTurnMetrics:
+    """Tests for ``_compute_turn_metrics``."""
+
+    def test_normal_case(self):
+        from src.agents.runner import _compute_turn_metrics
+
+        metrics = _compute_turn_metrics(
+            turn_start_s=100.0,
+            turn_end_s=101.5,
+            first_token_at_s=100.1,
+            tool_durations_s=[0.3, 0.2],
+            steps=3,
+            cache_hit_tokens=50,
+            system_prompt_tokens=200,
+            tool_definition_tokens=100,
+            tokens_in=1000,
+        )
+
+        assert metrics["llm_ms"] == 1000  # 1500 - 500
+        assert metrics["tool_ms"] == 500  # (0.3+0.2)*1000
+        assert metrics["ttft_ms"] == 100  # (100.1-100.0)*1000
+        assert metrics["steps"] == 3
+        assert metrics["cache_hit_tokens"] == 50
+        assert metrics["system_prompt_tokens"] == 200
+        assert metrics["tool_definition_tokens"] == 100
+        assert metrics["messages_tokens"] == 700  # 1000-200-100
+
+    def test_first_token_at_s_none(self):
+        from src.agents.runner import _compute_turn_metrics
+
+        metrics = _compute_turn_metrics(
+            turn_start_s=100.0,
+            turn_end_s=101.0,
+            first_token_at_s=None,
+            tool_durations_s=[],
+            steps=1,
+            cache_hit_tokens=0,
+            system_prompt_tokens=100,
+            tool_definition_tokens=50,
+            tokens_in=500,
+        )
+
+        assert metrics["ttft_ms"] is None
+
+    def test_tool_time_greater_than_wall(self):
+        from src.agents.runner import _compute_turn_metrics
+
+        metrics = _compute_turn_metrics(
+            turn_start_s=100.0,
+            turn_end_s=100.1,
+            first_token_at_s=100.05,
+            tool_durations_s=[0.2, 0.1],
+            steps=2,
+            cache_hit_tokens=10,
+            system_prompt_tokens=50,
+            tool_definition_tokens=30,
+            tokens_in=200,
+        )
+
+        assert metrics["llm_ms"] == 0  # max(0, 100 - 300)
+        assert metrics["tool_ms"] == 300
+
+    def test_tokens_in_zero(self):
+        from src.agents.runner import _compute_turn_metrics
+
+        metrics = _compute_turn_metrics(
+            turn_start_s=100.0,
+            turn_end_s=101.0,
+            first_token_at_s=100.1,
+            tool_durations_s=[],
+            steps=0,
+            cache_hit_tokens=0,
+            system_prompt_tokens=100,
+            tool_definition_tokens=50,
+            tokens_in=0,
+        )
+
+        assert metrics["system_prompt_tokens"] is None
+        assert metrics["tool_definition_tokens"] is None
+        assert metrics["messages_tokens"] is None
+
+    def test_deterministic_rounding(self):
+        from src.agents.runner import _compute_turn_metrics
+
+        # wall = 100ms, tool = 30ms -> llm = 70ms
+        metrics = _compute_turn_metrics(
+            turn_start_s=0.0,
+            turn_end_s=0.1,
+            first_token_at_s=0.03,
+            tool_durations_s=[0.03],
+            steps=1,
+            cache_hit_tokens=0,
+            system_prompt_tokens=0,
+            tool_definition_tokens=0,
+            tokens_in=100,
+        )
+
+        assert metrics["llm_ms"] == 70
+        assert metrics["tool_ms"] == 30
+        assert metrics["ttft_ms"] == 30
+

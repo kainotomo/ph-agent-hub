@@ -109,6 +109,9 @@ describe("percentage rendering", () => {
       tokens_used: 0,
       context_length: 128000,
       percentage: 0,
+      system_prompt_tokens: null,
+      tool_definition_tokens: null,
+      messages_tokens: null,
     });
     const qc = new QueryClient({
       defaultOptions: { queries: { retry: false } },
@@ -129,6 +132,9 @@ describe("percentage rendering", () => {
       tokens_used: 128000,
       context_length: 128000,
       percentage: 100,
+      system_prompt_tokens: null,
+      tool_definition_tokens: null,
+      messages_tokens: null,
     });
     const qc = new QueryClient({
       defaultOptions: { queries: { retry: false } },
@@ -155,6 +161,9 @@ describe("unconfigured state", () => {
       tokens_used: 0,
       context_length: null,
       percentage: null,
+      system_prompt_tokens: null,
+      tool_definition_tokens: null,
+      messages_tokens: null,
     });
     const qc = new QueryClient({
       defaultOptions: { queries: { retry: false } },
@@ -223,6 +232,9 @@ describe("critical warning icon", () => {
       tokens_used: 96000,
       context_length: 128000,
       percentage: 75,
+      system_prompt_tokens: null,
+      tool_definition_tokens: null,
+      messages_tokens: null,
     });
     const qc = new QueryClient({
       defaultOptions: { queries: { retry: false } },
@@ -243,6 +255,9 @@ describe("critical warning icon", () => {
       tokens_used: 76800,
       context_length: 128000,
       percentage: 60,
+      system_prompt_tokens: null,
+      tool_definition_tokens: null,
+      messages_tokens: null,
     });
     const qc = new QueryClient({
       defaultOptions: { queries: { retry: false } },
@@ -263,6 +278,9 @@ describe("critical warning icon", () => {
       tokens_used: 64000,
       context_length: 128000,
       percentage: 50,
+      system_prompt_tokens: null,
+      tool_definition_tokens: null,
+      messages_tokens: null,
     });
     const qc = new QueryClient({
       defaultOptions: { queries: { retry: false } },
@@ -289,6 +307,9 @@ describe("aria-label", () => {
       tokens_used: 48000,
       context_length: 128000,
       percentage: 37.5,
+      system_prompt_tokens: null,
+      tool_definition_tokens: null,
+      messages_tokens: null,
     });
     const qc = new QueryClient({
       defaultOptions: { queries: { retry: false } },
@@ -319,6 +340,9 @@ describe("popover interaction", () => {
       tokens_used: 48000,
       context_length: 128000,
       percentage: 37.5,
+      system_prompt_tokens: null,
+      tool_definition_tokens: null,
+      messages_tokens: null,
     });
     const qc = new QueryClient({
       defaultOptions: { queries: { retry: false } },
@@ -335,7 +359,9 @@ describe("popover interaction", () => {
     await act(async () => {
       await user.click(screen.getByRole("button"));
     });
-    expect(screen.getByText("Context Window")).toBeInTheDocument();
+    expect(screen.getAllByText("38%").length).toBeGreaterThan(0);
+    expect(screen.getByText("of context used")).toBeInTheDocument();
+    expect(screen.getByText("~48K / 128K in context")).toBeInTheDocument();
     expect(screen.getByText("Compact Conversation")).toBeInTheDocument();
     expect(screen.getByText("Auto-compact at 75% usage")).toBeInTheDocument();
   });
@@ -345,6 +371,9 @@ describe("popover interaction", () => {
       tokens_used: 48000,
       context_length: 128000,
       percentage: 37.5,
+      system_prompt_tokens: null,
+      tool_definition_tokens: null,
+      messages_tokens: null,
     });
     const qc = new QueryClient({
       defaultOptions: { queries: { retry: false } },
@@ -362,5 +391,99 @@ describe("popover interaction", () => {
       await user.click(screen.getByRole("button"));
     });
     expect(screen.getByText("Compact Conversation")).toBeInTheDocument();
+  });
+
+  it("shows breakdown rows when fields are populated", async () => {
+    mockGetSessionContext.mockResolvedValue({
+      tokens_used: 85400,
+      context_length: 1000000,
+      percentage: 8.54,
+      system_prompt_tokens: 2300,
+      tool_definition_tokens: 7300,
+      messages_tokens: 72900,
+    });
+    const qc = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={qc}>
+        <ContextIndicator sessionId="s1" />
+      </QueryClientProvider>,
+    );
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 100));
+    });
+    const user = userEvent.setup();
+    await act(async () => {
+      await user.click(screen.getByRole("button"));
+    });
+    expect(screen.getAllByText("9%").length).toBeGreaterThan(0);
+    expect(screen.getByText("of context used")).toBeInTheDocument();
+    expect(screen.getByText("~85.4K / 1M in context")).toBeInTheDocument();
+    expect(screen.getByTestId("context-breakdown")).toBeInTheDocument();
+    expect(screen.getByTestId("context-breakdown-system")).toHaveTextContent("~2.3K");
+    expect(screen.getByTestId("context-breakdown-tools")).toHaveTextContent("~7.3K");
+    expect(screen.getByTestId("context-breakdown-messages")).toHaveTextContent("~72.9K");
+  });
+
+  it("omits breakdown block when all three fields are null", async () => {
+    mockGetSessionContext.mockResolvedValue({
+      tokens_used: 48000,
+      context_length: 128000,
+      percentage: 37.5,
+      system_prompt_tokens: null,
+      tool_definition_tokens: null,
+      messages_tokens: null,
+    });
+    const qc = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={qc}>
+        <ContextIndicator sessionId="s1" />
+      </QueryClientProvider>,
+    );
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 100));
+    });
+    const user = userEvent.setup();
+    await act(async () => {
+      await user.click(screen.getByRole("button"));
+    });
+    expect(screen.queryByTestId("context-breakdown")).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ring sizing
+// ---------------------------------------------------------------------------
+
+describe("ring sizing", () => {
+  it("renders the ring at 24px so it matches the toolbar's small buttons", async () => {
+    mockGetSessionContext.mockResolvedValue({
+      tokens_used: 7302,
+      context_length: 1000000,
+      percentage: 0.7,
+      system_prompt_tokens: null,
+      tool_definition_tokens: null,
+      messages_tokens: null,
+    });
+    const qc = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const { container } = render(
+      <QueryClientProvider client={qc}>
+        <ContextIndicator sessionId="s1" />
+      </QueryClientProvider>,
+    );
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 100));
+    });
+    const inner = container.querySelector(".ant-progress-inner") as HTMLElement;
+    expect(inner).not.toBeNull();
+    expect(inner.style.width).toBe("24px");
+    expect(inner.style.height).toBe("24px");
+    // Text must still render: antd hides circle children at width <= 20.
+    expect(screen.getByTestId("context-indicator-label")).toBeInTheDocument();
   });
 });

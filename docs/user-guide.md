@@ -45,8 +45,9 @@ Your login persists across page reloads — you won't need to re-enter your cred
 After logging in, you'll see the chat area with:
 - **Left sidebar**: Your session list, search bar, and new session button
 - **Main area**: The active conversation
-- **Top bar**: Context indicator (hidden for new chats), model selector, template selector, and session controls
+- **Top bar**: Model selector, template selector, and session controls
 - **Input area**: Message composer with skill selector, tool manager, file upload, and memory buttons
+- **Usage toolbar** (below the input): shows session statistics (turns, steps, tokens/sec), total token usage with cache-hit percentage, and the context-window ring; click each to open a details popover. Per-response token counts are no longer shown on individual messages.
 
 ---
 

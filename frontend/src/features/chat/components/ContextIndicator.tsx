@@ -8,9 +8,12 @@
 // Severity bands (non-hue-only):
 //   normal   (< 60%)  — blue arc, no warning
 //   elevated (60–74%) — darker blue arc, no warning
-//   critical (≥ 75%)  — darkest blue arc + WarningOutlined icon
+//   critical (≥ 75%)  — darkest blue arc + WarningOutlined icon (right of ring)
 //
-// The percentage text is always visible (WCAG 1.4.11 compliant via text contrast).
+// The percentage is drawn INSIDE the ring via Progress `format`. antd only
+// paints circle children when size > 20 (smaller circles become tooltip-only),
+// which is why RING_SIZE must stay above that threshold. The percentage stays
+// visible text (WCAG 1.4.11 compliant via text contrast).
 // =============================================================================
 
 import React, { useState, useCallback } from "react";
@@ -64,6 +67,9 @@ export function formatTokenCount(n: number): string {
 // Component
 // ---------------------------------------------------------------------------
 
+/** Ring diameter in px. Must stay > 20 so antd renders the inner label. */
+const RING_SIZE = 28;
+
 interface ContextIndicatorProps {
   sessionId?: string;
 }
@@ -106,18 +112,21 @@ export const ContextIndicator = React.memo(function ContextIndicator({ sessionId
   // Loading state
   if (isLoading) {
     return (
-      <div data-testid="context-indicator-loading" style={{ display: "inline-flex", alignItems: "center", gap: 4, height: 24, paddingInline: 2 }}>
+      <div data-testid="context-indicator-loading" style={{ display: "inline-flex", alignItems: "center", height: RING_SIZE, paddingInline: 2 }}>
         <Progress
           type="circle"
           percent={0}
-          size={18}
+          size={RING_SIZE}
           strokeColor="#d9d9d9"
           trailColor="#f0f0f0"
-          strokeWidth={5}
-          format={() => ""}
+          strokeWidth={6}
+          format={() => (
+            <span data-testid="context-indicator-label" style={{ fontSize: 11, lineHeight: 1, color: "#8c8c8c" }}>
+              …
+            </span>
+          )}
           aria-hidden="true"
         />
-        <Text style={{ fontSize: 12, color: "#8c8c8c" }} data-testid="context-indicator-label">...</Text>
       </div>
     );
   }
@@ -197,7 +206,7 @@ export const ContextIndicator = React.memo(function ContextIndicator({ sessionId
         style={{
           display: "inline-flex",
           alignItems: "center",
-          height: 24,
+          height: RING_SIZE,
           paddingInline: 2,
           gap: 4,
           lineHeight: 0,
@@ -207,16 +216,27 @@ export const ContextIndicator = React.memo(function ContextIndicator({ sessionId
           data-testid="context-indicator-ring"
           type="circle"
           percent={rawPct}
-          size={18}
-          strokeWidth={5}
+          size={RING_SIZE}
+          strokeWidth={6}
           strokeColor={arcColor}
           trailColor="#bfbfbf"
-          format={() => ""}
+          format={() => (
+            <span
+              data-testid="context-indicator-label"
+              style={{
+                fontSize: labelPct >= 100 ? 9 : 10,
+                lineHeight: 1,
+                fontWeight: 600,
+                whiteSpace: "nowrap",
+                fontVariantNumeric: "tabular-nums",
+                color: band === "critical" ? "#d4380d" : "#434343",
+              }}
+            >
+              {labelPct}%
+            </span>
+          )}
           aria-hidden="true"
         />
-        <Text data-testid="context-indicator-label" style={{ fontSize: 12, color: band === "critical" ? "#d4380d" : "#595959" }}>
-          {labelPct}%
-        </Text>
         {band === "critical" && (
           <WarningOutlined data-testid="context-indicator-warning" style={{ fontSize: 12, color: "#d4380d" }} />
         )}

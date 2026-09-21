@@ -80,7 +80,6 @@ import {
   getStreamStatus,
   SearchScope,
 } from "../services/chat";
-import { ContextIndicator } from "./ContextIndicator";
 import { MemoryManager } from "./MemoryManager";
 import { SessionFolderHeader } from "./SessionFolderHeader";
 import {
@@ -585,10 +584,6 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
     queryKey: ["folders"],
     queryFn: listFolders,
   });
-
-  // Only show context indicator when the session actually exists (avoids 404
-  // for lazy-created sessions that haven't been persisted yet).
-  const sessionExists = sessions?.some(s => s.id === sessionId) ?? false;
 
   // Invalidate both the session list and the search cache so mutations
   // (delete, pin, rename, move, tag) are reflected in an active filter.
@@ -1234,7 +1229,6 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
           </div>
           {!collapsed && (
             <Space size={4} style={{ marginLeft: "auto" }}>
-              {sessionExists && <ContextIndicator sessionId={sessionId} />}
               {sessions && sessions.length > 0 && (
                 <Tooltip title={selectMode ? "Cancel selection" : "Select sessions"}>
                   <Button

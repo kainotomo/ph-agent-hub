@@ -126,7 +126,6 @@ vi.mock("./SessionSearchBar", () => ({
 
 // Mock child components from barrel export
 vi.mock("./", () => ({
-  ContextIndicator: () => <div data-testid="context-indicator" />,
   MemoryManager: ({ open }: { open: boolean }) =>
     open ? <div data-testid="memory-manager" /> : null,
 }));

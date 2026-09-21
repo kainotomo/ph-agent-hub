@@ -1,14 +1,24 @@
 // =============================================================================
 // PH Agent Hub — ContextIndicator
 // =============================================================================
-// Circular progress ring in the sidebar that shows how much of the model's
-// context window is consumed. Clicking opens a popover with exact token
-// counts and a "Compact Conversation" button (Issue #309).
+// Compact context-window gauge shown in the chat top bar (left of ModelSelector).
+// Hidden for unsent new chats. Clicking opens a popover with exact token
+// counts, the auto-compact threshold, and a "Compact Conversation" button.
+//
+// Severity bands (non-hue-only):
+//   normal   (< 60%)  — blue arc, no warning
+//   elevated (60–74%) — darker blue arc, no warning
+//   critical (≥ 75%)  — darkest blue arc + WarningOutlined icon (right of ring)
+//
+// The percentage is drawn INSIDE the ring via Progress `format`. antd only
+// paints circle children when size > 20 (smaller circles become tooltip-only),
+// which is why RING_SIZE must stay above that threshold. The percentage stays
+// visible text (WCAG 1.4.11 compliant via text contrast).
 // =============================================================================
 
 import React, { useState, useCallback } from "react";
-import { Button, Popover, Progress, Tooltip, Typography, message } from "antd";
-import { CompressOutlined } from "@ant-design/icons";
+import { Button, Popover, Progress, Typography, message } from "antd";
+import { WarningOutlined, CompressOutlined, ExclamationCircleOutlined } from "@ant-design/icons";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   getSessionContext,
@@ -21,23 +31,44 @@ const { Text } = Typography;
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Format a number to a concise human-readable form: 4400 → "4.4k" */
-function formatTokenCount(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}m`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-  return String(n);
+/** Severity band for a usage percentage. Mirrors SUMMARIZE_THRESHOLD (0.75). */
+export function bandForPercentage(pct: number): "normal" | "elevated" | "critical" {
+  if (pct >= 75) return "critical";
+  if (pct >= 60) return "elevated";
+  return "normal";
 }
 
-/** Pick a stroke colour based on usage percentage. */
-function strokeColorForPercentage(pct: number): string {
-  if (pct > 80) return "#ff4d4f"; // red
-  if (pct > 50) return "#faad14"; // orange
-  return "#52c41a";               // green
+/** Arc color for a severity band — single-hue blue ramp. */
+export function arcColorForBand(band: "normal" | "elevated" | "critical"): string {
+  switch (band) {
+    case "normal":
+      return "#1677ff";
+    case "elevated":
+      return "#0958d9";
+    case "critical":
+      return "#003eb3";
+  }
+}
+
+/** Format a number to a concise human-readable form: 4400 → "4.4k" */
+export function formatTokenCount(n: number): string {
+  if (n >= 1_000_000) {
+    const v = n / 1_000_000;
+    return Number.isInteger(v) ? `${v}m` : `${v.toFixed(1)}m`;
+  }
+  if (n >= 1_000) {
+    const v = n / 1_000;
+    return Number.isInteger(v) ? `${v}k` : `${v.toFixed(1)}k`;
+  }
+  return String(n);
 }
 
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
+
+/** Ring diameter in px. Must stay > 20 so antd renders the inner label. */
+const RING_SIZE = 28;
 
 interface ContextIndicatorProps {
   sessionId?: string;
@@ -78,34 +109,57 @@ export const ContextIndicator = React.memo(function ContextIndicator({ sessionId
     }
   }, [sessionId, queryClient]);
 
-  // Hide if there's no active session
-  if (!sessionId) {
-    return null;
-  }
-
-  // Loading state: show a plain icon
-  if (isLoading || isError) {
+  // Loading state
+  if (isLoading) {
     return (
-      <Tooltip title="Context Window">
-        <Button
-          type="text"
-          icon={<CompressOutlined />}
-          size="small"
-          disabled
+      <div data-testid="context-indicator-loading" style={{ display: "inline-flex", alignItems: "center", height: RING_SIZE, paddingInline: 2 }}>
+        <Progress
+          type="circle"
+          percent={0}
+          size={RING_SIZE}
+          strokeColor="#d9d9d9"
+          trailColor="#f0f0f0"
+          strokeWidth={6}
+          format={() => (
+            <span data-testid="context-indicator-label" style={{ fontSize: 11, lineHeight: 1, color: "#8c8c8c" }}>
+              …
+            </span>
+          )}
+          aria-hidden="true"
         />
-      </Tooltip>
+      </div>
     );
   }
 
-  // If context_length is not known, show icon without progress ring
-  const hasContextLength = contextLength !== null && contextLength > 0;
-  const rawPct = hasContextLength && percentage !== null
-    ? Math.min(percentage, 100)
-    : 0;
-  // Always show at least a tiny arc so the ring is visible
-  const progressPct = rawPct > 0 ? rawPct : 1;
-  const strokeColor = hasContextLength ? strokeColorForPercentage(rawPct) : "#8c8c8c";
+  // Error state
+  if (isError) {
+    return (
+      <div data-testid="context-indicator-error" style={{ display: "inline-flex", alignItems: "center", gap: 4, height: 24, paddingInline: 2 }}>
+        <ExclamationCircleOutlined style={{ fontSize: 12, color: "#d4380d" }} />
+        <Text style={{ fontSize: 12, color: "#8c8c8c" }} data-testid="context-indicator-label">n/a</Text>
+      </div>
+    );
+  }
 
+  // Unconfigured state (no context_length)
+  const hasContextLength = contextLength !== null && contextLength > 0;
+  if (!hasContextLength) {
+    return (
+      <div data-testid="context-indicator-unconfigured" style={{ display: "inline-flex", alignItems: "center", gap: 4, height: 24, paddingInline: 2 }}>
+        <CompressOutlined style={{ fontSize: 12, color: "#8c8c8c" }} />
+        <Text style={{ fontSize: 12, color: "#8c8c8c" }} data-testid="context-indicator-label">-</Text>
+      </div>
+    );
+  }
+
+  // Normal state
+  const rawPct = Math.min(percentage ?? 0, 100);
+  const band = bandForPercentage(rawPct);
+  const arcColor = arcColorForBand(band);
+  const labelPct = Math.round(rawPct);
+
+  // Build aria-label with exact figures
+  const ariaLabel = `Context window: ${labelPct}% used, ${formatTokenCount(tokensUsed)} of ${formatTokenCount(contextLength!)} tokens. Opens context details and compaction.`;
 
   // Popover content
   const popoverContent = (
@@ -113,19 +167,16 @@ export const ContextIndicator = React.memo(function ContextIndicator({ sessionId
       <Text strong style={{ fontSize: 13, display: "block", marginBottom: 8 }}>
         Context Window
       </Text>
-      {hasContextLength ? (
-        <Text style={{ fontSize: 12, display: "block", marginBottom: 12 }}>
-          {formatTokenCount(tokensUsed)} / {formatTokenCount(contextLength!)} tokens
-          {" "}
-          <Text type="secondary" style={{ fontSize: 11 }}>
-            ({progressPct.toFixed(1)}%)
-          </Text>
+      <Text style={{ fontSize: 12, display: "block", marginBottom: 12 }}>
+        {formatTokenCount(tokensUsed)} / {formatTokenCount(contextLength!)} tokens
+        {" "}
+        <Text type="secondary" style={{ fontSize: 11 }}>
+          ({(percentage ?? 0).toFixed(1)}%)
         </Text>
-      ) : (
-        <Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 12 }}>
-          Context length not configured for this model
-        </Text>
-      )}
+      </Text>
+      <Text type="secondary" style={{ fontSize: 11, display: "block", marginBottom: 12 }}>
+        Auto-compact at 75% usage
+      </Text>
       <Button
         type="primary"
         size="small"
@@ -141,42 +192,55 @@ export const ContextIndicator = React.memo(function ContextIndicator({ sessionId
 
   return (
     <Popover
+      data-testid="context-indicator"
       content={popoverContent}
       trigger="click"
       open={popoverOpen}
       onOpenChange={setPopoverOpen}
       placement="bottomLeft"
     >
-      <Tooltip title={`Context window: ${progressPct.toFixed(1)}% used`}>
-        <Button
-          type="text"
-          size="small"
-          aria-label={`Context window: ${progressPct.toFixed(1)}% used`}
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: 0,
-            lineHeight: 0,
-            height: 18,
-            width: 18,
-          }}
-        >
-          {hasContextLength ? (
-            <Progress
-              type="circle"
-              percent={progressPct}
-              size={16}
-              strokeColor={strokeColor}
-              trailColor="#d9d9d9"
-              format={() => ""}
-              strokeWidth={4}
-            />
-          ) : (
-            <CompressOutlined style={{ fontSize: 14, color: "#8c8c8c" }} />
+      <Button
+        type="text"
+        size="small"
+        aria-label={ariaLabel}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          height: RING_SIZE,
+          paddingInline: 2,
+          gap: 4,
+          lineHeight: 0,
+        }}
+      >
+        <Progress
+          data-testid="context-indicator-ring"
+          type="circle"
+          percent={rawPct}
+          size={RING_SIZE}
+          strokeWidth={6}
+          strokeColor={arcColor}
+          trailColor="#bfbfbf"
+          format={() => (
+            <span
+              data-testid="context-indicator-label"
+              style={{
+                fontSize: labelPct >= 100 ? 9 : 10,
+                lineHeight: 1,
+                fontWeight: 600,
+                whiteSpace: "nowrap",
+                fontVariantNumeric: "tabular-nums",
+                color: band === "critical" ? "#d4380d" : "#434343",
+              }}
+            >
+              {labelPct}%
+            </span>
           )}
-        </Button>
-      </Tooltip>
+          aria-hidden="true"
+        />
+        {band === "critical" && (
+          <WarningOutlined data-testid="context-indicator-warning" style={{ fontSize: 12, color: "#d4380d" }} />
+        )}
+      </Button>
     </Popover>
   );
 });

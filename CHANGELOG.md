@@ -51,6 +51,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the finished response. ([#521])
 - Reasoning panel now stays collapsed by default during streaming and expands
   only when clicked, matching Tool Activity. ([#524])
+- Context-window gauge is now accessible: visible percentage text, non-hue-only
+  severity bands, and a warning icon at ≥75% usage. Relocated from the sidebar
+  header to the chat top bar, hidden for unsent new chats. ([#530])
 
 ---
 
@@ -194,3 +197,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#521]: https://github.com/kainotomo/ph-agent-hub/issues/521
 [#524]: https://github.com/kainotomo/ph-agent-hub/issues/524
 [#526]: https://github.com/kainotomo/ph-agent-hub/issues/526
+[#530]: https://github.com/kainotomo/ph-agent-hub/issues/530

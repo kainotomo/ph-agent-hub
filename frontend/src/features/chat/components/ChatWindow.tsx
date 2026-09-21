@@ -1960,24 +1960,21 @@ export const ChatWindow = React.memo(function ChatWindow({
             }}
           />
           <div style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 120 }}>
-            <Tooltip
+            <Slider
+              min={0}
+              max={2}
+              step={0.1}
+              value={sessionTemperature ?? 0.7}
+              disabled={temperatureDisabled}
+              onChange={(v) => {
+                const val = v as number;
+                setSessionTemperature(val);
+                handleSettingsUpdate({ temperature: val });
+              }}
+              style={{ width: 80, margin: 0 }}
+              tooltip={{ open: sessionTemperature !== null ? undefined : false }}
               title={temperatureDisabled ? "Temperature is ignored while thinking mode is on (DeepSeek)." : undefined}
-            >
-              <Slider
-                min={0}
-                max={2}
-                step={0.1}
-                value={sessionTemperature ?? 0.7}
-                disabled={temperatureDisabled}
-                onChange={(v) => {
-                  const val = v as number;
-                  setSessionTemperature(val);
-                  handleSettingsUpdate({ temperature: val });
-                }}
-                style={{ width: 80, margin: 0 }}
-                tooltip={{ open: sessionTemperature !== null ? undefined : false }}
-              />
-            </Tooltip>
+            />
           </div>
         </div>
       )}
@@ -2049,23 +2046,20 @@ export const ChatWindow = React.memo(function ChatWindow({
           />
           <div style={{ width: "100%" }}>
             <Space direction="vertical" style={{ width: "100%" }}>
-              <Tooltip
+              <Slider
+                min={0}
+                max={2}
+                step={0.1}
+                value={sessionTemperature ?? 0.7}
+                disabled={temperatureDisabled}
+                onChange={(v) => {
+                  const val = v as number;
+                  setSessionTemperature(val);
+                  handleSettingsUpdate({ temperature: val });
+                }}
+                marks={{ 0: "0", 1: "1", 2: "2" }}
                 title={temperatureDisabled ? "Temperature is ignored while thinking mode is on (DeepSeek)." : undefined}
-              >
-                <Slider
-                  min={0}
-                  max={2}
-                  step={0.1}
-                  value={sessionTemperature ?? 0.7}
-                  disabled={temperatureDisabled}
-                  onChange={(v) => {
-                    const val = v as number;
-                    setSessionTemperature(val);
-                    handleSettingsUpdate({ temperature: val });
-                  }}
-                  marks={{ 0: "0", 1: "1", 2: "2" }}
-                />
-              </Tooltip>
+              />
             </Space>
           </div>
         </div>

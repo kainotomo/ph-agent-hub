@@ -277,7 +277,7 @@ function MessageBubbleInner({
           <Collapse
             ghost
             size="small"
-            destroyInactivePanel
+            destroyOnHidden
             activeKey={reasoningExpanded ? ["reasoning"] : []}
             onChange={(keys) =>
               setReasoningExpanded(

@@ -48,6 +48,7 @@ vi.mock("./", () => ({
   TemporaryChatBadge: () => <div data-testid="temp-badge" />,
   SessionToolActivation: () => <div data-testid="tools-activation" />,
   MemoryManager: () => <div data-testid="memory-manager" />,
+  ContextIndicator: () => <div data-testid="context-indicator" />,
 }));
 
 const AUTO_ROUTE_VALUE = "__auto__";

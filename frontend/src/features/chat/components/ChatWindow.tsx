@@ -48,6 +48,7 @@ import {
   TemporaryChatBadge,
   SessionToolActivation,
   MemoryManager,
+  ContextIndicator,
 } from "./";
 import { AUTO_ROUTE_VALUE } from "./ModelSelector";
 
@@ -1885,6 +1886,7 @@ export const ChatWindow = React.memo(function ChatWindow({
               loading={finalizing}
             />
           )}
+          {!pendingFlag && <ContextIndicator sessionId={sessionId} />}
           <Button
             size="small"
             icon={<SettingOutlined />}
@@ -1911,6 +1913,7 @@ export const ChatWindow = React.memo(function ChatWindow({
               loading={finalizing}
             />
           )}
+          {!pendingFlag && <ContextIndicator sessionId={sessionId} />}
           <ModelSelector
             value={pendingFlag
               ? (pendAutoRoute && !pendModelId ? AUTO_ROUTE_VALUE : pendModelId)

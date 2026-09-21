@@ -189,7 +189,7 @@ The embeddable chat widget uses a separate architecture from the main SPA:
   `ChatWindow` with `embedded={true}`.
 - **`ChatWindow` embedded mode** — the `embedded` prop hides the sidebar, model/template/
   skill selectors, settings drawers, and other chrome. Only the message list, input
-  area, and minimal header are shown.
+  area, and minimal header are shown. The context indicator is also hidden.
 - **`embed.js`** (`public/embed.js`) — a ~3 KB vanilla JS loader script injected by
   the host website's `<script>` tag. Creates a floating bubble + drawer (or inline
   iframe) and communicates with the iframe via `window.postMessage`.

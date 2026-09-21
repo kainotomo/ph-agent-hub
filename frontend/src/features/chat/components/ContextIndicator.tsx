@@ -68,8 +68,12 @@ export function formatTokenCount(n: number): string {
 // Component
 // ---------------------------------------------------------------------------
 
-/** Ring diameter in px. Must stay > 20 so antd renders the inner label. */
-const RING_SIZE = 28;
+/**
+ * Ring diameter in px. Must stay > 20 so antd renders the inner label.
+ * Set to 24 to match `controlHeightSM` (32 × 0.75), i.e. the height of the
+ * small text buttons sharing the SessionUsageToolbar row.
+ */
+const RING_SIZE = 24;
 
 interface ContextIndicatorProps {
   sessionId?: string;
@@ -172,7 +176,7 @@ export const ContextIndicator = React.memo(function ContextIndicator({ sessionId
         of context used
       </Text>
       <Text style={{ fontSize: 12, display: "block", marginBottom: 8 }}>
-        {formatTokensApprox(tokensUsed)} / {formatTokensCompact(contextLength!)}
+        {formatTokensApprox(tokensUsed)} / {formatTokensCompact(contextLength!)} in context
       </Text>
       <Divider style={{ margin: "8px 0" }} />
       {(data?.system_prompt_tokens ?? data?.tool_definition_tokens ?? data?.messages_tokens) != null && (

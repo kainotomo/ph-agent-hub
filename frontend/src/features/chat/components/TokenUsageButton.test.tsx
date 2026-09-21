@@ -40,7 +40,7 @@ describe("TokenUsageButton", () => {
 
     expect(screen.getByTestId("token-usage-popover")).toBeInTheDocument();
     expect(screen.getByText("Token usage")).toBeInTheDocument();
-    expect(screen.getByText("1,798,557 tok")).toBeInTheDocument();
+    expect(screen.getByText("1,798,557 tok total")).toBeInTheDocument();
     expect(screen.getByText("98%")).toBeInTheDocument();
     expect(screen.getByText("42,837 tok")).toBeInTheDocument();
     expect(screen.getByText("1,718,912 tok")).toBeInTheDocument();

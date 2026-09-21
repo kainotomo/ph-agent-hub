@@ -51,7 +51,7 @@ export const TokenUsageButton = React.memo(function TokenUsageButton({
       </Text>
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         <div style={{ display: "flex", justifyContent: "space-between" }}>
-          <Text style={{ fontSize: 12 }}>{formatTokensExact(usage!.tokens_total)} tok</Text>
+          <Text style={{ fontSize: 12 }}>{formatTokensExact(usage!.tokens_total)} tok total</Text>
         </div>
         <div style={{ display: "flex", justifyContent: "space-between" }}>
           <Text style={{ fontSize: 12 }}>Cache hit</Text>

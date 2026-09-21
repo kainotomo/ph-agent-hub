@@ -41,6 +41,8 @@ export const SessionUsageToolbar = React.memo(function SessionUsageToolbar({
         gap: 4,
         flexWrap: "wrap",
         alignItems: "center",
+        // Breathing room from the message input directly above (Issue #531 QA).
+        marginTop: 8,
       }}
     >
       <SessionStatsButton usage={data} isLoading={isLoading} isError={isError} />

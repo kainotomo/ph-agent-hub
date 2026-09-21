@@ -100,6 +100,11 @@ describe("SessionUsageToolbar", () => {
     // Toolbar container should be present
     expect(screen.getByTestId("session-usage-toolbar")).toBeInTheDocument();
 
+    // Keeps a small gap from the message input above (Issue #531 QA).
+    expect(
+      (screen.getByTestId("session-usage-toolbar") as HTMLElement).style.marginTop,
+    ).toBe("8px");
+
     // SessionStatsButton
     expect(screen.getByTestId("session-stats-button")).toBeInTheDocument();
 

@@ -20,6 +20,14 @@
 export const FIRST_ITEM_INDEX_BASE = 1_000_000;
 
 /**
+ * Number of messages the chat view fetches per page. Used for the initial
+ * (most recent) page and for every older page loaded on scroll-up. Smaller
+ * pages keep long sessions light in the browser; the backend default (50) and
+ * max (100) are unchanged — this is a client-side request size only.
+ */
+export const MESSAGES_PER_PAGE = 10;
+
+/**
  * Derive react-virtuoso's `firstItemIndex` from an infinite-query page array.
  *
  * All items in `pages[1..]` sit at the head of the chronological display

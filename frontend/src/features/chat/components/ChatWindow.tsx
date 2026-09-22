@@ -25,7 +25,7 @@ import { useQuery, useInfiniteQuery, useQueryClient, type InfiniteData } from "@
 import { MessageBubble } from "./MessageBubble";
 import { useStream } from "../hooks/useStream";
 import { useStickToBottom } from "../hooks/useStickToBottom";
-import { computeFirstItemIndex } from "../services/messagePaging";
+import { computeFirstItemIndex, MESSAGES_PER_PAGE } from "../services/messagePaging";
 import {
   listMessages,
   buildCursor,
@@ -572,7 +572,7 @@ export const ChatWindow = React.memo(function ChatWindow({
               })),
               has_more: false,
             }))
-          : listMessages(sessionId, { before: pageParam, limit: 50 }),
+          : listMessages(sessionId, { before: pageParam, limit: MESSAGES_PER_PAGE }),
     getNextPageParam: (lastPage) =>
       lastPage.has_more && lastPage.items.length > 0
         ? buildCursor(lastPage.items[0])

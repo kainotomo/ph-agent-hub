@@ -4830,3 +4830,344 @@ class TestSanitizeFilename:
 
         result = _sanitize_filename("")
         assert result == "conversation"
+
+
+# =============================================================================
+# Issue #539 — Lazy-Fetch Reasoning & Tool Details
+# =============================================================================
+
+
+class TestBuildContentSummary:
+    """Tests for the _build_content_summary() helper."""
+
+    def test_build_content_summary_none(self):
+        """Verify None returns None."""
+        from src.api.chat import _build_content_summary
+
+        result = _build_content_summary(None)
+        assert result is None
+
+    def test_build_content_summary_empty(self):
+        """Verify empty list returns empty list."""
+        from src.api.chat import _build_content_summary
+
+        result = _build_content_summary([])
+        assert result == []
+
+    def test_build_content_summary_reasoning(self):
+        """Verify reasoning parts get chars and summary."""
+        from src.api.chat import _build_content_summary
+
+        content = [
+            {"type": "reasoning", "text": "Line one\nLine two\n" * 500}
+        ]
+        result = _build_content_summary(content)
+        assert len(result) == 1
+        part = result[0]
+        assert part["type"] == "reasoning"
+        assert "chars" in part
+        assert part["chars"] > 0
+        assert "summary" in part
+        assert part["summary"] == "Line one"
+        # The bulky body must be stripped so the list stays light.
+        assert "text" not in part
+
+    def test_build_content_summary_reasoning_preserves_metadata(self):
+        """Verify non-body reasoning fields survive the projection."""
+        from src.api.chat import _build_content_summary
+
+        content = [
+            {
+                "type": "reasoning",
+                "text": "long thinking",
+                "id": "r1",
+                "call_id": "c1",
+                "batch_id": "b1",
+            }
+        ]
+        part = _build_content_summary(content)[0]
+        assert part["id"] == "r1"
+        assert part["call_id"] == "c1"
+        assert part["batch_id"] == "b1"
+        assert "text" not in part
+
+    def test_build_content_summary_function_result_preserves_metadata(self):
+        """Verify tool-result metadata survives while the output is stripped."""
+        from src.api.chat import _build_content_summary
+
+        content = [
+            {
+                "type": "function_result",
+                "name": "search",
+                "is_error": True,
+                "id": "r1",
+                "call_id": "c1",
+                "batch_id": "b1",
+                "output": "boom",
+            }
+        ]
+        part = _build_content_summary(content)[0]
+        assert part["name"] == "search"
+        assert part["is_error"] is True
+        assert part["id"] == "r1"
+        assert part["call_id"] == "c1"
+        assert part["batch_id"] == "b1"
+        assert part["output_chars"] == 4
+        assert part["output_summary"] == "boom"
+        assert "output" not in part
+
+    def test_build_content_summary_text(self):
+        """Verify text parts get chars, summary, and preserved text."""
+        from src.api.chat import _build_content_summary
+
+        content = [{"type": "text", "text": "Hello world\nSecond line"}]
+        result = _build_content_summary(content)
+        assert len(result) == 1
+        part = result[0]
+        assert part["type"] == "text"
+        assert "chars" in part
+        assert part["chars"] == len("Hello world\nSecond line")
+        assert part["summary"] == "Hello world"
+        # text field must be preserved so the frontend can render messages
+        assert part["text"] == "Hello world\nSecond line"
+
+    def test_build_content_summary_function_result(self):
+        """Verify function_result parts get output_chars and output_summary."""
+        from src.api.chat import _build_content_summary
+
+        content = [
+            {
+                "type": "function_result",
+                "output": {"key": "value", "nested": {"a": 1}},
+            }
+        ]
+        result = _build_content_summary(content)
+        assert len(result) == 1
+        part = result[0]
+        assert part["type"] == "function_result"
+        assert "output_chars" in part
+        assert "output_summary" in part
+
+    def test_build_content_summary_function_result_string(self):
+        """Verify function_result with string output."""
+        from src.api.chat import _build_content_summary
+
+        content = [
+            {"type": "function_result", "output": "some result data\nmore data"}
+        ]
+        result = _build_content_summary(content)
+        part = result[0]
+        assert part["output_summary"] == "some result data"
+
+    def test_build_content_summary_passthrough(self):
+        """Verify function_call and metrics passthrough."""
+        from src.api.chat import _build_content_summary
+
+        content = [
+            {
+                "type": "function_call",
+                "name": "search",
+                "arguments": {"q": "test"},
+            },
+            {"type": "metrics", "tokens_in": 100, "tokens_out": 50},
+        ]
+        result = _build_content_summary(content)
+        assert len(result) == 2
+        assert result[0]["type"] == "function_call"
+        assert result[0]["name"] == "search"
+        assert result[1]["type"] == "metrics"
+        assert result[1]["tokens_in"] == 100
+
+    def test_build_content_summary_mixed(self):
+        """Verify mixed content parts are handled correctly."""
+        from src.api.chat import _build_content_summary
+
+        content = [
+            {"type": "reasoning", "text": "Thinking...\nDone."},
+            {"type": "function_call", "name": "calc", "arguments": {"x": 1}},
+            {"type": "function_result", "output": "42"},
+            {"type": "text", "text": "The answer is 42."},
+        ]
+        result = _build_content_summary(content)
+        assert len(result) == 4
+        assert result[0]["type"] == "reasoning"
+        assert "summary" in result[0]
+        assert result[1]["type"] == "function_call"
+        assert result[2]["type"] == "function_result"
+        assert "output_chars" in result[2]
+        assert result[3]["type"] == "text"
+        assert "summary" in result[3]
+
+    def test_build_content_summary_first_line_capped(self):
+        """Verify summary is capped at 200 chars."""
+        from src.api.chat import _build_content_summary
+
+        long_line = "A" * 500
+        content = [{"type": "text", "text": long_line}]
+        result = _build_content_summary(content)
+        assert len(result[0]["summary"]) <= 200
+
+
+class TestGetMessageStep:
+    """Tests for GET /chat/session/{session_id}/message/{message_id}/step/{index}."""
+
+    async def test_get_message_step_success(
+        self, async_client, auth_headers, test_user, test_session, test_model, db_session
+    ):
+        """Verify step endpoint returns full body for reasoning."""
+        from src.db.orm.messages import Message
+        from datetime import datetime, timezone
+
+        msg_id = str(uuid.uuid4())
+        msg = Message(
+            id=msg_id,
+            session_id=test_session.id,
+            sender="assistant",
+            content=[
+                {"type": "reasoning", "text": "Deep reasoning here\n" * 100},
+                {"type": "function_call", "name": "search", "arguments": {"q": "test"}},
+                {"type": "text", "text": "Answer text"},
+            ],
+            is_deleted=False,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        db_session.add(msg)
+        await db_session.flush()
+
+        headers = auth_headers(test_user)
+
+        # Fetch reasoning step
+        resp = await async_client.get(
+            f"/api/chat/session/{test_session.id}/message/{msg_id}/step/0",
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["index"] == 0
+        assert data["type"] == "reasoning"
+        assert data["full_text"] == "Deep reasoning here\n" * 100
+
+        # Fetch function_call step
+        resp = await async_client.get(
+            f"/api/chat/session/{test_session.id}/message/{msg_id}/step/1",
+            headers=headers,
+        )
+        data = resp.json()
+        assert data["index"] == 1
+        assert data["type"] == "function_call"
+        assert data["name"] == "search"
+        assert data["args"] == {"q": "test"}
+
+        # Fetch text step
+        resp = await async_client.get(
+            f"/api/chat/session/{test_session.id}/message/{msg_id}/step/2",
+            headers=headers,
+        )
+        data = resp.json()
+        assert data["index"] == 2
+        assert data["type"] == "text"
+        assert data["full_text"] == "Answer text"
+
+    async def test_get_message_step_out_of_bounds(
+        self, async_client, auth_headers, test_user, test_session, db_session
+    ):
+        """Verify step index out of bounds returns 404."""
+        msg_id = str(uuid.uuid4())
+        headers = auth_headers(test_user)
+        resp = await async_client.get(
+            f"/api/chat/session/{test_session.id}/message/{msg_id}/step/0",
+            headers=headers,
+        )
+        assert resp.status_code == 404
+
+    async def test_get_message_step_other_user_forbidden(
+        self, async_client, auth_headers, test_user, test_session, second_user, test_model, db_session
+    ):
+        """Verify user B cannot fetch steps in user A's session."""
+        from src.db.orm.messages import Message
+        from datetime import datetime, timezone
+
+        msg_id = str(uuid.uuid4())
+        msg = Message(
+            id=msg_id,
+            session_id=test_session.id,
+            sender="assistant",
+            content=[{"type": "reasoning", "text": "secret reasoning"}],
+            is_deleted=False,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        db_session.add(msg)
+        await db_session.flush()
+
+        headers = auth_headers(second_user)
+        resp = await async_client.get(
+            f"/api/chat/session/{test_session.id}/message/{msg_id}/step/0",
+            headers=headers,
+        )
+        assert resp.status_code == 403
+
+    async def test_get_message_step_function_result_output(
+        self, async_client, auth_headers, test_user, test_session, test_model, db_session
+    ):
+        """Verify function_result step returns full_output."""
+        from src.db.orm.messages import Message
+        from datetime import datetime, timezone
+
+        msg_id = str(uuid.uuid4())
+        msg = Message(
+            id=msg_id,
+            session_id=test_session.id,
+            sender="assistant",
+            content=[
+                {"type": "function_result", "output": {"key": "value", "count": 42}},
+            ],
+            is_deleted=False,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        db_session.add(msg)
+        await db_session.flush()
+
+        headers = auth_headers(test_user)
+        resp = await async_client.get(
+            f"/api/chat/session/{test_session.id}/message/{msg_id}/step/0",
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["type"] == "function_result"
+        assert data["full_output"] is not None
+        assert '"key"' in data["full_output"]
+
+    async def test_get_message_step_json_serialized_output(
+        self, async_client, auth_headers, test_user, test_session, test_model, db_session
+    ):
+        """Verify function_result with non-string output is JSON-serialized."""
+        from src.db.orm.messages import Message
+        from datetime import datetime, timezone
+
+        msg_id = str(uuid.uuid4())
+        msg = Message(
+            id=msg_id,
+            session_id=test_session.id,
+            sender="assistant",
+            content=[
+                {"type": "function_result", "output": [1, 2, 3]},
+            ],
+            is_deleted=False,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        db_session.add(msg)
+        await db_session.flush()
+
+        headers = auth_headers(test_user)
+        resp = await async_client.get(
+            f"/api/chat/session/{test_session.id}/message/{msg_id}/step/0",
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["full_output"] == "[1, 2, 3]"

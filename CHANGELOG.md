@@ -49,6 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   front of the message content. No API, database, or UI change; existing messages remain valid. ([#537])
 - **Session Usage Toolbar** — a session-level usage toolbar now renders below the message input with (a) session statistics — turns, steps, tok/s, with a popover showing LLM time, tool time, average TTFT, and TPS; (b) token usage — total, cache hit %, uncached input, cached input, and output; (c) the context ring moved from the chat top bar into that toolbar and its popover now shows a context breakdown (system prompt, tool definitions, messages); and (d) the per-response token chip was removed from assistant messages because it presented a truncated per-message count as a precise measure. ([#531])
 - **Lighter chat history loading** — the chat view requests 10 messages per page instead of 50, so long conversations open with far less content in the browser. Older pages still load on scroll-up, and the API's `limit` contract (default 50, max 100) is unchanged. ([#536])
+- **On-Demand Step Details** — the message list no longer ships reasoning and tool-result bodies. Bulky parts are collapsed to a short preview (`{ chars, summary }`) and the full body is fetched only when a step is expanded, keeping long thinking traces out of the initial payload. ([#539])
 
 ### Fixed
 - Admin session deletion now works correctly. ([#460])
@@ -206,3 +207,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#530]: https://github.com/kainotomo/ph-agent-hub/issues/530
 [#531]: https://github.com/kainotomo/ph-agent-hub/issues/531
 [#536]: https://github.com/kainotomo/ph-agent-hub/issues/536
+[#539]: https://github.com/kainotomo/ph-agent-hub/issues/539

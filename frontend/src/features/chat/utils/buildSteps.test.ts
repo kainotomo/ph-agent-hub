@@ -80,6 +80,56 @@ describe("buildSteps", () => {
     expect(result.answer).toBe("Answer");
   });
 
+  // ---- Issue #539: persisted content arrives as summary-only projections ----
+
+  it("keeps summary-only reasoning (no text) as a step", () => {
+    // list_messages strips reasoning.text and returns {chars, summary}.
+    const result = buildSteps([
+      { type: "reasoning", chars: 12_345, summary: "First line of thinking" },
+      { type: "text", text: "Answer" },
+    ]);
+    expect(result.process).toHaveLength(1);
+    expect(result.process[0].kind).toBe("reasoning");
+    expect(result.process[0].summary).toBe("First line of thinking");
+    expect(result.process[0].chars).toBe(12_345);
+  });
+
+  it("keeps reasoning-only content so the process fold renders", () => {
+    const result = buildSteps([
+      { type: "reasoning", chars: 42, summary: "Thinking only" },
+    ]);
+    expect(result.process.map((s) => s.kind)).toEqual(["reasoning"]);
+    expect(result.answer).toBe("");
+  });
+
+  it("reads snake_case output_summary/output_chars for tool results", () => {
+    const result = buildSteps([
+      { type: "function_call", name: "search", arguments: { q: "x" }, id: "c1" },
+      {
+        type: "function_result",
+        name: "search",
+        is_error: true,
+        output_chars: 42,
+        output_summary: "some output",
+      },
+      { type: "text", text: "Done." },
+    ]);
+    const toolResult = result.process.find((s) => s.kind === "tool_result")!;
+    expect(toolResult.name).toBe("search");
+    expect(toolResult.isError).toBe(true);
+    expect(toolResult.outputSummary).toBe("some output");
+    expect(toolResult.outputChars).toBe(42);
+    expect(toolResult.output).toBeUndefined();
+  });
+
+  it("still skips summary-only reasoning when the summary is blank", () => {
+    const result = buildSteps([
+      { type: "reasoning", chars: 0, summary: "   " },
+      { type: "text", text: "Answer" },
+    ]);
+    expect(result.process).toHaveLength(0);
+  });
+
   it("skips whitespace-only text before answer", () => {
     const result = buildSteps([
       { type: "text", text: "   " },

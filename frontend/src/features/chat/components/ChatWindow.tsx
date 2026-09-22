@@ -613,6 +613,9 @@ export const ChatWindow = React.memo(function ChatWindow({
     // with a filter that only refetches the first page index (most recent messages).
     // Fallback: invalidate the query entirely if refetchPages is unavailable.
     queryClient.invalidateQueries({ queryKey: ["messages", sessionId], refetchType: "active" });
+    // Message edits/regenerations change a step's stored body (Issue #539), so
+    // drop the lazily cached step bodies to avoid rendering stale text.
+    queryClient.invalidateQueries({ queryKey: ["message-step"] });
   }, [sessionId, queryClient]);
 
   // Count user messages for CTA trigger (demo mode only)

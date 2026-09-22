@@ -71,6 +71,34 @@ export interface MessageData {
   updated_at: string;
 }
 
+/** Light-weight metadata for a content part — returned by list_messages. */
+export interface ContentPartSummary {
+  type: string;
+  chars?: number;
+  summary?: string;
+  output_chars?: number;
+  output_summary?: string;
+  name?: string;
+  arguments?: Record<string, unknown>;
+  id?: string;
+  call_id?: string;
+  batch_id?: string;
+  is_error?: boolean;
+}
+
+/** Full body for a single step, fetched on-demand. */
+export interface StepDetailResponse {
+  index: number;
+  type: string;
+  full_text?: string;
+  full_output?: string;
+  name?: string;
+  args?: Record<string, unknown>;
+  is_error?: boolean;
+  call_id?: string;
+  batch_id?: string;
+}
+
 export interface ToolData {
   id: string;
   tenant_id: string;
@@ -335,6 +363,17 @@ export function updateAssistantMessage(
     method: "PATCH",
     body: { content },
   });
+}
+
+/** Fetch the full body of a single step for lazy rendering (Issue #539). */
+export function getMessageStep(
+  sessionId: string,
+  messageId: string,
+  index: number,
+): Promise<StepDetailResponse> {
+  return api<StepDetailResponse>(
+    `/chat/session/${sessionId}/message/${messageId}/step/${index}`,
+  );
 }
 
 // ---------------------------------------------------------------------------

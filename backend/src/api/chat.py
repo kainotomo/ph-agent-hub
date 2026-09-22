@@ -245,6 +245,36 @@ class PaginatedMessagesResponse(BaseModel):
     has_more: bool
 
 
+class MessageContentPartSummary(BaseModel):
+    """Lightweight metadata for a content part — used in list_messages to avoid
+    shipping full reasoning/tool bodies over the wire."""
+    type: str
+    text: str | None = None
+    chars: int | None = None
+    summary: str | None = None
+    output_chars: int | None = None
+    output_summary: str | None = None
+    name: str | None = None
+    arguments: dict | None = None
+    id: str | None = None
+    call_id: str | None = None
+    batch_id: str | None = None
+    is_error: bool | None = None
+
+
+class StepDetailResponse(BaseModel):
+    """Full body for a single step, fetched on-demand via lazy fetch."""
+    index: int
+    type: str
+    full_text: str | None = None
+    full_output: str | None = None
+    name: str | None = None
+    args: dict | None = None
+    is_error: bool | None = None
+    call_id: str | None = None
+    batch_id: str | None = None
+
+
 class SendMessageResponse(BaseModel):
     message_id: str
     content: str
@@ -536,6 +566,72 @@ async def _truncate_after_message(
         await db.delete(msg)
 
     return len(subsequent)
+
+
+def _first_line(text: str) -> str:
+    """Return the first non-empty line of *text*, capped at 200 chars."""
+    for line in text.splitlines():
+        trimmed = line.strip()
+        if trimmed:
+            return trimmed[:200]
+    return text[:200]
+
+
+def _build_content_summary(content: list | None) -> list | None:
+    """Transform a full content JSON array into a summary array.
+
+    Only the bulky bodies are replaced — every other field on the part
+    (``name``, ``is_error``, ``id``, ``call_id``, ``batch_id``, …) is
+    preserved so the collapsed UI stays informative:
+
+    - reasoning → {type, chars, summary=first_line} (no ``text``)
+    - text → unchanged ``text`` plus {chars, summary}
+    - function_result → {type, output_chars, output_summary=first_line}
+      (no ``output``)
+    - function_call / metrics → passthrough (usually small)
+
+    This avoids shipping multi-KB reasoning/tool bodies over the wire
+    in the list endpoint.
+    """
+    if content is None:
+        return None
+    if not isinstance(content, list):
+        return None
+
+    summary: list[dict] = []
+
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+
+        ptype = part.get("type", "")
+
+        if ptype in ("reasoning", "text"):
+            projected = {k: v for k, v in part.items() if k != "text"}
+            text = part.get("text", "") or ""
+            if ptype == "text":
+                # Keep full text so answers render without a lazy fetch.
+                projected["text"] = text
+            projected["chars"] = len(text)
+            projected["summary"] = _first_line(text)
+            summary.append(projected)
+        elif ptype == "function_result":
+            projected = {k: v for k, v in part.items() if k != "output"}
+            output = part.get("output")
+            if output is None:
+                out_str = ""
+            elif isinstance(output, str):
+                out_str = output
+            else:
+                out_str = json.dumps(output)
+            projected["output_chars"] = len(out_str)
+            projected["output_summary"] = _first_line(out_str)
+            summary.append(projected)
+        else:
+            # function_call, metrics, or unknown — passthrough
+            summary.append(dict(part))
+
+    return summary
 
 
 async def _inject_file_content(
@@ -1232,7 +1328,7 @@ async def list_messages(
                     id=m.get("id", ""),
                     session_id=session_id,
                     sender=m.get("sender", "user"),
-                    content=m.get("content"),
+                    content=_build_content_summary(m.get("content")),
                     model_id=m.get("model_id"),
                     model_name=m.get("model_name"),
                     model_provider=m.get("model_provider"),
@@ -1296,7 +1392,7 @@ async def list_messages(
                     id=m.id,
                     session_id=m.session_id,
                     sender=m.sender,
-                    content=m.content,
+                    content=_build_content_summary(m.content),
                     model_id=m.model_id,
                     model_name=m.model.name if m.model else None,
                     model_provider=m.model.provider if m.model else None,
@@ -1312,6 +1408,84 @@ async def list_messages(
             ],
             has_more=has_more,
         )
+
+
+@router.get(
+    "/session/{session_id}/message/{message_id}/step/{index:int}",
+    response_model=StepDetailResponse,
+)
+async def get_message_step(
+    session_id: str,
+    message_id: str,
+    index: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(get_current_user),
+):
+    """Fetch the full body of a single step in a message.
+
+    Used by the frontend to lazy-load reasoning and tool-result bodies
+    only when the user expands a collapsed step row.
+    """
+    data = await _load_session(db, session_id)
+    await _require_session_owner(data, current_user)
+
+    is_temp = data.get("is_temporary", False)
+
+    if is_temp:
+        msgs = await get_temp_messages(session_id)
+        msg = next(
+            (m for m in msgs if m.get("id") == message_id),
+            None,
+        )
+    else:
+        msg_result = await db.execute(
+            select(Message).where(
+                Message.id == message_id,
+                Message.session_id == session_id,
+            )
+        )
+        msg_orm = msg_result.scalar_one_or_none()
+        if msg_orm is None:
+            raise NotFoundError("Message not found")
+        msg = {
+            "id": msg_orm.id,
+            "session_id": msg_orm.session_id,
+            "content": msg_orm.content,
+        }
+
+    if msg is None:
+        raise NotFoundError("Message not found")
+
+    content = msg.get("content") or []
+    if not isinstance(content, list) or index < 0 or index >= len(content):
+        raise NotFoundError("Step index out of bounds")
+
+    part = content[index]
+    if not isinstance(part, dict):
+        raise NotFoundError("Step is not a JSON object")
+
+    ptype = part.get("type", "")
+    response: dict = {
+        "index": index,
+        "type": ptype,
+        "name": part.get("name"),
+        "args": part.get("arguments") if ptype == "function_call" else None,
+        "is_error": part.get("is_error") if ptype == "function_result" else None,
+        "call_id": part.get("call_id"),
+        "batch_id": part.get("batch_id"),
+    }
+
+    if ptype in ("reasoning", "text"):
+        response["full_text"] = part.get("text")
+    elif ptype == "function_result":
+        output = part.get("output")
+        if output is not None:
+            if isinstance(output, str):
+                response["full_output"] = output
+            else:
+                response["full_output"] = json.dumps(output)
+
+    return StepDetailResponse(**response)
 
 
 @router.post(

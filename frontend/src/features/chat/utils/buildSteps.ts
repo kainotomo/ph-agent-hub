@@ -24,6 +24,11 @@ export interface ContentPart {
   id?: string;
   batch_id?: string;
   call_id?: string;
+  /** Preview / size projection for a bulky body (Issue #539). */
+  summary?: string;
+  chars?: number;
+  output_summary?: string;
+  output_chars?: number;
   [k: string]: unknown;
 }
 
@@ -53,6 +58,14 @@ export interface ProcessStep {
   output?: unknown;
   isError?: boolean;
   batchId?: string | null;
+  /** Summary preview for the reasoning body (first line, truncated). */
+  summary?: string;
+  /** Number of chars in the full reasoning body. */
+  chars?: number;
+  /** Summary preview for a function_result output. */
+  outputSummary?: string;
+  /** Number of chars in the full function_result output. */
+  outputChars?: number;
 }
 
 export interface TurnSteps {
@@ -186,8 +199,15 @@ export function buildSteps(content: unknown): TurnSteps {
 
     if (kind === null) continue; // metrics or unknown type → skip
 
-    // Skip whitespace-only text/reasoning
-    if ((kind === "reasoning" || kind === "text") && !part.text?.trim()) continue;
+    // Skip parts that carry neither a body nor a preview.  Persisted reasoning
+    // arrives as {chars, summary} with the bulky `text` stripped (Issue #539),
+    // so checking `text` alone would drop every collapsed thinking row.
+    const hasText = typeof part.text === "string" && part.text.trim().length > 0;
+    const hasSummary =
+      typeof part.summary === "string" && part.summary.trim().length > 0;
+    if ((kind === "reasoning" || kind === "text") && !hasText && !hasSummary) {
+      continue;
+    }
 
     process.push({
       kind,
@@ -199,6 +219,12 @@ export function buildSteps(content: unknown): TurnSteps {
       output: kind === "tool_result" ? part.output : undefined,
       isError: kind === "tool_result" ? !!part.is_error : undefined,
       batchId: part.batch_id ?? null,
+      summary:
+        kind === "reasoning" || kind === "text" ? part.summary : undefined,
+      chars: kind === "reasoning" || kind === "text" ? part.chars : undefined,
+      outputSummary:
+        kind === "tool_result" ? part.output_summary : undefined,
+      outputChars: kind === "tool_result" ? part.output_chars : undefined,
     });
   }
 

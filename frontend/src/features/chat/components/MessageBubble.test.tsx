@@ -152,6 +152,90 @@ describe("MessageBubble", () => {
     expect(screen.getByText("Hello, how can I help?")).toBeInTheDocument();
   });
 
+  it("shows the fold for a message with only summary-only reasoning (Issue #539)", () => {
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MessageBubble
+          message={{
+            id: "msg-summary-reason",
+            session_id: "session-1",
+            sender: "assistant",
+            // list_messages strips reasoning.text and returns {chars, summary}.
+            content: [
+              { type: "reasoning", chars: 4242, summary: "Thinking preview" },
+              { type: "text", text: "Answer text" },
+            ],
+            model_id: "deepseek-r1",
+            model_name: "DeepSeek R1",
+            model_provider: "DeepSeek",
+            tool_calls: null,
+            tokens_in: 100,
+            tokens_out: 200,
+            is_deleted: false,
+            created_at: "2024-01-01T00:00:00Z",
+            updated_at: "2024-01-01T00:00:00Z",
+          } as any}
+          sessionId="session-1"
+          streaming={false}
+        />
+      </QueryClientProvider>,
+    );
+
+    // The dropdown button must exist even without any tool call.
+    expect(screen.getByRole("button", { name: /Thinking preview/i })).toBeInTheDocument();
+    expect(screen.getByText("Answer text")).toBeInTheDocument();
+  });
+
+  it("renders summary-only reasoning and tool steps when the fold is opened", async () => {
+    const user = userEvent.setup();
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MessageBubble
+          message={{
+            id: "msg-summary-tools",
+            session_id: "session-1",
+            sender: "assistant",
+            content: [
+              { type: "reasoning", chars: 4242, summary: "Thinking preview" },
+              { type: "function_call", name: "search", arguments: { q: "x" }, id: "c1" },
+              {
+                type: "function_result",
+                name: "search",
+                is_error: false,
+                output_chars: 18,
+                output_summary: "Found 3 results",
+              },
+              { type: "text", text: "Here you go." },
+            ],
+            model_id: "deepseek-r1",
+            model_name: "DeepSeek R1",
+            model_provider: "DeepSeek",
+            tool_calls: null,
+            tokens_in: 100,
+            tokens_out: 200,
+            is_deleted: false,
+            created_at: "2024-01-01T00:00:00Z",
+            updated_at: "2024-01-01T00:00:00Z",
+          } as any}
+          sessionId="session-1"
+          streaming={false}
+        />
+      </QueryClientProvider>,
+    );
+
+    const foldBtn = screen.getByRole("button", { expanded: false });
+    expect(foldBtn).toBeInTheDocument();
+    expect(foldBtn.textContent).toContain("1 tool call");
+
+    await user.click(foldBtn);
+
+    expect(screen.getByTestId("step-row-reasoning")).toBeInTheDocument();
+    expect(screen.getByTestId("step-row-tool_call")).toBeInTheDocument();
+    expect(screen.getByTestId("step-row-tool_result")).toBeInTheDocument();
+    expect(screen.getByText("Thinking preview")).toBeInTheDocument();
+    expect(screen.getByText("Found 3 results")).toBeInTheDocument();
+  });
+
   it("process fold is closed by default even while streaming", async () => {
     const user = userEvent.setup();
     render(

@@ -6,8 +6,14 @@
 // Fold header: summarizeProcess(steps) with chevron.
 // Body: ordered step rows (reasoning, tool_call, tool_result, text).
 //
+// Lazy-fetch (Issue #539):
+//   When content is summary-only (no full text/output), StepRow fetches the
+//   full body on expand via GET /session/…/message/…/step/:index.
+//
 // Props:
 //   steps: ProcessStep[] — the ordered process steps for this turn.
+//   sessionId: string — session id for lazy fetch.
+//   messageId: string — message id for lazy fetch.
 //   streaming?: boolean — true while the turn is streaming.
 //
 // Open state:
@@ -16,7 +22,7 @@
 //
 // Step rows:
 //   Native <button aria-expanded> header + conditionally mounted body.
-//   Per-row open state as a Set<string> of step.key.
+//   Per-row open state + separate lazy-fetch state.
 //
 // Parallel batch:
 //   parallel rows render "⚡ Running {n} tools in parallel…" header
@@ -24,7 +30,7 @@
 //   Non-parallel batches render member rows flat.
 // =============================================================================
 
-import { useState, useId } from "react";
+import { useState } from "react";
 import {
   CaretDownOutlined,
   CaretRightOutlined,
@@ -34,17 +40,55 @@ import {
   CloseOutlined,
   FileTextOutlined,
 } from "@ant-design/icons";
-import { Tag } from "antd";
+import { Tag, Spin, Button } from "antd";
 import type { ProcessStep, ProcessRowBatch } from "../utils/buildSteps";
-import { groupProcessRows, reasoningSummary } from "../utils/buildSteps";
+import { groupProcessRows, reasoningSummary, summarizeProcess } from "../utils/buildSteps";
+import { getMessageStep } from "../services/chat";
+import { useQuery } from "@tanstack/react-query";
 
 // ---------------------------------------------------------------------------
-// Internal: StepRow
+// Internal: StepRow (lazy-fetch)
 // ---------------------------------------------------------------------------
 
-function StepRow({ step }: { step: ProcessStep }) {
+function StepRow({
+  step,
+  sessionId,
+  messageId,
+}: {
+  step: ProcessStep;
+  sessionId: string;
+  messageId: string;
+}) {
   const [open, setOpen] = useState(false);
   const toggle = () => setOpen((v) => !v);
+
+  // Headers always show summary preview from the compact content.
+
+  // Lazy-fetch full body on expand.
+  // We only need to fetch when the part is summary-only (no text/output
+  // already present) AND the step is expanded.
+  const needsFetch =
+    (step.kind === "reasoning" && !step.text) ||
+    (step.kind === "tool_result" && step.output === undefined) ||
+    (step.kind === "text" && !step.text);
+
+  const { data: fullStep, isLoading, isError, refetch } = useQuery({
+    queryKey: ["message-step", messageId, step.index],
+    queryFn: () => getMessageStep(sessionId, messageId, step.index),
+    enabled: needsFetch && open,
+    staleTime: 10_000, // avoid refetching within 10s
+  });
+
+  // Merge full body into step for rendering.
+  const displayText = fullStep?.full_text ?? step.text ?? step.summary;
+  const displayOutput = fullStep?.full_output ?? step.output;
+  // Shown when the body is not (yet) available — keeps the row informative
+  // even if the lazy fetch fails.
+  const fallbackText =
+    step.kind === "tool_result"
+      ? step.outputSummary ??
+        (step.outputChars ? `${step.outputChars} chars` : "(no output)")
+      : displayText || "(no content)";
 
   const header = (
     <button
@@ -84,9 +128,13 @@ function StepRow({ step }: { step: ProcessStep }) {
               marginLeft: 4,
               maxWidth: 300,
             }}
-            title={step.text}
+            title={displayText}
           >
-            {reasoningSummary(step.text || "", false)}
+            {step.summary
+              ? step.summary
+              : step.chars
+                ? `${step.chars} chars`
+                : reasoningSummary(step.text || "", false)}
           </span>
         </>
       )}
@@ -108,13 +156,31 @@ function StepRow({ step }: { step: ProcessStep }) {
             {step.isError ? <CloseOutlined /> : <CheckOutlined />}{" "}
             {step.name || "result"}
           </Tag>
+          {(step.outputSummary || step.outputChars) && (
+            <span
+              style={{
+                color: "#888",
+                fontSize: 12,
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                marginLeft: 4,
+                maxWidth: 200,
+              }}
+              title={step.outputSummary}
+            >
+              {step.outputSummary || `${step.outputChars} chars`}
+            </span>
+          )}
         </>
       )}
       {step.kind === "text" && (
         <>
           <FileTextOutlined style={{ color: "#888", fontSize: 13 }} />
           <span style={{ color: "#666", fontSize: 12 }}>
-            {step.text?.split("\n")[0]?.slice(0, 60) || "(text)"}
+            {step.summary ||
+              step.text?.split("\n")[0]?.slice(0, 60) ||
+              "(text)"}
           </span>
         </>
       )}
@@ -135,65 +201,102 @@ function StepRow({ step }: { step: ProcessStep }) {
             padding: "4px 12px",
           }}
         >
-          {step.kind === "reasoning" && (
+          {isLoading ? (
             <div
               style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
                 fontSize: 12,
-                whiteSpace: "pre-wrap",
-                margin: 0,
-                color: "#531dab",
+                color: "#888",
               }}
             >
-              {step.text}
+              <Spin size="small" /> Loading…
             </div>
-          )}
-          {step.kind === "tool_call" && (
-            <pre
-              style={{
-                fontSize: 12,
-                margin: 0,
-                maxHeight: 200,
-                overflow: "auto",
-                whiteSpace: "pre-wrap",
-                color: "#333",
-              }}
-            >
-              {step.args
-                ? JSON.stringify(step.args, null, 2)
-                : "(no arguments)"}
-            </pre>
-          )}
-          {step.kind === "tool_result" && (
-            <div
-              style={{
-                fontSize: 12,
-                whiteSpace: "pre-wrap",
-                margin: 0,
-                color: "#333",
-                maxHeight: 200,
-                overflow: "auto",
-              }}
-            >
-              {typeof step.output === "string"
-                ? step.output
-                : step.output !== undefined
-                  ? JSON.stringify(step.output)
-                  : "(no output)"}
+          ) : isError ? (
+            <div data-testid="step-fetch-error">
+              <div
+                style={{
+                  fontSize: 12,
+                  whiteSpace: "pre-wrap",
+                  margin: 0,
+                  color: "#999",
+                }}
+              >
+                {fallbackText}
+              </div>
+              <Button
+                type="link"
+                size="small"
+                style={{ padding: 0, fontSize: 12 }}
+                onClick={() => refetch()}
+              >
+                Retry
+              </Button>
             </div>
-          )}
-          {step.kind === "text" && (
-            <div
-              style={{
-                fontSize: 12,
-                whiteSpace: "pre-wrap",
-                margin: 0,
-                color: "#333",
-                maxHeight: 200,
-                overflow: "auto",
-              }}
-            >
-              {step.text}
-            </div>
+          ) : (
+            <>
+              {step.kind === "reasoning" && (
+                <div
+                  style={{
+                    fontSize: 12,
+                    whiteSpace: "pre-wrap",
+                    margin: 0,
+                    color: "#531dab",
+                  }}
+                >
+                  {displayText}
+                </div>
+              )}
+              {step.kind === "tool_call" && (
+                <pre
+                  style={{
+                    fontSize: 12,
+                    margin: 0,
+                    maxHeight: 200,
+                    overflow: "auto",
+                    whiteSpace: "pre-wrap",
+                    color: "#333",
+                  }}
+                >
+                  {step.args
+                    ? JSON.stringify(step.args, null, 2)
+                    : "(no arguments)"}
+                </pre>
+              )}
+              {step.kind === "tool_result" && (
+                <div
+                  style={{
+                    fontSize: 12,
+                    whiteSpace: "pre-wrap",
+                    margin: 0,
+                    color: "#333",
+                    maxHeight: 200,
+                    overflow: "auto",
+                  }}
+                >
+                  {displayOutput !== undefined
+                    ? typeof displayOutput === "string"
+                      ? displayOutput
+                      : JSON.stringify(displayOutput)
+                    : "(no output)"}
+                </div>
+              )}
+              {step.kind === "text" && (
+                <div
+                  style={{
+                    fontSize: 12,
+                    whiteSpace: "pre-wrap",
+                    margin: 0,
+                    color: "#333",
+                    maxHeight: 200,
+                    overflow: "auto",
+                  }}
+                >
+                  {displayText}
+                </div>
+              )}
+            </>
           )}
         </div>
       )}
@@ -207,11 +310,17 @@ function StepRow({ step }: { step: ProcessStep }) {
 
 interface ProcessStepsProps {
   steps: ProcessStep[];
+  sessionId: string;
+  messageId: string;
 }
 
-export function ProcessSteps({ steps }: ProcessStepsProps) {
+export function ProcessSteps({
+  steps,
+  sessionId,
+  messageId,
+}: ProcessStepsProps) {
   const [open, setOpen] = useState(false);
-  const bodyId = useId();
+  const bodyId = `process-fold-${messageId}`;
 
   if (steps.length === 0) return null;
 
@@ -240,7 +349,11 @@ export function ProcessSteps({ steps }: ProcessStepsProps) {
         }}
       >
         {open ? <CaretDownOutlined style={{ fontSize: 10 }} /> : <CaretRightOutlined style={{ fontSize: 10 }} />}
-        <span>{rows.length === 1 && rows[0].type === "step" ? reasoningSummary(rows[0].step.text || "", false) : ""}</span>
+        <span>
+        {rows.length === 1 && rows[0].type === "step"
+          ? reasoningSummary(rows[0].step.text || rows[0].step.summary || "", false)
+          : summarizeProcess(steps)}
+      </span>
         {rows.length > 1 && (
           <span style={{ marginLeft: 4, color: "#aaa" }}>
             {rows.length} step{rows.length === 1 ? "" : "s"}
@@ -251,7 +364,14 @@ export function ProcessSteps({ steps }: ProcessStepsProps) {
         <div id={bodyId} style={{ paddingLeft: 16 }}>
           {rows.map((row, i) => {
             if (row.type === "step") {
-              return <StepRow key={row.step.key} step={row.step} />;
+              return (
+                <StepRow
+                  key={row.step.key}
+                  step={row.step}
+                  sessionId={sessionId}
+                  messageId={messageId}
+                />
+              );
             }
             const batch = row as ProcessRowBatch;
             return (
@@ -269,7 +389,12 @@ export function ProcessSteps({ steps }: ProcessStepsProps) {
                   </div>
                 )}
                 {batch.steps.map((s) => (
-                  <StepRow key={s.key} step={s} />
+                  <StepRow
+                    key={s.key}
+                    step={s}
+                    sessionId={sessionId}
+                    messageId={messageId}
+                  />
                 ))}
               </div>
             );

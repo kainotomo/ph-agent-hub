@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Process Steps Fold** — one collapsible fold per assistant response showing every step (reasoning, tool call, tool result) in exact order. Replaces the separate "Reasoning" and "Tool Activity" dropdowns. ([#538])
 - **Bulk Move Chats** — select multiple chats in the sidebar and move them to a folder (or Unfiled) in one action, mirroring bulk delete. ([#526])
 - **Chat Folders** — organise chat sessions into collapsible folders in the sidebar, with native drag & drop and a Move-to-folder menu. ([#526])
 - **Parallel Tool Execution** — multiple independent tool calls run concurrently via `asyncio.gather`. Parallel batches count as a single step toward `AGENT_MAX_STEPS`. ([#447])

@@ -3,19 +3,17 @@
 // =============================================================================
 // Renders user/assistant message; markdown via react-markdown+remark-gfm;
 // code blocks via react-syntax-highlighter; includes MessageFeedback;
-// tool activity display for tool_start/tool_result events.
+// process fold via ProcessSteps (Issue #538).
 // =============================================================================
 
 import React, { useState, useEffect } from "react";
-import { Typography, Space, Collapse, Tag, Button, Popconfirm, App, Spin, Input } from "antd";
+import { Typography, Space, Tag, Button, Popconfirm, App, Spin, Input } from "antd";
 import {
   UserOutlined,
   RobotOutlined,
-  ToolOutlined,
   EditOutlined,
   DeleteOutlined,
   RedoOutlined,
-  BulbOutlined,
   FileOutlined,
   CopyOutlined,
   CompressOutlined,
@@ -29,10 +27,12 @@ import { MessageFeedback } from "./MessageFeedback";
 import type { MessageData } from "../services/chat";
 import { listMessageUploads } from "../services/chat";
 import { getToken } from "../../../services/api";
+import { buildSteps } from "../utils/buildSteps";
+import { ProcessSteps } from "./ProcessSteps";
 
-const { Text, Paragraph } = Typography;
+const { Text } = Typography;
 
-function textUtilsToString(items: ContentItem[]): string {
+function textUtilsToString(items: { text?: string }[]): string {
   return items.map((item) => item.text || "").join("\n").trim();
 }
 
@@ -41,36 +41,6 @@ function truncateMessagePreview(text: string): string {
   const maxChars = 700;
   if (compact.length <= maxChars) return compact;
   return `${compact.slice(0, maxChars).trimEnd()}…`;
-}
-
-// ---------------------------------------------------------------------------
-// Internal: parse content into displayable items
-// ---------------------------------------------------------------------------
-
-interface ContentItem {
-  type: string;
-  text?: string;
-  name?: string;
-  arguments?: Record<string, unknown>;
-  output?: string;
-  is_error?: boolean;
-  id?: string;
-  /** Issue #447 — groups tools that executed in the same parallel batch */
-  batch_id?: string;
-}
-
-function parseContent(content: unknown): ContentItem[] {
-  if (!content) return [];
-  if (Array.isArray(content)) {
-    return content as ContentItem[];
-  }
-  if (typeof content === "string") {
-    return [{ type: "text", text: content }];
-  }
-  if (typeof content === "object" && content !== null) {
-    return [content as ContentItem];
-  }
-  return [];
 }
 
 // ---------------------------------------------------------------------------
@@ -155,15 +125,17 @@ function MessageBubbleInner({
 }: MessageBubbleProps) {
   const isUser = message.sender === "user";
   const isSystem = message.sender === "system";
-  const contentItems = parseContent(message.content);
+  const isAssistant = message.sender === "assistant";
 
-  // Separate text, reasoning, and tool events
-  const textItems = contentItems.filter((c) => c.type === "text");
-  const reasoningItems = contentItems.filter((c) => c.type === "reasoning");
-  const toolItems = contentItems.filter(
-    (c) => c.type === "function_call" || c.type === "function_result",
-  );
+  // Issue #538: build ordered process steps from content
+  const turn = isAssistant ? buildSteps(message.content) : null;
+  const answerText = turn ? turn.answer : "";
 
+  // For user messages, derive textItems from content directly.
+  // For assistant messages, use text steps from the process.
+  const textItems = isUser
+    ? (message.content || []).filter((c: any) => c.type === "text").map((c: any) => ({ text: c.text }))
+    : (turn ? turn.process.filter((s) => s.kind === "text").map((s) => ({ text: s.text })) : []);
   const rawText = textUtilsToString(textItems);
   const previewText = truncateMessagePreview(rawText);
   const isLatestVisibleMessage = isUser ? isLatestUserMessage : !isSystem && isLatestAssistantMessage;
@@ -174,13 +146,6 @@ function MessageBubbleInner({
   const [isExpandedText, setIsExpandedText] = useState(false);
   const [editContent, setEditContent] = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
-
-  const [reasoningExpanded, setReasoningExpanded] = useState(false);
-
-  // Reset expanded state when the message changes (e.g. after Virtuoso remount)
-  useEffect(() => {
-    setReasoningExpanded(false);
-  }, [message.id]);
 
   // Reset editing state when the message changes (e.g. after Virtuoso remount)
   useEffect(() => {
@@ -233,7 +198,7 @@ function MessageBubbleInner({
   });
 
   return (
-    <div style={{ marginBottom: 16 }}>
+    <div style={{ marginBottom: 16 }} data-testid={`msg-${message.id}`}>
       {/* Sender indicator */}
       <div style={{ display: "flex", justifyContent: isUser ? "flex-end" : "flex-start", marginBottom: 2 }}>
         <Space style={{ marginLeft: isUser ? undefined : 4 }} size={2}>
@@ -270,57 +235,9 @@ function MessageBubbleInner({
 
       {/* Bubble */}
       <div style={bubbleStyle}>
-        {/* Reasoning panel — collapsed by default; user-expandable, same as
-            Tool Activity below. No auto-expand while streaming. */}
-        {reasoningItems.length > 0 && (
-          <Collapse
-            ghost
-            size="small"
-            destroyOnHidden
-            activeKey={reasoningExpanded ? ["reasoning"] : []}
-            onChange={(keys) =>
-              setReasoningExpanded(
-                Array.isArray(keys) ? keys.includes("reasoning") : keys === "reasoning",
-              )
-            }
-            items={[
-              {
-                key: "reasoning",
-                label: (
-                  <Space>
-                    <BulbOutlined style={{ color: "#722ed1" }} />
-                    <Text style={{ fontSize: 12 }}>
-                      Reasoning ({reasoningItems.map((r) => r.text || "").join("").length} chars)
-                    </Text>
-                  </Space>
-                ),
-                children: (
-                  <div
-                    style={{
-                      maxHeight: 300,
-                      overflow: "auto",
-                      borderLeft: "3px solid #d3adf7",
-                      padding: "4px 12px",
-                    }}
-                  >
-                    <Typography.Paragraph
-                      style={{
-                        fontSize: 12,
-                        whiteSpace: "pre-wrap",
-                        margin: 0,
-                        color: "#531dab",
-                      }}
-                    >
-                      {reasoningItems.map((r) => r.text || "").join("")}
-                    </Typography.Paragraph>
-                  </div>
-                ),
-                style: {
-                  marginBottom: textItems.length > 0 ? 8 : 0,
-                },
-              },
-            ]}
-          />
+        {/* Issue #538: process fold — one line per turn with ordered steps */}
+        {turn && turn.process.length > 0 && (
+          <ProcessSteps key={message.id} steps={turn.process} streaming={streaming} />
         )}
 
         {/* Inline edit mode for assistant messages */}
@@ -366,7 +283,7 @@ function MessageBubbleInner({
           </div>
         ) : (
           <>
-            {textItems.length === 0 ? null : (
+            {(isUser ? textItems.length > 0 : answerText.trim().length > 0) ? (
               <div style={isUser ? undefined : { maxWidth: 750 }}>
                 {isUser ? (
                   <Text style={{ color: "#fff", whiteSpace: "pre-wrap" }}>
@@ -408,7 +325,7 @@ function MessageBubbleInner({
                           },
                         }}
                       >
-                        {textItems.map((item) => item.text || "").join("\n")}
+                        {answerText}
                       </ReactMarkdown>
                     )}
                   </div>
@@ -426,105 +343,10 @@ function MessageBubbleInner({
                   </div>
                 )}
               </div>
-            )}
+            ) : null}
           </>
         )}
 
-        {/* Tool calls / results */}
-        {toolItems.length > 0 && (() => {
-          // Issue #447 — group tools by batch_id for parallel execution display.
-          // Tools without batch_id (sequential) each get their own group.
-          const grouped: { batchId: string | null; items: ContentItem[] }[] = [];
-          for (const item of toolItems) {
-            const bid = item.batch_id || null;
-            const last = grouped[grouped.length - 1];
-            if (last && last.batchId === bid) {
-              last.items.push(item);
-            } else {
-              grouped.push({ batchId: bid, items: [item] });
-            }
-          }
-
-          return (
-          <Collapse
-            ghost
-            size="small"
-            items={[
-              {
-                key: "tools",
-                label: (
-                  <Space>
-                    <ToolOutlined />
-                    <Text style={{ fontSize: 12, color: isUser ? "#fff" : undefined }}>
-                      Tool Activity ({toolItems.length})
-                    </Text>
-                  </Space>
-                ),
-                children: (
-                  <div style={{ maxHeight: 200, overflow: "auto" }}>
-                    {grouped.map((group, gi) => {
-                      const isParallel = group.batchId !== null && group.items.length > 1;
-                      return (
-                        <div key={gi} style={{ marginBottom: 8 }}>
-                          {/* Parallel batch indicator */}
-                          {isParallel && (
-                            <div style={{
-                              fontSize: 11,
-                              color: "#1677ff",
-                              marginBottom: 4,
-                              fontWeight: 500,
-                            }}>
-                              ⚡ Running {group.items.length} tools in parallel…
-                            </div>
-                          )}
-                          {group.items.map((item, i) => (
-                            <div key={i} style={{ marginBottom: 4, paddingLeft: isParallel ? 12 : 0 }}>
-                              {item.type === "function_call" ? (
-                                <Tag color="blue">
-                                  🔧 {item.name}
-                                </Tag>
-                              ) : (
-                                <div>
-                                  <Tag
-                                    color={
-                                      item.is_error
-                                        ? "red"
-                                        : "green"
-                                    }
-                                  >
-                                    ✓ {item.name || "result"}
-                                  </Tag>
-                                  {item.output && (
-                                    <Paragraph
-                                      ellipsis={{ rows: 2 }}
-                                      style={{
-                                        fontSize: 12,
-                                        margin: "4px 0 0 0",
-                                        color: isUser ? "#fff" : "#666",
-                                      }}
-                                    >
-                                      {typeof item.output === "string"
-                                        ? item.output
-                                        : JSON.stringify(item.output)}
-                                    </Paragraph>
-                                  )}
-                                </div>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      );
-                    })}
-                  </div>
-                ),
-                style: {
-                  marginTop: 8,
-                },
-              },
-            ]}
-          />
-          );
-        })()}
         {/* Attached files (user messages only) */}
         {isUser && attachedFiles && attachedFiles.length > 0 && (
           <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 4 }}>
@@ -586,7 +408,7 @@ function MessageBubbleInner({
             size="small"
             icon={<CopyOutlined />}
             onClick={() => {
-              const text = textItems.map((t) => t.text || "").join("\n");
+              const text = answerText;
               navigator.clipboard.writeText(text).then(() => {
                 messageApi.success("Copied to clipboard");
               }).catch(() => {
@@ -601,7 +423,7 @@ function MessageBubbleInner({
               size="small"
               icon={<EditOutlined />}
               onClick={() => {
-                const text = textItems.map((t) => t.text || "").join("\n");
+                const text = answerText;
                 if (hasSubsequentMessages) {
                   modal.confirm({
                     title: "Edit this response?",

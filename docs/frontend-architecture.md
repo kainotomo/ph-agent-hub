@@ -325,6 +325,7 @@ It does **not** include any admin functionality.
   /components
     ChatWindow.tsx
     MessageBubble.tsx
+    ProcessSteps.tsx
     MessageBranchNav.tsx
     MessageFeedback.tsx
     ModelSelector.tsx
@@ -347,6 +348,9 @@ It does **not** include any admin functionality.
   /hooks
   /services
     chat.ts
+  /utils
+    buildSteps.ts — parses content parts into { process: ProcessStep[], answer: string }
+    liveSegments.ts — mirrors backend _accumulate_stream_state for SSE streaming
   /state
 ```
 

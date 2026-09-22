@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MessageBubble } from "./MessageBubble";
@@ -85,15 +85,39 @@ describe("MessageBubble", () => {
     expect(screen.getByRole("button", { name: /show less/i })).toBeInTheDocument();
     expect(screen.getByText(longText)).toBeInTheDocument();
   });
-});
 
-// ---------------------------------------------------------------------------
-// Reasoning panel — Issue #524: must stay collapsed by default
-// ---------------------------------------------------------------------------
+  it("shows no process fold for assistant messages without process steps", () => {
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MessageBubble
+          message={{
+            id: "msg-no-process",
+            session_id: "session-1",
+            sender: "assistant",
+            content: [{ type: "text", text: "Hello, how can I help?" }],
+            model_id: "deepseek-r1",
+            model_name: "DeepSeek R1",
+            model_provider: "DeepSeek",
+            tool_calls: null,
+            tokens_in: 100,
+            tokens_out: 200,
+            is_deleted: false,
+            created_at: "2024-01-01T00:00:00Z",
+            updated_at: "2024-01-01T00:00:00Z",
+          } as any}
+          sessionId="session-1"
+          streaming={false}
+        />
+      </QueryClientProvider>,
+    );
 
-describe("MessageBubble — reasoning panel (Issue #524)", () => {
-  function renderAssistantWithReasoning(overrides: Partial<React.ComponentProps<typeof MessageBubble>> = {}) {
-    return render(
+    // No process fold header for messages with no process steps
+    expect(screen.queryByRole("button", { name: /step/i })).not.toBeInTheDocument();
+    expect(screen.getByText("Hello, how can I help?")).toBeInTheDocument();
+  });
+
+  it("shows process fold header for assistant messages with reasoning", () => {
+    render(
       <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
         <MessageBubble
           message={{
@@ -101,7 +125,7 @@ describe("MessageBubble — reasoning panel (Issue #524)", () => {
             session_id: "session-1",
             sender: "assistant",
             content: [
-              { type: "reasoning", text: "REASONING_MARKER_XYZ" },
+              { type: "reasoning", text: "Let me think about this..." },
               { type: "text", text: "Hello, how can I help?" },
             ],
             model_id: "deepseek-r1",
@@ -115,52 +139,176 @@ describe("MessageBubble — reasoning panel (Issue #524)", () => {
             updated_at: "2024-01-01T00:00:00Z",
           } as any}
           sessionId="session-1"
-          {...overrides}
+          streaming={false}
         />
       </QueryClientProvider>,
     );
-  }
 
-  it("reasoning panel is collapsed (not visible) on first render", () => {
-    renderAssistantWithReasoning({ streaming: true });
-
-    // Header must be visible but panel content must be absent
-    expect(screen.getByText(/Reasoning \(\d+ chars\)/i)).toBeInTheDocument();
-    expect(screen.queryByText("REASONING_MARKER_XYZ")).not.toBeInTheDocument();
+    // Process fold header should be visible (shows reasoning summary for single step)
+    expect(screen.getByRole("button", { name: /Let me think/i })).toBeInTheDocument();
+    // Fold is collapsed (aria-expanded=false)
+    expect(screen.getByRole("button", { expanded: false })).toHaveAttribute("aria-expanded", "false");
+    // Answer text should be visible
+    expect(screen.getByText("Hello, how can I help?")).toBeInTheDocument();
   });
 
-  it("reasoning panel stays collapsed while streaming", () => {
-    renderAssistantWithReasoning({ streaming: true });
+  it("process fold is open while streaming", () => {
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MessageBubble
+          message={{
+            id: "msg-streaming",
+            session_id: "session-1",
+            sender: "assistant",
+            content: [
+              { type: "reasoning", text: "Thinking..." },
+              { type: "text", text: "Hello" },
+            ],
+            model_id: "deepseek-r1",
+            model_name: "DeepSeek R1",
+            model_provider: "DeepSeek",
+            tool_calls: null,
+            tokens_in: 100,
+            tokens_out: 200,
+            is_deleted: false,
+            created_at: "2024-01-01T00:00:00Z",
+            updated_at: "2024-01-01T00:00:00Z",
+          } as any}
+          sessionId="session-1"
+          streaming={true}
+        />
+      </QueryClientProvider>,
+    );
 
-    expect(screen.getByText(/Reasoning \(\d+ chars\)/i)).toBeInTheDocument();
-    expect(screen.queryByText("REASONING_MARKER_XYZ")).not.toBeInTheDocument();
+    // Fold should be open while streaming
+    expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
+    // Content visible in body (appears twice: once in header summary, once in body)
+    expect(screen.getAllByText("Thinking...").length).toBe(2);
+    expect(screen.getByText("Hello")).toBeInTheDocument();
   });
 
-  it("reasoning panel stays collapsed when not streaming", () => {
-    renderAssistantWithReasoning({ streaming: false });
-
-    expect(screen.getByText(/Reasoning \(\d+ chars\)/i)).toBeInTheDocument();
-    expect(screen.queryByText("REASONING_MARKER_XYZ")).not.toBeInTheDocument();
-  });
-
-  it("expands reasoning content on header click", async () => {
+  it("expands process fold on header click when collapsed", async () => {
     const user = userEvent.setup();
-    renderAssistantWithReasoning();
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MessageBubble
+          message={{
+            id: "msg-expand",
+            session_id: "session-1",
+            sender: "assistant",
+            content: [
+              { type: "reasoning", text: "Let me think..." },
+              { type: "text", text: "Answer text" },
+            ],
+            model_id: "deepseek-r1",
+            model_name: "DeepSeek R1",
+            model_provider: "DeepSeek",
+            tool_calls: null,
+            tokens_in: 100,
+            tokens_out: 200,
+            is_deleted: false,
+            created_at: "2024-01-01T00:00:00Z",
+            updated_at: "2024-01-01T00:00:00Z",
+          } as any}
+          sessionId="session-1"
+          streaming={false}
+        />
+      </QueryClientProvider>,
+    );
 
-    // Should be collapsed initially
-    expect(screen.queryByText("REASONING_MARKER_XYZ")).not.toBeInTheDocument();
+    // Should be collapsed initially (only in header, not in body)
+    expect(screen.getByRole("button", { expanded: false })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getAllByText("Let me think...").length).toBe(1);
 
-    // Click the collapse header to expand
-    const headerBtn = screen.getByRole("button", { name: /Reasoning \(\d+ chars\)/i });
+    // Click the fold header to expand
+    const headerBtn = screen.getByRole("button", { name: /Let me think/i });
     await user.click(headerBtn);
 
-    // Panel should now be visible
-    expect(screen.getByText("REASONING_MARKER_XYZ")).toBeInTheDocument();
+    // Content should now be visible in body (appears twice: header + body)
+    expect(screen.getAllByText("Let me think...").length).toBe(2);
+    expect(screen.getByText("Answer text")).toBeInTheDocument();
+  });
 
-    // Click again to collapse (jsdom needs waitFor due to CSSMotion animations)
-    await user.click(headerBtn);
-    await waitFor(() => {
-      expect(screen.queryByText("REASONING_MARKER_XYZ")).not.toBeInTheDocument();
-    });
+  it("shows tool call steps in process fold", () => {
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MessageBubble
+          message={{
+            id: "msg-tools",
+            session_id: "session-1",
+            sender: "assistant",
+            content: [
+              { type: "reasoning", text: "I'll search for that." },
+              { type: "function_call", name: "web_search", arguments: { query: "test" }, call_id: "call-1", batch_id: null },
+              { type: "function_result", name: "web_search", output: "Results found", call_id: "call-1", batch_id: null },
+              { type: "text", text: "Here are the results." },
+            ],
+            model_id: "deepseek-r1",
+            model_name: "DeepSeek R1",
+            model_provider: "DeepSeek",
+            tool_calls: null,
+            tokens_in: 100,
+            tokens_out: 200,
+            is_deleted: false,
+            created_at: "2024-01-01T00:00:00Z",
+            updated_at: "2024-01-01T00:00:00Z",
+          } as any}
+          sessionId="session-1"
+          streaming={false}
+        />
+      </QueryClientProvider>,
+    );
+
+    // Process fold header exists (button with aria-expanded)
+    const foldBtn = screen.getByRole("button", { expanded: false });
+    expect(foldBtn).toBeInTheDocument();
+    // Content is collapsed by default (non-streaming)
+    expect(foldBtn).toHaveAttribute("aria-expanded", "false");
+    // Answer text should be visible
+    expect(screen.getByText("Here are the results.")).toBeInTheDocument();
+  });
+
+  it("shows tool call steps expanded when streaming", async () => {
+    const user = userEvent.setup();
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MessageBubble
+          message={{
+            id: "msg-tools-streaming",
+            session_id: "session-1",
+            sender: "assistant",
+            content: [
+              { type: "reasoning", text: "I'll search for that." },
+              { type: "function_call", name: "web_search", arguments: { query: "test" }, call_id: "call-1", batch_id: null },
+              { type: "function_result", name: "web_search", output: "Results found", call_id: "call-1", batch_id: null },
+              { type: "text", text: "Here are the results." },
+            ],
+            model_id: "deepseek-r1",
+            model_name: "DeepSeek R1",
+            model_provider: "DeepSeek",
+            tool_calls: null,
+            tokens_in: 100,
+            tokens_out: 200,
+            is_deleted: false,
+            created_at: "2024-01-01T00:00:00Z",
+            updated_at: "2024-01-01T00:00:00Z",
+          } as any}
+          sessionId="session-1"
+          streaming={true}
+        />
+      </QueryClientProvider>,
+    );
+
+    // Fold is open while streaming
+    expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
+    expect(screen.getByText("I'll search for that.")).toBeInTheDocument();
+    // web_search appears in both tool_call and tool_result tags
+    expect(screen.getAllByText("web_search").length).toBe(2);
+    // Click the tool_result step header to expand it (header text is "down tool check web_search")
+    const resultHeader = screen.getByRole("button", { name: /down tool check web_search/i });
+    await user.click(resultHeader);
+    // Tool result output is now visible
+    expect(screen.getByText("Results found")).toBeInTheDocument();
+    expect(screen.getByText("Here are the results.")).toBeInTheDocument();
   });
 });

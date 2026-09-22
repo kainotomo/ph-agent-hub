@@ -51,6 +51,13 @@ import {
   SessionUsageToolbar,
 } from "./";
 import { AUTO_ROUTE_VALUE } from "./ModelSelector";
+import type { ContentPart } from "../utils/buildSteps";
+import {
+  appendReasoningDelta,
+  appendToolStart,
+  appendToolResult,
+  buildLiveContent,
+} from "../utils/liveSegments";
 
 const { TextArea } = Input;
 const { Text } = Typography;
@@ -218,7 +225,7 @@ export const ChatWindow = React.memo(function ChatWindow({
   }, [inputValue, isPending, sessionId]);
 
   const [streamingContent, setStreamingContent] = useState("");
-  const [streamingReasoningContent, setStreamingReasoningContent] = useState("");
+  const [streamingSegments, setStreamingSegments] = useState<ContentPart[]>([]);
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null);
   /**
    * True between `message_complete` and the arrival of the persisted assistant
@@ -252,7 +259,7 @@ export const ChatWindow = React.memo(function ChatWindow({
   const [sessionTemperature, setSessionTemperature] = useState<number | null>(
     temperature ?? null,
   );
-  const [toolEvents, setToolEvents] = useState<Array<{type: string; data: Record<string, unknown>}>>([]);
+  // toolEvents removed — replaced by streamingSegments (Issue #538)
   const [followUpQuestions, setFollowUpQuestions] = useState<string[]>([]);
   const [finalizing, setFinalizing] = useState(false);
 
@@ -721,11 +728,10 @@ export const ChatWindow = React.memo(function ChatWindow({
     // Clear stopped-session tracking so a new session can reconnect.
     stoppedSessionsRef.current.clear();
     setStreamingContent("");
-    setStreamingReasoningContent("");
+    setStreamingSegments([]);
     setStreamingMessageId(null);
     setStreamError(null);
     setHandoffPending(false);
-    setToolEvents([]);
     setFollowUpQuestions([]);
     setStreamingTokens(null);
     setPendingUserMessage(null);
@@ -888,7 +894,7 @@ export const ChatWindow = React.memo(function ChatWindow({
   useEffect(() => {
     if (demo && messages && messages.length > 0 && messages.length > prevMessagesLenRef.current && streamingMessageId) {
       setStreamingContent("");
-      setStreamingReasoningContent("");
+      setStreamingSegments([]);
       setStreamingMessageId(null);
     }
     prevMessagesLenRef.current = messages?.length ?? 0;
@@ -918,9 +924,8 @@ export const ChatWindow = React.memo(function ChatWindow({
       // Persisted row has arrived — clear the local bubble and end the
       // handoff window so Virtuoso stops following output.
       setStreamingContent("");
-      setStreamingReasoningContent("");
+      setStreamingSegments([]);
       setStreamingMessageId(null);
-      setToolEvents([]);
       setStreamingTokens(null);
       setHandoffPending(false);
     }
@@ -990,13 +995,17 @@ export const ChatWindow = React.memo(function ChatWindow({
         },
         onReasoningToken: (delta: string, msgId: string) => {
           setStreamingMessageId((prev) => prev ?? msgId);
-          setStreamingReasoningContent((prev) => prev + delta);
+          setStreamingSegments((prev) => appendReasoningDelta(prev, delta));
         },
         onToolStart: (data: Record<string, unknown>) => {
-          setToolEvents((prev) => [...prev, { type: "function_call", data }]);
+          setStreamingSegments((prev) =>
+            appendToolStart(prev, data as { tool_name: string; tool_call_id?: string; arguments?: Record<string, unknown>; batch_id?: string })
+          );
         },
         onToolResult: (data: Record<string, unknown>) => {
-          setToolEvents((prev) => [...prev, { type: "function_result", data }]);
+          setStreamingSegments((prev) =>
+            appendToolResult(prev, data as { tool_name?: string; tool_call_id?: string; success?: boolean; result_summary?: unknown; batch_id?: string })
+          );
         },
         onStepComplete: () => { /* No UI update needed */ },
         onFollowUpQuestions: (questions: string[]) => {
@@ -1025,9 +1034,8 @@ export const ChatWindow = React.memo(function ChatWindow({
           // messages per turn; the refetch on message_complete will
           // show the previous turn's exchange cleanly).
           setStreamingContent("");
-          setStreamingReasoningContent("");
+          setStreamingSegments([]);
           setStreamingMessageId(null);
-          setToolEvents([]);
           // Invalidate now so the PREVIOUS turn's persisted messages
           // (user + assistant) appear from the DB.  The NEW turn's user
           // message is being persisted by run_agent_stream right after
@@ -1113,10 +1121,10 @@ export const ChatWindow = React.memo(function ChatWindow({
           if (isRegenerate) setRegeneratingMsgId(null);
           if (isSend || isEdit || isAutopilot) setPendingUserMessage(null);
 
-          // In normal chat send mode we keep the streaming bubble (and its
-          // tool events) visible during the handoff to the persisted message.
+          // In normal chat send mode we keep the streaming bubble visible
+          // during the handoff to the persisted message.
           // The reconciliation effect clears it once the persisted row arrives.
-          if (!isAutopilot && !(isSend && !demo)) setToolEvents([]);
+          if (!isAutopilot && !(isSend && !demo)) setStreamingSegments([]);
           if (data.tokens_in || data.tokens_out) {
             setStreamingTokens({
               tokens_in: data.tokens_in || 0,
@@ -1167,7 +1175,7 @@ export const ChatWindow = React.memo(function ChatWindow({
             // Regenerate / Edit: clear streaming state and refetch.
             setHandoffPending(false);
             setStreamingContent("");
-            setStreamingReasoningContent("");
+            setStreamingSegments([]);
             setStreamingMessageId(null);
             refetchLatestPage();
             // Removed: session query not needed for lazy sessions
@@ -1217,9 +1225,8 @@ export const ChatWindow = React.memo(function ChatWindow({
             // lands.
             setHandoffPending(false);
             setStreamingContent("");
-            setStreamingReasoningContent("");
+            setStreamingSegments([]);
             setStreamingMessageId(null);
-            setToolEvents([]);
             setStreamingTokens(null);
           }
           // Stop the live duration timer when the stream ends.
@@ -1258,8 +1265,8 @@ export const ChatWindow = React.memo(function ChatWindow({
     },
     [
       sessionId, queryClient, demo,
-      setStreamingContent, setStreamingReasoningContent, setStreamingMessageId,
-      setStreamError, setToolEvents, setFollowUpQuestions, setStreamingTokens,
+      setStreamingContent, setStreamingSegments, setStreamingMessageId,
+      setStreamError, setFollowUpQuestions, setStreamingTokens,
       setPendingUserMessage, setRegeneratingMsgId, setEditingMsgId,
       setHandoffPending,
       fetchFollowUpQuestions, refetchLatestPage,
@@ -1275,9 +1282,8 @@ export const ChatWindow = React.memo(function ChatWindow({
     const content = inputValue.trim();
     setInputValue("");
     setStreamingContent("");
-    setStreamingReasoningContent("");
+    setStreamingSegments([]);
     setStreamError(null);
-    setToolEvents([]);
     setFollowUpQuestions([]);
     setStreamingTokens(null);
 
@@ -1306,9 +1312,8 @@ export const ChatWindow = React.memo(function ChatWindow({
           // It gets cleared by the useEffect below when messages update.
           setPendingUserMessage(null);
           setStreamingContent("");
-          setStreamingReasoningContent("");
+          setStreamingSegments([]);
           setStreamingMessageId(null);
-          setToolEvents([]);
           if (data.tokens_in || data.tokens_out) {
             setStreamingTokens({ tokens_in: data.tokens_in || 0, tokens_out: data.tokens_out || 0 });
           }
@@ -1447,10 +1452,9 @@ export const ChatWindow = React.memo(function ChatWindow({
     // onClose handler refetches messages → the partial response becomes
     // a permanent message bubble.
     setStreamingContent("");
-    setStreamingReasoningContent("");
+    setStreamingSegments([]);
     setStreamingMessageId(null);
     setStreamingTokens(null);
-    setToolEvents([]);
     // A manual stop aborts this turn — no handoff to the persisted message.
     setHandoffPending(false);
     // Stop the live duration timer when the user manually stops.
@@ -1519,9 +1523,8 @@ export const ChatWindow = React.memo(function ChatWindow({
     setHandoffPending(false);
     setRegeneratingMsgId(messageId);
     setStreamingContent("");
-    setStreamingReasoningContent("");
+    setStreamingSegments([]);
     setStreamError(null);
-    setToolEvents([]);
     setFollowUpQuestions([]);
     setStreamingTokens(null);
 
@@ -1557,13 +1560,17 @@ export const ChatWindow = React.memo(function ChatWindow({
       },
       onReasoningToken: (delta: string, msgId: string) => {
         setStreamingMessageId((prev) => prev ?? msgId);
-        setStreamingReasoningContent((prev) => prev + delta);
+        setStreamingSegments((prev) => appendReasoningDelta(prev, delta));
       },
       onToolStart: (data: Record<string, unknown>) => {
-        setToolEvents((prev) => [...prev, { type: "function_call", data }]);
+        setStreamingSegments((prev) =>
+          appendToolStart(prev, data as { tool_name: string; tool_call_id?: string; arguments?: Record<string, unknown>; batch_id?: string })
+        );
       },
       onToolResult: (data: Record<string, unknown>) => {
-        setToolEvents((prev) => [...prev, { type: "function_result", data }]);
+        setStreamingSegments((prev) =>
+          appendToolResult(prev, data as { tool_name?: string; tool_call_id?: string; success?: boolean; result_summary?: unknown; batch_id?: string })
+        );
       },
       onMemoryUpdated: (data: { action: string; key: string | null; success: boolean; tool_name: string }) => {
         queryClient.invalidateQueries({ queryKey: ["memory", sessionId] });
@@ -1586,9 +1593,8 @@ export const ChatWindow = React.memo(function ChatWindow({
       },
       onAutopilotTurnStart: (data: { turn: number; max_turns: number }) => {
         setStreamingContent("");
-        setStreamingReasoningContent("");
+        setStreamingSegments([]);
         setStreamingMessageId(null);
-        setToolEvents([]);
         refetchLatestPage();
         setAutopilotState((prev) => ({
           ...prev,
@@ -1650,7 +1656,6 @@ export const ChatWindow = React.memo(function ChatWindow({
       onMessageComplete: (data: { message_id: string; tokens_in?: number; tokens_out?: number }) => {
         if (regeneratingMsgId === messageId) setRegeneratingMsgId(null);
         setPendingUserMessage(null);
-        setToolEvents([]);
         if (data.tokens_in || data.tokens_out) {
           setStreamingTokens({
             tokens_in: data.tokens_in || 0,
@@ -1664,7 +1669,6 @@ export const ChatWindow = React.memo(function ChatWindow({
       },
       onError: (err: string) => {
         if (regeneratingMsgId === messageId) setRegeneratingMsgId(null);
-        setToolEvents([]);
         setStreamError(err);
         message.error(err || "Regenerate failed");
       },
@@ -1672,9 +1676,8 @@ export const ChatWindow = React.memo(function ChatWindow({
         if (regeneratingMsgId === messageId) setRegeneratingMsgId(null);
         setPendingUserMessage(null);
         setStreamingContent("");
-        setStreamingReasoningContent("");
+        setStreamingSegments([]);
         setStreamingMessageId(null);
-        setToolEvents([]);
         setStreamingTokens(null);
         setStreamingStart(null);
         setStreamingDuration(null);
@@ -1774,31 +1777,16 @@ export const ChatWindow = React.memo(function ChatWindow({
     //   2. No persisted row already has this id — dedupes the local bubble
     //      against the persisted row that may have arrived via refetch.
     if (
-      (streamingContent || streamingReasoningContent) &&
+      (streamingSegments.length > 0 || streamingContent.length > 0) &&
       streamingMessageId &&
       !base.some((m: any) => m.id === streamingMessageId)
     ) {
+      const liveContent = buildLiveContent(streamingSegments, streamingContent);
       base.push({
         id: streamingMessageId,
         session_id: sessionId,
         sender: "assistant" as const,
-        content: [
-          ...(streamingReasoningContent
-            ? [{ type: "reasoning", text: streamingReasoningContent }]
-            : []),
-          ...toolEvents.map((ev) => ({
-            type: ev.type,
-            name: (ev.data as Record<string, unknown>).tool_name,
-            arguments: (ev.data as Record<string, unknown>).arguments,
-            output: (ev.data as Record<string, unknown>).result_summary,
-            is_error: !(ev.data as Record<string, unknown>).success,
-            call_id: (ev.data as Record<string, unknown>).tool_call_id,
-            batch_id: (ev.data as Record<string, unknown>).batch_id,
-          })),
-          ...(streamingContent
-            ? [{ type: "text", text: streamingContent }]
-            : []),
-        ],
+        content: liveContent,
         model_id: selectedModelId || null,
         model_name: selectedModel?.name || null,
         model_provider: selectedModel?.provider || null,
@@ -1817,13 +1805,11 @@ export const ChatWindow = React.memo(function ChatWindow({
     editingMsgId,
     pendingUserMessage,
     sessionId,
-    streamingContent,
-    streamingReasoningContent,
+    streamingSegments,
     streamingMessageId,
     streamingTokens,
     selectedModelId,
     selectedModel,
-    toolEvents,
   ]);
 
   const latestUserMessageId = useMemo(() => {
@@ -2281,7 +2267,7 @@ export const ChatWindow = React.memo(function ChatWindow({
             Footer: () => (
               <>
                 {/* Thinking placeholder — shown while streaming but before any content or reasoning */}
-              {streaming && !streamingContent && !streamingReasoningContent && (
+              {streaming && streamingSegments.length === 0 && (
                 <div style={{ padding: "0 16px", marginBottom: 16 }}>
                   <div style={{ display: "flex", justifyContent: "flex-start", marginBottom: 2 }}>
                     <Space style={{ marginLeft: 4 }} size={2}>

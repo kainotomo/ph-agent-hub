@@ -237,7 +237,7 @@ function MessageBubbleInner({
       <div style={bubbleStyle}>
         {/* Issue #538: process fold — one line per turn with ordered steps */}
         {turn && turn.process.length > 0 && (
-          <ProcessSteps key={message.id} steps={turn.process} streaming={streaming} />
+          <ProcessSteps key={message.id} steps={turn.process} />
         )}
 
         {/* Inline edit mode for assistant messages */}

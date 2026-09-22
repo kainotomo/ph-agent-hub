@@ -11,8 +11,8 @@
 //   streaming?: boolean — true while the turn is streaming.
 //
 // Open state:
-//   useState(!!streaming) so the fold is open while streaming.
-//   useEffect collapses it when streaming flips to false at turn completion.
+//   Always starts closed; user toggles with click.
+//   Arrow shows → when closed, ↓ when open.
 //
 // Step rows:
 //   Native <button aria-expanded> header + conditionally mounted body.
@@ -24,10 +24,10 @@
 //   Non-parallel batches render member rows flat.
 // =============================================================================
 
-import { useState, useEffect, useId } from "react";
+import { useState, useId } from "react";
 import {
-  DownOutlined,
-  UpOutlined,
+  CaretDownOutlined,
+  CaretRightOutlined,
   BulbOutlined,
   ToolOutlined,
   CheckOutlined,
@@ -51,6 +51,7 @@ function StepRow({ step }: { step: ProcessStep }) {
       type="button"
       aria-expanded={open}
       onClick={toggle}
+      data-testid={`step-row-${step.kind}`}
       style={{
         display: "flex",
         alignItems: "center",
@@ -67,7 +68,7 @@ function StepRow({ step }: { step: ProcessStep }) {
       }}
     >
       <span style={{ fontSize: 10, color: "#999", flexShrink: 0 }}>
-        {open ? <UpOutlined /> : <DownOutlined />}
+        {open ? <CaretDownOutlined /> : <CaretRightOutlined />}
       </span>
       {step.kind === "reasoning" && (
         <>
@@ -206,16 +207,11 @@ function StepRow({ step }: { step: ProcessStep }) {
 
 interface ProcessStepsProps {
   steps: ProcessStep[];
-  streaming?: boolean;
 }
 
-export function ProcessSteps({ steps, streaming }: ProcessStepsProps) {
-  const [open, setOpen] = useState(!!streaming);
+export function ProcessSteps({ steps }: ProcessStepsProps) {
+  const [open, setOpen] = useState(false);
   const bodyId = useId();
-
-  useEffect(() => {
-    setOpen(!!streaming);
-  }, [streaming]);
 
   if (steps.length === 0) return null;
 
@@ -243,7 +239,7 @@ export function ProcessSteps({ steps, streaming }: ProcessStepsProps) {
           fontFamily: "inherit",
         }}
       >
-        {open ? <UpOutlined style={{ fontSize: 10 }} /> : <DownOutlined style={{ fontSize: 10 }} />}
+        {open ? <CaretDownOutlined style={{ fontSize: 10 }} /> : <CaretRightOutlined style={{ fontSize: 10 }} />}
         <span>{rows.length === 1 && rows[0].type === "step" ? reasoningSummary(rows[0].step.text || "", false) : ""}</span>
         {rows.length > 1 && (
           <span style={{ marginLeft: 4, color: "#aaa" }}>

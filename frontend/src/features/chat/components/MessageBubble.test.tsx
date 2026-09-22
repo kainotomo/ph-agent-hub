@@ -152,7 +152,8 @@ describe("MessageBubble", () => {
     expect(screen.getByText("Hello, how can I help?")).toBeInTheDocument();
   });
 
-  it("process fold is open while streaming", () => {
+  it("process fold is closed by default even while streaming", async () => {
+    const user = userEvent.setup();
     render(
       <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
         <MessageBubble
@@ -180,11 +181,19 @@ describe("MessageBubble", () => {
       </QueryClientProvider>,
     );
 
-    // Fold should be open while streaming
-    expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
-    // Content visible in body (appears twice: once in header summary, once in body)
-    expect(screen.getAllByText("Thinking...").length).toBe(2);
+    // Fold is closed by default (even while streaming)
+    expect(screen.getByRole("button", { expanded: false })).toHaveAttribute("aria-expanded", "false");
+    // Reasoning summary visible in header
+    expect(screen.getByText("Thinking...")).toBeInTheDocument();
+    // Answer text visible
     expect(screen.getByText("Hello")).toBeInTheDocument();
+    // Body is not visible (fold collapsed)
+    expect(screen.queryByText("Thinking...")).toBeInTheDocument(); // only in header
+    // Click to open
+    await user.click(screen.getByRole("button", { expanded: false }));
+    // Now body is visible
+    expect(screen.getByRole("button", { expanded: true })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getAllByText("Thinking...").length).toBe(2);
   });
 
   it("expands process fold on header click when collapsed", async () => {
@@ -299,13 +308,18 @@ describe("MessageBubble", () => {
       </QueryClientProvider>,
     );
 
-    // Fold is open while streaming
-    expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
+    // Fold is closed by default (even while streaming)
+    expect(screen.getByRole("button", { expanded: false })).toHaveAttribute("aria-expanded", "false");
+    // Click the fold header to open
+    await user.click(screen.getByRole("button", { expanded: false }));
+    // Now body is visible
+    expect(screen.getByRole("button", { expanded: true })).toHaveAttribute("aria-expanded", "true");
+    // Reasoning text visible in body
     expect(screen.getByText("I'll search for that.")).toBeInTheDocument();
     // web_search appears in both tool_call and tool_result tags
     expect(screen.getAllByText("web_search").length).toBe(2);
-    // Click the tool_result step header to expand it (header text is "down tool check web_search")
-    const resultHeader = screen.getByRole("button", { name: /down tool check web_search/i });
+    // Find the tool_result step button by test id and expand it
+    const resultHeader = screen.getByTestId("step-row-tool_result");
     await user.click(resultHeader);
     // Tool result output is now visible
     expect(screen.getByText("Results found")).toBeInTheDocument();

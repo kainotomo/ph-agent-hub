@@ -22,3 +22,4 @@ export { MemoryManager } from "./MemoryManager";
 export { SessionSidebar } from "./SessionSidebar";
 export { SessionFolderHeader } from "./SessionFolderHeader";
 export { AutopilotPanel } from "./AutopilotPanel";
+export { ProcessSteps } from "./ProcessSteps";

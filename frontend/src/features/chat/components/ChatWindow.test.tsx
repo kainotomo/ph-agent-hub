@@ -870,3 +870,100 @@ async function selectReasoningOption(
   const option = await screen.findByTitle(label);
   await user.click(option);
 }
+
+// ---------------------------------------------------------------------------
+// Issue #536 — message page size (10 per page)
+// ---------------------------------------------------------------------------
+
+describe("ChatWindow — message page size (Issue #536)", () => {
+  function pagedMsg(id: string, sender: "user" | "assistant", text: string) {
+    return {
+      id,
+      session_id: "test-session-1",
+      sender,
+      content: [{ type: "text" as const, text }],
+      model_id: null,
+      model_name: null,
+      model_provider: null,
+      tool_calls: null,
+      tokens_in: null,
+      tokens_out: null,
+      is_deleted: false,
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    };
+  }
+
+  beforeEach(() => {
+    mockApi.mockReset();
+    mockApi.mockImplementation((url: string) => {
+      if (url === "/models") return Promise.resolve(FAKE_MODELS);
+      return Promise.resolve([]);
+    });
+    mockGetStreamStatus.mockReset();
+    mockGetStreamStatus.mockResolvedValue({ active: false });
+    mockListMessages.mockReset();
+    mockListMessages.mockResolvedValue({ items: [], has_more: false });
+    lastStreamHandlers.current = null;
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  it("requests limit 10 on the initial fetch", async () => {
+    mockListMessages.mockResolvedValue({
+      items: Array.from({ length: 10 }, (_, i) => pagedMsg(`m${i}`, "user", `msg ${i}`)),
+      has_more: true,
+    });
+
+    renderChatWindow({ isPending: false, sessionId: "test-session-1" });
+    await settle();
+
+    expect(mockListMessages.mock.calls[0][0]).toBe("test-session-1");
+    expect(mockListMessages.mock.calls[0][1].limit).toBe(10);
+    expect(mockListMessages.mock.calls[0][1].before).toBeUndefined();
+  });
+
+  it("requests the same page size and the oldest-loaded cursor on an older page", async () => {
+    const firstPage = Array.from({ length: 10 }, (_, i) => pagedMsg(`m${i}`, "user", `msg ${i}`));
+    const secondPage = Array.from({ length: 10 }, (_, i) => pagedMsg(`m${i + 10}`, "user", `msg ${i + 10}`));
+
+    mockListMessages.mockResolvedValueOnce({ items: firstPage, has_more: true });
+    mockListMessages.mockResolvedValueOnce({ items: secondPage, has_more: false });
+
+    renderChatWindow({ isPending: false, sessionId: "test-session-1" });
+    await settle();
+
+    // Simulate scrolling to the top (startReached fires)
+    await act(async () => {
+      virtuosoState.props.startReached();
+    });
+    await settle();
+
+    // Second call: before=cursor of oldest item from first page, limit=10
+    const secondCall = mockListMessages.mock.calls[1];
+    expect(secondCall[0]).toBe("test-session-1");
+    expect(secondCall[1].limit).toBe(10);
+    expect(secondCall[1].before).toBe("2026-01-01T00:00:00.000Z|m0");
+  });
+
+  it("does not paginate when has_more is false", async () => {
+    mockListMessages.mockResolvedValue({
+      items: [pagedMsg("m1", "user", "hi")],
+      has_more: false,
+    });
+
+    renderChatWindow({ isPending: false, sessionId: "test-session-1" });
+    await settle();
+
+    // startReached fires but hasNextPage is false → no second call
+    await act(async () => {
+      virtuosoState.props.startReached();
+    });
+    await settle();
+
+    expect(mockListMessages).toHaveBeenCalledTimes(1);
+  });
+});

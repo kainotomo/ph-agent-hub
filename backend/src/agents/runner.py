@@ -2746,10 +2746,9 @@ async def _persist_assistant_message(
     model_id: str,
     model_name: str | None = None,
     model_provider: str | None = None,
-    tool_events: list[dict] | None = None,
+    content_segments: list[dict] | None = None,
     tokens_in: int = 0,
     tokens_out: int = 0,
-    reasoning: str = "",
     message_id: str = "",
     metrics: dict | None = None,
 ) -> str:
@@ -2757,16 +2756,12 @@ async def _persist_assistant_message(
 
     If message_id is provided, it is reused as the persisted row ID;
     otherwise a new UUID is generated.
+
+    *content_segments* is the caller-closed, chronological list of
+    ``reasoning`` / ``function_call`` / ``function_result`` parts
+    (Issue #537).  Array position is the order.
     """
-    content: list[dict] = []
-
-    # Prepend reasoning content (always first, before tool events)
-    if reasoning.strip():
-        content.append({"type": "reasoning", "text": reasoning})
-
-    # Build content array: tool events interleaved before the final text
-    for evt in (tool_events or []):
-        content.append(evt)
+    content: list[dict] = list(content_segments or [])
 
     # Always append the final text response, stripped of any leaked
     # <function_calls> XML (DeepSeek thinking-mode artifact)
@@ -2954,7 +2949,8 @@ async def run_agent_stream(
 
     accumulated_text: str = ""
     accumulated_reasoning: str = ""
-    accumulated_tool_events: list[dict] = []
+    accumulated_segments: list[dict] = []
+    segments_to_persist: list[dict] = []
     step_index: int = 0
     total_tokens: int = 0
     _stream_token_info: dict = {}  # mutated by _run_agent_stream to propagate token counts
@@ -3093,25 +3089,14 @@ async def run_agent_stream(
                     session_id,
                 )
                 # Persist whatever we have so far
-                accumulated_text = _maybe_accumulate_text(
-                    event_dict, accumulated_text
-                )
-                accumulated_reasoning = _maybe_accumulate_reasoning(
-                    event_dict, accumulated_reasoning
+                accumulated_segments, accumulated_reasoning, accumulated_text = _accumulate_stream_state(
+                    event_dict, accumulated_segments, accumulated_reasoning, accumulated_text,
                 )
                 break
 
             # Accumulate text from token events
-            accumulated_text = _maybe_accumulate_text(
-                event_dict, accumulated_text
-            )
-            # Accumulate reasoning from reasoning_token events
-            accumulated_reasoning = _maybe_accumulate_reasoning(
-                event_dict, accumulated_reasoning
-            )
-            # Accumulate tool events for persistence
-            accumulated_tool_events = _maybe_accumulate_tool_events(
-                event_dict, accumulated_tool_events
+            accumulated_segments, accumulated_reasoning, accumulated_text = _accumulate_stream_state(
+                event_dict, accumulated_segments, accumulated_reasoning, accumulated_text,
             )
 
             yield event_dict
@@ -3154,7 +3139,9 @@ async def run_agent_stream(
 
                 metrics_payload: dict | None = _stream_token_info.get("metrics")
 
-                if accumulated_text or accumulated_reasoning or accumulated_tool_events:
+                segments_to_persist = _flush_reasoning_segment(accumulated_segments, accumulated_reasoning)
+
+                if accumulated_text or segments_to_persist:
                     await _persist_assistant_message(
                         db=_persist_db,
                         session_id=session_id,
@@ -3163,10 +3150,9 @@ async def run_agent_stream(
                         model_id=cfg.model.id if cfg else "unknown",
                         model_name=cfg.model.name if cfg else None,
                         model_provider=cfg.model.provider if cfg else None,
-                        tool_events=accumulated_tool_events,
+                        content_segments=segments_to_persist,
                         tokens_in=tokens_in,
                         tokens_out=tokens_out,
-                        reasoning=accumulated_reasoning,
                         message_id=message_id,
                         metrics=metrics_payload,
                     )
@@ -3233,7 +3219,7 @@ async def run_agent_stream(
                     logger.debug("Failed to close client %s", type(client).__name__, exc_info=True)
 
     # ---- Only reached on normal completion (no GeneratorExit) ----------
-    if accumulated_text or accumulated_reasoning or accumulated_tool_events:
+    if accumulated_text or segments_to_persist:
         tokens_in = _stream_token_info.get("in", 0) or 0
         tokens_out = _stream_token_info.get("out", 0) or 0
         logger.info(
@@ -3787,6 +3773,42 @@ def _maybe_accumulate_reasoning(event_dict: dict, current: str) -> str:
         return current + delta
     except (json.JSONDecodeError, KeyError):
         return current
+
+
+def _flush_reasoning_segment(segments: list[dict], pending: str) -> list[dict]:
+    """Close the open reasoning segment (Issue #537).
+
+    Appends *pending* as a reasoning part when it has non-whitespace text;
+    an empty/whitespace-only segment is dropped.  Returns a new list
+    (the existing accumulate helpers are also non-mutating).
+    """
+    if pending and pending.strip():
+        return segments + [{"type": "reasoning", "text": pending}]
+    return segments
+
+
+def _accumulate_stream_state(
+    event_dict: dict,
+    segments: list[dict],
+    pending_reasoning: str,
+    text: str,
+) -> tuple[list[dict], str, str]:
+    """Fold one SSE event into the ordered segment list and open reasoning.
+
+    Ordering rule (Issue #537): a tool event closes the open reasoning
+    segment — the pending reasoning is emitted immediately before the tool
+    part — and starts a fresh one.
+
+    Returns ``(segments, pending_reasoning, text)``.
+    """
+    text = _maybe_accumulate_text(event_dict, text)
+    pending_reasoning = _maybe_accumulate_reasoning(event_dict, pending_reasoning)
+    tool_parts = _maybe_accumulate_tool_events(event_dict, [])
+    if tool_parts:
+        segments = _flush_reasoning_segment(segments, pending_reasoning)
+        pending_reasoning = ""
+        segments = segments + tool_parts
+    return segments, pending_reasoning, text
 
 
 def _strip_raw_tool_xml(text: str) -> str:

@@ -181,6 +181,27 @@ class TestExtractMessageText:
         assert "[Tool result from calculator: 42]" in result
         assert "The answer is 42." in result
 
+    def test_reasoning_parts_ignored_equivalence(self):
+        """Legacy single-reasoning-part and segmented reasoning produce identical output.
+
+        Legacy: [reasoning(r1+r2), call, result, text]
+        Segmented: [reasoning(r1), call, result, reasoning(r2), text]
+        """
+        legacy = [
+            {"type": "reasoning", "text": "r1r2"},
+            {"type": "function_call", "name": "calculator"},
+            {"type": "function_result", "name": "calculator", "output": "42"},
+            {"type": "text", "text": "The answer is 42."},
+        ]
+        segmented = [
+            {"type": "reasoning", "text": "r1"},
+            {"type": "function_call", "name": "calculator"},
+            {"type": "function_result", "name": "calculator", "output": "42"},
+            {"type": "reasoning", "text": "r2"},
+            {"type": "text", "text": "The answer is 42."},
+        ]
+        assert self.fn(legacy) == self.fn(segmented)
+
 
 class TestMsgGet:
     """Tests for ``_msg_get``."""
@@ -426,6 +447,117 @@ class TestMaybeAccumulateReasoning:
     def test_non_reasoning_event_ignored(self):
         event = {"event": "token", "data": json.dumps({"delta": "text"})}
         assert self.fn(event, "current") == "current"
+
+
+class TestFlushReasoningSegment:
+    """Tests for ``_flush_reasoning_segment`` (Issue #537)."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self):
+        from src.agents.runner import _flush_reasoning_segment
+        self.fn = _flush_reasoning_segment
+
+    def test_non_blank_pending_appends_reasoning_part(self):
+        segments = []
+        result = self.fn(segments, "I think about this")
+        assert result == [{"type": "reasoning", "text": "I think about this"}]
+
+    def test_empty_pending_does_not_mutate(self):
+        segments = [{"type": "function_call", "name": "x"}]
+        result = self.fn(segments, "")
+        assert result == [{"type": "function_call", "name": "x"}]
+
+    def test_whitespace_only_pending_does_not_mutate(self):
+        segments = [{"type": "function_call", "name": "x"}]
+        result = self.fn(segments, "   \n  ")
+        assert result == [{"type": "function_call", "name": "x"}]
+
+
+class TestAccumulateStreamState:
+    """Tests for ``_accumulate_stream_state`` (Issue #537)."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self):
+        from src.agents.runner import _accumulate_stream_state
+        self.fn = _accumulate_stream_state
+
+    def test_reasoning_then_tool_start(self):
+        reasoning_event = {"event": "reasoning_token", "data": json.dumps({"delta": "r1"})}
+        tool_event = {"event": "tool_start", "data": json.dumps({"tool_call_id": "c1", "tool_name": "calc", "arguments": {}})}
+
+        segments, pending, text = self.fn(reasoning_event, [], "", "")
+        assert segments == []
+        assert pending == "r1"
+        assert text == ""
+
+        segments, pending, text = self.fn(tool_event, segments, pending, text)
+        assert segments == [
+            {"type": "reasoning", "text": "r1"},
+            {"type": "function_call", "name": "calc", "arguments": {}, "id": "c1"},
+        ]
+        assert pending == ""
+
+    def test_tool_result_does_not_insert_reasoning(self):
+        tool_result = {"event": "tool_result", "data": json.dumps({"tool_name": "calc", "output": "42", "success": True})}
+        segments, pending, text = self.fn(tool_result, [], "", "")
+        assert segments == [{"type": "function_result", "name": "calc", "output": "42", "is_error": False}]
+        assert pending == ""
+
+    def test_full_multi_step_sequence(self):
+        """reasoning_token r1, tool_start, tool_result, reasoning_token r2, tool_start, tool_result, reasoning_token tail, token."""
+        r1 = {"event": "reasoning_token", "data": json.dumps({"delta": "r1"})}
+        call1 = {"event": "tool_start", "data": json.dumps({"tool_call_id": "c1", "tool_name": "calc", "arguments": {}})}
+        res1 = {"event": "tool_result", "data": json.dumps({"tool_name": "calc", "output": "42", "success": True})}
+        r2 = {"event": "reasoning_token", "data": json.dumps({"delta": "r2"})}
+        call2 = {"event": "tool_start", "data": json.dumps({"tool_call_id": "c2", "tool_name": "fetch", "arguments": {}})}
+        res2 = {"event": "tool_result", "data": json.dumps({"tool_name": "fetch", "output": "data", "success": True})}
+        tail = {"event": "reasoning_token", "data": json.dumps({"delta": "tail"})}
+        token = {"event": "token", "data": json.dumps({"delta": "answer"})}
+
+        segments, pending, text = self.fn(r1, [], "", "")
+        segments, pending, text = self.fn(call1, segments, pending, text)
+        segments, pending, text = self.fn(res1, segments, pending, text)
+        segments, pending, text = self.fn(r2, segments, pending, text)
+        segments, pending, text = self.fn(call2, segments, pending, text)
+        segments, pending, text = self.fn(res2, segments, pending, text)
+        segments, pending, text = self.fn(tail, segments, pending, text)
+        segments, pending, text = self.fn(token, segments, pending, text)
+
+        # Final flush
+        from src.agents.runner import _flush_reasoning_segment
+        segments = _flush_reasoning_segment(segments, pending)
+
+        assert segments == [
+            {"type": "reasoning", "text": "r1"},
+            {"type": "function_call", "name": "calc", "arguments": {}, "id": "c1"},
+            {"type": "function_result", "name": "calc", "output": "42", "is_error": False},
+            {"type": "reasoning", "text": "r2"},
+            {"type": "function_call", "name": "fetch", "arguments": {}, "id": "c2"},
+            {"type": "function_result", "name": "fetch", "output": "data", "is_error": False},
+            {"type": "reasoning", "text": "tail"},
+        ]
+        assert text == "answer"
+
+    def test_tool_event_no_preceding_reasoning(self):
+        """A tool event with no preceding reasoning inserts no empty reasoning part."""
+        tool_event = {"event": "tool_start", "data": json.dumps({"tool_call_id": "c1", "tool_name": "x", "arguments": {}})}
+        segments, pending, text = self.fn(tool_event, [], "", "")
+        assert segments == [{"type": "function_call", "name": "x", "arguments": {}, "id": "c1"}]
+        assert pending == ""
+
+    def test_token_only_event(self):
+        token = {"event": "token", "data": json.dumps({"delta": "hi"})}
+        segments, pending, text = self.fn(token, [], "", "")
+        assert segments == []
+        assert pending == ""
+        assert text == "hi"
+
+    def test_reasoning_token_only_event(self):
+        r = {"event": "reasoning_token", "data": json.dumps({"delta": "think"})}
+        segments, pending, text = self.fn(r, [], "", "")
+        assert segments == []
+        assert pending == "think"
+        assert text == ""
 
 
 class TestStripRawToolXml:
@@ -1834,7 +1966,7 @@ class TestPersistAssistantMessage:
         msg_id = await self.fn(
             db_session, test_session.id, False,
             "Hello!", test_model.id, "gpt-4", "openai",
-            [], 50, 30, reasoning="",
+            [], 50, 30,
         )
         assert msg_id is not None
         assert isinstance(msg_id, str)
@@ -1853,7 +1985,7 @@ class TestPersistAssistantMessage:
         msg_id = await self.fn(
             db_session, test_session.id, False,
             "Hello!", test_model.id, "gpt-4", "openai",
-            [], 50, 30, reasoning="",
+            [], 50, 30,
             message_id=supplied,
         )
         assert msg_id == supplied
@@ -1870,18 +2002,92 @@ class TestPersistAssistantMessage:
         m1 = await self.fn(
             db_session, test_session.id, False,
             "A", test_model.id, "gpt-4", "openai",
-            [], 1, 1, reasoning="", message_id="",
+            [], 1, 1, message_id="",
         )
         m2 = await self.fn(
             db_session, test_session.id, False,
             "B", test_model.id, "gpt-4", "openai",
-            [], 1, 1, reasoning="", message_id="",
+            [], 1, 1, message_id="",
         )
         assert m1 != m2
         # Both look like UUIDs.
         for mid in (m1, m2):
             uuid.UUID(mid)
 
+    async def test_multi_step_turn_preserves_chronological_order(self, db_session, test_session, test_model):
+        """Multi-step turn: reasoning interleaved with tool events in order.
+
+        content_segments=[r1, call1, result1, r2], response="answer", metrics={...}
+        → persisted types exactly ["reasoning","function_call","function_result","reasoning","text","metrics"].
+        """
+        from src.db.orm.messages import Message
+        segments = [
+            {"type": "reasoning", "text": "r1"},
+            {"type": "function_call", "name": "calc", "arguments": {}, "id": "c1"},
+            {"type": "function_result", "name": "calc", "output": "42", "is_error": False},
+            {"type": "reasoning", "text": "r2"},
+        ]
+        msg_id = await self.fn(
+            db_session, test_session.id, False,
+            "answer", test_model.id, "gpt-4", "openai",
+            segments, 50, 30,
+            metrics={"llm_ms": 100, "tool_ms": 200},
+        )
+        row = await db_session.get(Message, msg_id)
+        assert row is not None
+        types = [p["type"] for p in row.content]
+        assert types == ["reasoning", "function_call", "function_result", "reasoning", "text", "metrics"]
+
+    async def test_no_reasoning_segments(self, db_session, test_session, test_model):
+        """Tool parts only → no reasoning part in persisted content."""
+        from src.db.orm.messages import Message
+        segments = [
+            {"type": "function_call", "name": "x", "arguments": {}, "id": "c1"},
+            {"type": "function_result", "name": "x", "output": "ok", "is_error": False},
+        ]
+        msg_id = await self.fn(
+            db_session, test_session.id, False,
+            "done", test_model.id, "gpt-4", "openai",
+            segments, 10, 10,
+        )
+        row = await db_session.get(Message, msg_id)
+        types = [p["type"] for p in row.content]
+        assert "reasoning" not in types
+        assert types == ["function_call", "function_result", "text"]
+
+    async def test_single_reasoning_segment(self, db_session, test_session, test_model):
+        """No tool calls: segments = [reasoning] → ["reasoning","text"]."""
+        from src.db.orm.messages import Message
+        segments = [{"type": "reasoning", "text": "thinking..."}]
+        msg_id = await self.fn(
+            db_session, test_session.id, False,
+            "final answer", test_model.id, "gpt-4", "openai",
+            segments, 10, 10,
+        )
+        row = await db_session.get(Message, msg_id)
+        types = [p["type"] for p in row.content]
+        assert types == ["reasoning", "text"]
+
+    @patch("src.agents.runner.append_temp_message")
+    async def test_temp_path_preserves_order(self, mock_append, db_session, test_session_temp, test_model):
+        """Temporary/Redis path: ordered segments are appended as-is."""
+        mock_append.return_value = "redis-msg-id"
+        segments = [
+            {"type": "reasoning", "text": "r1"},
+            {"type": "function_call", "name": "x", "arguments": {}, "id": "c1"},
+            {"type": "function_result", "name": "x", "output": "ok", "is_error": False},
+        ]
+        msg_id = await self.fn(
+            db_session, test_session_temp.id, True,
+            "answer", test_model.id, "gpt-4", "openai",
+            segments, 10, 10,
+        )
+        assert msg_id == "redis-msg-id"
+        mock_append.assert_called_once()
+        call_args = mock_append.call_args
+        content = call_args[0][1]["content"]
+        types = [p["type"] for p in content]
+        assert types == ["reasoning", "function_call", "function_result", "text"]
 
 
 @pytest.mark.integration

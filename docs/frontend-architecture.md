@@ -294,7 +294,7 @@ The chat area focuses on:
 - Temporary and permanent chat sessions
 - Message editing, branching, and regeneration
 - Message feedback
-- Full-text search across sessions and messages
+- Session search across user's own sessions and messages
 - Follow-up question suggestions
 
 It does **not** include any admin functionality.
@@ -311,7 +311,7 @@ It does **not** include any admin functionality.
 | **Session Management** | Create (permanent or temporary), rename, delete (with confirmation), pin/unpin, convert temp→permanent, collapsible session list |
 | **Session Folders** | User-scoped, single-level folders; collapsible folder groups in the sidebar with "Unfiled" last; move by native drag & drop, the per-row "Move to folder" menu, or bulk move from selection mode; create/rename/recolour/delete; collapse state persisted in localStorage (Issue #526) |
 | **Message Management** | Edit (creates branch + auto-regenerates), delete (soft-delete), regenerate (creates branch), branch navigation, thumbs up/down feedback |
-| **Search** | Full-text search across user's own sessions and messages |
+| **Search** | Session search across user's own sessions and messages |
 | **Memory** | Paginated view, filter by session, delete, manually add entries, cross-session retrieval, automatic vs. manual entry markers |
 | **Tool Activation** | View tenant-enabled tools; activate/deactivate per session; state stored server-side |
 | **File Uploads** | Upload to backend; backend handles extraction and embedding |

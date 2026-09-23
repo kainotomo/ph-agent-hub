@@ -211,7 +211,7 @@ DELETE /chat/folders/:id                # Delete folder (sessions move to Unfile
 
 > **`POST /chat/session/:id/finalize`** — Converts a temporary (Redis) session into a permanent (MariaDB) session. Migrates messages, tool activations, and file uploads. Returns the new permanent session. Requires the session to be in temporary mode.
 
-> **`GET /chat/sessions/search?q=<term>&scope=<scope>`** — Full-text search across a user's permanent sessions.
+> **`GET /chat/sessions/search?q=<term>&scope=<scope>`** — Session search across a user's permanent sessions.
 > - `q` (required): the search term.
 > - `scope` (optional, default `all`): limits which fields are searched — `all` (title + content + tag), `title`, `content`, or `tag`. Invalid values return 422.
 > - Each result extends the standard session payload with `matched_fields` (e.g. `["title", "content"]`) indicating which scopes matched, so clients can show *why* a session matched when searching `all`.
@@ -666,7 +666,7 @@ The backend uses **SQLAlchemy 2.0** as the ORM and **Alembic** for schema migrat
 ### **5.1 SQLAlchemy ORM**
 - All database tables are defined as SQLAlchemy model classes under `/db/orm/`
 - The async session factory (`AsyncSession`) is configured in `/db/base.py` using `aiomysql` as the MariaDB driver
-- Complex queries (e.g., message branching tree, full-text search) are written as raw SQL via `session.execute(text(...))` and called from the service layer
+- Complex queries (e.g., message branching tree, session search) are written as raw SQL via `session.execute(text(...))` and called from the service layer
 - JSON columns (`messages.content`, `messages.tool_calls`, `tools.config`, etc.) map to SQLAlchemy's `JSON` column type and are read/written as Python dicts
 
 ### **5.2 Alembic Migrations**

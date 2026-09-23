@@ -87,9 +87,10 @@ On desktop, click the minimize button on the session sidebar to collapse it and 
 
 Click the magnifier icon in the sidebar header to open the search field inside the sidebar. As you type, the session list itself is filtered in place — there is no separate results window.
 
-- Search matches session titles, message content, and tags.
+- A search term is matched as an **exact, case-insensitive piece of text** (e.g. `MC:xpar` matches only sessions whose title, message content, or tags contain that exact substring).
 - Use the **All / Title / Content / Tag** control to narrow the search scope.
 - Type `#tagname` (for example `#work`) for an exact tag search.
+- `%` and `_` are matched literally (they are not wildcard characters).
 - Results keep your folder grouping: a folder only appears while it contains a match, and matching fields are shown as small badges on each row.
 - Press **Esc**, click the **✕**, or clear the field to restore the full list. Temporary chats are not included in search results.
 

@@ -121,6 +121,7 @@ export interface ToolData {
   tenant_id: string;
   name: string;
   description?: string | null;
+  capabilities?: string[];
   type: string;
   category: string;
   config: Record<string, unknown> | null;
@@ -129,6 +130,11 @@ export interface ToolData {
   is_public: boolean;
   created_at: string;
   updated_at: string;
+}
+
+export interface ToolTypeInfo {
+  type: string;
+  capabilities: string[];
 }
 
 export interface TemplateData {
@@ -432,6 +438,10 @@ export function updateTool(id: string, data: Partial<ToolData>): Promise<ToolDat
 
 export function deleteTool(id: string): Promise<void> {
   return api<void>(`/admin/tools/${id}`, { method: "DELETE" });
+}
+
+export function listToolTypes(): Promise<ToolTypeInfo[]> {
+  return api<ToolTypeInfo[]>("/admin/tools/types");
 }
 
 // =============================================================================

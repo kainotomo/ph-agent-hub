@@ -14,6 +14,7 @@ import {
   Switch,
   message,
   Typography,
+  Tag,
 } from "antd";
 import { useMutation, useQueryClient, useQuery } from "@tanstack/react-query";
 import { createTool, updateTool, listTenants, ToolData, TenantData, listA2aServers, A2aServerData } from "../../services/admin";
@@ -71,7 +72,6 @@ export function ToolForm({ open, tool, duplicateFrom, onClose }: ToolFormProps) 
         const fields: Record<string, unknown> = {
           tenant_id: duplicateFrom.tenant_id,
           name: duplicateFrom.name,
-          description: duplicateFrom.description || "",
           type: duplicateFrom.type,
           enabled: duplicateFrom.enabled,
           is_public: duplicateFrom.is_public,
@@ -114,7 +114,6 @@ export function ToolForm({ open, tool, duplicateFrom, onClose }: ToolFormProps) 
         const fields: Record<string, unknown> = {
           tenant_id: tool.tenant_id,
           name: tool.name,
-          description: tool.description || "",
           type: tool.type,
           enabled: tool.enabled,
           is_public: tool.is_public,
@@ -352,9 +351,17 @@ export function ToolForm({ open, tool, duplicateFrom, onClose }: ToolFormProps) 
         <Form.Item name="name" label="Name" rules={[{ required: true }]}>
           <Input />
         </Form.Item>
-        <Form.Item name="description" label="Description">
-          <Input.TextArea rows={2} placeholder="Describe what this tool does" />
-        </Form.Item>
+        {tool && tool.capabilities && tool.capabilities.length > 0 && (
+          <Form.Item label="Capabilities (auto-derived)">
+            <div style={{ marginTop: 4 }}>
+              {tool.capabilities.map((cap, i) => (
+                <Tag key={i} color="blue" style={{ margin: "2px 4px 2px 0" }}>
+                  {cap}
+                </Tag>
+              ))}
+            </div>
+          </Form.Item>
+        )}
         <Form.Item
           name="type"
           label="Type"

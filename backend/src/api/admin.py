@@ -367,7 +367,6 @@ class ModelResponse(BaseModel):
 class ToolCreate(BaseModel):
     tenant_id: str | None = None  # admin only — fallback to current_user.tenant_id
     name: str
-    description: str | None = None
     type: str
     config: dict | None = None
     code: str | None = None
@@ -378,7 +377,6 @@ class ToolCreate(BaseModel):
 class ToolUpdate(BaseModel):
     tenant_id: str | None = None  # admin only
     name: str | None = None
-    description: str | None = None
     type: str | None = None
     config: dict | None = None
     code: str | None = None
@@ -391,6 +389,7 @@ class ToolResponse(BaseModel):
     tenant_id: str
     name: str
     description: str | None = None
+    capabilities: list[str] = []
     type: str
     category: str
     config: dict | None
@@ -401,6 +400,38 @@ class ToolResponse(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class ToolTypeInfo(BaseModel):
+    """A tool type and its derived capabilities."""
+    type: str
+    capabilities: list[str]
+
+    model_config = {"from_attributes": True}
+
+
+def _admin_tool_response(tool) -> dict:
+    """Convert a Tool ORM object to a response dict with capabilities."""
+    from ..tools.descriptions import resolve_capabilities
+
+    tool_type = tool.type if hasattr(tool, 'type') else ""
+    code = tool.code if hasattr(tool, 'code') else None
+    capabilities = resolve_capabilities(tool_type, code)
+    return {
+        "id": str(tool.id),
+        "tenant_id": tool.tenant_id,
+        "name": tool.name,
+        "description": tool.description or None,
+        "capabilities": capabilities,
+        "type": tool.type,
+        "category": tool.category,
+        "config": getattr(tool, 'config', None),
+        "code": getattr(tool, 'code', None),
+        "enabled": bool(tool.enabled),
+        "is_public": bool(tool.is_public),
+        "created_at": tool.created_at,
+        "updated_at": tool.updated_at,
+    }
 
 
 # =============================================================================
@@ -1145,7 +1176,7 @@ async def list_tools(
 
     total_pages = max(1, -(-total // page_size))
     return PaginatedResponse(
-        items=[ToolResponse.model_validate(t) for t in tools],
+        items=[ToolResponse(**_admin_tool_response(t)) for t in tools],
         total=total, page=page, page_size=page_size, total_pages=total_pages,
     )
 
@@ -1208,7 +1239,7 @@ async def create_tool(
         db,
         tenant_id=tenant_id,
         name=body.name,
-        description=body.description,
+        description=None,  # description is auto-derived; stored value kept as-is
         type=body.type,
         config=body.config,
         code=body.code,
@@ -1224,7 +1255,7 @@ async def create_tool(
         tenant_id=current_user.tenant_id,
         ip_address=_get_client_ip(request),
     )
-    return ToolResponse.model_validate(tool)
+    return ToolResponse(**_admin_tool_response(tool))
 
 
 @router.put("/tools/{tool_id}", response_model=ToolResponse)
@@ -1255,8 +1286,6 @@ async def update_tool(
     update_kwargs: dict = {}
     if body.name is not None:
         update_kwargs["name"] = body.name
-    if body.description is not None:
-        update_kwargs["description"] = body.description
     if body.type is not None:
         update_kwargs["type"] = body.type
     if body.config is not None:
@@ -1289,7 +1318,7 @@ async def update_tool(
         tenant_id=current_user.tenant_id,
         ip_address=_get_client_ip(request),
     )
-    return ToolResponse.model_validate(tool)
+    return ToolResponse(**_admin_tool_response(tool))
 
 
 @router.delete("/tools/{tool_id}", status_code=204)
@@ -1319,6 +1348,22 @@ async def delete_tool(
         tenant_id=current_user.tenant_id,
         ip_address=_get_client_ip(request),
     )
+
+
+@router.get("/tools/types", response_model=list[ToolTypeInfo])
+async def list_tool_types(
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Return all registered tool types with their derived capabilities."""
+    from ..tools.descriptions import type_capabilities
+    from ..services.tool_service import VALID_TOOL_TYPES
+
+    result = []
+    for tool_type in sorted(VALID_TOOL_TYPES):
+        caps = type_capabilities(tool_type)
+        result.append(ToolTypeInfo(type=tool_type, capabilities=caps))
+    return result
 
 
 # =============================================================================

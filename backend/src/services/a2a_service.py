@@ -425,6 +425,7 @@ async def sync_a2a_tools(
             tool.config = config
             tool.enabled = True
             tool.is_public = True
+            tool.description = skill.description or None
             updated += 1
             existing_tools.pop(skill.id)
         else:
@@ -437,6 +438,7 @@ async def sync_a2a_tools(
                 category=derive_tool_category("a2a"),
                 enabled=True,
                 is_public=True,
+                description=skill.description or None,
             )
             db.add(tool)
             created += 1

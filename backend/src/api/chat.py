@@ -287,12 +287,36 @@ class ToolResponse(BaseModel):
     name: str
     type: str
     category: str
+    description: str | None = None
+    capabilities: list[str] = []
     config: dict | None
     enabled: bool
     created_at: datetime
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+def _tool_response(tool) -> dict:
+    """Convert a Tool ORM object to a response dict with capabilities."""
+    from ..tools.descriptions import resolve_capabilities
+
+    tool_type = tool.type if hasattr(tool, 'type') else ""
+    code = tool.code if hasattr(tool, 'code') else None
+    capabilities = resolve_capabilities(tool_type, code)
+    return {
+        "id": str(tool.id),
+        "tenant_id": tool.tenant_id,
+        "name": tool.name,
+        "type": tool.type,
+        "category": tool.category,
+        "description": tool.description or None,
+        "capabilities": capabilities,
+        "config": getattr(tool, 'config', None),
+        "enabled": bool(tool.enabled),
+        "created_at": tool.created_at,
+        "updated_at": tool.updated_at,
+    }
 
 
 class AssistantMessageUpdate(BaseModel):
@@ -4388,7 +4412,7 @@ async def list_available_tools(
         user_id=current_user.id,
     )
     enabled = [t for t in tools if t.enabled]
-    return [ToolResponse.model_validate(t) for t in enabled]
+    return [ToolResponse(**_tool_response(t)) for t in enabled]
 
 
 @router.put("/session/tools/{tool_id}/always-on", status_code=204)
@@ -4469,10 +4493,10 @@ async def list_session_tools(
             )
         )
         tools = result.scalars().all()
-        return [ToolResponse.model_validate(t) for t in tools]
+        return [ToolResponse(**_tool_response(t)) for t in tools]
     else:
         tools = await session_service.get_session_tools(db, session_id)
-        return [ToolResponse.model_validate(t) for t in tools]
+        return [ToolResponse(**_tool_response(t)) for t in tools]
 
 
 @router.post(

@@ -20,6 +20,7 @@ VALID_TOOL_TYPES = {
     "code_interpreter", "sql_query", "document_generation", "browser",
     "rag_search", "github", "calendar", "image_generation",
     "slack", "email", "mcp", "tasks", "a2a",
+    "file_list", "memory",
 }
 
 TOOL_TYPE_TO_CATEGORY = {

@@ -105,6 +105,8 @@ export interface ToolData {
   name: string;
   type: string;
   category: string;
+  description?: string | null;
+  capabilities?: string[];
   config: Record<string, unknown> | null;
   enabled: boolean;
   created_at: string;

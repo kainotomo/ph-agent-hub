@@ -123,14 +123,27 @@ export function ToolList() {
 
   const columns = [
     { title: "Name", dataIndex: "name", key: "name", sorter: true,
-      render: (v: string, record: ToolData) => (
-        <Typography.Text ellipsis={{ tooltip: record.description || undefined }}>
-          {v}
-        </Typography.Text>
-      ),
+      render: (v: string, record: ToolData) => {
+        const tip = (record.capabilities && record.capabilities.length > 0)
+          ? record.capabilities.join("; ")
+          : (record.description || undefined);
+        return (
+          <Typography.Text ellipsis={{ tooltip: tip }}>
+            {v}
+          </Typography.Text>
+        );
+      },
     },
     { title: "Description", dataIndex: "description", key: "description", 
-      ellipsis: true, width: 250, responsive: ["xl" as const] },
+      width: 250, responsive: ["xl" as const],
+      render: (v: string | null, record: ToolData) => {
+        if (v) return v;
+        if (record.capabilities && record.capabilities.length > 0) {
+          return record.capabilities[0] + (record.capabilities.length > 1 ? ` (+${record.capabilities.length - 1} more)` : "");
+        }
+        return <Typography.Text type="secondary">—</Typography.Text>;
+      },
+    },
     {
       title: "Category",
       dataIndex: "category",

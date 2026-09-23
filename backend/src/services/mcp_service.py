@@ -313,6 +313,7 @@ async def sync_mcp_tools(
             tool.config = config
             tool.enabled = True
             tool.is_public = True
+            tool.description = tool_description or None
             updated += 1
             existing_tools.pop(tool_name)
         else:
@@ -325,6 +326,7 @@ async def sync_mcp_tools(
                 category="mcp",
                 enabled=True,
                 is_public=True,
+                description=tool_description or None,
             )
             db.add(tool)
             created += 1

@@ -17,6 +17,7 @@ import {
   message,
   Tooltip,
   Divider,
+  Popover,
 } from "antd";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import api from "../../../services/api";
@@ -254,13 +255,40 @@ export function SessionToolActivation({
                     }
                     description={
                       <Space direction="vertical" size={0}>
-                        <Text type="secondary">
-                          Type: {tool.type}
-                          {alwaysOnSet.has(tool.id) ? " · Always on" : ""}
-                        </Text>
-                        {tool.enabled ? null : (
-                          <Text type="danger">Disabled</Text>
+                        {tool.description ? (
+                          <Text type="secondary">{tool.description}</Text>
+                        ) : (tool.capabilities && tool.capabilities.length > 0) ? (
+                          <Text type="secondary">
+                            {tool.capabilities[0]}
+                            {tool.capabilities.length > 1 && (
+                              <>
+                                {" · "}
+                                <Popover
+                                  content={
+                                    <ul style={{ margin: 0, paddingLeft: 16 }}>
+                                      {tool.capabilities.slice(1).map((c, i) => (
+                                        <li key={i}>{c}</li>
+                                      ))}
+                                    </ul>
+                                  }
+                                  title={`+${tool.capabilities.length - 1} more capability${tool.capabilities.length - 1 === 1 ? "" : "s"}`}
+                                >
+                                  <Text style={{ cursor: "pointer", color: "#1677ff" }}>
+                                    +{tool.capabilities.length - 1} more
+                                  </Text>
+                                </Popover>
+                              </>
+                            )}
+                          </Text>
+                        ) : (
+                          <Text type="secondary">Type: {tool.type}</Text>
                         )}
+                        {alwaysOnSet.has(tool.id) ? (
+                          <Text type="secondary"> · Always on</Text>
+                        ) : null}
+                        {!tool.enabled ? (
+                          <Text type="danger">Disabled</Text>
+                        ) : null}
                       </Space>
                     }
                   />

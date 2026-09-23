@@ -52,6 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **On-Demand Step Details** — the message list no longer ships reasoning and tool-result bodies. Bulky parts are collapsed to a short preview (`{ chars, summary }`) and the full body is fetched only when a step is expanded, keeping long thinking traces out of the initial payload. ([#539])
 
 ### Fixed
+- Search queries are now matched as a literal, case-insensitive substring of the selected field (e.g. `MC:xpar` returns only that session, `XXX:xpar` returns none). Wildcard characters (`%`, `_`) are matched literally. The stale FULLTEXT index `idx_sessions_title_ft` has been dropped. ([#541])
 - Admin session deletion now works correctly. ([#460])
 - Chat no longer auto-scrolls to the end when a response finishes while the user
   is reading earlier messages; a badge on the scroll-to-bottom button indicates
@@ -208,3 +209,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#531]: https://github.com/kainotomo/ph-agent-hub/issues/531
 [#536]: https://github.com/kainotomo/ph-agent-hub/issues/536
 [#539]: https://github.com/kainotomo/ph-agent-hub/issues/539
+[#541]: https://github.com/kainotomo/ph-agent-hub/issues/541

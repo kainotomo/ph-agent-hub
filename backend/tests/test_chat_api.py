@@ -3336,6 +3336,148 @@ class TestSearchSessions:
         assert content_match.id in ids
 
 
+# ---------------------------------------------------------------------------
+# Issue #541 — literal substring matching (no more FULLTEXT false-positives)
+# ---------------------------------------------------------------------------
+
+    async def test_search_title_is_literal_substring_issue_541(
+        self, async_client, auth_headers, test_user, test_tenant, db_session
+    ):
+        """Verify title matching is a case-insensitive literal substring.
+
+        Searching ``XXX:xpar`` returns nothing when only ``MC:xpar`` and
+        ``VIE:xpar`` exist.  Searching ``MC:xpar`` returns only that session.
+        Searching ``xpar`` returns both.
+        """
+        from src.db.orm.sessions import Session
+        from datetime import datetime, timezone
+
+        mc = Session(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            title="MC:xpar",
+            is_temporary=False,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        vie = Session(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            title="VIE:xpar",
+            is_temporary=False,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        db_session.add_all([mc, vie])
+        await db_session.flush()
+
+        headers = auth_headers(test_user)
+
+        # --- no match for non-existent prefix ---
+        resp = await async_client.get(
+            "/api/chat/sessions/search?q=XXX%3Axpar&scope=title", headers=headers
+        )
+        assert resp.status_code == 200, resp.text
+        ids = [s["id"] for s in resp.json()]
+        assert ids == [], "XXX:xpar should return no results"
+
+        # also verify with scope=all
+        resp = await async_client.get(
+            "/api/chat/sessions/search?q=XXX%3Axpar", headers=headers
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == []
+
+        # --- exact prefix match returns only MC:xpar ---
+        resp = await async_client.get(
+            "/api/chat/sessions/search?q=MC%3Axpar&scope=title", headers=headers
+        )
+        assert resp.status_code == 200, resp.text
+        ids = [s["id"] for s in resp.json()]
+        assert ids == [mc.id], "MC:xpar should return only the MC session"
+
+        # --- bare substring returns both ---
+        resp = await async_client.get(
+            "/api/chat/sessions/search?q=xpar&scope=title", headers=headers
+        )
+        assert resp.status_code == 200, resp.text
+        ids = [s["id"] for s in resp.json()]
+        assert set(ids) == {mc.id, vie.id}, "xpar should match both sessions"
+
+    async def test_search_like_wildcards_are_literal_issue_541(
+        self, async_client, auth_headers, test_user, test_tenant, db_session
+    ):
+        """Verify % and _ in a query are matched literally, not as wildcards."""
+        from src.db.orm.sessions import Session
+        from datetime import datetime, timezone
+
+        done = Session(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            title="100% done",
+            is_temporary=False,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        under = Session(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            title="under_score",
+            is_temporary=False,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        plain = Session(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            title="plain report",
+            is_temporary=False,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        db_session.add_all([done, under, plain])
+        await db_session.flush()
+
+        headers = auth_headers(test_user)
+
+        # % alone must match only "100% done", not every session
+        resp = await async_client.get(
+            "/api/chat/sessions/search?q=%25&scope=title", headers=headers
+        )
+        assert resp.status_code == 200, resp.text
+        ids = [s["id"] for s in resp.json()]
+        assert ids == [done.id], "Literal % should match only '100% done'"
+
+        # _ alone must match only "under_score"
+        resp = await async_client.get(
+            "/api/chat/sessions/search?q=_&scope=title", headers=headers
+        )
+        assert resp.status_code == 200, resp.text
+        ids = [s["id"] for s in resp.json()]
+        assert ids == [under.id], "Literal _ should match only 'under_score'"
+
+        # escaped combination: 100% done
+        resp = await async_client.get(
+            "/api/chat/sessions/search?q=100%25+done&scope=title", headers=headers
+        )
+        assert resp.status_code == 200, resp.text
+        ids = [s["id"] for s in resp.json()]
+        assert ids == [done.id], "Query '100% done' should match only '100% done'"
+
+        # plain substring returns exactly one
+        resp = await async_client.get(
+            "/api/chat/sessions/search?q=plain&scope=title", headers=headers
+        )
+        assert resp.status_code == 200, resp.text
+        ids = [s["id"] for s in resp.json()]
+        assert ids == [plain.id]
+
+
 class TestSessionContext:
     """Tests for GET /chat/session/{session_id}/context."""
 

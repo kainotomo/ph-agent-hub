@@ -3588,6 +3588,21 @@ async def summarize_session(
 # =============================================================================
 
 
+# =============================================================================
+# Session Search — Issue #541: literal, case-insensitive substring matching
+# =============================================================================
+
+
+def _like_pattern(term: str) -> str:
+    """Case-insensitive substring pattern with LIKE wildcards escaped."""
+    escaped = (
+        term.replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
+    return f"%{escaped}%"
+
+
 @router.get(
     "/sessions/search",
     response_model=list[SearchResultResponse],
@@ -3598,11 +3613,12 @@ async def search_sessions(
     db: AsyncSession = Depends(get_db),
     current_user: UserORM = Depends(get_current_user),
 ):
-    """Full-text search across session titles, message content, and tags.
+    """Search across session titles, message content, and tags.
 
-    Query is scoped to the authenticated user's tenant and user ID.
-    Uses FULLTEXT index on ``sessions.title`` and ``LIKE`` on
-    ``messages.content`` (JSON column).
+    The query ``q`` is matched as a **literal, case-insensitive substring**
+    of each selected field (``%`` / ``_`` / ``\\`` are matched literally,
+    not as wildcards).  Results are scoped to the authenticated user's
+    tenant and user ID; temporary sessions are excluded.
 
     ``scope`` controls which fields are searched:
       - ``all`` (default): title, content, and tag
@@ -3622,31 +3638,19 @@ async def search_sessions(
             f"Invalid scope '{scope}'. Must be one of: all, title, content, tag"
         )
 
-    search_term = f"%{q.strip()}%"
+    search_term = _like_pattern(q.strip())
 
-    # Search sessions by title (FULLTEXT) and by message content (LIKE)
-    from sqlalchemy import text, type_coerce, String as SAString
+    # Search sessions by message content (LIKE) — title uses LIKE below.
+    from sqlalchemy import type_coerce, String as SAString
 
-    # FULLTEXT on sessions.title
+    # LIKE on sessions.title (literal, case-insensitive substring)
     title_stmt = (
         select(Session)
         .where(
             Session.user_id == current_user.id,
             Session.tenant_id == current_user.tenant_id,
             Session.is_temporary == False,  # noqa: E712
-            text("MATCH(sessions.title) AGAINST(:query IN NATURAL LANGUAGE MODE)"),
-        )
-        .params(query=q.strip())
-    )
-
-    # LIKE fallback on sessions.title (covers cases where FULLTEXT can't)
-    like_stmt = (
-        select(Session)
-        .where(
-            Session.user_id == current_user.id,
-            Session.tenant_id == current_user.tenant_id,
-            Session.is_temporary == False,  # noqa: E712
-            Session.title.ilike(search_term),
+            Session.title.ilike(search_term, escape="\\"),
         )
     )
 
@@ -3659,7 +3663,7 @@ async def search_sessions(
             Session.tenant_id == current_user.tenant_id,
             Session.is_temporary == False,  # noqa: E712
             Message.is_deleted == False,  # noqa: E712
-            type_coerce(Message.content, SAString).ilike(search_term),
+            type_coerce(Message.content, SAString).ilike(search_term, escape="\\"),
         )
     )
 
@@ -3673,7 +3677,7 @@ async def search_sessions(
             Session.user_id == current_user.id,
             Session.tenant_id == current_user.tenant_id,
             Session.is_temporary == False,  # noqa: E712
-            TagORM.name.ilike(search_term),
+            TagORM.name.ilike(search_term, escape="\\"),
         )
     )
 
@@ -3682,7 +3686,6 @@ async def search_sessions(
     queries: list[tuple[str, Any]] = []
     if scope in ("all", "title"):
         queries.append(("title", title_stmt))
-        queries.append(("title", like_stmt))
     if scope in ("all", "content"):
         queries.append(("content", msg_stmt))
     if scope in ("all", "tag"):

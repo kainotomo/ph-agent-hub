@@ -127,7 +127,7 @@ The chat area is the end-user experience inside the frontend web app. It provide
 - auto-sync of session tools when skill changes
 - message editing, deletion, and regeneration via non-destructive branching
 - message feedback (thumbs up / down) with confirmation before deletion
-- full-text search across sessions and messages
+- session search across titles, message content, and tags
 - authentication via backend-issued JWT
 - real-time streaming responses and agent events
 - auto-scroll to bottom when revisiting a session

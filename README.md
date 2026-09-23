@@ -184,7 +184,7 @@ For deeper architecture detail, see [docs/architecture-overview.md](docs/archite
 - Model selection from tenant-enabled providers
 - Templates, prompts, and skills
 - File uploads + RAG search support
-- Session branching, feedback, full-text search
+- Session branching, feedback, session search
 - Temporary sessions and finalization flow
 
 ### Admins And Managers

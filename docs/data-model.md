@@ -451,7 +451,7 @@ Feedback is recorded for assistant messages only and is used for model quality a
 
 ## 3.3 Search
 
-Full-text search across a user's sessions and messages is supported via MariaDB full-text indexes on `sessions.title` and the text parts within `messages.content`. Search is scoped to the authenticated user's own data within their tenant.
+Session search is implemented as a literal, case-insensitive substring match across `sessions.title`, the text parts within `messages.content` (via JSON `LIKE`), and tag names. Search is scoped to the authenticated user's own data within their tenant. The former FULLTEXT index on `sessions.title` was dropped by the Issue #541 migration (it could not serve leading-wildcard `LIKE` queries).
 
 ---
 
@@ -717,7 +717,7 @@ Fields marked as encrypted in this schema use **application-level Fernet symmetr
 - Support message branching for edits and regeneration without data loss
 - Support multi-modal message content via structured JSON parts
 - Support message feedback (thumbs up/down) for analytics
-- Enable full-text search across sessions and messages
+- Enable session search across titles, message content, and tags
 - Enable DeepSeek‑compatible agent workflows
 - Provide clean storage for sessions, messages, and memory
 - Allow future expansion (billing, quotas, analytics)

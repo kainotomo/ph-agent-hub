@@ -3,9 +3,13 @@
 
 # Python cache
 __pycache__
+**/__pycache__/
 *.pyc
+**/*.pyc
 *.pyo
+**/*.pyo
 *.pyd
+**/*.pyd
 .Python
 *.egg-info/
 dist/

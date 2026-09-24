@@ -2694,6 +2694,7 @@ async def _run_workflow(
             extra_tools=tools,
             base_temperature=temperature,
             base_reasoning_effort=reasoning_effort,
+            default_model_id=skill.default_model_id,
         )
 
         # Execute the workflow
@@ -3778,6 +3779,7 @@ async def _run_workflow_stream(
             extra_tools=tools,
             base_temperature=temperature,
             base_reasoning_effort=reasoning_effort,
+            default_model_id=skill.default_model_id,
         )
 
         # Stream the workflow via the engine's SSE iterator

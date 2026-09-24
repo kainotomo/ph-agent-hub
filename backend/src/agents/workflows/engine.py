@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any, AsyncIterator
 
@@ -145,6 +146,7 @@ def _build_agent_for_step(
         A configured MAF Agent.
     """
     from agent_framework import Agent, ToolResultCompactionStrategy, CharacterEstimatorTokenizer
+    from ...models.base import get_chat_client
 
     # Build default options
     default_options: dict[str, Any] = {}
@@ -157,7 +159,7 @@ def _build_agent_for_step(
     max_tokens = getattr(model, "max_tokens", None)
     if max_tokens and max_tokens > 0:
         compaction = TokenBudgetComposedStrategy(
-            strategy=ToolResultCompactionStrategy(),
+            strategies=[ToolResultCompactionStrategy()],
             token_budget=max_tokens,
             tokenizer=CharacterEstimatorTokenizer(),
         )
@@ -165,7 +167,7 @@ def _build_agent_for_step(
         compaction = ToolResultCompactionStrategy()
 
     agent = Agent(
-        client=model.model_client,
+        client=get_chat_client(model, thinking_enabled=False),
         name=step.name or step.id,
         instructions=step.instructions or "",
         tools=tools or None,
@@ -187,6 +189,7 @@ async def build_workflow(
     extra_tools: list | None = None,
     base_temperature: float = 0.7,
     base_reasoning_effort: str | None = None,
+    default_model_id: str | None = None,
 ) -> Workflow:
     """Build a MAF ``Workflow`` from a ``WorkflowDefinition``.
 
@@ -199,6 +202,8 @@ async def build_workflow(
         extra_tools:           Optional global tools injected into every step.
         base_temperature:      Base temperature for all steps (overridden by step).
         base_reasoning_effort: Base reasoning effort for all steps (overridden by step).
+        default_model_id:      Fallback model id to use when a step's model_ref is not
+                               found in the DB (typically the skill's default model).
 
     Returns:
         A built ``Workflow`` instance ready for execution.
@@ -210,8 +215,19 @@ async def build_workflow(
     executors: list[AgentExecutor] = []
 
     for i, step in enumerate(defn.steps):
-        # Resolve model for this step
-        model = await resolve_model(db, step.model_ref)
+        # Resolve model for this step (with fallback to skill default)
+        model = None
+        try:
+            model = await resolve_model(db, step.model_ref)
+        except NotFoundError:
+            if default_model_id:
+                logger.warning(
+                    "Step '%s' model_ref '%s' not found, falling back to '%s'",
+                    step.id, step.model_ref, default_model_id,
+                )
+                model = await resolve_model(db, default_model_id)
+            else:
+                raise
 
         # Resolve tools for this step (merge extra tools with step-specific)
         step_tools = list(extra_tools) if extra_tools else []
@@ -405,7 +421,12 @@ async def iter_workflow_sse(
         # Iterate over the async stream of WorkflowEvent objects
         async for event in response_stream:
             event_type = event.type
-            executor_id = getattr(event, "source_executor_id", None) or ""
+            # source_executor_id is only available on certain event types
+            # (e.g. request_info); accessing it on others raises ValueError
+            try:
+                executor_id = getattr(event, "source_executor_id", None) or ""
+            except (ValueError, AttributeError, RuntimeError):
+                executor_id = ""
 
             # ---- Step lifecycle events ----
             if event_type == "executor_invoked":
@@ -417,24 +438,24 @@ async def iter_workflow_sse(
 
                 yield {
                     "event": "workflow_step",
-                    "data": {
+                    "data": json.dumps({
                         "step_id": executor_id,
                         "step_index": step_num,
                         "total_steps": total_steps,
                         "status": "started",
-                    },
+                    }),
                 }
 
             elif event_type == "executor_completed":
                 step_num = step_tracker.get(executor_id, 0)
                 yield {
                     "event": "workflow_step",
-                    "data": {
+                    "data": json.dumps({
                         "step_id": executor_id,
                         "step_index": step_num,
                         "total_steps": total_steps,
                         "status": "completed",
-                    },
+                    }),
                 }
 
             elif event_type == "executor_failed":
@@ -444,7 +465,7 @@ async def iter_workflow_sse(
 
                 yield {
                     "event": "workflow_step",
-                    "data": {
+                    "data": json.dumps({
                         "step_id": executor_id,
                         "step_index": step_num,
                         "total_steps": total_steps,
@@ -453,19 +474,19 @@ async def iter_workflow_sse(
                             "message": error_msg,
                             "type": "step_error",
                         },
-                    },
+                    }),
                 }
 
             elif event_type == "executor_bypassed":
                 step_num = step_tracker.get(executor_id, 0)
                 yield {
                     "event": "workflow_step",
-                    "data": {
+                    "data": json.dumps({
                         "step_id": executor_id,
                         "step_index": step_num,
                         "total_steps": total_steps,
                         "status": "bypassed",
-                    },
+                    }),
                 }
 
             # ---- Output / intermediate text events ----
@@ -486,12 +507,12 @@ async def iter_workflow_sse(
                     if text:
                         yield {
                             "event": "token",
-                            "data": {
+                            "data": json.dumps({
                                 "session_id": session_id,
                                 "message_id": message_id,
                                 "delta": text,
                                 "step_name": executor_id or "",
-                            },
+                            }),
                         }
 
             # ---- Error events ----
@@ -500,9 +521,9 @@ async def iter_workflow_sse(
                 error_msg = str(err_data) if err_data else "Workflow error"
                 yield {
                     "event": "error",
-                    "data": {
+                    "data": json.dumps({
                         "message": error_msg,
-                    },
+                    }),
                 }
 
             # ---- Warning events (optional passthrough) ----
@@ -510,9 +531,9 @@ async def iter_workflow_sse(
                 warn_msg = event.data or "Workflow warning"
                 yield {
                     "event": "warning",
-                    "data": {
+                    "data": json.dumps({
                         "message": warn_msg,
-                    },
+                    }),
                 }
 
     except asyncio.CancelledError:
@@ -522,9 +543,9 @@ async def iter_workflow_sse(
         logger.warning("Workflow streaming error: %s", exc)
         yield {
             "event": "error",
-            "data": {
+            "data": json.dumps({
                 "message": f"Workflow streaming error: {exc}",
-            },
+            }),
         }
 
     # Final token extraction and message completion
@@ -538,13 +559,13 @@ async def iter_workflow_sse(
 
             yield {
                 "event": "message_complete",
-                "data": {
+                "data": json.dumps({
                     "session_id": session_id,
                     "message_id": message_id,
                     "tokens_in": tokens_in,
                     "tokens_out": tokens_out,
                     "cache_hit": cache_hit,
-                },
+                }),
             }
         except Exception as exc:
             logger.warning("Could not extract token counts from workflow result: %s", exc)
@@ -554,11 +575,11 @@ async def iter_workflow_sse(
             token_counts["cache_hit"] = 0
             yield {
                 "event": "message_complete",
-                "data": {
+                "data": json.dumps({
                     "session_id": session_id,
                     "message_id": message_id,
                     "tokens_in": 0,
                     "tokens_out": 0,
                     "cache_hit": 0,
-                },
+                }),
             }

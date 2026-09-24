@@ -915,7 +915,7 @@ async def run_agent(
     _nonstream_metrics: dict = {}
     try:
         try:
-            if cfg.execution_type == "workflow":
+            if cfg.execution_type in ("workflow", "workflow_based"):
                 raw_response, tokens_in, tokens_out, cache_hit_tokens = await _run_workflow(
                     model=cfg.model,
                     skill=cfg.skill,
@@ -2987,7 +2987,6 @@ async def run_agent_stream(
     accumulated_segments: list[dict] = []
     segments_to_persist: list[dict] = []
     step_index: int = 0
-    total_tokens: int = 0
     _stream_token_info: dict = {}  # mutated by _run_agent_stream to propagate token counts
     cfg = None
 
@@ -3083,7 +3082,7 @@ async def run_agent_stream(
         if extra_tools:
             _stream_tools = list(_stream_tools) + list(extra_tools)
 
-        if cfg.execution_type == "workflow":
+        if cfg.execution_type in ("workflow", "workflow_based"):
             stream = _run_workflow_stream(
                 model=cfg.model,
                 skill=cfg.skill,
@@ -3268,7 +3267,7 @@ async def run_agent_stream(
             "data": json.dumps({
                 "session_id": session_id,
                 "message_id": message_id,
-                "total_tokens": total_tokens,
+                "total_tokens": tokens_in + tokens_out,
                 "tokens_in": tokens_in,
                 "tokens_out": tokens_out,
                 "model_id": cfg.model.id if cfg else "unknown",

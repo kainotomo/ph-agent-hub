@@ -297,10 +297,21 @@ def _extract_token_counts_from_workflow(
     cache_hit = 0
 
     for event in result:
-        if event.type not in ("output", "intermediate"):
+        if event.type not in ("output", "intermediate", "executor_completed"):
             continue
         data = event.data
         if data is None:
+            continue
+        # For executor_completed, data is a list of AgentExecutorResponse
+        if event.type == "executor_completed" and isinstance(data, list):
+            for resp in data:
+                if hasattr(resp, 'agent_response') and resp.agent_response is not None:
+                    agent_resp = resp.agent_response
+                    usage = getattr(agent_resp, "usage_details", None)
+                    if usage is not None and isinstance(usage, dict):
+                        tokens_in += usage.get("input_token_count", 0) or 0
+                        tokens_out += usage.get("output_token_count", 0) or 0
+                        cache_hit += usage.get("cache_read_input_token_count", 0) or 0
             continue
         # Check if data is an AgentResponse-like object with usage_details
         usage = getattr(data, "usage_details", None)
@@ -406,8 +417,20 @@ async def iter_workflow_sse(
     # Get total steps for progress reporting
     total_steps = len(workflow.get_executors_list())
 
+    # Pre-populate step indices from workflow executor list so invoked events have correct step_id
     step_index = 0
     step_tracker: dict[str, int] = {}  # executor_id → step_index
+    step_name_by_idx: dict[int, str] = {}  # step_index → executor_name
+    current_step_idx = 0  # track which step we're actively streaming for
+    next_prepop_idx = 0   # next available pre-populated slot index
+    for exe in workflow.get_executors_list():
+        # Use 'id' attribute (e.g. "research", "report") — executors don't have 'name'
+        exe_id = getattr(exe, 'id', None) or getattr(exe, 'name', None)
+        if exe_id:
+            if exe_id not in step_tracker:
+                step_tracker[exe_id] = step_index
+                step_name_by_idx[step_index] = exe_id
+                step_index += 1
 
     # Build kwargs for the stream call
     stream_kwargs: dict[str, Any] = {"stream": True}
@@ -418,9 +441,33 @@ async def iter_workflow_sse(
     response_stream = workflow.run(message, **stream_kwargs)
 
     try:
+        # Accumulators for token counts during streaming
+        streaming_tokens_in = 0
+        streaming_tokens_out = 0
+        streaming_cache_hit = 0
+        event_types_seen = set()
+        processed_event_types = set()
+
         # Iterate over the async stream of WorkflowEvent objects
         async for event in response_stream:
             event_type = event.type
+            event_types_seen.add(event_type)
+            # Debug: log the first request_info event
+            if event_type == "request_info" and event.data is not None:
+                data = event.data
+                req_attrs = [a for a in dir(data) if not a.startswith("_")]
+                logger.info("PH-WORKFLOW-REQUEST_INFO: data_type=%s data_attrs=%s",
+                           type(data).__name__, req_attrs)
+                # Try to extract token usage
+                if hasattr(data, "to_dict"):
+                    try:
+                        logger.info("PH-WORKFLOW-REQUEST_INFO-dict: %s", json.dumps(str(data.to_dict())[:2000]))
+                    except Exception:
+                        pass
+                elif isinstance(data, dict):
+                    logger.info("PH-WORKFLOW-REQUEST_INFO-dict: %s", json.dumps(data)[:2000])
+                else:
+                    logger.info("PH-WORKFLOW-REQUEST_INFO-str: %s", str(data)[:2000])
             # source_executor_id is only available on certain event types
             # (e.g. request_info); accessing it on others raises ValueError
             try:
@@ -430,16 +477,25 @@ async def iter_workflow_sse(
 
             # ---- Step lifecycle events ----
             if event_type == "executor_invoked":
-                # First time we see this executor, assign it an index
-                if executor_id not in step_tracker:
+                # Use pre-populated step index from workflow structure
+                if executor_id and executor_id in step_tracker:
+                    step_num = step_tracker[executor_id]
+                elif executor_id:
                     step_tracker[executor_id] = step_index
+                    step_num = step_index
                     step_index += 1
-                step_num = step_tracker[executor_id]
+                else:
+                    # executor_id is empty; use the next pre-populated slot
+                    step_num = next_prepop_idx
+                    next_prepop_idx += 1
+                current_step_idx = step_num
+                # Look up actual executor name for step display
+                display_step_id = executor_id or step_name_by_idx.get(step_num, executor_id)
 
                 yield {
                     "event": "workflow_step",
                     "data": json.dumps({
-                        "step_id": executor_id,
+                        "step_id": display_step_id,
                         "step_index": step_num,
                         "total_steps": total_steps,
                         "status": "started",
@@ -447,11 +503,40 @@ async def iter_workflow_sse(
                 }
 
             elif event_type == "executor_completed":
-                step_num = step_tracker.get(executor_id, 0)
+                # Extract actual executor_id from response data
+                actual_executor_id = executor_id
+                step_num = current_step_idx  # should match since executors run sequentially
+                if event.data is not None and isinstance(event.data, list) and event.data:
+                    first_resp = event.data[0]
+                    if hasattr(first_resp, 'executor_id') and first_resp.executor_id:
+                        actual_executor_id = first_resp.executor_id
+                        # Pre-populated tracker should have this; verify
+                        if actual_executor_id not in step_tracker:
+                            step_tracker[actual_executor_id] = step_num
+
+                # Extract token counts from AgentExecutorResponse objects in the list
+                if event.data is not None and isinstance(event.data, list):
+                    for resp in event.data:
+                        if hasattr(resp, 'agent_response') and resp.agent_response is not None:
+                            agent_resp = resp.agent_response
+                            usage = getattr(agent_resp, "usage_details", None)
+                            if usage is not None and isinstance(usage, dict):
+                                logger.info("PH-WORKFLOW-EXECCOMP-USAGE: executor=%s input=%s output=%s cache=%s",
+                                           actual_executor_id,
+                                           usage.get("input_token_count", 0),
+                                           usage.get("output_token_count", 0),
+                                           usage.get("cache_read_input_token_count", 0))
+                                streaming_tokens_in += usage.get("input_token_count", 0) or 0
+                                streaming_tokens_out += usage.get("output_token_count", 0) or 0
+                                streaming_cache_hit += usage.get("cache_read_input_token_count", 0) or 0
+
+                # Store step name for token events (for any late-arriving tokens)
+                step_tracker[actual_executor_id] = step_num
+
                 yield {
                     "event": "workflow_step",
                     "data": json.dumps({
-                        "step_id": executor_id,
+                        "step_id": actual_executor_id,
                         "step_index": step_num,
                         "total_steps": total_steps,
                         "status": "completed",
@@ -490,9 +575,29 @@ async def iter_workflow_sse(
                 }
 
             # ---- Output / intermediate text events ----
-            elif event_type == "output":
+            # Handles both 'output' and 'intermediate' events.
+            # These carry AgentResponse payloads from each workflow step.
+            elif event_type in ("output", "intermediate"):
                 data = event.data
                 if data is not None:
+                    # Debug: dump all attributes to understand the data structure
+                    attrs = [a for a in dir(data) if not a.startswith("_")]
+                    logger.info("PH-WORKFLOW-DATA: type=%s data_type=%s data_attrs=%s",
+                               event_type, type(data).__name__, attrs)
+
+                    # Accumulate token counts from usage_details
+                    usage = getattr(data, "usage_details", None)
+                    if usage is None and isinstance(data, dict):
+                        usage = data.get("usage_details")
+                    if usage is not None and isinstance(usage, dict):
+                        logger.info("PH-WORKFLOW-USAGE: input=%s output=%s cache=%s",
+                                   usage.get("input_token_count", 0),
+                                   usage.get("output_token_count", 0),
+                                   usage.get("cache_read_input_token_count", 0))
+                        streaming_tokens_in += usage.get("input_token_count", 0) or 0
+                        streaming_tokens_out += usage.get("output_token_count", 0) or 0
+                        streaming_cache_hit += usage.get("cache_read_input_token_count", 0) or 0
+
                     # Try to extract text from the response
                     text = None
                     if hasattr(data, "text"):
@@ -505,13 +610,15 @@ async def iter_workflow_sse(
                         text = str(data["content"])
 
                     if text:
+                        # Look up step name from current streaming step
+                        step_name = step_name_by_idx.get(current_step_idx, executor_id)
                         yield {
                             "event": "token",
                             "data": json.dumps({
                                 "session_id": session_id,
                                 "message_id": message_id,
                                 "delta": text,
-                                "step_name": executor_id or "",
+                                "step_name": step_name or "",
                             }),
                         }
 
@@ -536,6 +643,22 @@ async def iter_workflow_sse(
                     }),
                 }
 
+            # ---- Request info events (token usage) ----
+            elif event_type == "request_info":
+                data = event.data
+                if data is not None:
+                    usage = getattr(data, "usage_details", None)
+                    if usage is None and isinstance(data, dict):
+                        usage = data.get("usage_details")
+                    if usage is not None and isinstance(usage, dict):
+                        logger.info("PH-WORKFLOW-REQUESTUSAGE: input=%s output=%s cache=%s",
+                                   usage.get("input_token_count", 0),
+                                   usage.get("output_token_count", 0),
+                                   usage.get("cache_read_input_token_count", 0))
+                        streaming_tokens_in += usage.get("input_token_count", 0) or 0
+                        streaming_tokens_out += usage.get("output_token_count", 0) or 0
+                        streaming_cache_hit += usage.get("cache_read_input_token_count", 0) or 0
+
     except asyncio.CancelledError:
         # Stream was cancelled — propagate
         raise
@@ -548,23 +671,37 @@ async def iter_workflow_sse(
             }),
         }
 
+    logger.info("PH-WORKFLOW-ALLTYPES: %s", sorted(event_types_seen))
+
     # Final token extraction and message completion
     if token_counts is not None:
         try:
             final_result = await response_stream.get_final_response()
+            logger.info("PH-WORKFLOW-FINAL-result type=%s final_result_attrs=%s",
+                       type(final_result).__name__, [a for a in dir(final_result) if not a.startswith('_')])
             tokens_in, tokens_out, cache_hit = _extract_token_counts_from_workflow(final_result)
-            token_counts["in"] = tokens_in
-            token_counts["out"] = tokens_out
-            token_counts["cache_hit"] = cache_hit
+            # Use streaming accumulators if they have values (they may be more accurate),
+            # otherwise fall back to the values extracted from the final result.
+            final_tokens_in = streaming_tokens_in or tokens_in
+            final_tokens_out = streaming_tokens_out or tokens_out
+            final_cache_hit = streaming_cache_hit or cache_hit
+            logger.info("PH-WORKFLOW-FINAL: streaming=(%d,%d,%d) result=(%d,%d,%d) => final=(%d,%d,%d)",
+                       streaming_tokens_in, streaming_tokens_out, streaming_cache_hit,
+                       tokens_in, tokens_out, cache_hit,
+                       final_tokens_in, final_tokens_out, final_cache_hit)
+            token_counts["in"] = final_tokens_in
+            token_counts["out"] = final_tokens_out
+            token_counts["cache_hit"] = final_cache_hit
 
             yield {
                 "event": "message_complete",
                 "data": json.dumps({
                     "session_id": session_id,
                     "message_id": message_id,
-                    "tokens_in": tokens_in,
-                    "tokens_out": tokens_out,
-                    "cache_hit": cache_hit,
+                    "total_tokens": final_tokens_in + final_tokens_out,
+                    "tokens_in": final_tokens_in,
+                    "tokens_out": final_tokens_out,
+                    "cache_hit": final_cache_hit,
                 }),
             }
         except Exception as exc:
@@ -578,6 +715,7 @@ async def iter_workflow_sse(
                 "data": json.dumps({
                     "session_id": session_id,
                     "message_id": message_id,
+                    "total_tokens": 0,
                     "tokens_in": 0,
                     "tokens_out": 0,
                     "cache_hit": 0,

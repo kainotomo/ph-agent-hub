@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **MAF 1.19.0 Workflow Engine** — `workflow_based` skills now execute as multi-step, multi-model agent graphs via the MAF 1.19.0 Workflow API. Each step uses its own model configuration, progress streams as SSE `workflow_step` events, and per-step failures are reported without fallback to single-agent execution. Includes a two-step example workflow (`web_research_report`: research → report). ([#XXX])
+- **Workflow Step Progress UI** — chat renders workflow step progress indicators (step name, status dot: started/completed/failed) inline in the chat view alongside other streaming events.
 - **Process Steps Fold** — one collapsible fold per assistant response showing every step (reasoning, tool call, tool result) in exact order. Replaces the separate "Reasoning" and "Tool Activity" dropdowns. ([#538])
 - **Bulk Move Chats** — select multiple chats in the sidebar and move them to a folder (or Unfiled) in one action, mirroring bulk delete. ([#526])
 - **Chat Folders** — organise chat sessions into collapsible folders in the sidebar, with native drag & drop and a Move-to-folder menu. ([#526])

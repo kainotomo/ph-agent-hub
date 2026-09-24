@@ -219,6 +219,23 @@ export interface ProgressEvent {
   };
 }
 
+// ---- Workflow step events (MAF 1.19.0 multi-step workflows) ---------------
+
+export interface WorkflowStepEvent {
+  event: "workflow_step";
+  data: {
+    workflow_key?: string;
+    step_id: string;
+    step_index: number;
+    total_steps: number;
+    status: "started" | "completed" | "failed" | "bypassed";
+    error?: {
+      message: string;
+      type: string;
+    };
+  };
+}
+
 export type StreamEvent =
   | TokenEvent
   | ToolStartEvent
@@ -238,6 +255,7 @@ export type StreamEvent =
   | AutopilotPauseEvent
   | AutopilotResumeEvent
   | ProgressEvent
+  | WorkflowStepEvent
   | ErrorEvent
   | HeartbeatEvent;
 
@@ -303,6 +321,7 @@ export function useStream(apiPrefix: string = "chat") {
         onAutopilotPause?: (data: AutopilotPauseEvent["data"]) => void;
         onAutopilotResume?: (data: AutopilotResumeEvent["data"]) => void;
         onProgress?: (data: ProgressEvent["data"]) => void;
+        onWorkflowStep?: (data: WorkflowStepEvent["data"]) => void;
         onError?: (error: string, messageId: string) => void;
         onClose?: () => void;
       },
@@ -466,6 +485,9 @@ export function useStream(apiPrefix: string = "chat") {
                   case "progress":
                     handlers.onProgress?.(parsed);
                     break;
+                  case "workflow_step":
+                    handlers.onWorkflowStep?.(parsed);
+                    break;
                   case "error":
                     handlers.onError?.(parsed.message || parsed.error || "Unknown error", parsed.message_id);
                     break;
@@ -599,6 +621,7 @@ export function useStream(apiPrefix: string = "chat") {
         onAutopilotPause?: (data: AutopilotPauseEvent["data"]) => void;
         onAutopilotResume?: (data: AutopilotResumeEvent["data"]) => void;
         onProgress?: (data: ProgressEvent["data"]) => void;
+        onWorkflowStep?: (data: WorkflowStepEvent["data"]) => void;
         onError?: (error: string, messageId: string) => void;
         onClose?: () => void;
       },
@@ -735,6 +758,9 @@ export function useStream(apiPrefix: string = "chat") {
                   case "autopilot_resume":
                     handlers.onAutopilotResume?.(parsed);
                     break;
+                  case "workflow_step":
+                    handlers.onWorkflowStep?.(parsed);
+                    break;
                   case "error":
                     handlers.onError?.(parsed.message || parsed.error || "Unknown error", parsed.message_id);
                     break;
@@ -803,6 +829,7 @@ export function useStream(apiPrefix: string = "chat") {
         onAutopilotPause?: (data: AutopilotPauseEvent["data"]) => void;
         onAutopilotResume?: (data: AutopilotResumeEvent["data"]) => void;
         onProgress?: (data: ProgressEvent["data"]) => void;
+        onWorkflowStep?: (data: WorkflowStepEvent["data"]) => void;
         onError?: (error: string, messageId: string) => void;
         onClose?: () => void;
       } | undefined,
@@ -871,6 +898,9 @@ export function useStream(apiPrefix: string = "chat") {
                   case "tags_updated":
                     if (handlers) handlers.onTagsUpdated?.(parsed);
                     break;
+                  case "workflow_step":
+                    if (handlers) handlers.onWorkflowStep?.(parsed);
+                    break;
                   case "error":
                     if (handlers) handlers.onError?.(parsed.message || parsed.error || "Unknown error", parsed.message_id);
                     break;
@@ -934,6 +964,7 @@ export function useStream(apiPrefix: string = "chat") {
         onSummarized?: (data: SummarizedEvent["data"]) => void;
         onTagsUpdated?: (data?: TagsUpdatedEvent["data"]) => void;
         onStreamStart?: () => void;
+        onWorkflowStep?: (data: WorkflowStepEvent["data"]) => void;
         onError?: (error: string, messageId: string) => void;
         onClose?: () => void;
       },
@@ -1007,6 +1038,9 @@ export function useStream(apiPrefix: string = "chat") {
                     break;
                   case "tags_updated":
                     handlers.onTagsUpdated?.(parsed);
+                    break;
+                  case "workflow_step":
+                    handlers.onWorkflowStep?.(parsed);
                     break;
                   case "error":
                     handlers.onError?.(parsed.message || parsed.error || "Unknown error", parsed.message_id);

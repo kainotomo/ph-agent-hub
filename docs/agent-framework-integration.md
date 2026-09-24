@@ -62,7 +62,59 @@ MAF Workflows are graph-based orchestrations supporting sequential, concurrent, 
 - human-in-the-loop steps
 - time-travel (step replay)
 
-PH Agent Hub exposes workflows as skills with `execution_type = workflow`. When the agent loop resolves a skill with `execution_type = workflow`, it delegates to a MAF Workflow runner instead of a simple `Agent.run()` call.
+PH Agent Hub exposes workflows as skills with `skill_type = workflow_based`. When the agent loop resolves a skill with `skill_type = workflow_based`, it delegates to a MAF Workflow runner instead of a simple `Agent.run()` call.
+
+#### Workflow Definition
+
+Workflows are defined in `/backend/src/agents/workflows/` as Python modules. Each module exposes:
+- **`WorkflowDefinition`** — a Pydantic v2 model declaring the workflow metadata and step graph
+- **`MAF_KEY`** — a constant string identifier matching the skill's `maf_target_key` in the DB
+
+A workflow consists of **steps** — each step declares its own model/provider, tools, system prompt, and input/output handling. Steps can be sequential or parallel (fan-out → fan-in).
+
+```python
+from agent_framework import Workflow, WorkflowStep, ToolSpec, ModelSpec
+
+class WebResearchReportWorkflow(Workflow):
+    MAF_KEY = "web_research_report"
+
+    steps = [
+        WorkflowStep(
+            id="research",
+            model=ModelSpec(provider="openai", model="gpt-4"),
+            tools=[ToolSpec(name="web_search"), ToolSpec(name="web_scrape")],
+            instructions="Research the topic and compile findings.",
+        ),
+        WorkflowStep(
+            id="report",
+            model=ModelSpec(provider="openai", model="gpt-4"),
+            tools=[ToolSpec(name="document_generation")],
+            instructions="Generate a report from the research findings.",
+        ),
+    ]
+```
+
+#### Workflow Execution & Streaming
+
+Workflows stream progress as SSE `workflow_step` events. Each event carries:
+```json
+{
+  "type": "workflow_step",
+  "data": {
+    "workflow_key": "web_research_report",
+    "step_id": "research",
+    "step_index": 0,
+    "total_steps": 2,
+    "status": "completed"  // or "started", "failed", "bypassed"
+  }
+}
+```
+
+The frontend consumes these events to render a progress indicator showing per-step status (started/completed/failed). Per-step failures are reported directly — there is no automatic fallback to single-agent execution.
+
+#### Token Extraction
+
+Workflow token usage (input tokens, cache hits, output tokens) is extracted from the MAF event stream during execution and associated with the final workflow result for billing/usage tracking.
 
 ### 2.4 MAF Middleware
 
@@ -103,11 +155,13 @@ HTTP Request (POST /chat/session/:id/message)
 [2] Resolve session config
     - selected_model_id → model client
     - selected_template_id → system prompt
-    - selected_skill_id → maf_target_key + execution_type
+    - selected_skill_id → maf_target_key + skill_type
     - session_active_tools → tool list
         │
         ▼
-[3] Assemble MAF Agent (or route to Workflow)
+[3] Route by skill_type
+    ├── skill_type = agent_based → assemble MAF Agent → agent.run()
+    └── skill_type = workflow_based → assemble MAF Workflow → workflow.run()
         │
         ▼
 [4] Apply middleware pipeline
@@ -116,13 +170,15 @@ HTTP Request (POST /chat/session/:id/message)
     - OpenTelemetry tracing
         │
         ▼
-[5] agent.run(user_message) → streaming response
+[5] Execute (Agent.run() or Workflow.run(stream=True))
         │
         ▼
 [6] Persist message + branch to MariaDB
         │
         ▼
 [7] Stream tokens + agent events → SSE → frontend
+    - Agent-based: token/tool/tool_result/step_complete events
+    - Workflow-based: workflow_step events (per-step progress)
 ```
 
 ---
@@ -158,6 +214,29 @@ MAF streaming integration points:
 - Agent events (tool start, tool result, step complete) are emitted as typed SSE events
 - The DeepSeek stabilizer filters `<think>` tokens from the stream before they reach the SSE layer
 - The **Stream Bridge** (`agents/stream_bridge.py`) manages the SSE streaming connection between the agent loop and the frontend, handling reconnection, partial response preservation on navigation, and stream lifecycle
+
+---
+
+## 7. Workflow Engine (`agents/workflows/engine.py`)
+
+The workflow engine provides the bridge between PH Agent Hub's skill system and MAF's Workflow API:
+
+| Function | Purpose |
+|---|---|
+| `resolve_model(step)` | Maps a workflow step's model spec to the appropriate MAF ChatClient provider |
+| `load_workflow_definition(key)` | Loads and validates a `WorkflowDefinition` from the workflow module identified by key |
+| `build_agent_for_step(step, model_client, tools)` | Constructs a MAF Agent for a single workflow step with its specific config |
+| `build_workflow(definition, tools)` | Assembles a MAF Workflow from the definition, building agents for each step |
+| `run_workflow(workflow, user_input)` | Executes the workflow, yielding `WorkflowEvent` objects as they arrive |
+| `iter_workflow_sse(workflow, user_input)` | Async generator that iterates the workflow and emits SSE-compatible event dicts |
+| `_extract_token_counts_from_workflow(event)` | Extracts input/output/cached token counts from workflow events for billing |
+
+Execution flow:
+1. `run_workflow` is called with the workflow and user input
+2. Each step is executed in order (or parallel where declared)
+3. Step events (`workflow_step`) are emitted as SSE events with status: `started` → `completed` (or `failed`)
+4. Token usage from each step is accumulated for billing
+5. The final workflow result includes output from all steps
 
 ---
 
@@ -201,7 +280,7 @@ MAF has built-in OpenTelemetry integration. PH Agent Hub configures:
 
 ---
 
-## 10. References
+## 11. References
 
 - [MAF GitHub](https://github.com/microsoft/agent-framework)
 - [MAF Docs — Agents](https://learn.microsoft.com/en-us/agent-framework/agents/index)
@@ -211,3 +290,9 @@ MAF has built-in OpenTelemetry integration. PH Agent Hub configures:
 - [MAF Docs — Tools](https://learn.microsoft.com/en-us/agent-framework/agents/tools/index)
 - [DeepSeek Stabilizer](deepseek-stabilizer.md)
 - [Streaming Protocol](backend-architecture.md#11-streaming-protocol)
+
+### Example Workflow
+
+- **`web_research_report`** (`agents/workflows/web_research_report.py`) — A two-step workflow:
+  1. **Research** — uses `web_search` and `web_scrape` tools to gather information on a topic
+  2. **Report** — uses `document_generation` to create a structured report from the findings

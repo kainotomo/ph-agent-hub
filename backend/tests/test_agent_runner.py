@@ -1050,17 +1050,29 @@ class TestRunWorkflow:
             await self.fn(model, skill, "client", "prompt", [], "hi", "assistant")
 
     @patch("src.agents.registry.get_registered")
-    @patch("src.agents.runner._run_agent")
-    async def test_falls_back_to_agent(self, mock_run_agent, mock_reg):
+    async def test_raises_when_not_registered(self, mock_reg):
         mock_reg.return_value = MagicMock()
-        mock_run_agent.return_value = ("fallback response", 10, 5, 0)
 
         model = await self._make_mock_model()
         skill = self._make_mock_skill(maf_target_key="my_workflow")
 
-        result = await self.fn(model, skill, "client", "prompt", [], "hi", "assistant")
-        assert result[0] == "fallback response"
-        mock_run_agent.assert_called_once()
+        from src.agents.workflows.definition import WorkflowDefinition
+        wf_def = WorkflowDefinition(
+            key="my_workflow",
+            name="Test Workflow",
+            steps=[
+                {
+                    "id": "step1",
+                    "instructions": "Test step",
+                    "model_ref": "gpt-4",
+                }
+            ],
+        )
+        mock_reg.return_value = MagicMock(WORKFLOW_DEFINITION=wf_def)
+
+        # Should raise because no DB session to resolve models
+        with pytest.raises(ValidationError, match="workflow"):
+            await self.fn(model, skill, "client", "prompt", [], "hi", "assistant")
 
 
 # =============================================================================

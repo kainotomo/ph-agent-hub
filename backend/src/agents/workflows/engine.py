@@ -155,7 +155,9 @@ def load_workflow_definition(mod: Any) -> WorkflowDefinition:
         A validated ``WorkflowDefinition``.
 
     Raises:
-        ValidationError: If the module has no workflow definition structure.
+        ValidationError: If the module has no workflow definition structure, or
+            if a declared ``WORKFLOW_DEFINITION`` key does not match the
+            module's ``MAF_KEY``.
     """
     if mod is None:
         raise ValidationError("Workflow module is None")
@@ -170,6 +172,16 @@ def load_workflow_definition(mod: Any) -> WorkflowDefinition:
         else:
             raise ValidationError(
                 "WORKFLOW_DEFINITION must be a dict or WorkflowDefinition instance"
+            )
+        # The key is the checkpoint namespace and the registry key, so a
+        # rename is a create, not an edit: it must track the module MAF_KEY.
+        # (The STEPS branch below cannot diverge: it derives key from MAF_KEY.)
+        maf_key = getattr(mod, "MAF_KEY", None)
+        if isinstance(maf_key, str) and maf_key != defn.key:
+            raise ValidationError(
+                f"Workflow definition key '{defn.key}' does not match module "
+                f"MAF_KEY '{maf_key}': a workflow key is immutable, renaming it is "
+                f"a create, not an edit"
             )
         _validate_agent_refs(defn)
         return defn

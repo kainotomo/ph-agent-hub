@@ -39,6 +39,8 @@ class WorkflowStep(BaseModel):
 
     Attributes:
         id:                Unique identifier (executor identity; must be stable across rebuilds).
+                           Must be non-empty and contain no whitespace, because MAF falls back
+                           to the agent's ``name`` when the id is falsy.
         name:              Display-only name for the step.
         type:              Discriminator: ``"inline"`` (LLM-driven) or ``"agent"`` (pre-built).
         agent_ref:         Role reference (``@name``) required when ``type == "agent"``.
@@ -66,6 +68,18 @@ class WorkflowStep(BaseModel):
     input: str = ""
     context_mode: Literal["full", "last_agent"] = "last_agent"
     on_error: Literal["stop", "continue"] = "stop"
+
+    @field_validator("id")
+    @classmethod
+    def validate_step_id(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("Step 'id' must be a non-empty string")
+        if any(ch.isspace() for ch in v):
+            raise ValueError(
+                f"Step id {v!r} must not contain whitespace: it is the "
+                f"executor identity and the key used by 'output_of:<step_id>'"
+            )
+        return v
 
     @field_validator("model_ref")
     @classmethod

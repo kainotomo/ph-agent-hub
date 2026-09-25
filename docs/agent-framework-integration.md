@@ -77,14 +77,14 @@ A workflow consists of **steps** — an ordered list of step dicts. Each step is
 | `type` | `Literal["inline", "agent"]` | `"inline"` for LLM-driven steps (requires `instructions`); `"agent"` for pre-built agent steps (requires `agent_ref`). |
 | `agent_ref` | `str \| None` | Required when `type == "agent"`. An `@`-prefixed role reference (e.g. `@reasoning`) or a registered agent key. |
 | `instructions` | `str \| None` | Required when `type == "inline"`. System prompt for the LLM. |
-| `model_ref` | `str \| None` | Model reference. An `@`-prefixed role (e.g. `@reasoning`) or an unprefixed concrete tenant model id. If omitted or if an `@`-prefixed role has no tenant binding, an `inline` step falls back to the skill's `default_model_id`; for `type == "agent"` an omitted `model_ref` inherits the agent module's `MODEL_ROLE`. |
+| `model_ref` | `str \| None` | Model reference. An `@`-prefixed role (e.g. `@reasoning`) or an unprefixed concrete tenant model id. An unbound `@`-prefixed role raises `ValidationError` and never falls back. For an omitted `model_ref` on an `inline` step, `resolve_model` is never called (the step cannot execute without a model). A concrete reference that is not found in the tenant falls back to the skill's `default_model_id`. For `type == "agent"`, an omitted `model_ref` inherits the agent module's `MODEL_ROLE`. |
 | `reasoning_effort` | `str \| None` | Optional chain-of-thought effort level override. |
 | `temperature` | `float` | Model temperature, clamped to [0.0, 2.0]. Default `0.7`. |
 | `input` | `str` | Description of the step's input source (see *input forms* below). Default is empty — inherit from upstream output. |
 | `context_mode` | `Literal["full", "last_agent"]` | How prior context is passed. Default `"last_agent"` — only the immediately preceding agent's response messages. `"full"` also includes the original user input. `"custom"` is not supported. |
 | `on_error` | `Literal["stop", "continue"]` | Step failure handling. Default `"stop"` (halt the workflow); `"continue"` skips to the next step. |
 
-**Reference convention**: An `@`-prefixed value is a logical role reference drawn from a closed, centrally declared vocabulary in `roles.py` (`MODEL_ROLES`, `TOOL_ROLES`, `AGENT_ROLES`). Each tenant *is intended* to bind these roles to its own concrete resources, but **tenant role-to-resource binding resolution is not implemented** (deferred to issue #550). An unprefixed value (e.g. `"gpt-4o"`) is a concrete tenant resource id, validated on a different path. The `tool_refs` field is not part of this step model, and `TOOL_ROLES` is declared for issue #550 and is not consumed yet. An `@`-prefixed `model_ref` that currently has no tenant binding falls back to the skill's default model.
+**Reference convention**: An `@`-prefixed value is a logical role reference drawn from a closed, centrally declared vocabulary in `roles.py` (`MODEL_ROLES`, `TOOL_ROLES`, `AGENT_ROLES`). Each tenant binds these roles to its own concrete resources: model roles resolve through the tenant's model-role bindings (raising `ValidationError` for an unbound role), and tool roles resolve against the run's tenant-scoped tool pool (raising `ValidationError` for an unresolved ref). An unprefixed value (e.g. `"gpt-4o"`) is a concrete tenant resource id, validated on a different path.
 
 **Input forms** for the `input` field:
 
@@ -92,6 +92,32 @@ A workflow consists of **steps** — an ordered list of step dicts. Each step is
 - `"user_message"`: use the original user message for this step.
 - `"output_of:<step_id>"`: use the output of the specified step (the referenced `step_id` must exist in the definition and cannot be the step's own id).
 - Any other non-empty string: treated as literal text.
+
+#### Definition identity and edit policy
+
+A workflow definition is identified by two immutable tokens:
+
+- **`key`** — the checkpoint namespace and the registry key (see `definition.py`).
+- **step `id`** — the MAF executor identity (see `engine.py` and `identity.py`).
+
+The definition `key` is immutable: a rename is a create, not an edit. This is enforced by `load_workflow_definition` which requires a definition's `key` to equal the module's `MAF_KEY` (see `engine.py` § "Workflow definition loader"). A step `id` must be a non-empty, whitespace-free token — it serves as MAF executor identity.
+
+Config-only versus topology changes are derived from MAF's `Workflow.graph_signature` (never from a hand-maintained field list) by rebuilding a probe workflow and comparing signatures (see `graph_signature`, `graph_signature_hash`, and `classify_edit` in `identity.py`). The full edit policy is:
+
+> Workflow definition edit policy
+>
+> - A definition is identified by its key (the checkpoint namespace and the registry
+>   key) and by its step ids (MAF executor identity). Neither may be renamed in place:
+>   renaming is a create, not an edit, and is rejected by validation.
+> - A config-only edit changes nothing in MAF's graph signature (instructions,
+>   model_ref, tool_refs, temperature, reasoning_effort, context_mode, type, agent_ref,
+>   input, on_error, display name, description). It is allowed and applies to
+>   subsequent runs; paused runs of the previous definition remain resumable.
+> - A topology edit changes the graph: a step is added, removed, renumbered or renamed,
+>   or an edge changes. It is allowed, but paused runs of the previous topology can no
+>   longer be resumed. The edit must report the added and removed step ids, and, once
+>   checkpoint storage exists, the number of paused runs affected. Paused runs are
+>   never silently stranded and the edit is never silently blocked.
 
 #### Workflow Execution & Streaming
 
@@ -216,6 +242,10 @@ The workflow engine provides the bridge between PH Agent Hub's skill system and 
 | `run_workflow(workflow, message)` | Executes a workflow synchronously; returns `(output_text, WorkflowRunResult)` |
 | `iter_workflow_sse(workflow, message, session_id, message_id, ...)` | Async generator that iterates the workflow and emits SSE-compatible event dicts for each agent event |
 | `_extract_token_counts_from_workflow(result)` | Extracts input/output/cached token counts from a completed `WorkflowRunResult` by iterating output and intermediate events |
+| `classify_edit(current, proposed)` | Classifies an edit as `unchanged`, `config_only`, or `topology` from MAF's `graph_signature_hash` (see `identity.py`) |
+| `render_edit_report(classification, *, paused_run_count=None)` | Renders the edit-impact report, stating whether paused runs remain resumable (see `identity.py`) |
+
+Definitions are also validated so a key that diverges from `MAF_KEY` is rejected.
 
 Execution flow:
 1. `load_workflow_definition` reads the workflow module and validates its structure

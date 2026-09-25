@@ -520,6 +520,69 @@ class TestLoadWorkflowDefinition:
         with pytest.raises(ValidationError, match="no WORKFLOW_DEFINITION"):
             load_workflow_definition(module)
 
+    def test_key_diverging_from_maf_key_is_rejected(self):
+        from src.agents.workflows.engine import load_workflow_definition
+        from src.core.exceptions import ValidationError
+
+        module = MagicMock()
+        module.MAF_KEY = "wf_key"
+        module.WORKFLOW_DEFINITION = {
+            "key": "other_key",
+            "name": "Test",
+            "steps": [
+                {"id": "s1", "name": "S1", "type": "inline", "instructions": "Do it"},
+            ],
+        }
+
+        with pytest.raises(ValidationError) as excinfo:
+            load_workflow_definition(module)
+
+        message = str(excinfo.value)
+        assert "wf_key" in message
+        assert "other_key" in message
+        assert "immutable" in message
+
+    def test_key_matching_maf_key_loads(self):
+        from src.agents.workflows.engine import load_workflow_definition
+
+        module = MagicMock()
+        module.MAF_KEY = "wf_key"
+        module.WORKFLOW_DEFINITION = {
+            "key": "wf_key",
+            "name": "Test",
+            "steps": [
+                {"id": "s1", "name": "S1", "type": "inline", "instructions": "Do it"},
+            ],
+        }
+
+        defn = load_workflow_definition(module)
+
+        assert defn.key == module.MAF_KEY
+
+    def test_shipped_web_research_report_matches_maf_key(self):
+        from src.agents.workflows import web_research_report
+        from src.agents.workflows.engine import load_workflow_definition
+
+        defn = load_workflow_definition(web_research_report)
+
+        assert defn.key == web_research_report.MAF_KEY
+
+    def test_steps_branch_still_derives_key_from_maf_key(self):
+        from src.agents.workflows.engine import load_workflow_definition
+
+        module = MagicMock()
+        module.WORKFLOW_DEFINITION = None
+        module.MAF_KEY = "steps_key"
+        module.NAME = "Steps Workflow"
+        module.DESCRIPTION = ""
+        module.STEPS = [
+            {"id": "s1", "name": "S1", "type": "inline", "instructions": "Do it"},
+        ]
+
+        defn = load_workflow_definition(module)
+
+        assert defn.key == "steps_key"
+
 
 # =============================================================================
 # resolve_model tests

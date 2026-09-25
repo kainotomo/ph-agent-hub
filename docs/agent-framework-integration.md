@@ -57,64 +57,51 @@ In PH Agent Hub, the `skills` table maps to MAF Agent Skills. Each skill record 
 
 ### 2.3 MAF Workflows
 
-MAF Workflows are graph-based orchestrations supporting sequential, concurrent, handoff, and group-collaboration patterns. They support:
-- checkpointing and restartability
-- human-in-the-loop steps
-- time-travel (step replay)
+PH Agent Hub exposes workflows as skills with `execution_type = workflow_based`. When the agent loop resolves a skill with `execution_type = workflow_based`, it delegates to a MAF Workflow runner instead of a simple `Agent.run()` call.
 
-PH Agent Hub exposes workflows as skills with `skill_type = workflow_based`. When the agent loop resolves a skill with `skill_type = workflow_based`, it delegates to a MAF Workflow runner instead of a simple `Agent.run()` call.
+MAF Workflows are built using the `WorkflowBuilder` graph API. PH Agent Hub connects steps sequentially via `add_chain` — topology is data defined in the workflow module, not code.
 
 #### Workflow Definition
 
-Workflows are defined in `/backend/src/agents/workflows/` as Python modules. Each module exposes:
-- **`WorkflowDefinition`** — a Pydantic v2 model declaring the workflow metadata and step graph
-- **`MAF_KEY`** — a constant string identifier matching the skill's `maf_target_key` in the DB
+Workflows are defined in `/backend/src/agents/workflows/` as Python modules. Each module must expose `MAF_KEY` (a constant string matching the skill's `maf_target_key`) plus one of:
 
-A workflow consists of **steps** — each step declares its own model/provider, tools, system prompt, and input/output handling. Steps can be sequential or parallel (fan-out → fan-in).
+- **`WORKFLOW_DEFINITION`** — a `dict` or a `WorkflowDefinition` instance (from `definition.py`)
+- **`STEPS`** — a list of step dicts, auto-wrapped by `load_workflow_definition()` into a `WorkflowDefinition` keyed by `MAF_KEY`
 
-```python
-from agent_framework import Workflow, WorkflowStep, ToolSpec, ModelSpec
+A workflow consists of **steps** — an ordered list of step dicts. Each step is a plain dict with the following fields:
 
-class WebResearchReportWorkflow(Workflow):
-    MAF_KEY = "web_research_report"
+| Field | Type | Description |
+|---|---|---|
+| `id` | `str` | Executor identity. Must be stable across rebuilds. |
+| `name` | `str` | Display label only. |
+| `type` | `Literal["inline", "agent"]` | `"inline"` for LLM-driven steps (requires `instructions`); `"agent"` for pre-built agent steps (requires `agent_ref`). |
+| `agent_ref` | `str \| None` | Required when `type == "agent"`. An `@`-prefixed role reference (e.g. `@reasoning`) or a registered agent key. |
+| `instructions` | `str \| None` | Required when `type == "inline"`. System prompt for the LLM. |
+| `model_ref` | `str \| None` | Model reference. An `@`-prefixed role (e.g. `@reasoning`) or an unprefixed concrete tenant model id. If omitted or if an `@`-prefixed role has no tenant binding, an `inline` step falls back to the skill's `default_model_id`; for `type == "agent"` an omitted `model_ref` inherits the agent module's `MODEL_ROLE`. |
+| `reasoning_effort` | `str \| None` | Optional chain-of-thought effort level override. |
+| `temperature` | `float` | Model temperature, clamped to [0.0, 2.0]. Default `0.7`. |
+| `input` | `str` | Description of the step's input source (see *input forms* below). Default is empty — inherit from upstream output. |
+| `context_mode` | `Literal["full", "last_agent"]` | How prior context is passed. Default `"last_agent"` — only the immediately preceding agent's response messages. `"full"` also includes the original user input. `"custom"` is not supported. |
+| `on_error` | `Literal["stop", "continue"]` | Step failure handling. Default `"stop"` (halt the workflow); `"continue"` skips to the next step. |
 
-    steps = [
-        WorkflowStep(
-            id="research",
-            model=ModelSpec(provider="openai", model="gpt-4"),
-            tools=[ToolSpec(name="web_search"), ToolSpec(name="web_scrape")],
-            instructions="Research the topic and compile findings.",
-        ),
-        WorkflowStep(
-            id="report",
-            model=ModelSpec(provider="openai", model="gpt-4"),
-            tools=[ToolSpec(name="document_generation")],
-            instructions="Generate a report from the research findings.",
-        ),
-    ]
-```
+**Reference convention**: An `@`-prefixed value is a logical role reference drawn from a closed, centrally declared vocabulary in `roles.py` (`MODEL_ROLES`, `TOOL_ROLES`, `AGENT_ROLES`). Each tenant *is intended* to bind these roles to its own concrete resources, but **tenant role-to-resource binding resolution is not implemented** (deferred to issue #550). An unprefixed value (e.g. `"gpt-4o"`) is a concrete tenant resource id, validated on a different path. The `tool_refs` field is not part of this step model, and `TOOL_ROLES` is declared for issue #550 and is not consumed yet. An `@`-prefixed `model_ref` that currently has no tenant binding falls back to the skill's default model.
+
+**Input forms** for the `input` field:
+
+- Empty string (default): inherit the upstream step's output.
+- `"user_message"`: use the original user message for this step.
+- `"output_of:<step_id>"`: use the output of the specified step (the referenced `step_id` must exist in the definition and cannot be the step's own id).
+- Any other non-empty string: treated as literal text.
 
 #### Workflow Execution & Streaming
 
-Workflows stream progress as SSE `workflow_step` events. Each event carries:
-```json
-{
-  "type": "workflow_step",
-  "data": {
-    "workflow_key": "web_research_report",
-    "step_id": "research",
-    "step_index": 0,
-    "total_steps": 2,
-    "status": "completed"  // or "started", "failed", "bypassed"
-  }
-}
-```
+Each workflow step is built into a MAF `Agent` (see `build_agent_for_step`), wrapped with a `StepAgent` that applies step-level input semantics, and then connected sequentially via `WorkflowBuilder.add_chain`. The workflow is executed as a single MAF `Workflow.run()` call.
 
-The frontend consumes these events to render a progress indicator showing per-step status (started/completed/failed). Per-step failures are reported directly — there is no automatic fallback to single-agent execution.
+Steps are executed in order. Per-step failures are handled according to the `on_error` field: `"stop"` halts the workflow, `"continue"` skips to the next step. There is no automatic fallback to single-agent execution.
 
 #### Token Extraction
 
-Workflow token usage (input tokens, cache hits, output tokens) is extracted from the MAF event stream during execution and associated with the final workflow result for billing/usage tracking.
+Workflow token usage (input tokens, cache hits, output tokens) is extracted from the `WorkflowRunResult` after execution by iterating output and intermediate events, accumulating `usage_details` from `AgentResponse` payloads.
 
 ### 2.4 MAF Middleware
 
@@ -155,13 +142,13 @@ HTTP Request (POST /chat/session/:id/message)
 [2] Resolve session config
     - selected_model_id → model client
     - selected_template_id → system prompt
-    - selected_skill_id → maf_target_key + skill_type
+    - selected_skill_id → maf_target_key + execution_type
     - session_active_tools → tool list
         │
         ▼
-[3] Route by skill_type
-    ├── skill_type = agent_based → assemble MAF Agent → agent.run()
-    └── skill_type = workflow_based → assemble MAF Workflow → workflow.run()
+[3] Route by execution_type
+    ├── execution_type = agent_based → assemble MAF Agent → agent.run()
+    └── execution_type = workflow_based → assemble MAF Workflow → workflow.run()
         │
         ▼
 [4] Apply middleware pipeline
@@ -177,8 +164,7 @@ HTTP Request (POST /chat/session/:id/message)
         │
         ▼
 [7] Stream tokens + agent events → SSE → frontend
-    - Agent-based: token/tool/tool_result/step_complete events
-    - Workflow-based: workflow_step events (per-step progress)
+    - token/tool/tool_result/step_complete events
 ```
 
 ---
@@ -223,20 +209,20 @@ The workflow engine provides the bridge between PH Agent Hub's skill system and 
 
 | Function | Purpose |
 |---|---|
-| `resolve_model(step)` | Maps a workflow step's model spec to the appropriate MAF ChatClient provider |
-| `load_workflow_definition(key)` | Loads and validates a `WorkflowDefinition` from the workflow module identified by key |
-| `build_agent_for_step(step, model_client, tools)` | Constructs a MAF Agent for a single workflow step with its specific config |
-| `build_workflow(definition, tools)` | Assembles a MAF Workflow from the definition, building agents for each step |
-| `run_workflow(workflow, user_input)` | Executes the workflow, yielding `WorkflowEvent` objects as they arrive |
-| `iter_workflow_sse(workflow, user_input)` | Async generator that iterates the workflow and emits SSE-compatible event dicts |
-| `_extract_token_counts_from_workflow(event)` | Extracts input/output/cached token counts from workflow events for billing |
+| `resolve_model(db, model_ref)` | Look up a `Model` record from the database by its `id` or `model_id` attribute |
+| `load_workflow_definition(mod)` | Extract a validated `WorkflowDefinition` from a registered MAF module (accepts `WORKFLOW_DEFINITION` or `STEPS`) |
+| `_build_agent_for_step(step, model, tools, temperature, reasoning_effort, instructions)` | Creates a MAF `Agent` configured with the step's instructions, model, tools, and options (private) |
+| `build_workflow(defn, db, extra_tools, base_temperature, base_reasoning_effort, default_model_id)` | Assembles a MAF `Workflow` from a `WorkflowDefinition` by building agents for each step and connecting them sequentially via `WorkflowBuilder.add_chain` |
+| `run_workflow(workflow, message)` | Executes a workflow synchronously; returns `(output_text, WorkflowRunResult)` |
+| `iter_workflow_sse(workflow, message, session_id, message_id, ...)` | Async generator that iterates the workflow and emits SSE-compatible event dicts for each agent event |
+| `_extract_token_counts_from_workflow(result)` | Extracts input/output/cached token counts from a completed `WorkflowRunResult` by iterating output and intermediate events |
 
 Execution flow:
-1. `run_workflow` is called with the workflow and user input
-2. Each step is executed in order (or parallel where declared)
-3. Step events (`workflow_step`) are emitted as SSE events with status: `started` → `completed` (or `failed`)
-4. Token usage from each step is accumulated for billing
-5. The final workflow result includes output from all steps
+1. `load_workflow_definition` reads the workflow module and validates its structure
+2. `build_workflow` resolves model records, builds a MAF `Agent` per step, applies `StepAgent` input semantics, and connects them sequentially
+3. `run_workflow` executes the workflow; each step receives the previous step's output (governed by `input` and `context_mode`)
+4. Token usage from each step is accumulated via `_extract_token_counts_from_workflow`
+5. The final output combines results from all steps
 
 ---
 
@@ -294,5 +280,5 @@ MAF has built-in OpenTelemetry integration. PH Agent Hub configures:
 ### Example Workflow
 
 - **`web_research_report`** (`agents/workflows/web_research_report.py`) — A two-step workflow:
-  1. **Research** — uses `web_search` and `web_scrape` tools to gather information on a topic
-  2. **Report** — uses `document_generation` to create a structured report from the findings
+  1. **Step id `research`** — type `inline` with `@reasoning` as its model reference, instructed to search and summarize findings.
+  2. **Step id `report`** — type `inline` with `@reasoning` as its model reference and a lower `temperature` (0.3), instructed to synthesize findings into a structured report.

@@ -3,15 +3,25 @@
 # =============================================================================
 # Pydantic v2 models for defining workflow structure: steps, ordering, and
 # per-step agent configuration.
+#
+# WorkflowStep fields:
+#   - ``id`` is the executor identity and must be stable across rebuilds.
+#   - ``name`` is display-only.
+#   - ``type`` discriminates between ``"inline"`` (LLM-driven, uses
+#     ``instructions``) and ``"agent"`` (pre-built agent, uses ``agent_ref``).
+#   - ``agent_ref`` is required only when ``type == "agent"``.
+#   - ``context_mode`` accepts only ``"full"`` and ``"last_agent"``;
+#     ``"custom"`` is deliberately excluded because it requires a
+#     ``context_filter`` callable that cannot come from a definition.
 # =============================================================================
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
-from ...core.exceptions import ValidationError
+from .roles import is_role_reference, validate_reference
 
 
 # ---------------------------------------------------------------------------
@@ -22,58 +32,67 @@ class WorkflowStep(BaseModel):
     """A single step (agent) within a workflow graph.
 
     Attributes:
-        id:      Unique identifier for the step (used as executor ID).
-        name:    Display name for the step.
-        instructions:   System-prompt / instructions for this agent.
-        model_ref:      Reference to a Model DB record (used to build the client).
-        reasoning_effort:  Optional CoT effort ("low" | "medium" | "high" | "max").
-        temperature:     Model temperature for this step.
-        tool_names:      Optional list of tool names to inject into the step's agent.
-        input:           Optional description of the step's input source.
-                         Default is ``""``  (empty → the agent sees the full
-                         prior conversation via MAF's default ``context_mode="full"``).
-        on_error:        How to handle step failure: ``"stop"`` or ``"continue"``.
-                         Defaults to ``"stop"``.
+        id:                Unique identifier (executor identity; must be stable across rebuilds).
+        name:              Display-only name for the step.
+        type:              Discriminator: ``"inline"`` (LLM-driven) or ``"agent"`` (pre-built).
+        agent_ref:         Role reference (``@name``) required when ``type == "agent"``.
+        instructions:      System-prompt required when ``type == "inline"``.
+        model_ref:         Optional model role reference (``@reasoning``, etc.) or unprefixed tenant resource.
+        reasoning_effort:  Optional CoT effort level.
+        temperature:       Model temperature, clamped to [0.0, 2.0].  Default 0.7.
+        input:             Description of the step's input source.
+        context_mode:      How prior conversation context is passed: ``"full"`` or ``"last_agent"``.
+        on_error:          How to handle step failure: ``"stop"`` or ``"continue"``.
     """
 
     id: str
-    name: str = Field(description="Display name for the step.")
-    instructions: str = Field(
-        default="",
-        description="System-prompt / instructions for this agent.",
-    )
-    model_ref: str = Field(
-        description="Reference to a Model DB record (model ID or name).",
-    )
-    reasoning_effort: str | None = Field(
-        default=None,
-        description="CoT effort level: low, medium, high, or max.",
-    )
-    temperature: float = Field(
-        default=0.7,
-        ge=0.0,
-        le=2.0,
-        description="Model temperature for this step.",
-    )
-    tool_names: list[str] = Field(
-        default_factory=list,
-        description="Optional list of tool names to inject.",
-    )
-    input: str = Field(
-        default="",
-        description="Optional description of input source.",
-    )
-    on_error: str = Field(
-        default="stop",
-        description="How to handle step failure: 'stop' or 'continue'.",
-    )
+    name: str
+    type: Literal["inline", "agent"]
+    agent_ref: str | None = None
+    instructions: str | None = None
+    model_ref: str | None = None
+    reasoning_effort: str | None = None
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    input: str = ""
+    context_mode: Literal["full", "last_agent"] = "last_agent"
+    on_error: Literal["stop", "continue"] = "stop"
 
-    @field_validator("on_error")
+    @field_validator("model_ref")
     @classmethod
-    def validate_on_error(cls, v: str) -> str:
-        if v not in ("stop", "continue"):
-            raise ValueError("on_error must be 'stop' or 'continue'")
+    def validate_model_ref(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        validate_reference(v, "model")
         return v
+
+    @field_validator("agent_ref")
+    @classmethod
+    def validate_agent_ref(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if is_role_reference(v):
+            validate_reference(v, "agent")
+        return v
+
+    @model_validator(mode="after")
+    def validate_step_shape(self) -> "WorkflowStep":
+        if self.type == "agent" and not self.agent_ref:
+            raise ValueError(
+                f"Step '{self.id}': type 'agent' requires 'agent_ref'"
+            )
+        if self.type == "inline" and not self.instructions:
+            raise ValueError(
+                f"Step '{self.id}': type 'inline' requires 'instructions'"
+            )
+        if self.type == "agent" and self.instructions is not None:
+            raise ValueError(
+                f"Step '{self.id}': 'instructions' is only valid for type 'inline'"
+            )
+        if self.type == "inline" and self.agent_ref is not None:
+            raise ValueError(
+                f"Step '{self.id}': 'agent_ref' is only valid for type 'agent'"
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -115,3 +134,23 @@ class WorkflowDefinition(BaseModel):
         if len(ids) != len(set(ids)):
             raise ValueError("Workflow step IDs must be unique")
         return v
+
+    @model_validator(mode="after")
+    def validate_step_inputs(self) -> "WorkflowDefinition":
+        step_ids = {s.id for s in self.steps}
+        for step in self.steps:
+            if step.input.startswith("output_of:"):
+                target = step.input.split(":", 1)[1]
+                if not target:
+                    raise ValueError(
+                        f"Step '{step.id}': 'output_of:{target}' must name a non-empty step id"
+                    )
+                if target not in step_ids:
+                    raise ValueError(
+                        f"Step '{step.id}': 'output_of:{target}' does not match any step id"
+                    )
+                if target == step.id:
+                    raise ValueError(
+                        f"Step '{step.id}': 'input' may not reference its own output"
+                    )
+        return self

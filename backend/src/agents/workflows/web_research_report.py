@@ -20,6 +20,7 @@ STEPS = [
         # Step 1: Research step — search and collect information
         "id": "research",
         "name": "Web Research",
+        "type": "inline",
         "instructions": (
             "Research the following topic thoroughly. Use web search to find "
             "relevant, up-to-date information. Look for multiple sources and "
@@ -31,13 +32,13 @@ STEPS = [
             "- Any relevant background information\n\n"
             "Be thorough and cite the types of sources you found."
         ),
-        # Use a model with good web-aware knowledge
-        "model_ref": "gpt-4o",
+        "model_ref": "@reasoning",
     },
     {
         # Step 2: Report step — synthesize into structured report
         "id": "report",
         "name": "Report Writer",
+        "type": "inline",
         "instructions": (
             "You are a professional research analyst. Synthesize the research "
             "findings provided below into a well-structured, readable report.\n\n"
@@ -50,7 +51,7 @@ STEPS = [
             "Use clear headings, professional tone, and avoid speculation. "
             "Only include information that was actually found in the research."
         ),
-        "model_ref": "gpt-4o",
+        "model_ref": "@reasoning",
         # Slightly lower temperature for more deterministic reporting
         "temperature": 0.3,
     },
@@ -72,5 +73,4 @@ WORKFLOW_DEFINITION = {
         }
         for step in STEPS
     ],
-    "on_error": "stop",
 }

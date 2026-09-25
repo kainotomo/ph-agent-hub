@@ -34,8 +34,39 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...core.exceptions import NotFoundError, ValidationError
 from ...db.orm.models import Model
 from .definition import WorkflowDefinition
+from .executors import StepAgent
+from .roles import is_role_reference
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Registered-agent helpers
+# ---------------------------------------------------------------------------
+
+
+def _registered_agent_module(agent_ref: str) -> Any:
+    """Return the registered agent module for *agent_ref*, or ``None`` if not
+    found.  The import is local so the lookup can be patched at
+    ``src.agents.registry.get_registered_agent``.
+    """
+    from ..registry import get_registered_agent
+
+    return get_registered_agent(agent_ref)
+
+
+def _validate_agent_refs(defn: WorkflowDefinition) -> None:
+    """Raise ``ValidationError`` if any ``agent`` step references a key that
+    is not present in the registered-agent store.
+    """
+    for step in defn.steps:
+        if step.type == "agent":
+            mod = _registered_agent_module(step.agent_ref)  # type: ignore[union-attr]
+            if mod is None:
+                raise ValidationError(
+                    f"Workflow '{defn.key}': step '{step.id}' "
+                    f"references unknown registered agent '{step.agent_ref}'"
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -91,13 +122,15 @@ def load_workflow_definition(mod: Any) -> WorkflowDefinition:
     wf_def = getattr(mod, "WORKFLOW_DEFINITION", None)
     if wf_def is not None:
         if isinstance(wf_def, dict):
-            return WorkflowDefinition(**wf_def)
+            defn = WorkflowDefinition(**wf_def)
         elif isinstance(wf_def, WorkflowDefinition):
-            return wf_def
+            defn = wf_def
         else:
             raise ValidationError(
                 "WORKFLOW_DEFINITION must be a dict or WorkflowDefinition instance"
             )
+        _validate_agent_refs(defn)
+        return defn
 
     # Try STEPS as a shortcut (auto-wrapped into a WorkflowDefinition)
     steps = getattr(mod, "STEPS", None)
@@ -110,12 +143,14 @@ def load_workflow_definition(mod: Any) -> WorkflowDefinition:
             )
         name = getattr(mod, "NAME", key)
         description = getattr(mod, "DESCRIPTION", "")
-        return WorkflowDefinition(
+        defn = WorkflowDefinition(
             key=key,
             name=name,
             description=description,
             steps=steps,
         )
+        _validate_agent_refs(defn)
+        return defn
 
     raise ValidationError(
         f"Workflow module '{getattr(mod, '__name__', 'unknown')}' has no "
@@ -134,6 +169,7 @@ def _build_agent_for_step(
     tools: list | None,
     temperature: float = 0.7,
     reasoning_effort: str | None = None,
+    instructions: str | None = None,
 ) -> Agent:
     """Create a MAF ``Agent`` for a workflow step.
 
@@ -143,6 +179,8 @@ def _build_agent_for_step(
         tools:            Optional list of tool callables.
         temperature:      Model temperature.
         reasoning_effort: Optional CoT effort override.
+        instructions:     Explicit instructions to use (falls back to
+                          ``step.instructions`` when ``None``).
 
     Returns:
         A configured MAF Agent.
@@ -171,7 +209,7 @@ def _build_agent_for_step(
     agent = Agent(
         client=get_chat_client(model, thinking_enabled=False),
         name=step.name or step.id,
-        instructions=step.instructions or "",
+        instructions=instructions if instructions is not None else (step.instructions or ""),
         tools=tools or None,
         default_options=default_options,
         compaction_strategy=compaction,
@@ -215,17 +253,39 @@ async def build_workflow(
     """
     # Build steps into agents + executors
     executors: list[AgentExecutor] = []
+    shared: dict[str, Any] = {}
 
     for i, step in enumerate(defn.steps):
+        # Resolve the effective step configuration from the agent module
+        # when step.type == "agent".
+        instructions = step.instructions
+        model_ref = step.model_ref
+
+        if step.type == "agent":
+            agent_mod = _registered_agent_module(step.agent_ref)  # type: ignore[union-attr]
+            if agent_mod is None:
+                raise ValidationError(
+                    f"Workflow '{defn.key}': step '{step.id}' "
+                    f"references unknown registered agent '{step.agent_ref}'"
+                )
+            instructions = agent_mod.INSTRUCTIONS
+            if step.model_ref is None:
+                model_ref = agent_mod.MODEL_ROLE
+
         # Resolve model for this step (with fallback to skill default)
         model = None
         try:
-            model = await resolve_model(db, step.model_ref)
+            model = await resolve_model(db, model_ref)
         except NotFoundError:
+            if is_role_reference(model_ref):
+                logger.warning(
+                    "Step '%s': model role '%s' has no tenant binding (see #550); falling back to '%s'",
+                    step.id, model_ref, default_model_id,
+                )
             if default_model_id:
                 logger.warning(
                     "Step '%s' model_ref '%s' not found, falling back to '%s'",
-                    step.id, step.model_ref, default_model_id,
+                    step.id, model_ref, default_model_id,
                 )
                 model = await resolve_model(db, default_model_id)
             else:
@@ -233,7 +293,6 @@ async def build_workflow(
 
         # Resolve tools for this step (merge extra tools with step-specific)
         step_tools = list(extra_tools) if extra_tools else []
-        # TODO: resolve step-specific tools from tool_names in future
 
         # Build agent for this step
         temperature = step.temperature if step.temperature != 0.7 else base_temperature
@@ -245,10 +304,14 @@ async def build_workflow(
             tools=step_tools,
             temperature=temperature,
             reasoning_effort=reasoning_effort,
+            instructions=instructions,
         )
 
+        # Apply step-level input semantics without changing topology
+        agent = StepAgent(inner=agent, step_id=step.id, input_spec=step.input, shared=shared)
+
         # Wrap in executor with the step's id as executor id
-        executor = AgentExecutor(agent=agent, id=step.id)
+        executor = AgentExecutor(agent=agent, id=step.id, context_mode=step.context_mode)
         executors.append(executor)
 
     if not executors:

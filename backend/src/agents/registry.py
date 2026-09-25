@@ -18,6 +18,55 @@ logger = logging.getLogger(__name__)
 # In-memory registry: maf_target_key → registered module/object
 _registry: dict[str, Any] = {}
 
+# Agent definitions: agent_key → agent module
+_agents: dict[str, Any] = {}
+
+
+def scan_agent_defs() -> dict[str, Any]:
+    """Scan the agent_defs package and register any module exposing MAF_KEY,
+    NAME, INSTRUCTIONS, and MODEL_ROLE.  Repeated calls are idempotent
+    (stale modules are cleared first).
+
+    Returns the ``_agents`` dict on success.
+    """
+    _agents.clear()
+
+    from . import agent_defs as agent_defs_pkg
+    from .workflows.roles import validate_reference
+
+    for _, mod_name, _ in pkgutil.iter_modules(agent_defs_pkg.__path__):
+        full_name = f"src.agents.agent_defs.{mod_name}"
+        try:
+            module = importlib.import_module(full_name)
+        except Exception as exc:
+            logger.warning("Failed to import agent module %s: %s", full_name, exc)
+            continue
+
+        for name in ("MAF_KEY", "NAME", "INSTRUCTIONS", "MODEL_ROLE"):
+            if not hasattr(module, name):
+                logger.warning(
+                    "Agent module %s is missing %s — not registered",
+                    full_name,
+                    name,
+                )
+                break
+        else:
+            try:
+                validate_reference(module.MODEL_ROLE, "model")
+            except ValueError as exc:
+                logger.warning(
+                    "Agent module %s declares invalid MODEL_ROLE %r: %s — not registered",
+                    full_name,
+                    module.MODEL_ROLE,
+                    exc,
+                )
+                continue
+
+            _agents[module.MAF_KEY] = module
+            logger.info("Registered agent: %s → %s", module.MAF_KEY, full_name)
+
+    return _agents
+
 
 async def startup_scan(db: AsyncSession) -> None:
     """Scan skills and workflows packages, register modules with MAF_KEY,
@@ -58,6 +107,9 @@ async def startup_scan(db: AsyncSession) -> None:
             _registry[key] = mod
             logger.info("Registered workflow: %s → %s", key, full_name)
 
+    # ---- Scan agent definitions --------------------------------------------
+    scan_agent_defs()
+
     # ---- Validate DB skills against registry -------------------------------
     from ..db.orm.skills import Skill
 
@@ -83,3 +135,14 @@ def get_registered(key: str) -> Any | None:
 def list_registered_keys() -> list[str]:
     """Return all registered MAF target keys."""
     return list(_registry.keys())
+
+
+def get_registered_agent(key: str) -> Any | None:
+    """Look up a registered agent definition by key.  Returns ``None`` if
+    not found."""
+    return _agents.get(key)
+
+
+def list_registered_agent_keys() -> list[str]:
+    """Return all registered agent keys."""
+    return list(_agents.keys())

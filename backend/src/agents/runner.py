@@ -2691,6 +2691,7 @@ async def _run_workflow(
         workflow = await build_workflow(
             defn=defn,
             db=db,
+            tenant_id=skill.tenant_id,
             extra_tools=tools,
             base_temperature=temperature,
             base_reasoning_effort=reasoning_effort,
@@ -3775,6 +3776,7 @@ async def _run_workflow_stream(
         workflow = await build_workflow(
             defn=defn,
             db=db,
+            tenant_id=skill.tenant_id,
             extra_tools=tools,
             base_temperature=temperature,
             base_reasoning_effort=reasoning_effort,

@@ -145,6 +145,12 @@ from ..services.group_service import (
     update_group as _svc_update_group,
 )
 from ..services import memory_service
+from ..agents.workflows.roles import MODEL_ROLES
+from ..services.model_role_service import (
+    clear_role_bindings as _svc_clear_role_bindings,
+    list_role_bindings as _svc_list_role_bindings,
+    set_role_bindings as _svc_set_role_bindings,
+)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -494,6 +500,24 @@ class ModelAssign(BaseModel):
 
 class ToolAssign(BaseModel):
     tool_id: str
+
+
+class ModelRoleRefResponse(BaseModel):
+    id: str
+    name: str
+    model_id: str
+    enabled: bool
+
+    model_config = {"from_attributes": True}
+
+
+class ModelRoleBindingResponse(BaseModel):
+    role: str
+    models: list[ModelRoleRefResponse]
+
+
+class ModelRoleBindingUpdate(BaseModel):
+    model_ids: list[str]
 
 
 # =============================================================================
@@ -3108,6 +3132,135 @@ async def remove_tool_from_group(
         target_id=group_id,
         payload={"tool_id": tool_id},
         tenant_id=current_user.tenant_id,
+        ip_address=_get_client_ip(request),
+    )
+
+
+# =============================================================================
+# Model Role Bindings (admin or manager)
+# =============================================================================
+# Binds the closed workflow model-role vocabulary to a tenant's own models.
+# A role may bind several models (a pool); resolution is deterministic and
+# cost-agnostic.  This is the admin-side half of Issue #550; the authoring UI
+# that consumes it is a separate issue.
+
+
+def _resolve_binding_tenant(
+    current_user: UserORM, tenant_id: str | None
+) -> str:
+    """Return the tenant a role-binding request acts on.
+
+    Admins may name a tenant; managers are pinned to their own tenant.
+    """
+    effective = (
+        tenant_id
+        if current_user.role == "admin" and tenant_id
+        else current_user.tenant_id
+    )
+    if current_user.role == "manager" and effective != current_user.tenant_id:
+        raise ForbiddenError(
+            "Managers can only manage role bindings in their own tenant"
+        )
+    return effective
+
+
+def _role_binding_response(role: str, models: list) -> ModelRoleBindingResponse:
+    return ModelRoleBindingResponse(
+        role=role,
+        models=[ModelRoleRefResponse.model_validate(m) for m in models],
+    )
+
+
+@router.get(
+    "/model-role-bindings", response_model=list[ModelRoleBindingResponse]
+)
+async def list_model_role_bindings(
+    tenant_id: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """List every declared model role and the models bound to it.
+
+    One entry per role in the closed vocabulary; unbound roles have an empty
+    ``models`` list.  Manager sees own tenant only; admin may pass
+    ``tenant_id``.
+    """
+    effective_tenant_id = _resolve_binding_tenant(current_user, tenant_id)
+    bindings = await _svc_list_role_bindings(db, effective_tenant_id)
+    return [
+        _role_binding_response(role, bindings.get(role, []))
+        for role in sorted(MODEL_ROLES)
+    ]
+
+
+@router.put(
+    "/model-role-bindings/{role}", response_model=ModelRoleBindingResponse
+)
+async def set_model_role_bindings(
+    role: str,
+    body: ModelRoleBindingUpdate,
+    request: Request,
+    tenant_id: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Replace the models bound to *role* for a tenant.
+
+    Every model must exist and belong to the target tenant; the backend
+    re-validates on save, never trusting a previously submitted form.
+    """
+    effective_tenant_id = _resolve_binding_tenant(current_user, tenant_id)
+
+    if role not in MODEL_ROLES:
+        raise ValidationError(
+            f"Unknown model role '{role}'. "
+            f"Known roles: {', '.join(sorted(MODEL_ROLES))}"
+        )
+
+    await _svc_set_role_bindings(
+        db, effective_tenant_id, role, body.model_ids
+    )
+    await write_audit_log(
+        db,
+        actor=current_user,
+        action="model_role_bindings.updated",
+        target_type="model_role_binding",
+        target_id=role,
+        payload={"tenant_id": effective_tenant_id, "model_ids": body.model_ids},
+        tenant_id=effective_tenant_id,
+        ip_address=_get_client_ip(request),
+    )
+
+    bindings = await _svc_list_role_bindings(db, effective_tenant_id)
+    return _role_binding_response(role, bindings.get(role, []))
+
+
+@router.delete("/model-role-bindings/{role}", status_code=204)
+async def clear_model_role_bindings(
+    role: str,
+    request: Request,
+    tenant_id: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Remove every model binding for *role*."""
+    effective_tenant_id = _resolve_binding_tenant(current_user, tenant_id)
+
+    if role not in MODEL_ROLES:
+        raise ValidationError(
+            f"Unknown model role '{role}'. "
+            f"Known roles: {', '.join(sorted(MODEL_ROLES))}"
+        )
+
+    await _svc_clear_role_bindings(db, effective_tenant_id, role)
+    await write_audit_log(
+        db,
+        actor=current_user,
+        action="model_role_bindings.cleared",
+        target_type="model_role_binding",
+        target_id=role,
+        payload={"tenant_id": effective_tenant_id},
+        tenant_id=effective_tenant_id,
         ip_address=_get_client_ip(request),
     )
 

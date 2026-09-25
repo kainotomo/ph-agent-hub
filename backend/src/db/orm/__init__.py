@@ -10,6 +10,7 @@
 from .tenants import Tenant
 from .users import User
 from .models import Model
+from .model_role_bindings import ModelRoleBinding
 from .groups import UserGroup, UserGroupMember, ModelGroup
 from .mcp_servers import McpServer
 from .a2a_servers import A2aServer
@@ -43,6 +44,7 @@ __all__ = [
     "Tenant",
     "User",
     "Model",
+    "ModelRoleBinding",
     "UserGroup",
     "UserGroupMember",
     "ModelGroup",

@@ -12,8 +12,11 @@
 # invent arbitrary role names.  Tenant role-to-resource bindings are
 # resolved elsewhere (issue #550).
 #
-# ``TOOL_ROLES`` is declared here for issue #550 and is not consumed in
-# this issue.
+# ``TOOL_ROLE_TARGETS`` maps each tool role to one or more MAF tool
+# *callable* names — the names of the ``@tool``-decorated functions in
+# ``src/tools/<module>.py``.  These are code-level tool kinds, not tenant
+# ``tools`` rows: the tenant supplies which tools are enabled and active for
+# a run, and a step's ``tool_refs`` restricts that already-resolved pool.
 # =============================================================================
 
 REFERENCE_PREFIX: str = "@"
@@ -23,6 +26,11 @@ MODEL_ROLES: frozenset[str] = frozenset({"@reasoning", "@general", "@fast"})
 TOOL_ROLES: frozenset[str] = frozenset({"@web_search"})
 
 AGENT_ROLES: frozenset[str] = frozenset()
+
+# Every key of ``TOOL_ROLES`` must have an entry here.
+TOOL_ROLE_TARGETS: dict[str, tuple[str, ...]] = {
+    "@web_search": ("web_search",),
+}
 
 _VOCABULARIES: dict[str, frozenset[str]] = {
     "model": MODEL_ROLES,

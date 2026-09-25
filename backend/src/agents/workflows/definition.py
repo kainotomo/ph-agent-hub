@@ -10,6 +10,12 @@
 #   - ``type`` discriminates between ``"inline"`` (LLM-driven, uses
 #     ``instructions``) and ``"agent"`` (pre-built agent, uses ``agent_ref``).
 #   - ``agent_ref`` is required only when ``type == "agent"``.
+#   - ``tool_refs`` restricts the step to a subset of the run's
+#     already-resolved, tenant-scoped tool pool.  An ``@``-prefixed entry is
+#     a role from the closed ``TOOL_ROLES`` vocabulary; an unprefixed entry
+#     is a concrete tool reference.  An empty list means "inherit the run's
+#     whole pool".  Refs are matched against MAF tool callable names at
+#     build time; an unresolved ref fails the build loudly.
 #   - ``context_mode`` accepts only ``"full"`` and ``"last_agent"``;
 #     ``"custom"`` is deliberately excluded because it requires a
 #     ``context_filter`` callable that cannot come from a definition.
@@ -38,6 +44,9 @@ class WorkflowStep(BaseModel):
         agent_ref:         Role reference (``@name``) required when ``type == "agent"``.
         instructions:      System-prompt required when ``type == "inline"``.
         model_ref:         Optional model role reference (``@reasoning``, etc.) or unprefixed tenant resource.
+        tool_refs:         Tool references restricting this step to a subset of the run's resolved
+                           tool pool.  ``@``-prefixed entries are ``TOOL_ROLES``; an unprefixed entry
+                           is a concrete tool reference.  Empty means inherit the whole pool.
         reasoning_effort:  Optional CoT effort level.
         temperature:       Model temperature, clamped to [0.0, 2.0].  Default 0.7.
         input:             Description of the step's input source.
@@ -51,6 +60,7 @@ class WorkflowStep(BaseModel):
     agent_ref: str | None = None
     instructions: str | None = None
     model_ref: str | None = None
+    tool_refs: list[str] = Field(default_factory=list)
     reasoning_effort: str | None = None
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     input: str = ""
@@ -72,6 +82,15 @@ class WorkflowStep(BaseModel):
             return v
         if is_role_reference(v):
             validate_reference(v, "agent")
+        return v
+
+    @field_validator("tool_refs")
+    @classmethod
+    def validate_tool_refs(cls, v: list[str]) -> list[str]:
+        for ref in v:
+            if not ref or not ref.strip():
+                raise ValueError("tool_refs entries must be non-empty strings")
+            validate_reference(ref, "tool")
         return v
 
     @model_validator(mode="after")

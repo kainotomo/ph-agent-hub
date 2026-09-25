@@ -11,6 +11,7 @@ from src.agents.workflows.roles import (
     MODEL_ROLES,
     REFERENCE_PREFIX,
     TOOL_ROLES,
+    TOOL_ROLE_TARGETS,
     known_roles,
     is_role_reference,
     validate_reference,
@@ -36,6 +37,29 @@ class TestRoleConstants:
 
     def test_all_members_start_with_at(self):
         for role in MODEL_ROLES | TOOL_ROLES | AGENT_ROLES:
+            assert role.startswith(REFERENCE_PREFIX)
+
+
+class TestToolRoleTargets:
+    """Verify the tool-role to MAF callable-name mapping."""
+
+    def test_every_tool_role_has_a_target(self):
+        assert set(TOOL_ROLE_TARGETS) == set(TOOL_ROLES)
+
+    def test_targets_are_non_empty_tuples_of_names(self):
+        for role, names in TOOL_ROLE_TARGETS.items():
+            assert isinstance(names, tuple), f"{role} target must be a tuple"
+            assert names, f"{role} target must not be empty"
+            for name in names:
+                assert isinstance(name, str) and name.strip(), (
+                    f"{role} target names must be non-empty strings"
+                )
+
+    def test_web_search_maps_to_web_search_callable(self):
+        assert TOOL_ROLE_TARGETS["@web_search"] == ("web_search",)
+
+    def test_every_target_key_starts_with_at(self):
+        for role in TOOL_ROLE_TARGETS:
             assert role.startswith(REFERENCE_PREFIX)
 
 

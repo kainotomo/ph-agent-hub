@@ -237,6 +237,8 @@ export const ChatWindow = React.memo(function ChatWindow({
   const [handoffPending, setHandoffPending] = useState(false);
   const [streamError, setStreamError] = useState<string | null>(null);
   const [streamingTokens, setStreamingTokens] = useState<{ tokens_in: number; tokens_out: number } | null>(null);
+  // Workflow step progress (MAF 1.19.0 multi-step workflows)
+  const [workflowSteps, setWorkflowStep] = useState<Record<string, { stepIndex: number; totalSteps: number; status: string; error?: { message: string; type: string } }>>({});
   /** Live elapsed time for the currently streaming assistant response. */
   const [streamingStart, setStreamingStart] = useState<number | null>(null);
   const [streamingDuration, setStreamingDuration] = useState<number | null>(null);
@@ -1105,6 +1107,24 @@ export const ChatWindow = React.memo(function ChatWindow({
             maxTurns: data.max_turns,
           }));
         },
+        // ---- Workflow step progress (MAF 1.19.0 multi-step) ---------------
+        onWorkflowStep: (data: {
+          step_id: string;
+          step_index: number;
+          total_steps: number;
+          status: "started" | "completed" | "failed" | "bypassed";
+          error?: { message: string; type: string };
+        }) => {
+          setWorkflowStep((prev) => ({
+            ...prev,
+            [data.step_id]: {
+              stepIndex: data.step_index,
+              totalSteps: data.total_steps,
+              status: data.status,
+              error: data.error,
+            },
+          }));
+        },
         // ------------------------------------------------------------------
         onSummarized: isReconnect
           ? () => { /* No notification during reconnect */ }
@@ -1231,6 +1251,7 @@ export const ChatWindow = React.memo(function ChatWindow({
             setStreamingSegments([]);
             setStreamingMessageId(null);
             setStreamingTokens(null);
+            setWorkflowStep({});
           }
           // Stop the live duration timer when the stream ends.
           setStreamingStart(null);
@@ -2169,6 +2190,30 @@ export const ChatWindow = React.memo(function ChatWindow({
                       showIcon
                       style={{ marginBottom: 8, borderLeft: "4px solid #1677ff" }}
                     />
+                  </div>
+                )}
+                {streaming && workflowSteps && Object.keys(workflowSteps).length > 0 && (
+                  <div style={{ padding: "0 16px 8px" }}>
+                    <div style={{ background: "#f5f5f5", borderRadius: 8, padding: "8px 12px", fontSize: 13 }}>
+                      {Object.values(workflowSteps).length > 0 && (
+                        <div style={{ marginBottom: 4, color: "#888" }}>Workflow Steps:</div>
+                      )}
+                      {Object.entries(workflowSteps).map(([stepId, stepData]) => (
+                        <div key={stepId} style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                          padding: "2px 0",
+                          color: stepData.status === "failed" ? "#ff4d4f" : stepData.status === "completed" ? "#52c41a" : "#1677ff",
+                        }}>
+                          {stepData.status === "completed" ? "✓" : stepData.status === "failed" ? "✗" : stepData.status === "bypassed" ? "↺" : "●"}
+                          <span>{stepId}</span>
+                          {stepData.error && (
+                            <span style={{ color: "#888", fontSize: 12 }}>(error)</span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 )}
                 {streamError ? (

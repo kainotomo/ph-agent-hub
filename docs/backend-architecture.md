@@ -61,6 +61,17 @@ agent in a loop, and can pause/resume execution. Protections include
 `AUTOPILOT_MAX_TOKENS` (default `0` = unlimited) for cumulative token limits.
 Progress is streamed via SSE and displayed in a dedicated UI.
 
+**Workflow Engine (MAF 1.19.0):** Skills with `skill_type=workflow_based` are
+executed as multi-step, multi-model agent graphs via the MAF 1.19.0 Workflow
+API. A workflow is defined in a Python module as a `WorkflowDefinition`
+Pydantic model; it declares steps with independent model/provider config,
+tools, and prompts. Steps execute sequentially (or in parallel where declared),
+each step producing its own LLM response and tool results. Progress streams as
+SSE `workflow_step` events (`{workflow_key, step_id, step_index, total_steps,
+status}`) so the frontend can render per-step indicators. Per-step failures
+are reported directly (no fallback to single-agent execution). Includes a
+two-step example workflow: `web_research_report` (research → report).
+
 **Background Tasks (Issue #449):** Long-running agent executions that run
 independently of the user's current chat session. Users can start a task in
 background mode, navigate away, and receive a notification when it completes.

@@ -1984,6 +1984,7 @@ async def _run_agent_background(
                 message_id=message_id,
                 file_ids=_file_ids,
             ):
+                logger.info("PH-BG-STREAM event=%s data_keys=%s", event_dict.get("event"), list(event_dict.get("data", {}).keys()) if isinstance(event_dict.get("data"), dict) else type(event_dict.get("data")).__name__)
                 # Swallow httpx ContextVar cleanup errors at stream end.
                 if (
                     event_dict.get("event") == "error"

@@ -915,8 +915,8 @@ async def run_agent(
     _nonstream_metrics: dict = {}
     try:
         try:
-            if cfg.execution_type == "workflow":
-                raw_response, tokens_in, tokens_out = await _run_workflow(
+            if cfg.execution_type in ("workflow", "workflow_based"):
+                raw_response, tokens_in, tokens_out, cache_hit_tokens = await _run_workflow(
                     model=cfg.model,
                     skill=cfg.skill,
                     model_client=cfg.model_client,
@@ -927,8 +927,8 @@ async def run_agent(
                     temperature=cfg.temperature,
                     reasoning_effort=cfg.reasoning_effort,
                     function_invocation_kwargs=function_invocation_kwargs,
+                    db=db,
                 )
-                cache_hit_tokens = 0
             else:
                 raw_response, tokens_in, tokens_out, cache_hit_tokens = await _run_agent(
                     model=cfg.model,
@@ -2639,16 +2639,31 @@ async def _run_workflow(
     temperature: float = 0.7,
     reasoning_effort: str | None = None,
     function_invocation_kwargs: dict | None = None,
-) -> tuple[str, int, int]:
+    db: AsyncSession | None = None,
+) -> tuple[str, int, int, int]:
     """Run a MAF Workflow via the registry.
+
+    No fallback to single-agent execution — raises on any error.
 
     Args:
         function_invocation_kwargs: Forwarded to ``agent.run()`` for tool
             invocation layers (A2A ``ask_user`` tool uses ``task_id``).
+        db: Database session for resolving model records and tools.
 
     Returns:
-        A tuple of (response_text, tokens_in, tokens_out).
+        A tuple of (response_text, tokens_in, tokens_out, cache_hit_tokens).
+
+    Raises:
+        ValidationError: If the skill has no maf_target_key or the workflow
+            definition is invalid.
+        NotFoundError: If the workflow module is not registered.
     """
+    from ..agents.workflows.engine import (
+        build_workflow,
+        load_workflow_definition,
+        run_workflow as engine_run_workflow,
+        _extract_token_counts_from_workflow,
+    )
     from .registry import get_registered
 
     if skill is None or not skill.maf_target_key:
@@ -2661,22 +2676,42 @@ async def _run_workflow(
             "Register a workflow module in src/agents/workflows/."
         )
 
-    # Stub: fall back to agent execution if workflow runner not available
-    logger.warning(
-        "Workflow execution not fully implemented for key '%s'; falling back to agent.",
-        skill.maf_target_key,
-    )
-    return await _run_agent(
-        model=model,
-        model_client=model_client,
-        system_prompt=system_prompt,
-        tools=tools,
-        user_message=user_message,
-        function_invocation_kwargs=function_invocation_kwargs,
-        agent_name=agent_name,
-        temperature=temperature,
-        reasoning_effort=reasoning_effort,
-    )
+    # Load the workflow definition from the module
+    defn = load_workflow_definition(target)
+
+    # Build the workflow (requires DB session to resolve Model records)
+    if db is None:
+        from ..db.base import AsyncSessionLocal
+        db = AsyncSessionLocal()
+        need_close = True
+    else:
+        need_close = False
+
+    try:
+        workflow = await build_workflow(
+            defn=defn,
+            db=db,
+            extra_tools=tools,
+            base_temperature=temperature,
+            base_reasoning_effort=reasoning_effort,
+            default_model_id=skill.default_model_id,
+        )
+
+        # Execute the workflow
+        output_text, result = await engine_run_workflow(
+            workflow=workflow,
+            message=user_message,
+            function_invocation_kwargs=function_invocation_kwargs,
+        )
+
+        # Extract token counts
+        tokens_in, tokens_out, cache_hit = _extract_token_counts_from_workflow(result)
+
+        return output_text, tokens_in, tokens_out, cache_hit
+
+    finally:
+        if need_close:
+            await db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -2952,7 +2987,6 @@ async def run_agent_stream(
     accumulated_segments: list[dict] = []
     segments_to_persist: list[dict] = []
     step_index: int = 0
-    total_tokens: int = 0
     _stream_token_info: dict = {}  # mutated by _run_agent_stream to propagate token counts
     cfg = None
 
@@ -3048,7 +3082,7 @@ async def run_agent_stream(
         if extra_tools:
             _stream_tools = list(_stream_tools) + list(extra_tools)
 
-        if cfg.execution_type == "workflow":
+        if cfg.execution_type in ("workflow", "workflow_based"):
             stream = _run_workflow_stream(
                 model=cfg.model,
                 skill=cfg.skill,
@@ -3062,6 +3096,8 @@ async def run_agent_stream(
                 token_counts=_stream_token_info,
                 temperature=cfg.temperature,
                 reasoning_effort=cfg.reasoning_effort,
+                function_invocation_kwargs=function_invocation_kwargs,
+                db=db,
             )
         else:
             stream = _run_agent_stream(
@@ -3231,7 +3267,7 @@ async def run_agent_stream(
             "data": json.dumps({
                 "session_id": session_id,
                 "message_id": message_id,
-                "total_tokens": total_tokens,
+                "total_tokens": tokens_in + tokens_out,
                 "tokens_in": tokens_in,
                 "tokens_out": tokens_out,
                 "model_id": cfg.model.id if cfg else "unknown",
@@ -3640,7 +3676,10 @@ async def _run_agent_stream(
             if usage and isinstance(usage, dict):
                 token_counts["in"] = usage.get("input_token_count", 0) or 0
                 token_counts["out"] = usage.get("output_token_count", 0) or 0
-                cache_hit = usage.get("prompt/cached_tokens", 0) or 0
+                # MAF 1.19.0+: primary key is cache_read_input_token_count
+                cache_hit = usage.get("cache_read_input_token_count", 0) or 0
+                if cache_hit == 0:
+                    cache_hit = usage.get("prompt/cached_tokens", 0) or 0
                 if cache_hit == 0:
                     cache_hit = usage.get("cache_read_input_tokens", 0) or 0
                 if cache_hit == 0:
@@ -3668,7 +3707,7 @@ async def _run_agent_stream(
 
 async def _run_workflow_stream(
     model: Model,
-    skill: Any,
+    skill: Skill,
     model_client: Any,
     system_prompt: str,
     tools: list,
@@ -3679,12 +3718,34 @@ async def _run_workflow_stream(
     token_counts: dict | None = None,
     temperature: float = 0.7,
     reasoning_effort: str | None = None,
+    function_invocation_kwargs: dict | None = None,
+    db: AsyncSession | None = None,
 ) -> AsyncIterator[dict]:
-    """Run a MAF Workflow in streaming mode.
+    """Run a MAF Workflow in streaming mode, yielding SSE event dicts.
 
-    Stub for Phase 7 — falls back to agent streaming.  Will be upgraded
-    when workflow streaming is fully implemented.
+    No fallback to agent streaming — raises on any error.
+
+    SSE event types:
+        ``workflow_step``  — per-step lifecycle (started/completed/failed)
+        ``token``          — delta text from individual steps
+        ``error``          — workflow-level errors
+        ``warning``        — non-fatal warnings
+        ``message_complete`` — final completion with token counts
+
+    Args:
+        function_invocation_kwargs: Forwarded to ``agent.run()`` for tool
+            invocation layers (A2A ``ask_user`` tool uses ``task_id``).
+        db: Database session for resolving model records and tools.
+
+    Raises:
+        ValidationError: If the skill has no maf_target_key.
+        NotFoundError: If the workflow module is not registered.
     """
+    from ..agents.workflows.engine import (
+        build_workflow,
+        iter_workflow_sse,
+        load_workflow_definition,
+    )
     from .registry import get_registered
 
     if skill is None or not skill.maf_target_key:
@@ -3699,33 +3760,43 @@ async def _run_workflow_stream(
             "Register a workflow module in src/agents/workflows/."
         )
 
-    # Stub: attempt workflow.run_stream() if available, else fall back
-    if hasattr(target, "run_stream"):
-        logger.info(
-            "Using workflow.run_stream() for key '%s'", skill.maf_target_key
-        )
-        # TODO: map workflow stream events to SSE events (Phase 7+)
-        # For now, fall back to agent streaming
+    # Load the workflow definition from the module
+    defn = load_workflow_definition(target)
+
+    # Build the workflow (requires DB session to resolve Model records)
+    if db is None:
+        from ..db.base import AsyncSessionLocal
+        db = AsyncSessionLocal()
+        need_close = True
     else:
-        logger.warning(
-            "Workflow '%s' has no run_stream(); falling back to agent stream.",
-            skill.maf_target_key,
+        need_close = False
+
+    try:
+        workflow = await build_workflow(
+            defn=defn,
+            db=db,
+            extra_tools=tools,
+            base_temperature=temperature,
+            base_reasoning_effort=reasoning_effort,
+            default_model_id=skill.default_model_id,
         )
 
-    async for event_dict in _run_agent_stream(
-        model=model,
-        model_client=model_client,
-        system_prompt=system_prompt,
-        tools=tools,
-        user_message=user_message,
-        agent_name=agent_name,
-        session_id=session_id,
-        message_id=message_id,
-        token_counts=token_counts,
-        temperature=temperature,
-        reasoning_effort=reasoning_effort,
-    ):
-        yield event_dict
+        # Stream the workflow via the engine's SSE iterator
+        async for event_dict in iter_workflow_sse(
+            workflow=workflow,
+            message=user_message,
+            session_id=session_id,
+            message_id=message_id,
+            token_counts=token_counts,
+            function_invocation_kwargs=function_invocation_kwargs,
+            system_prompt=system_prompt,
+            tools=tools,
+        ):
+            yield event_dict
+
+    finally:
+        if need_close:
+            await db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -4290,18 +4361,24 @@ async def _auto_tag_session(
 
 
 def _extract_token_counts(result: Any) -> tuple[int, int, int]:
-    """Best-effort extraction of token counts from a MAF agent response.
+    """Best-effort extraction of token counts from a MAF response.
 
     Returns:
         A tuple of (tokens_in, tokens_out, cache_hit_tokens), defaulting to (0, 0, 0).
     """
     try:
         usage = getattr(result, "usage_details", None)
+        if usage is None:
+            # Some MAF versions attach usage_details inside a dict
+            if isinstance(result, dict) and "usage_details" in result:
+                usage = result["usage_details"]
         if usage and isinstance(usage, dict):
             tokens_in = usage.get("input_token_count", 0) or 0
             tokens_out = usage.get("output_token_count", 0) or 0
-            # MAF stores cached_tokens as "prompt/cached_tokens" (slash-separated)
-            cache_hit = usage.get("prompt/cached_tokens", 0) or 0
+            # MAF 1.19.0+: primary key is cache_read_input_token_count
+            cache_hit = usage.get("cache_read_input_token_count", 0) or 0
+            if cache_hit == 0:
+                cache_hit = usage.get("prompt/cached_tokens", 0) or 0
             if cache_hit == 0:
                 cache_hit = usage.get("cache_read_input_tokens", 0) or 0
             if cache_hit == 0:

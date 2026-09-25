@@ -316,6 +316,66 @@ class TestWorkflowDefinition:
         )
         assert defn.steps[0].model_ref == "@reasoning"
 
+    def test_tool_refs_defaults_empty(self):
+        from src.agents.workflows.definition import WorkflowDefinition
+
+        defn = WorkflowDefinition(
+            key="ok",
+            name="OK",
+            steps=[
+                {"id": "s1", "name": "S1", "type": "inline", "instructions": "Test"},
+            ],
+        )
+        assert defn.steps[0].tool_refs == []
+
+    def test_tool_refs_role_valid(self):
+        from src.agents.workflows.definition import WorkflowDefinition
+
+        defn = WorkflowDefinition(
+            key="ok",
+            name="OK",
+            steps=[
+                {"id": "s1", "name": "S1", "type": "inline", "instructions": "Test", "tool_refs": ["@web_search"]},
+            ],
+        )
+        assert defn.steps[0].tool_refs == ["@web_search"]
+
+    def test_tool_refs_concrete_valid(self):
+        from src.agents.workflows.definition import WorkflowDefinition
+
+        defn = WorkflowDefinition(
+            key="ok",
+            name="OK",
+            steps=[
+                {"id": "s1", "name": "S1", "type": "inline", "instructions": "Test", "tool_refs": ["web_search"]},
+            ],
+        )
+        assert defn.steps[0].tool_refs == ["web_search"]
+
+    def test_tool_refs_unknown_role_raises(self):
+        from src.agents.workflows.definition import WorkflowDefinition
+
+        with pytest.raises(ValueError, match="Unknown tool role"):
+            WorkflowDefinition(
+                key="bad",
+                name="Bad",
+                steps=[
+                    {"id": "s1", "name": "S1", "type": "inline", "instructions": "Test", "tool_refs": ["@nope"]},
+                ],
+            )
+
+    def test_tool_refs_empty_string_raises(self):
+        from src.agents.workflows.definition import WorkflowDefinition
+
+        with pytest.raises(ValueError, match="non-empty"):
+            WorkflowDefinition(
+                key="bad",
+                name="Bad",
+                steps=[
+                    {"id": "s1", "name": "S1", "type": "inline", "instructions": "Test", "tool_refs": [""]},
+                ],
+            )
+
     def test_agent_step_with_valid_agent_ref(self):
         from src.agents.workflows.definition import WorkflowDefinition
 
@@ -469,33 +529,61 @@ class TestLoadWorkflowDefinition:
 class TestResolveModel:
     """Tests for resolve_model()."""
 
-    @patch("sqlalchemy.select")
-    async def test_resolves_by_id(self, mock_select):
+    async def test_resolves_by_id(self):
         from src.agents.workflows.engine import resolve_model
 
-        mock_query = MagicMock()
-        mock_query.scalar_one_or_none.return_value = MagicMock(id="m1", model_id="gpt-4")
-        mock_select.return_value.where.return_value = mock_query
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.first.return_value = MagicMock(
+            id="m1", model_id="gpt-4"
+        )
 
-        # Need AsyncSession mock
         mock_db = AsyncMock()
-        mock_db.execute = AsyncMock(return_value=mock_query)
+        mock_db.execute = AsyncMock(return_value=mock_result)
 
-        model = await resolve_model(mock_db, "m1")
+        model = await resolve_model(mock_db, "m1", "tenant-1")
         assert model.id == "m1"
 
-    @patch("sqlalchemy.select")
-    async def test_raises_not_found(self, mock_select):
+    async def test_raises_not_found(self):
         from src.agents.workflows.engine import resolve_model
 
-        mock_query = MagicMock()
-        mock_query.scalar_one_or_none.return_value = None
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.first.return_value = None
 
         mock_db = AsyncMock()
-        mock_db.execute = AsyncMock(return_value=mock_query)
+        mock_db.execute = AsyncMock(return_value=mock_result)
 
         with pytest.raises(Exception, match="not found"):
-            await resolve_model(mock_db, "nonexistent")
+            await resolve_model(mock_db, "nonexistent", "tenant-1")
+
+    async def test_is_tenant_scoped(self, db_session, test_tenant, second_tenant):
+        """A model_id shared by two tenants resolves to the caller's tenant."""
+        import uuid as _uuid
+
+        from src.agents.workflows.engine import resolve_model
+        from src.db.orm.models import Model
+
+        def _row(tenant_id: str) -> Model:
+            return Model(
+                id=str(_uuid.uuid4()),
+                tenant_id=tenant_id,
+                name=f"Shared {tenant_id[:8]}",
+                model_id="shared-model",
+                provider="openai",
+                api_key="test-key",
+                enabled=True,
+                is_public=True,
+                max_tokens=4096,
+                temperature=0.7,
+            )
+
+        mine = _row(test_tenant.id)
+        theirs = _row(second_tenant.id)
+        db_session.add_all([mine, theirs])
+        await db_session.flush()
+
+        resolved = await resolve_model(db_session, "shared-model", test_tenant.id)
+        assert resolved.id == mine.id
+        assert resolved.tenant_id == test_tenant.id
 
 
 # =============================================================================
@@ -536,7 +624,7 @@ class TestBuildWorkflow:
             mock_builder_instance.build.return_value = MagicMock()
 
             workflow = await build_workflow(
-                defn=defn, db=mock_db, extra_tools=None
+                defn=defn, db=mock_db, tenant_id="test-tenant", extra_tools=None
             )
 
             # Verify builder was called with correct params
@@ -567,7 +655,7 @@ class TestBuildWorkflow:
             )
             mock_db = MagicMock()
 
-            await build_workflow(defn=defn, db=mock_db)
+            await build_workflow(defn=defn, db=mock_db, tenant_id="test-tenant")
 
             # Should NOT call add_chain for single step
             assert not mock_builder_instance.add_chain.called
@@ -835,7 +923,7 @@ class TestAgentStepResolution:
             )
             mock_db = MagicMock()
 
-            await build_workflow(defn=defn, db=mock_db)
+            await build_workflow(defn=defn, db=mock_db, tenant_id="test-tenant")
 
             # resolve_model should be called with "@reasoning" for agent step (from MODEL_ROLE)
             calls = mock_resolve.call_args_list
@@ -884,27 +972,25 @@ class TestAgentStepResolution:
             )
             mock_db = MagicMock()
 
-            await build_workflow(defn=defn, db=mock_db)
+            await build_workflow(defn=defn, db=mock_db, tenant_id="test-tenant")
 
             # resolve_model should be called with "@fast" (step-level override)
             calls = mock_resolve.call_args_list
             assert calls[0][0][1] == "@fast"
 
-    async def test_unbound_role_logs_warning_and_fallback(self, caplog):
-        """An @-prefixed model_ref with no DB row logs the role-naming warning
-        and still falls back to default_model_id."""
+    async def test_unbound_role_raises(self):
+        """An @-prefixed model_ref with no binding raises ValidationError
+        naming the role — it must never fall back to the skill default."""
         import types
 
         from src.agents.workflows.engine import build_workflow
         from src.agents.workflows.definition import WorkflowDefinition
-        from src.core.exceptions import NotFoundError
+        from src.core.exceptions import ValidationError
 
         agent_mod = types.SimpleNamespace(
             INSTRUCTIONS="AGENT INSTRUCTIONS",
             MODEL_ROLE="@reasoning",
         )
-
-        mock_model = MagicMock()
 
         with patch(
             "src.agents.registry.get_registered_agent", return_value=agent_mod
@@ -913,16 +999,11 @@ class TestAgentStepResolution:
         ) as mock_resolve, patch(
             "src.agents.workflows.engine._build_agent_for_step", new=MagicMock()
         ) as mock_build:
-            # First call (model_ref) raises NotFoundError, second call (default_model_id fallback) returns mock_model
-            side_effects = [NotFoundError("not found"), mock_model]
-            calls = 0
 
-            async def side_effect_fn(db, ref):
-                nonlocal calls
-                calls += 1
-                if calls == 1:
-                    raise side_effects[0]
-                return side_effects[1]
+            async def side_effect_fn(db, ref, tenant_id):
+                raise ValidationError(
+                    f"No model bound to role '{ref}' for tenant '{tenant_id}'"
+                )
 
             mock_resolve.side_effect = side_effect_fn
 
@@ -933,15 +1014,121 @@ class TestAgentStepResolution:
                     {"id": "a", "name": "A", "type": "agent", "agent_ref": "web_researcher"},
                 ],
             )
-            mock_db = MagicMock()
 
-            await build_workflow(
-                defn=defn, db=mock_db, default_model_id="fallback-id"
+            with pytest.raises(ValidationError, match=r"@reasoning"):
+                await build_workflow(
+                    defn=defn,
+                    db=MagicMock(),
+                    tenant_id="test-tenant",
+                    default_model_id="fallback-id",
+                )
+
+            # The unbound role must not be rescued by the fallback model.
+            assert not mock_build.called
+
+    async def test_concrete_model_ref_not_found_still_falls_back(self):
+        """A concrete reference that does not resolve still falls back to
+        default_model_id (existing behaviour preserved)."""
+        from src.agents.workflows.engine import build_workflow
+        from src.agents.workflows.definition import WorkflowDefinition
+        from src.core.exceptions import NotFoundError
+
+        fallback_model = MagicMock()
+
+        with patch(
+            "src.agents.workflows.engine.resolve_model", new=AsyncMock()
+        ) as mock_resolve, patch(
+            "src.agents.workflows.engine._build_agent_for_step", new=MagicMock()
+        ) as mock_build:
+            calls = 0
+
+            async def side_effect_fn(db, ref, tenant_id):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise NotFoundError("not found")
+                return fallback_model
+
+            mock_resolve.side_effect = side_effect_fn
+
+            defn = WorkflowDefinition(
+                key="test",
+                name="Test",
+                steps=[
+                    {"id": "a", "name": "A", "type": "inline", "instructions": "I", "model_ref": "ghost-model"},
+                ],
             )
 
-            # Check that the role-naming warning was logged
-            assert "model role '@reasoning' has no tenant binding" in caplog.text
-            assert "fallback-id" in caplog.text
+            await build_workflow(
+                defn=defn,
+                db=MagicMock(),
+                tenant_id="test-tenant",
+                default_model_id="fallback-id",
+            )
+
+            assert mock_resolve.call_args_list[1][0][1] == "fallback-id"
+            assert mock_build.call_args[1]["model"] is fallback_model
+
+    async def test_concrete_model_ref_in_another_tenant_raises(self):
+        """A concrete model_ref owned by another tenant is rejected loudly
+        rather than resolving or falling back."""
+        from src.agents.workflows.engine import build_workflow
+        from src.agents.workflows.definition import WorkflowDefinition
+        from src.core.exceptions import ValidationError
+
+        with patch(
+            "src.agents.workflows.engine.resolve_model", new=AsyncMock()
+        ) as mock_resolve, patch(
+            "src.agents.workflows.engine._build_agent_for_step", new=MagicMock()
+        ):
+
+            async def side_effect_fn(db, ref, tenant_id):
+                raise ValidationError(
+                    f"Model '{ref}' belongs to a different tenant"
+                )
+
+            mock_resolve.side_effect = side_effect_fn
+
+            defn = WorkflowDefinition(
+                key="test",
+                name="Test",
+                steps=[
+                    {"id": "a", "name": "A", "type": "inline", "instructions": "I", "model_ref": "foreign-model"},
+                ],
+            )
+
+            with pytest.raises(ValidationError, match="different tenant"):
+                await build_workflow(
+                    defn=defn,
+                    db=MagicMock(),
+                    tenant_id="test-tenant",
+                    default_model_id="fallback-id",
+                )
+
+    async def test_resolve_model_role_branch_uses_tenant_bindings(self):
+        """resolve_model routes an @-prefixed reference through the tenant's
+        role bindings and names the role when unbound."""
+        from src.agents.workflows.engine import resolve_model
+        from src.core.exceptions import ValidationError
+
+        bound = MagicMock(id="bound-model")
+
+        with patch(
+            "src.services.model_role_service.resolve_role_model",
+            new=AsyncMock(return_value=bound),
+        ) as mock_role:
+            resolved = await resolve_model(MagicMock(), "@reasoning", "tenant-1")
+
+        assert resolved is bound
+        assert mock_role.call_args[0][1] == "tenant-1"
+        assert mock_role.call_args[0][2] == "@reasoning"
+
+        with patch(
+            "src.services.model_role_service.resolve_role_model",
+            new=AsyncMock(return_value=None),
+        ):
+            with pytest.raises(ValidationError, match=r"@reasoning"):
+                await resolve_model(MagicMock(), "@reasoning", "tenant-1")
 
     def test_load_time_validation_raises_for_unknown_agent(self):
         """load_workflow_definition should raise ValidationError when the
@@ -978,7 +1165,7 @@ class TestAgentStepResolution:
 
         with patch("src.agents.workflows.engine._registered_agent_module", return_value=None):
             with pytest.raises(ValidationError, match="phantom"):
-                await build_workflow(defn=defn, db=MagicMock())
+                await build_workflow(defn=defn, db=MagicMock(), tenant_id="test-tenant")
 
     async def test_end_to_end_real_registered_agent(self):
         """A definition referencing the real 'web_researcher' agent builds
@@ -1012,7 +1199,7 @@ class TestAgentStepResolution:
             assert loaded.key == "e2e_test"
 
             # build_workflow should also pass
-            await build_workflow(defn=loaded, db=MagicMock())
+            await build_workflow(defn=loaded, db=MagicMock(), tenant_id="test-tenant")
 
 
 class TestRunWorkflowIntegration:
@@ -1143,7 +1330,7 @@ class TestContextMode:
             )
             mock_db = MagicMock()
 
-            workflow = await build_workflow(defn=defn, db=mock_db)
+            workflow = await build_workflow(defn=defn, db=mock_db, tenant_id="test-tenant")
             await workflow.run("USER_ORIGINAL")
             return step1, step2
 
@@ -1218,7 +1405,7 @@ class TestStepInput:
                 ],
             )
             mock_db = MagicMock()
-            workflow = await build_workflow(defn=defn, db=mock_db)
+            workflow = await build_workflow(defn=defn, db=mock_db, tenant_id="test-tenant")
             await workflow.run("USER_ORIGINAL")
             return step1, step2
 
@@ -1285,7 +1472,7 @@ class TestStepInput:
                 ],
             )
             mock_db = MagicMock()
-            workflow = await build_workflow(defn=defn, db=mock_db)
+            workflow = await build_workflow(defn=defn, db=mock_db, tenant_id="test-tenant")
             await workflow.run("USER_ORIGINAL")
 
         assert step3.seen == [[("assistant", "OUT_2"), ("user", "OUT_1")]]
@@ -1317,7 +1504,7 @@ class TestStepInput:
                 ],
             )
             mock_db = MagicMock()
-            workflow = await build_workflow(defn=defn, db=mock_db)
+            workflow = await build_workflow(defn=defn, db=mock_db, tenant_id="test-tenant")
             await workflow.run("USER_ORIGINAL")
 
         assert [e.id for e in workflow.get_executors_list()] == [
@@ -1365,7 +1552,7 @@ class TestStepInput:
                 ],
             )
             mock_db = MagicMock()
-            workflow = await build_workflow(defn=defn, db=mock_db)
+            workflow = await build_workflow(defn=defn, db=mock_db, tenant_id="test-tenant")
 
             # Drive the PRODUCTION streaming path. Workflow.run(message, stream=True)
             # returns an async-iterable ResponseStream; it is NOT a coroutine.
@@ -1375,3 +1562,143 @@ class TestStepInput:
 
         # The wrapped step 2 should have received: upstream + user_message
         assert step2.seen == [[("assistant", "OUT_1"), ("user", "USER_ORIGINAL")]]
+
+
+# =============================================================================
+# Per-step tool resolution tests
+# =============================================================================
+
+
+class TestResolveStepTools:
+    """Tests for ``_resolve_step_tools`` — restricting the run's tool pool."""
+
+    @staticmethod
+    def _step(tool_refs):
+        import types
+
+        return types.SimpleNamespace(id="s1", tool_refs=tool_refs)
+
+    @staticmethod
+    def _tools(*names):
+        import types
+
+        return [types.SimpleNamespace(name=n) for n in names]
+
+    def test_empty_refs_inherit_whole_pool(self):
+        from src.agents.workflows.engine import _resolve_step_tools
+
+        pool = self._tools("web_search", "calculator")
+        result = _resolve_step_tools(self._step([]), pool, "wf")
+        assert result == pool
+        assert result[0] is pool[0]
+
+    def test_none_pool_behaves_as_empty(self):
+        from src.agents.workflows.engine import _resolve_step_tools
+        from src.core.exceptions import ValidationError
+
+        # Empty refs inherit an empty pool.
+        assert _resolve_step_tools(self._step([]), None, "wf") == []
+        # A ref against an empty pool cannot resolve and must fail loudly.
+        with pytest.raises(ValidationError, match="web_search"):
+            _resolve_step_tools(self._step(["web_search"]), None, "wf")
+
+    def test_role_ref_restricts_to_target_callable(self):
+        from src.agents.workflows.engine import _resolve_step_tools
+
+        pool = self._tools("web_search", "calculator")
+        result = _resolve_step_tools(self._step(["@web_search"]), pool, "wf")
+        assert result == [pool[0]]
+
+    def test_concrete_ref_restricts_to_named_callable(self):
+        from src.agents.workflows.engine import _resolve_step_tools
+
+        pool = self._tools("web_search", "calculator")
+        result = _resolve_step_tools(self._step(["web_search"]), pool, "wf")
+        assert result == [pool[0]]
+
+    def test_multiple_refs_follow_pool_order(self):
+        from src.agents.workflows.engine import _resolve_step_tools
+
+        pool = self._tools("web_search", "calculator")
+        result = _resolve_step_tools(
+            self._step(["calculator", "@web_search"]), pool, "wf"
+        )
+        assert result == pool
+
+    def test_unresolved_ref_raises_naming_step_and_ref(self):
+        from src.agents.workflows.engine import _resolve_step_tools
+        from src.core.exceptions import ValidationError
+
+        pool = self._tools("calculator")
+        with pytest.raises(ValidationError) as exc:
+            _resolve_step_tools(self._step(["@web_search"]), pool, "wf")
+        message = str(exc.value)
+        assert "s1" in message
+        assert "@web_search" in message
+        assert "calculator" in message  # available tools are listed
+
+    def test_unresolved_concrete_ref_raises(self):
+        from src.agents.workflows.engine import _resolve_step_tools
+        from src.core.exceptions import ValidationError
+
+        with pytest.raises(ValidationError, match="ghost_tool"):
+            _resolve_step_tools(
+                self._step(["ghost_tool"]), self._tools("calculator"), "wf"
+            )
+
+    def test_duplicate_refs_do_not_duplicate_tools(self):
+        from src.agents.workflows.engine import _resolve_step_tools
+
+        pool = self._tools("web_search")
+        result = _resolve_step_tools(
+            self._step(["@web_search", "web_search"]), pool, "wf"
+        )
+        assert result == [pool[0]]
+
+    async def test_build_workflow_applies_per_step_tools(self):
+        """A restricted step gets only its tools; an unrestricted step inherits."""
+        import types
+
+        from src.agents.workflows.engine import build_workflow
+        from src.agents.workflows.definition import WorkflowDefinition
+
+        web = types.SimpleNamespace(name="web_search")
+        calc = types.SimpleNamespace(name="calculator")
+
+        with patch(
+            "src.agents.workflows.engine.resolve_model", new=AsyncMock()
+        ) as mock_resolve, patch(
+            "src.agents.workflows.engine._build_agent_for_step"
+        ) as mock_build:
+            mock_resolve.return_value = MagicMock(max_tokens=4096)
+            mock_build.return_value = MagicMock()
+
+            defn = WorkflowDefinition(
+                key="tool_refs_test",
+                name="Tool Refs Test",
+                steps=[
+                    {
+                        "id": "research",
+                        "name": "Research",
+                        "type": "inline",
+                        "instructions": "I1",
+                        "tool_refs": ["@web_search"],
+                    },
+                    {
+                        "id": "report",
+                        "name": "Report",
+                        "type": "inline",
+                        "instructions": "I2",
+                    },
+                ],
+            )
+
+            await build_workflow(
+                defn=defn,
+                db=MagicMock(),
+                tenant_id="test-tenant",
+                extra_tools=[web, calc],
+            )
+
+            assert mock_build.call_args_list[0][1]["tools"] == [web]
+            assert mock_build.call_args_list[1][1]["tools"] == [web, calc]

@@ -149,6 +149,8 @@ class TestBuildWorkflowIntegration:
     """The workflow must build successfully with mocked model/agent resolution."""
 
     async def test_builds_with_correct_executors(self):
+        import types
+
         from src.agents.workflows.engine import build_workflow, load_workflow_definition
 
         defn = load_workflow_definition(mod)
@@ -162,7 +164,42 @@ class TestBuildWorkflowIntegration:
             mock_resolve.return_value = MagicMock(max_tokens=4096)
             mock_build.return_value = MagicMock()
 
-            workflow = await build_workflow(defn=defn, db=MagicMock())
+            # The research step restricts itself to @web_search, so the run's
+            # (already tenant-scoped) pool must contain that tool.
+            web_search = types.SimpleNamespace(name="web_search")
+
+            workflow = await build_workflow(
+                defn=defn,
+                db=MagicMock(),
+                tenant_id="test-tenant",
+                extra_tools=[web_search],
+            )
 
             executor_ids = [e.id for e in workflow.get_executors_list()]
             assert executor_ids == ["research", "report"]
+
+
+class TestStepToolRefs:
+    """Every step must declare portable, role-based tool references."""
+
+    def _defn(self):
+        from src.agents.workflows.engine import load_workflow_definition
+
+        return load_workflow_definition(mod)
+
+    def test_research_step_uses_web_search_role(self):
+        defn = self._defn()
+        assert defn.steps[0].tool_refs == ["@web_search"]
+
+    def test_report_step_inherits_pool(self):
+        defn = self._defn()
+        assert defn.steps[1].tool_refs == []
+
+    def test_declared_tool_roles_are_known(self):
+        from src.agents.workflows.roles import TOOL_ROLES
+
+        defn = self._defn()
+        for step in defn.steps:
+            for ref in step.tool_refs:
+                if ref.startswith("@"):
+                    assert ref in TOOL_ROLES

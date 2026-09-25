@@ -4,10 +4,10 @@
 # Builds and executes MAF 1.19.0 workflows from ``WorkflowDefinition`` objects.
 #
 # Public API:
-#   ``build_workflow(defn, db_session, extra_tools)`` → built ``Workflow`` instance
+#   ``build_workflow(defn, db, tenant_id, extra_tools)`` → built ``Workflow`` instance
 #   ``run_workflow(workflow, message, **kwargs)``    → ``tuple[str, WorkflowRunResult]``
 #   ``iter_workflow_sse(workflow, message, ...)``    → ``AsyncIterator[dict]`` SSE events
-#   ``resolve_model(db, key)``                      → ``Model`` from DB
+#   ``resolve_model(db, key, tenant_id)``           → ``Model`` from DB (tenant-scoped)
 #   ``load_workflow_definition(mod)``               → ``WorkflowDefinition`` from module
 # =============================================================================
 
@@ -35,7 +35,7 @@ from ...core.exceptions import NotFoundError, ValidationError
 from ...db.orm.models import Model
 from .definition import WorkflowDefinition
 from .executors import StepAgent
-from .roles import is_role_reference
+from .roles import TOOL_ROLE_TARGETS, is_role_reference
 
 logger = logging.getLogger(__name__)
 
@@ -74,24 +74,66 @@ def _validate_agent_refs(defn: WorkflowDefinition) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def resolve_model(db: AsyncSession, model_ref: str) -> Model:
-    """Look up a ``Model`` record by its ``id`` or ``model_id`` attribute.
+async def resolve_model(db: AsyncSession, model_ref: str, tenant_id: str) -> Model:
+    """Resolve a model reference for a tenant.
 
-    Raises ``NotFoundError`` if not found.
+    Two reference kinds are supported:
+
+    * ``@role`` — a logical role resolved through the tenant's role
+      bindings (``services.model_role_service``).  An unbound role raises
+      ``ValidationError`` naming the role; it must never fall back to an
+      arbitrary model.
+    * anything else — a concrete tenant model, matched against ``Model.id``
+      or ``Model.model_id`` within *tenant_id* only.
+
+    Raises:
+        ValidationError: If the role is unbound, or the concrete reference
+            matches a model owned by a different tenant.
+        NotFoundError: If the concrete reference does not resolve for this
+            tenant.
     """
     from sqlalchemy import select
 
+    if model_ref is not None and is_role_reference(model_ref):
+        from ...services.model_role_service import resolve_role_model
+
+        model = await resolve_role_model(db, tenant_id, model_ref)
+        if model is None:
+            raise ValidationError(
+                f"No model bound to role '{model_ref}' for tenant '{tenant_id}'"
+            )
+        return model
+
     result = await db.execute(
-        select(Model).where(
-            (Model.id == model_ref) | (Model.model_id == model_ref)
+        select(Model)
+        .where(
+            (Model.id == model_ref) | (Model.model_id == model_ref),
+            Model.tenant_id == tenant_id,
         )
+        .order_by(Model.created_at.asc(), Model.id.asc())
+        .limit(1)
     )
-    model = result.scalar_one_or_none()
-    if model is None:
-        raise NotFoundError(
-            f"Model not found for reference '{model_ref}'"
+    model = result.scalars().first()
+    if model is not None:
+        return model
+
+    # Distinguish "belongs to another tenant" from "does not exist" so that a
+    # cross-tenant reference is rejected loudly instead of being rescued by
+    # the caller's default-model fallback.
+    diagnostic = await db.execute(
+        select(Model)
+        .where((Model.id == model_ref) | (Model.model_id == model_ref))
+        .limit(1)
+    )
+    foreign = diagnostic.scalars().first()
+    if foreign is not None and foreign.tenant_id != tenant_id:
+        raise ValidationError(
+            f"Model '{model_ref}' belongs to a different tenant"
         )
-    return model
+
+    raise NotFoundError(
+        f"Model not found for reference '{model_ref}'"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +260,71 @@ def _build_agent_for_step(
     return agent
 
 
+def _resolve_step_tools(
+    step: Any, tool_pool: list | None, workflow_key: str
+) -> list:
+    """Select the tools a single workflow step may use.
+
+    Refs are matched against the already-resolved, tenant-scoped tool pool by
+    MAF tool-callable name.  This is a *restriction* filter — it can never
+    supply a tool the run did not resolve, so a tenant tool that is disabled
+    or not active for the run simply is not available and the build fails.
+
+    An ``@``-prefixed ref is a role from the closed vocabulary, resolved
+    through ``TOOL_ROLE_TARGETS``; any other ref is matched directly.
+
+    An empty ``tool_refs`` inherits the whole pool, so definitions that do not
+    restrict tools keep today's behaviour.  A ref matching nothing in the pool
+    raises ``ValidationError`` naming the step and the ref — a step silently
+    running without its tools is the failure mode this exists to remove.
+
+    Args:
+        step:         ``WorkflowStep`` whose ``tool_refs`` drive selection.
+        tool_pool:    Already-resolved tool callables for this run.
+        workflow_key: Workflow key, used in error messages.
+
+    Returns:
+        The selected callables in pool order, de-duplicated.
+    """
+    pool = list(tool_pool or [])
+    refs = list(getattr(step, "tool_refs", None) or [])
+    if not refs:
+        return pool
+
+    by_name: dict[str, Any] = {}
+    for tool in pool:
+        name = getattr(tool, "name", None)
+        if name:
+            by_name.setdefault(name, tool)
+
+    wanted: set[str] = set()
+    unresolved: list[str] = []
+
+    for ref in refs:
+        if is_role_reference(ref):
+            names = TOOL_ROLE_TARGETS.get(ref)
+            if names is None:
+                raise ValidationError(
+                    f"Step '{step.id}': tool role '{ref}' has no declared target"
+                )
+        else:
+            names = (ref,)
+
+        wanted.update(names)
+        if not any(name in by_name for name in names) and ref not in unresolved:
+            unresolved.append(ref)
+
+    if unresolved:
+        available = ", ".join(sorted(by_name)) or "(none)"
+        raise ValidationError(
+            f"Workflow '{workflow_key}': step '{step.id}' tool refs "
+            f"{sorted(unresolved)} are not available in this run. "
+            f"Available tools: {available}"
+        )
+
+    return [tool for tool in pool if getattr(tool, "name", None) in wanted]
+
+
 # ---------------------------------------------------------------------------
 # Workflow builder
 # ---------------------------------------------------------------------------
@@ -226,6 +333,7 @@ def _build_agent_for_step(
 async def build_workflow(
     defn: WorkflowDefinition,
     db: AsyncSession,
+    tenant_id: str,
     extra_tools: list | None = None,
     base_temperature: float = 0.7,
     base_reasoning_effort: str | None = None,
@@ -239,6 +347,7 @@ async def build_workflow(
     Args:
         defn:                  Workflow definition with steps.
         db:                    Database session (used to resolve Model records).
+        tenant_id:             Tenant owning the run; all model resolution is scoped to it.
         extra_tools:           Optional global tools injected into every step.
         base_temperature:      Base temperature for all steps (overridden by step).
         base_reasoning_effort: Base reasoning effort for all steps (overridden by step).
@@ -272,27 +381,25 @@ async def build_workflow(
             if step.model_ref is None:
                 model_ref = agent_mod.MODEL_ROLE
 
-        # Resolve model for this step (with fallback to skill default)
+        # Resolve model for this step. Only an unresolved *concrete* reference
+        # may fall back to the skill's default model: an unbound role or a
+        # cross-tenant reference raises ValidationError and must surface.
         model = None
         try:
-            model = await resolve_model(db, model_ref)
+            model = await resolve_model(db, model_ref, tenant_id)
         except NotFoundError:
-            if is_role_reference(model_ref):
-                logger.warning(
-                    "Step '%s': model role '%s' has no tenant binding (see #550); falling back to '%s'",
-                    step.id, model_ref, default_model_id,
-                )
             if default_model_id:
                 logger.warning(
                     "Step '%s' model_ref '%s' not found, falling back to '%s'",
                     step.id, model_ref, default_model_id,
                 )
-                model = await resolve_model(db, default_model_id)
+                model = await resolve_model(db, default_model_id, tenant_id)
             else:
                 raise
 
-        # Resolve tools for this step (merge extra tools with step-specific)
-        step_tools = list(extra_tools) if extra_tools else []
+        # Resolve tools for this step: the run's tenant-scoped pool,
+        # restricted by the step's tool_refs (empty = inherit the pool).
+        step_tools = _resolve_step_tools(step, extra_tools, defn.key)
 
         # Build agent for this step
         temperature = step.temperature if step.temperature != 0.7 else base_temperature

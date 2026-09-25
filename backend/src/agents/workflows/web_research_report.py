@@ -33,6 +33,9 @@ STEPS = [
             "Be thorough and cite the types of sources you found."
         ),
         "model_ref": "@reasoning",
+        # Restricted to the tenant's web-search tool (resolved through the
+        # @web_search role against the tenant's enabled + active tool pool).
+        "tool_refs": ["@web_search"],
     },
     {
         # Step 2: Report step — synthesize into structured report
@@ -52,6 +55,9 @@ STEPS = [
             "Only include information that was actually found in the research."
         ),
         "model_ref": "@reasoning",
+        # Inherits the run's whole tool pool: this step only synthesises text
+        # it was given, so it declares no tool of its own.
+        "tool_refs": [],
         # Slightly lower temperature for more deterministic reporting
         "temperature": 0.3,
     },

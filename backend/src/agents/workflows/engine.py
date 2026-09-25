@@ -16,6 +16,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
+import time
 from typing import Any, AsyncIterator
 
 from agent_framework import (
@@ -391,6 +393,8 @@ async def iter_workflow_sse(
     message_id: str,
     token_counts: dict | None = None,
     function_invocation_kwargs: dict | None = None,
+    system_prompt: str | None = None,
+    tools: list | None = None,
 ) -> AsyncIterator[dict]:
     """Stream a workflow execution, yielding SSE event dicts per step.
 
@@ -399,7 +403,7 @@ async def iter_workflow_sse(
           {event: "workflow_step", data: {workflow_key, step_id, step_index, total_steps, status}}
         - ``token``: Token events from individual steps (delta text)
         - ``tool_start``, ``tool_result``: Tool execution events
-        - ``message_complete``: Final completion with token counts
+        - ``message_complete``: Final completion with token counts and metrics
 
     Args:
         workflow:                  Built MAF workflow.
@@ -408,11 +412,17 @@ async def iter_workflow_sse(
         message_id:                Message ID for SSE tracking.
         token_counts:              Mutable dict for accumulating token counts.
         function_invocation_kwargs: Optional kwargs forwarded to agent.run().
+        system_prompt:             System prompt string for token estimation.
+        tools:                     List of tool definitions for token estimation.
 
     Yields:
         SSE event dicts.
     """
     from agent_framework import WorkflowEventType
+
+    # ---- Timing tracking -------------------------------------------------
+    turn_start_s = time.monotonic()
+    first_token_at_s: float | None = None
 
     # Get total steps for progress reporting
     total_steps = len(workflow.get_executors_list())
@@ -610,6 +620,9 @@ async def iter_workflow_sse(
                         text = str(data["content"])
 
                     if text:
+                        # Track first token for TTFT calculation
+                        if first_token_at_s is None:
+                            first_token_at_s = time.monotonic()
                         # Look up step name from current streaming step
                         step_name = step_name_by_idx.get(current_step_idx, executor_id)
                         yield {
@@ -692,6 +705,15 @@ async def iter_workflow_sse(
             token_counts["in"] = final_tokens_in
             token_counts["out"] = final_tokens_out
             token_counts["cache_hit"] = final_cache_hit
+            # Also store system_prompt/tools for metrics estimation
+            token_counts["_system_prompt"] = system_prompt or ""
+            token_counts["_tools"] = tools or []
+
+            # Compute and emit metrics for session usage aggregation
+            _emit_workflow_metrics(
+                token_counts, total_steps, turn_start_s, first_token_at_s,
+                final_tokens_in, final_tokens_out, final_cache_hit,
+            )
 
             yield {
                 "event": "message_complete",
@@ -721,3 +743,70 @@ async def iter_workflow_sse(
                     "cache_hit": 0,
                 }),
             }
+            # Still emit basic metrics even on extraction failure
+            _emit_workflow_metrics(token_counts, total_steps, turn_start_s, first_token_at_s, 0, 0, 0)
+
+
+# ===========================================================================
+# Token estimation helpers
+# ===========================================================================
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token count estimate: ~4 chars per token."""
+    if not text:
+        return 0
+    return max(1, len(text) // 4)
+
+
+def _estimate_tool_definitions(tools: list | None) -> int:
+    """Rough token count for tool definition strings."""
+    if not tools:
+        return 0
+    total = 0
+    for t in tools:
+        if isinstance(t, dict):
+            total += _estimate_tokens(json.dumps(t))
+        elif isinstance(t, str):
+            total += _estimate_tokens(t)
+    return max(1, total)
+
+
+def _emit_workflow_metrics(
+    token_counts: dict,
+    total_steps: int,
+    turn_start_s: float,
+    first_token_at_s: float | None,
+    tokens_in: int,
+    tokens_out: int,
+    cache_hit_tokens: int,
+) -> None:
+    """Compute and set the metrics dict for workflow execution."""
+    if token_counts is None:
+        return
+    turn_end_s = time.monotonic()
+    turn_wall_ms = int(round((turn_end_s - turn_start_s) * 1000))
+
+    # For workflows, we don't see internal tool calls per-se, so tool_ms ≈ 0
+    # and llm_ms ≈ wall time.
+    llm_ms = turn_wall_ms
+    tool_ms = 0
+    ttft_ms = None if first_token_at_s is None else int(round((first_token_at_s - turn_start_s) * 1000))
+
+    system_prompt_tokens = _estimate_tokens(token_counts.get("_system_prompt", ""))
+    tool_definition_tokens = _estimate_tool_definitions(token_counts.get("_tools", []))
+
+    if tokens_in > 0:
+        messages_tokens = max(0, tokens_in - system_prompt_tokens - tool_definition_tokens)
+    else:
+        messages_tokens = None
+
+    token_counts["metrics"] = {
+        "llm_ms": llm_ms,
+        "tool_ms": tool_ms,
+        "ttft_ms": ttft_ms,
+        "steps": total_steps,
+        "cache_hit_tokens": cache_hit_tokens,
+        "system_prompt_tokens": system_prompt_tokens if system_prompt_tokens > 0 else None,
+        "tool_definition_tokens": tool_definition_tokens if tool_definition_tokens > 0 else None,
+        "messages_tokens": messages_tokens,
+    }

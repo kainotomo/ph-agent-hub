@@ -3789,6 +3789,8 @@ async def _run_workflow_stream(
             message_id=message_id,
             token_counts=token_counts,
             function_invocation_kwargs=function_invocation_kwargs,
+            system_prompt=system_prompt,
+            tools=tools,
         ):
             yield event_dict
 

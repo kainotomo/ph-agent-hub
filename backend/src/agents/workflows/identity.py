@@ -78,7 +78,7 @@ class _TopologyProbeAgent:
         raise NotImplementedError("topology probe agents are never run")
 
 
-def _build_probe_workflow(defn: WorkflowDefinition) -> Any:
+def build_probe_workflow(defn: WorkflowDefinition) -> Any:
     """Build a real MAF ``Workflow`` from probe executors (one per step).
 
     Mirrors ``engine.build_workflow``'s builder usage exactly: same name,
@@ -117,7 +117,7 @@ def graph_signature(defn: WorkflowDefinition) -> dict[str, Any]:
     """Return MAF's canonical graph signature for a workflow definition.
 
     The definition is rebuilt into a real MAF ``Workflow`` (see
-    :func:`_build_probe_workflow`) and MAF's own ``graph_signature`` dict is
+    :func:`build_probe_workflow`) and MAF's own ``graph_signature`` dict is
     returned unmodified.
 
     Args:
@@ -127,13 +127,13 @@ def graph_signature(defn: WorkflowDefinition) -> dict[str, Any]:
         MAF's graph signature dict (``start_executor``, ``executors``,
         ``edge_groups``, and nested sub-workflow signatures, if any).
     """
-    return _build_probe_workflow(defn).graph_signature
+    return build_probe_workflow(defn).graph_signature
 
 
 def graph_signature_hash(defn: WorkflowDefinition) -> str:
     """Return MAF's canonical graph signature hash for a workflow definition.
 
-    The graph is built exactly once, inside :func:`_build_probe_workflow`.
+    The graph is built exactly once, inside :func:`build_probe_workflow`.
 
     Args:
         defn: The workflow definition to fingerprint.
@@ -141,7 +141,7 @@ def graph_signature_hash(defn: WorkflowDefinition) -> str:
     Returns:
         MAF's ``Workflow.graph_signature_hash`` string.
     """
-    return _build_probe_workflow(defn).graph_signature_hash
+    return build_probe_workflow(defn).graph_signature_hash
 
 
 # ---------------------------------------------------------------------------

@@ -22,6 +22,31 @@ _registry: dict[str, Any] = {}
 _agents: dict[str, Any] = {}
 
 
+class DuplicateMAFKeyError(RuntimeError):
+    """Raised when two scanned modules declare the same MAF_KEY."""
+
+
+def register_module(
+    registry: dict[str, Any],
+    key: str,
+    module: Any,
+    full_name: str,
+    kind: str,
+) -> None:
+    """Register *module* under *key* in *registry*, raising
+    ``DuplicateMAFKeyError`` if the key already exists.
+    """
+    existing = registry.get(key)
+    if existing is not None:
+        raise DuplicateMAFKeyError(
+            f"Duplicate MAF key {key!r}: already registered "
+            f"{getattr(existing, '__name__', repr(existing))}, "
+            f"refused {full_name}"
+        )
+    registry[key] = module
+    logger.info("Registered %s: %s → %s", kind, key, full_name)
+
+
 def scan_agent_defs() -> dict[str, Any]:
     """Scan the agent_defs package and register any module exposing MAF_KEY,
     NAME, INSTRUCTIONS, and MODEL_ROLE.  Repeated calls are idempotent
@@ -62,8 +87,7 @@ def scan_agent_defs() -> dict[str, Any]:
                 )
                 continue
 
-            _agents[module.MAF_KEY] = module
-            logger.info("Registered agent: %s → %s", module.MAF_KEY, full_name)
+            register_module(_agents, module.MAF_KEY, module, full_name, "agent")
 
     return _agents
 
@@ -79,6 +103,8 @@ async def startup_scan(db: AsyncSession) -> None:
     from . import skills as skills_pkg
     from . import workflows as workflows_pkg
 
+    _registry.clear()
+
     # ---- Scan skills -------------------------------------------------------
     for _, mod_name, _ in pkgutil.iter_modules(skills_pkg.__path__):
         full_name = f"src.agents.skills.{mod_name}"
@@ -90,8 +116,7 @@ async def startup_scan(db: AsyncSession) -> None:
 
         key = getattr(mod, "MAF_KEY", None)
         if key is not None:
-            _registry[key] = mod
-            logger.info("Registered skill: %s → %s", key, full_name)
+            register_module(_registry, key, mod, full_name, "skill")
 
     # ---- Scan workflows ----------------------------------------------------
     for _, mod_name, _ in pkgutil.iter_modules(workflows_pkg.__path__):
@@ -104,8 +129,7 @@ async def startup_scan(db: AsyncSession) -> None:
 
         key = getattr(mod, "MAF_KEY", None)
         if key is not None:
-            _registry[key] = mod
-            logger.info("Registered workflow: %s → %s", key, full_name)
+            register_module(_registry, key, mod, full_name, "workflow")
 
     # ---- Scan agent definitions --------------------------------------------
     scan_agent_defs()

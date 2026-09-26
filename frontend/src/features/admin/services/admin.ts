@@ -116,6 +116,18 @@ export interface ModelData {
   updated_at: string;
 }
 
+export interface ModelRoleRef {
+  id: string;
+  name: string;
+  model_id: string;
+  enabled: boolean;
+}
+
+export interface ModelRoleBinding {
+  role: string;
+  models: ModelRoleRef[];
+}
+
 export interface ToolData {
   id: string;
   tenant_id: string;
@@ -411,6 +423,39 @@ export function updateModel(id: string, data: Partial<ModelData> & { api_key?: s
 
 export function deleteModel(id: string): Promise<void> {
   return api<void>(`/admin/models/${id}`, { method: "DELETE" });
+}
+
+// =============================================================================
+// Model Role Bindings
+// =============================================================================
+
+export function listModelRoleBindings(
+  params?: { tenant_id?: string },
+): Promise<ModelRoleBinding[]> {
+  const qs = buildQueryString({ ...params });
+  return api<ModelRoleBinding[]>(`/admin/model-role-bindings${qs}`);
+}
+
+export function setModelRoleBindings(
+  role: string,
+  modelIds: string[],
+  params?: { tenant_id?: string },
+): Promise<ModelRoleBinding> {
+  const qs = buildQueryString({ ...params });
+  return api<ModelRoleBinding>(`/admin/model-role-bindings/${encodeURIComponent(role)}${qs}`, {
+    method: "PUT",
+    body: { model_ids: modelIds },
+  });
+}
+
+export function clearModelRoleBindings(
+  role: string,
+  params?: { tenant_id?: string },
+): Promise<void> {
+  const qs = buildQueryString({ ...params });
+  return api<void>(`/admin/model-role-bindings/${encodeURIComponent(role)}${qs}`, {
+    method: "DELETE",
+  });
 }
 
 // =============================================================================

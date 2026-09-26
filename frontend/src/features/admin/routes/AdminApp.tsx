@@ -22,6 +22,9 @@ const TemplateList = React.lazy(
   () => import("../resources/templates/TemplateList"),
 );
 const SkillList = React.lazy(() => import("../resources/skills/SkillList"));
+const ModelRoleList = React.lazy(
+  () => import("../resources/model-roles/ModelRoleList"),
+);
 const GroupList = React.lazy(() => import("../resources/groups/GroupList"));
 const MemoryList = React.lazy(() => import("../resources/memories/MemoryList"));
 const RagDocumentList = React.lazy(
@@ -135,6 +138,14 @@ export function AdminApp() {
           element={
             <Suspense fallback={<AdminFallback />}>
               <SkillList />
+            </Suspense>
+          }
+        />
+        <Route
+          path="model-roles"
+          element={
+            <Suspense fallback={<AdminFallback />}>
+              <ModelRoleList />
             </Suspense>
           }
         />

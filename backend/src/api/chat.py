@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, File, Query, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -219,6 +219,78 @@ class MessageCreate(BaseModel):
     progress tracking and notification on completion.  Implies
     ``autopilot=True``.  The user can close the browser and come
     back later to see results.  (Issue #449)"""
+
+
+# =============================================================================
+# Workflow Resume
+# =============================================================================
+
+
+class WorkflowApprovalDecision(BaseModel):
+    """One approval decision for a workflow resume request."""
+
+    request_id: str
+    """The ``request_id`` carried by the ``workflow_approval_required`` SSE
+    event that the client previously received."""
+    approved: bool
+    """Whether the user approved the requested tool call."""
+
+
+class WorkflowResumeRequest(BaseModel):
+    """Request body for the workflow resume endpoint."""
+
+    approvals: list[WorkflowApprovalDecision] = Field(
+        default_factory=list,
+    )
+
+
+async def _build_approval_responses(
+    db, tenant_id, target, checkpoint_storage, approvals
+) -> dict[str, Any]:
+    """Build the MAF ``responses`` dict from approval decisions.
+
+    Reads ``pending_request_info_events`` from the checkpoint, validates each
+    submitted ``request_id`` against known pending function-approval requests,
+    and returns real MAF ``Content`` objects.
+
+    Raises ``ValidationError`` when the checkpoint has no pending approval
+    requests or when a submitted ``request_id`` is not found.
+    """
+    from agent_framework import Content
+
+    if not approvals:
+        return {}
+
+    checkpoint = await checkpoint_storage.load(target.checkpoint_id)
+    pending = getattr(checkpoint, "pending_request_info_events", None) or {}
+
+    if not pending:
+        raise ValidationError(
+            "Checkpoint has no pending approval requests; nothing to resume."
+        )
+
+    # Build a mapping of request_id -> event for function_approval_request events
+    approval_map: dict[str, Any] = {}
+    for rid, event in pending.items():
+        data = getattr(event, "data", None)
+        if data is not None and getattr(data, "type", None) == "function_approval_request":
+            approval_map[rid] = event
+
+    responses: dict[str, Any] = {}
+    for approval in approvals:
+        if approval.request_id not in approval_map:
+            raise ValidationError(
+                f"Unknown approval request id: {approval.request_id}"
+            )
+        func_event = approval_map[approval.request_id]
+        function_call = func_event.data.function_call
+        responses[approval.request_id] = Content.from_function_approval_response(
+            approved=approval.approved,
+            id=approval.request_id,
+            function_call=function_call,
+        )
+
+    return responses
 
 
 class MessageResponse(BaseModel):
@@ -1802,6 +1874,137 @@ async def send_message(
         content=response_text,
         model_id=model_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# Workflow Resume (Chunk C1)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/session/{session_id}/workflow/resume",
+    dependencies=[Depends(get_current_user)],
+)
+async def resume_workflow(
+    session_id: str,
+    body: WorkflowResumeRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(get_current_user),
+):
+    """Resume a paused workflow run by answering pending approvals.
+
+    Returns a Server-Sent Events stream of the resumed workflow execution.
+
+    **Flow**
+
+    1. Load the session and validate ownership.
+    2. Resolve the session config (model, skill, tools, execution type).
+    3. Validate that the session is configured for workflow execution.
+    4. Look up the registered workflow module by ``maf_target_key``.
+    5. Load the workflow definition from the module.
+    6. Build the MAF ``responses`` dict from the provided
+       ``approvals``.
+    7. Call ``resume_workflow_with_responses`` which:
+
+       * Locates, validates, and loads the latest checkpoint.
+       * Extracts the cross-step state snapshot.
+       * Builds a fresh workflow instance seeded with the recovered state.
+       * Emits a ``workflow_resumed`` SSE event with ``pending_request_ids``.
+       * Streams resumed workflow execution via ``iter_workflow_sse``,
+         forwarding approval responses into the workflow engine.
+       * Yields ``workflow_step``, ``token``, ``tool_start``,
+         ``tool_result``, ``workflow_approval_required``, and
+         ``message_complete`` events.
+
+    8. Stream the events back to the client via ``EventSourceResponse``.
+    """
+    # ------------------------------------------------------------------
+    # Load & validate session ownership
+    # ------------------------------------------------------------------
+    data = await _load_session(db, session_id)
+    await _require_session_owner(data, current_user)
+    tenant_id = data.get("tenant_id", current_user.tenant_id)
+    message_id = str(uuid.uuid4())
+
+    # ------------------------------------------------------------------
+    # Resolve session config (model, skill, tools, execution type)
+    # ------------------------------------------------------------------
+    from ..agents.runner import _resolve_session_config, SessionConfig
+
+    cfg = await _resolve_session_config(
+        db, data, tenant_id, user=current_user,
+    )
+
+    # ------------------------------------------------------------------
+    # Validate: must be a workflow skill with a MAF target key
+    # ------------------------------------------------------------------
+    if cfg.skill is None or not cfg.skill.maf_target_key:
+        raise ValidationError(
+            "Workflow resume requires a session with a MAF workflow skill"
+        )
+    if cfg.execution_type not in ("workflow", "workflow_based"):
+        raise ValidationError(
+            f"Session execution type '{cfg.execution_type}' is not a workflow"
+        )
+
+    # ------------------------------------------------------------------
+    # Look up the registered workflow module and load its definition
+    # ------------------------------------------------------------------
+    from ..agents.registry import get_registered
+    from ..agents.workflows.engine import load_workflow_definition
+
+    target_mod = get_registered(cfg.skill.maf_target_key)
+    if target_mod is None:
+        raise NotFoundError(
+            f"No registered workflow for key '{cfg.skill.maf_target_key}'"
+        )
+
+    defn = load_workflow_definition(target_mod)
+
+    # ------------------------------------------------------------------
+    # Create checkpoint storage, load target (resolves + loads checkpoint),
+    # and build MAF Content responses from the approval decisions.
+    # ------------------------------------------------------------------
+    from ..agents.workflows.checkpoint_storage import MariaDBCheckpointStorage
+    from ..agents.workflows.engine import build_workflow, iter_workflow_sse
+    from ..services.workflow_resume_service import (
+        load_resume_target,
+        resume_workflow_with_responses,
+    )
+
+    checkpoint_storage = MariaDBCheckpointStorage(
+        tenant_id=tenant_id,
+        session_id=session_id,
+        message_id=message_id,
+    )
+
+    target, _checkpoint = await load_resume_target(
+        db, tenant_id, session_id, defn, checkpoint_storage
+    )
+
+    responses = await _build_approval_responses(
+        db, tenant_id, target, checkpoint_storage, body.approvals
+    )
+
+    # Use the skill's default model as the resume fallback
+    default_model_id = getattr(cfg.skill, "default_model_id", None)
+
+    async def _event_generator():
+        async for event_dict in resume_workflow_with_responses(
+            db=db,
+            tenant_id=tenant_id,
+            session_id=session_id,
+            message_id=message_id,
+            defn=defn,
+            checkpoint_storage=checkpoint_storage,
+            responses=responses,
+            base_temperature=cfg.temperature,
+            base_reasoning_effort=cfg.reasoning_effort,
+            default_model_id=default_model_id,
+        ):
+            yield event_dict
+
+    return EventSourceResponse(_event_generator())
 
 
 # ---------------------------------------------------------------------------

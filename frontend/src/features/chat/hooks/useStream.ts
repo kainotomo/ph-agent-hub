@@ -94,6 +94,10 @@ export interface MessageCompleteEvent {
     model_provider?: string;
     tokens_in?: number;
     tokens_out?: number;
+    /** Workflow: final status of the overall workflow run */
+    outcome?: "completed" | "paused";
+    /** Workflow: list of pending request IDs when workflow is paused */
+    pending_request_ids?: string[];
   };
 }
 
@@ -236,6 +240,19 @@ export interface WorkflowStepEvent {
   };
 }
 
+// ---- Workflow approval requests -------------------------------------------
+
+export interface WorkflowApprovalRequiredEvent {
+  event: "workflow_approval_required";
+  data: {
+    type: "function_approval_request";
+    request_id: string;
+    step_id: string;
+    tool_name: string | null;
+    arguments: unknown;
+  };
+}
+
 export type StreamEvent =
   | TokenEvent
   | ToolStartEvent
@@ -322,6 +339,7 @@ export function useStream(apiPrefix: string = "chat") {
         onAutopilotResume?: (data: AutopilotResumeEvent["data"]) => void;
         onProgress?: (data: ProgressEvent["data"]) => void;
         onWorkflowStep?: (data: WorkflowStepEvent["data"]) => void;
+        onWorkflowApprovalRequired?: (data: WorkflowApprovalRequiredEvent["data"]) => void;
         onError?: (error: string, messageId: string) => void;
         onClose?: () => void;
       },
@@ -451,6 +469,9 @@ export function useStream(apiPrefix: string = "chat") {
                     break;
                   case "message_complete":
                     handlers.onMessageComplete?.(parsed);
+                    break;
+                  case "workflow_approval_required":
+                    handlers.onWorkflowApprovalRequired?.(parsed);
                     break;
                   case "reasoning_token":
                     handlers.onReasoningToken?.(parsed.delta, parsed.message_id);
@@ -622,6 +643,7 @@ export function useStream(apiPrefix: string = "chat") {
         onAutopilotResume?: (data: AutopilotResumeEvent["data"]) => void;
         onProgress?: (data: ProgressEvent["data"]) => void;
         onWorkflowStep?: (data: WorkflowStepEvent["data"]) => void;
+        onWorkflowApprovalRequired?: (data: WorkflowApprovalRequiredEvent["data"]) => void;
         onError?: (error: string, messageId: string) => void;
         onClose?: () => void;
       },
@@ -728,6 +750,9 @@ export function useStream(apiPrefix: string = "chat") {
                   case "message_complete":
                     handlers.onMessageComplete?.(parsed);
                     break;
+                  case "workflow_approval_required":
+                    handlers.onWorkflowApprovalRequired?.(parsed);
+                    break;
                   case "reasoning_token":
                     handlers.onReasoningToken?.(parsed.delta, parsed.message_id);
                     break;
@@ -830,6 +855,7 @@ export function useStream(apiPrefix: string = "chat") {
         onAutopilotResume?: (data: AutopilotResumeEvent["data"]) => void;
         onProgress?: (data: ProgressEvent["data"]) => void;
         onWorkflowStep?: (data: WorkflowStepEvent["data"]) => void;
+        onWorkflowApprovalRequired?: (data: WorkflowApprovalRequiredEvent["data"]) => void;
         onError?: (error: string, messageId: string) => void;
         onClose?: () => void;
       } | undefined,
@@ -885,6 +911,9 @@ export function useStream(apiPrefix: string = "chat") {
                     break;
                   case "message_complete":
                     if (handlers) handlers.onMessageComplete?.(parsed);
+                    break;
+                  case "workflow_approval_required":
+                    if (handlers) handlers.onWorkflowApprovalRequired?.(parsed);
                     break;
                   case "reasoning_token":
                     if (handlers) handlers.onReasoningToken?.(parsed.delta, parsed.message_id);
@@ -965,6 +994,7 @@ export function useStream(apiPrefix: string = "chat") {
         onTagsUpdated?: (data?: TagsUpdatedEvent["data"]) => void;
         onStreamStart?: () => void;
         onWorkflowStep?: (data: WorkflowStepEvent["data"]) => void;
+        onWorkflowApprovalRequired?: (data: WorkflowApprovalRequiredEvent["data"]) => void;
         onError?: (error: string, messageId: string) => void;
         onClose?: () => void;
       },
@@ -1026,6 +1056,9 @@ export function useStream(apiPrefix: string = "chat") {
                     break;
                   case "message_complete":
                     handlers.onMessageComplete?.(parsed);
+                    break;
+                  case "workflow_approval_required":
+                    handlers.onWorkflowApprovalRequired?.(parsed);
                     break;
                   case "reasoning_token":
                     handlers.onReasoningToken?.(parsed.delta, parsed.message_id);
@@ -1117,6 +1150,34 @@ export function useStream(apiPrefix: string = "chat") {
     stopStream,
     startReconnect,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Workflow approval helpers
+// ---------------------------------------------------------------------------
+
+export interface WorkflowApprovalBody {
+  approvals: Array<{ request_id: string; approved: boolean }>;
+}
+
+/**
+ * POST to /api/chat/session/{sessionId}/workflow/resume with approval decisions.
+ * The backend generates the message_id itself — callers must NOT supply one.
+ * Returns the raw Response so the caller can attach SSE handling.
+ */
+export async function resumeWorkflowApproval(
+  sessionId: string,
+  body: WorkflowApprovalBody,
+): Promise<Response> {
+  const token = getToken();
+  return fetch(`${BASE_URL}/chat/session/${sessionId}/workflow/resume`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(body),
+  });
 }
 
 export default useStream;

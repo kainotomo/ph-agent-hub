@@ -167,6 +167,40 @@ describe("useStream", () => {
     );
   });
 
+  // ── Workflow approval required ─────────────────────────────────────────
+
+  it("calls onWorkflowApprovalRequired when workflow_approval_required event arrives", async () => {
+    const { result } = renderHook(() => useStream());
+    const onWorkflowApprovalRequired = vi.fn();
+
+    act(() => {
+      result.current.startStream("session-1", "Hello", [], undefined, {}, { onWorkflowApprovalRequired });
+    });
+
+    await waitFor(() => expect(mockFetchEventSource).toHaveBeenCalled());
+
+    act(() => {
+      sseEvent("workflow_approval_required", {
+        type: "function_approval_request",
+        request_id: "req-abc",
+        step_id: "step-123",
+        tool_name: "ask_user",
+        arguments: { question: "Continue?" },
+      });
+    });
+
+    expect(onWorkflowApprovalRequired).toHaveBeenCalledTimes(1);
+    expect(onWorkflowApprovalRequired).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "function_approval_request",
+        request_id: "req-abc",
+        step_id: "step-123",
+        tool_name: "ask_user",
+        arguments: { question: "Continue?" },
+      }),
+    );
+  });
+
   // ── Stop / cancel stream ──────────────────────────────────────────────
 
   it("stopStream sends DELETE and sets streaming to false", async () => {

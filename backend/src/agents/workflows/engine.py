@@ -564,6 +564,7 @@ async def run_workflow(
     *,
     checkpoint_storage: Any | None = None,
     checkpoint_id: str | None = None,
+    responses: dict | None = None,
 ) -> tuple[str, Any]:  # tuple[str, WorkflowRunResult]
     """Execute a workflow synchronously and return (output_text, result).
 
@@ -573,6 +574,8 @@ async def run_workflow(
         function_invocation_kwargs: Optional kwargs forwarded to agent.run().
         checkpoint_storage:        Optional MAF checkpoint storage for persisting/restoring runs.
         checkpoint_id:             ID of a checkpoint to resume from.
+        responses:                 Optional MAF responses dict, forwarded as-is for
+                                   workflow resume.
 
     Returns:
         Tuple of (final_output_text, WorkflowRunResult).
@@ -591,6 +594,8 @@ async def run_workflow(
         kwargs["checkpoint_storage"] = checkpoint_storage
     if checkpoint_id is not None:
         kwargs["checkpoint_id"] = checkpoint_id
+    if responses:
+        kwargs["responses"] = responses
 
     result = await workflow.run(message, **kwargs)
 
@@ -616,6 +621,37 @@ async def run_workflow(
 
 
 # ---------------------------------------------------------------------------
+# Approval event helper
+# ---------------------------------------------------------------------------
+
+
+def approval_event_from_request_info(event: Any) -> dict | None:
+    """Build the SSE payload for a function-approval request_info event.
+
+    Returns None for any request_info that is not a function approval request.
+    """
+    data = event.data
+    if data is None or getattr(data, "type", None) != "function_approval_request":
+        return None
+    function_call = getattr(data, "function_call", None)
+    return {
+        "type": "function_approval_request",
+        "request_id": getattr(event, "request_id", ""),
+        "step_id": _get_step_id_from_event(event),
+        "tool_name": getattr(function_call, "name", None),
+        "arguments": getattr(function_call, "arguments", None),
+    }
+
+
+def _get_step_id_from_event(event: Any) -> str:
+    """Extract step_id from an event's source_executor_id, returning '' on failure."""
+    try:
+        return getattr(event, "source_executor_id", "") or ""
+    except (ValueError, AttributeError, RuntimeError):
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # Streaming: iterate workflow events and yield SSE dicts
 # ---------------------------------------------------------------------------
 
@@ -632,6 +668,7 @@ async def iter_workflow_sse(
     tools: list | None = None,
     checkpoint_storage: Any | None = None,
     checkpoint_id: str | None = None,
+    responses: dict | None = None,
 ) -> AsyncIterator[dict]:
     """Stream a workflow execution, yielding SSE event dicts per step.
 
@@ -644,6 +681,9 @@ async def iter_workflow_sse(
         - ``message_complete``: Final completion with token counts, metrics,
           ``outcome`` (``"completed"`` or ``"paused"``), and
           ``pending_request_ids`` (present only when ``outcome == "paused"``).
+        - ``workflow_approval_required``: Emitted when the workflow pauses on a
+          function-approval request_info event.  Data is a dict with
+          ``type``, ``request_id``, ``step_id``, ``tool_name``, and ``arguments``.
 
     Args:
         workflow:                  Built MAF workflow.
@@ -656,6 +696,8 @@ async def iter_workflow_sse(
         tools:                     List of tool definitions for token estimation.
         checkpoint_storage:        Optional MAF checkpoint storage for persisting/restoring runs.
         checkpoint_id:             ID of a checkpoint to resume from.
+        responses:                 Optional MAF ``responses`` dict, forwarded as-is
+                                   for workflow resume (function-call approvals).
 
     Yields:
         SSE event dicts.
@@ -692,6 +734,8 @@ async def iter_workflow_sse(
         stream_kwargs["checkpoint_storage"] = checkpoint_storage
     if checkpoint_id is not None:
         stream_kwargs["checkpoint_id"] = checkpoint_id
+    if responses:
+        stream_kwargs["responses"] = responses
 
     # Run the workflow with streaming
     response_stream = workflow.run(message, **stream_kwargs)
@@ -709,28 +753,16 @@ async def iter_workflow_sse(
         async for event in response_stream:
             event_type = event.type
             event_types_seen.add(event_type)
-            # Debug: log the first request_info event
-            if event_type == "request_info" and event.data is not None:
-                data = event.data
-                req_attrs = [a for a in dir(data) if not a.startswith("_")]
-                logger.info("PH-WORKFLOW-REQUEST_INFO: data_type=%s data_attrs=%s",
-                           type(data).__name__, req_attrs)
-                # Try to extract token usage
-                if hasattr(data, "to_dict"):
-                    try:
-                        logger.info("PH-WORKFLOW-REQUEST_INFO-dict: %s", json.dumps(str(data.to_dict())[:2000]))
-                    except Exception:
-                        pass
-                elif isinstance(data, dict):
-                    logger.info("PH-WORKFLOW-REQUEST_INFO-dict: %s", json.dumps(data)[:2000])
-                else:
-                    logger.info("PH-WORKFLOW-REQUEST_INFO-str: %s", str(data)[:2000])
             # source_executor_id is only available on certain event types
             # (e.g. request_info); accessing it on others raises ValueError
             try:
                 executor_id = getattr(event, "source_executor_id", None) or ""
             except (ValueError, AttributeError, RuntimeError):
                 executor_id = ""
+
+            if event_type == "request_info":
+                logger.debug("Workflow request_info event: executor=%s request_id=%s",
+                             executor_id, getattr(event, "request_id", None))
 
             # ---- Step lifecycle events ----
             if event_type == "executor_invoked":
@@ -927,6 +959,10 @@ async def iter_workflow_sse(
                         streaming_tokens_in += usage.get("input_token_count", 0) or 0
                         streaming_tokens_out += usage.get("output_token_count", 0) or 0
                         streaming_cache_hit += usage.get("cache_read_input_token_count", 0) or 0
+
+                approval = approval_event_from_request_info(event)
+                if approval is not None:
+                    yield {"event": "workflow_approval_required", "data": json.dumps(approval)}
 
     except asyncio.CancelledError:
         # Stream was cancelled — propagate

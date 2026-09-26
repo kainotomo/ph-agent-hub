@@ -149,6 +149,7 @@ async def create_tool(
     description: str | None = None,
     enabled: bool = True,
     is_public: bool = False,
+    approval_required: bool = False,
 ) -> Tool:
     """Create a new tool. Raises ValidationError if type is invalid."""
     if type not in VALID_TOOL_TYPES:
@@ -166,6 +167,7 @@ async def create_tool(
         code=code,
         enabled=enabled,
         is_public=is_public,
+        approval_required=approval_required,
         category=derive_tool_category(type),
     )
     db.add(tool)

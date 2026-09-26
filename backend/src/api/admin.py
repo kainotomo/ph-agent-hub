@@ -377,6 +377,7 @@ class ToolCreate(BaseModel):
     config: dict | None = None
     code: str | None = None
     enabled: bool = True
+    approval_required: bool = False
     is_public: bool = False
 
 
@@ -387,6 +388,7 @@ class ToolUpdate(BaseModel):
     config: dict | None = None
     code: str | None = None
     enabled: bool | None = None
+    approval_required: bool | None = None
     is_public: bool | None = None
 
 
@@ -401,6 +403,7 @@ class ToolResponse(BaseModel):
     config: dict | None
     code: str | None
     enabled: bool
+    approval_required: bool
     is_public: bool
     created_at: datetime
     updated_at: datetime
@@ -434,6 +437,7 @@ def _admin_tool_response(tool) -> dict:
         "config": getattr(tool, 'config', None),
         "code": getattr(tool, 'code', None),
         "enabled": bool(tool.enabled),
+        "approval_required": bool(getattr(tool, "approval_required", False)),
         "is_public": bool(tool.is_public),
         "created_at": tool.created_at,
         "updated_at": tool.updated_at,
@@ -1268,6 +1272,7 @@ async def create_tool(
         config=body.config,
         code=body.code,
         enabled=body.enabled,
+        approval_required=body.approval_required,
         is_public=body.is_public,
     )
     await write_audit_log(
@@ -1318,6 +1323,8 @@ async def update_tool(
         update_kwargs["code"] = body.code
     if body.enabled is not None:
         update_kwargs["enabled"] = body.enabled
+    if body.approval_required is not None:
+        update_kwargs["approval_required"] = body.approval_required
     if body.is_public is not None:
         update_kwargs["is_public"] = body.is_public
     if body.tenant_id is not None:

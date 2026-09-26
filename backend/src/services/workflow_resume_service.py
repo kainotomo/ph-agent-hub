@@ -25,6 +25,7 @@
 
 import json
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator
 
@@ -46,6 +47,68 @@ from .workflow_checkpoint_service import (
 logger = logging.getLogger(__name__)
 
 
+# =============================================================================
+# Data classes
+# =============================================================================
+
+@dataclass(frozen=True)
+class ResumeTarget:
+    """The checkpoint chosen for resumption, plus the key needed to rebuild it."""
+    checkpoint_id: str
+    workflow_key: str
+
+
+@dataclass(frozen=True)
+class ResumeResult:
+    target: ResumeTarget
+    pending_request_ids: list[str]
+
+
+# =============================================================================
+# Checkpoint resolution helper
+# =============================================================================
+
+async def load_resume_target(
+    db: AsyncSession,
+    tenant_id: str,
+    session_id: str,
+    defn: WorkflowDefinition,
+    checkpoint_storage: MariaDBCheckpointStorage,
+) -> tuple[ResumeTarget, Any]:
+    """Locate, validate, and load the latest resumable checkpoint.
+
+    Returns (target, checkpoint).
+    """
+    # 1. Locate the latest resumable checkpoint for the session
+    record = await latest_resumable_checkpoint(
+        db, tenant_id, session_id
+    )
+    if record is None:
+        raise NotFoundError(
+            f"No resumable workflow checkpoint for session '{session_id}'"
+        )
+
+    # 2. Validate: ensure the checkpoint is safe to resume for this tenant/definition
+    assert_resumable(tenant_id, record, defn)
+
+    # 3. Load the checkpoint from persistent storage
+    checkpoint = await checkpoint_storage.load(record.id)
+
+    # 4. Derive the workflow key from the tenant-namespaced workflow_name
+    workflow_key = record.workflow_name.split(":", 1)[-1]
+
+    target = ResumeTarget(
+        checkpoint_id=record.id,
+        workflow_key=workflow_key,
+    )
+
+    return target, checkpoint
+
+
+# =============================================================================
+# Resume entry points
+# =============================================================================
+
 async def resume_workflow_stream(
     *,
     db: AsyncSession,
@@ -64,20 +127,10 @@ async def resume_workflow_stream(
     This is the durable-resume primitive: locate, validate, load, extract,
     build a fresh instance, and stream the resumed run.
     """
-    # 1. Locate the latest resumable checkpoint for the session
-    record = await latest_resumable_checkpoint(
-        db, tenant_id, session_id
+    # 1-3. Locate, validate, and load the checkpoint
+    target, checkpoint = await load_resume_target(
+        db, tenant_id, session_id, defn, checkpoint_storage
     )
-    if record is None:
-        raise NotFoundError(
-            f"No resumable workflow checkpoint for session '{session_id}'"
-        )
-
-    # 2. Validate: ensure the checkpoint is safe to resume for this tenant/definition
-    assert_resumable(tenant_id, record, defn)
-
-    # 3. Load the checkpoint from persistent storage
-    checkpoint = await checkpoint_storage.load(record.id)
 
     # 4. Extract the cross-step state snapshot
     snapshot = extract_state_snapshot(checkpoint)
@@ -108,7 +161,7 @@ async def resume_workflow_stream(
         session_id=session_id,
         message_id=message_id,
         checkpoint_storage=checkpoint_storage,
-        checkpoint_id=record.id,
+        checkpoint_id=target.checkpoint_id,
         # A mutable token sink is required: `iter_workflow_sse` only emits its
         # terminal `message_complete` event when `token_counts` is not None,
         # and that event is where the run outcome ("completed" vs "paused") is
@@ -129,13 +182,112 @@ async def resume_workflow_stream(
 
     # 7. On completion, mark the checkpoint and set expiry for retention cleanup
     if outcome == "completed":
-        await mark_checkpoint_state(db, tenant_id, record.id, RUN_STATE_COMPLETED)
+        await mark_checkpoint_state(db, tenant_id, target.checkpoint_id, RUN_STATE_COMPLETED)
         if settings.WORKFLOW_CHECKPOINT_TTL_SECONDS > 0:
             await checkpoint_storage.set_expiry(
-                record.id,
+                target.checkpoint_id,
                 datetime.now(timezone.utc) + timedelta(
                     seconds=settings.WORKFLOW_CHECKPOINT_TTL_SECONDS
                 ),
             )
         # A completed run is marked and given an expiry so the periodic
         # sweep can reclaim it.  A "paused" run is not marked.
+
+
+async def resume_workflow_with_responses(
+    *,
+    db: AsyncSession,
+    tenant_id: str,
+    session_id: str,
+    message_id: str,
+    defn: WorkflowDefinition,
+    checkpoint_storage: MariaDBCheckpointStorage,
+    responses: dict[str, Any],
+    extra_tools: list | None = None,
+    base_temperature: float = 0.7,
+    base_reasoning_effort: str | None = None,
+    default_model_id: str | None = None,
+    token_counts: dict | None = None,
+) -> AsyncIterator[dict]:
+    """Resume a workflow run with approval responses, streaming SSE events.
+
+    Extends ``resume_workflow_stream`` by accepting pre-collected approval
+    responses (function-call answers) and yielding a synthetic first event
+    carrying the checkpoint key and pending request ids so the UI can
+    display resumption context before the workflow continues.
+
+    Only marks the checkpoint as completed when the final outcome is
+    ``"completed"`` *and* there are no pending request ids remaining.
+    """
+    # 1. Locate, validate, and load the checkpoint
+    target, checkpoint = await load_resume_target(
+        db, tenant_id, session_id, defn, checkpoint_storage
+    )
+
+    # 2. Extract the cross-step state snapshot
+    snapshot = extract_state_snapshot(checkpoint)
+
+    # 3. Build a fresh workflow instance seeded with the recovered state.
+    workflow = await build_workflow(
+        defn=defn,
+        db=db,
+        tenant_id=tenant_id,
+        extra_tools=extra_tools,
+        base_temperature=base_temperature,
+        base_reasoning_effort=base_reasoning_effort,
+        default_model_id=default_model_id,
+        checkpoint_storage=checkpoint_storage,
+        initial_state=snapshot,
+    )
+
+    # 4. Emit synthetic first event with resumption context
+    first_event = {
+        "event": "workflow_resumed",
+        "data": json.dumps({
+            "session_id": session_id,
+            "message_id": message_id,
+            "workflow_key": target.workflow_key,
+            "checkpoint_id": target.checkpoint_id,
+            "pending_request_ids": sorted(responses),
+        }),
+    }
+    yield first_event
+
+    # 5. Stream the resumed run, forwarding each SSE event dict and
+    #    collecting outcome + pending_request_ids from message_complete.
+    outcome: str | None = None
+    pending_request_ids: list[str] = []
+    tc = token_counts if token_counts is not None else {}
+
+    async for event_dict in iter_workflow_sse(
+        workflow,
+        message=None,
+        session_id=session_id,
+        message_id=message_id,
+        checkpoint_storage=checkpoint_storage,
+        checkpoint_id=target.checkpoint_id,
+        responses=responses,
+        token_counts=tc,
+    ):
+        if event_dict.get("event") == "message_complete":
+            try:
+                parsed = json.loads(event_dict.get("data") or "{}")
+                outcome = parsed.get("outcome")
+                prids = parsed.get("pending_request_ids", [])
+                if prids:
+                    pending_request_ids = prids
+            except (ValueError, TypeError):
+                pass
+        yield event_dict
+
+    # 6. After the stream: only mark completed when both outcome is "completed"
+    #    AND there are no pending request ids.
+    if outcome == "completed" and not pending_request_ids:
+        await mark_checkpoint_state(db, tenant_id, target.checkpoint_id, RUN_STATE_COMPLETED)
+        if settings.WORKFLOW_CHECKPOINT_TTL_SECONDS > 0:
+            await checkpoint_storage.set_expiry(
+                target.checkpoint_id,
+                datetime.now(timezone.utc) + timedelta(
+                    seconds=settings.WORKFLOW_CHECKPOINT_TTL_SECONDS
+                ),
+            )

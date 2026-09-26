@@ -13,7 +13,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from src.agents.workflows.checkpoint_storage import MariaDBCheckpointStorage
 from src.agents.workflows.definition import WorkflowDefinition, WorkflowStep
 from src.core.exceptions import NotFoundError
-from src.services.workflow_resume_service import resume_workflow_stream
+from src.services.workflow_resume_service import (
+    resume_workflow_stream,
+    resume_workflow_with_responses,
+)
 
 
 pytestmark = [pytest.mark.unit]
@@ -25,6 +28,7 @@ def _make_record(
     session_id: str = "S1",
     graph_signature_hash: str = "abc",
     run_state: str | None = None,
+    workflow_name: str = "T1:research",
 ):
     """Build a lightweight checkpoint record."""
     return types.SimpleNamespace(
@@ -33,6 +37,7 @@ def _make_record(
         session_id=session_id,
         graph_signature_hash=graph_signature_hash,
         run_state=run_state,
+        workflow_name=workflow_name,
     )
 
 
@@ -267,6 +272,134 @@ async def test_paused_run_is_not_marked():
             defn=defn,
             checkpoint_storage=storage,
         )]
+
+    # No mark was called
+    assert mark_mock.call_count == 0
+    # No expiry was set
+    assert storage.set_expiry.call_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Test 5: resume_with_responses_forwards_responses_and_checkpoint_id
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+async def test_resume_with_responses_forwards_responses_and_checkpoint_id():
+    """resume_workflow_with_responses yields a workflow_resumed event carrying
+    the workflow_key and checkpoint_id, and passes the responses dict and
+    checkpoint_id to iter_workflow_sse."""
+    record = _make_record()
+    checkpoint = _make_checkpoint()
+    storage = MagicMock()
+    storage.load = AsyncMock(return_value=checkpoint)
+    storage.set_expiry = AsyncMock()
+    defn = _make_defn()
+    db = AsyncMock()
+
+    build_workflow_mock = AsyncMock()
+
+    async def _empty_gen(*_args, **_kwargs):
+        return
+        yield  # turn into async generator
+
+    iter_mock = MagicMock()
+    iter_mock.side_effect = _empty_gen
+
+    with patch(
+        "src.services.workflow_resume_service.latest_resumable_checkpoint",
+        AsyncMock(return_value=record),
+    ), patch(
+        "src.services.workflow_resume_service.assert_resumable",
+        MagicMock(),
+    ), patch(
+        "src.services.workflow_resume_service.build_workflow",
+        build_workflow_mock,
+    ), patch(
+        "src.services.workflow_resume_service.iter_workflow_sse",
+        iter_mock,
+    ):
+        events = [e async for e in resume_workflow_with_responses(
+            db=db,
+            tenant_id="T1",
+            session_id="S1",
+            message_id="M1",
+            defn=defn,
+            checkpoint_storage=storage,
+            responses={"req-1": "yes"},
+        )]
+
+    # First event is workflow_resumed with the workflow_key equal to defn.key
+    first = events[0]
+    assert first["event"] == "workflow_resumed"
+    data = json.loads(first["data"])
+    assert data["workflow_key"] == defn.key
+    assert data["checkpoint_id"] == record.id
+    assert data["pending_request_ids"] == ["req-1"]
+
+    # iter_workflow_sse received responses and checkpoint_id
+    assert iter_mock.call_args.kwargs["responses"] == {"req-1": "yes"}
+    assert iter_mock.call_args.kwargs["checkpoint_id"] == record.id
+
+
+# ---------------------------------------------------------------------------
+# Test 6: paused_resume_does_not_mark_completed
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+async def test_paused_resume_does_not_mark_completed():
+    """A resumed workflow that pauses does not mark the checkpoint COMPLETED."""
+    record = _make_record()
+    checkpoint = _make_checkpoint()
+    storage = MagicMock()
+    storage.load = AsyncMock(return_value=checkpoint)
+    storage.set_expiry = AsyncMock()
+    defn = _make_defn()
+    db = AsyncMock()
+
+    build_workflow_mock = AsyncMock()
+
+    mark_mock = AsyncMock()
+
+    async def _message_complete_gen(*_args, **_kwargs):
+        yield {"event": "message_complete", "data": json.dumps({
+            "outcome": "paused",
+            "pending_request_ids": ["req-2"],
+        })}
+
+    iter_mock = MagicMock()
+    iter_mock.side_effect = _message_complete_gen
+
+    with patch(
+        "src.services.workflow_resume_service.latest_resumable_checkpoint",
+        AsyncMock(return_value=record),
+    ), patch(
+        "src.services.workflow_resume_service.assert_resumable",
+        MagicMock(),
+    ), patch(
+        "src.services.workflow_resume_service.build_workflow",
+        build_workflow_mock,
+    ), patch(
+        "src.services.workflow_resume_service.iter_workflow_sse",
+        iter_mock,
+    ), patch(
+        "src.services.workflow_resume_service.mark_checkpoint_state",
+        mark_mock,
+    ):
+        events = [e async for e in resume_workflow_with_responses(
+            db=db,
+            tenant_id="T1",
+            session_id="S1",
+            message_id="M1",
+            defn=defn,
+            checkpoint_storage=storage,
+            responses={},
+        )]
+
+    # workflow_resumed event was emitted first
+    assert events[0]["event"] == "workflow_resumed"
+
+    # message_complete was forwarded
+    assert any(e["event"] == "message_complete" for e in events)
 
     # No mark was called
     assert mark_mock.call_count == 0

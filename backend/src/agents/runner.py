@@ -1513,6 +1513,18 @@ async def _resolve_skill(
     return result.scalar_one_or_none()
 
 
+def apply_tool_approval_modes(callables: list, approval_names: set[str]) -> list:
+    """Set MAF approval_mode='always_require' on the named tool callables.
+
+    Tools not named in *approval_names* are returned untouched (MAF default
+    'never_require'), so the flag is opt-in per tenant tool row.
+    """
+    for c in callables:
+        if getattr(c, "name", None) in approval_names and hasattr(c, "approval_mode"):
+            c.approval_mode = "always_require"
+    return callables
+
+
 async def _resolve_tool_callables(
     db: AsyncSession,
     session_data: dict,
@@ -1660,6 +1672,7 @@ async def _resolve_tool_callables(
     # Build callables for each tool, deduplicating MCP tools by server_id
     # to avoid opening multiple connections to the same server.
     callables: list = []
+    approval_names: set[str] = set()
     mcp_by_server: dict[str, list[Tool]] = {}
     for tool in tools:
         if tool.type == "mcp":
@@ -1674,6 +1687,8 @@ async def _resolve_tool_callables(
                     user_credentials=user_credentials_map.get(tool.id),
                 )
                 callables.extend(tc)
+                if tool.approval_required:
+                    approval_names.add(tool.name)
         else:
             tc = await _build_tool_callables(
                 db, tool, tenant_id,
@@ -1681,6 +1696,8 @@ async def _resolve_tool_callables(
                 user_credentials=user_credentials_map.get(tool.id),
             )
             callables.extend(tc)
+            if tool.approval_required:
+                approval_names.add(tool.name)
 
     # Build ONE callable per MCP server, filtering to only the tools
     # that are active in this session.
@@ -1702,6 +1719,10 @@ async def _resolve_tool_callables(
             session_id=session_id, cleanup_clients=cleanup_clients,
         )
         callables.extend(tc)
+        # Check approval_required for each MCP server tool record
+        for record in server_tools:
+            if getattr(record, "approval_required", False):
+                approval_names.add(record.name)
         # Restore original config (in-memory only, no DB write)
         primary.config = orig_config
 
@@ -1761,6 +1782,8 @@ async def _resolve_tool_callables(
                     exc_info=True,
                 )
                 callables.remove(item)
+
+    callables = apply_tool_approval_modes(callables, approval_names)
 
     return callables, cleanup_clients
 

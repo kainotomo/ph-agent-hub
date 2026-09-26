@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     TEMPORARY_SESSION_TTL_SECONDS: int = 86400  # 24 hours
     DEMO_SESSION_TTL_SECONDS: int = 3600  # 1 hour
 
+    # Workflow checkpoint retention.  Checkpoints must not accumulate
+    # unbounded in the database.  0 disables checkpoint expiry.
+    WORKFLOW_CHECKPOINT_TTL_SECONDS: int = 604800  # 7 days
+    WORKFLOW_CHECKPOINT_CLEANUP_INTERVAL_SECONDS: int = 3600  # hourly
+
     # --- Cross-session memory (Issue #229) ---
     CROSS_SESSION_EMBEDDING_MODEL: str = "text-embedding-3-small"
 

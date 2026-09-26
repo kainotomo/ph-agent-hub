@@ -37,6 +37,7 @@ from .embed_configs import EmbedConfig
 from .autopilot_runs import AutopilotRun
 from .scheduled_tasks import ScheduledTask
 from .notifications import Notification
+from .workflow_checkpoints import WorkflowCheckpointRecord
 
 __all__ = [
     "A2aCallLog",
@@ -75,4 +76,5 @@ __all__ = [
     "AutopilotRun",
     "ScheduledTask",
     "Notification",
+    "WorkflowCheckpointRecord",
 ]

@@ -2679,6 +2679,18 @@ async def _run_workflow(
     # Load the workflow definition from the module
     defn = load_workflow_definition(target)
 
+    # Durable checkpointing is enabled for this run.  This non-streaming
+    # path is used by autopilot / scheduled execution, which has no chat
+    # session, so session_id and message_id stay None: these checkpoints
+    # are addressable only by tenant and workflow name.
+    from ..agents.workflows.checkpoint_storage import MariaDBCheckpointStorage
+
+    checkpoint_storage = MariaDBCheckpointStorage(
+        tenant_id=skill.tenant_id,
+        session_id=None,
+        message_id=None,
+    )
+
     # Build the workflow (requires DB session to resolve Model records)
     if db is None:
         from ..db.base import AsyncSessionLocal
@@ -2696,6 +2708,7 @@ async def _run_workflow(
             base_temperature=temperature,
             base_reasoning_effort=reasoning_effort,
             default_model_id=skill.default_model_id,
+            checkpoint_storage=checkpoint_storage,
         )
 
         # Execute the workflow
@@ -2703,6 +2716,7 @@ async def _run_workflow(
             workflow=workflow,
             message=user_message,
             function_invocation_kwargs=function_invocation_kwargs,
+            checkpoint_storage=checkpoint_storage,
         )
 
         # Extract token counts
@@ -3764,6 +3778,16 @@ async def _run_workflow_stream(
     # Load the workflow definition from the module
     defn = load_workflow_definition(target)
 
+    # Durable checkpointing is enabled for this run, bound to the chat
+    # session and message so a paused run can be located and resumed.
+    from ..agents.workflows.checkpoint_storage import MariaDBCheckpointStorage
+
+    checkpoint_storage = MariaDBCheckpointStorage(
+        tenant_id=skill.tenant_id,
+        session_id=session_id,
+        message_id=message_id,
+    )
+
     # Build the workflow (requires DB session to resolve Model records)
     if db is None:
         from ..db.base import AsyncSessionLocal
@@ -3781,6 +3805,7 @@ async def _run_workflow_stream(
             base_temperature=temperature,
             base_reasoning_effort=reasoning_effort,
             default_model_id=skill.default_model_id,
+            checkpoint_storage=checkpoint_storage,
         )
 
         # Stream the workflow via the engine's SSE iterator
@@ -3793,6 +3818,7 @@ async def _run_workflow_stream(
             function_invocation_kwargs=function_invocation_kwargs,
             system_prompt=system_prompt,
             tools=tools,
+            checkpoint_storage=checkpoint_storage,
         ):
             yield event_dict
 

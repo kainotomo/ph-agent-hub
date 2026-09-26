@@ -318,10 +318,10 @@ class TestMigrationDAG:
     def test_migration_count(self, migrations):
         """Snapshot the total migration count to detect unintended additions."""
         count = len(migrations)
-        # As of 2026-06-01: 70 migration files (3 merge, 65 data/DDL, 1 index, 1 folders,
-        # 1 drop-fulltext, 1 model-role-bindings)
-        assert count == 70, (
-            f"Expected 70 migration files, found {count}. "
+        # As of 2026-06-01: 71 migration files (3 merge, 65 data/DDL, 1 index, 1 folders,
+        # 1 drop-fulltext, 1 model-role-bindings, 1 workflow-checkpoints)
+        assert count == 71, (
+            f"Expected 71 migration files, found {count}. "
             "Update this assertion after adding/removing migrations."
         )
 

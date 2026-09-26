@@ -28,6 +28,7 @@ from agent_framework import (
     TokenBudgetComposedStrategy,
     Workflow,
     WorkflowBuilder,
+    WorkflowRunState,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -350,6 +351,10 @@ async def build_workflow(
     base_temperature: float = 0.7,
     base_reasoning_effort: str | None = None,
     default_model_id: str | None = None,
+    *,
+    checkpoint_storage: Any | None = None,
+    workflow_name: str | None = None,
+    initial_state: dict[str, Any] | None = None,
 ) -> Workflow:
     """Build a MAF ``Workflow`` from a ``WorkflowDefinition``.
 
@@ -365,6 +370,14 @@ async def build_workflow(
         base_reasoning_effort: Base reasoning effort for all steps (overridden by step).
         default_model_id:      Fallback model id to use when a step's model_ref is not
                                found in the DB (typically the skill's default model).
+        checkpoint_storage:    Optional MAF ``CheckpointStorage`` for persisting and
+                               restoring workflow checkpoints across runs.
+        workflow_name:         Explicit name for the MAF workflow. When omitted the
+                               name defaults to ``"{tenant_id}:{defn.key}"`` so that
+                               checkpoints are namespaced per tenant.
+        initial_state:         Checkpoint-recovered cross-step state dict. Passed to the
+                               builder so that steps which already ran keep contributing
+                               to ``output_of:`` and ``user_message`` on a resumed run.
 
     Returns:
         A built ``Workflow`` instance ready for execution.
@@ -374,7 +387,10 @@ async def build_workflow(
     """
     # Build steps into agents + executors
     executors: list[AgentExecutor] = []
-    shared: dict[str, Any] = {}
+    # Seed the run-wide cross-step state.  On a resumed run the caller passes
+    # the state snapshot recovered from the checkpoint so that steps which
+    # already ran keep contributing to `output_of:` and `user_message`.
+    shared: dict[str, Any] = dict(initial_state or {})
 
     for i, step in enumerate(defn.steps):
         # Resolve the effective step configuration from the agent module
@@ -437,11 +453,17 @@ async def build_workflow(
         raise ValidationError("Workflow must have at least one step")
 
     # Build the workflow
+    # MAF groups checkpoints by workflow name and validates them by graph
+    # signature hash.  Namespacing the name per tenant means two tenants that
+    # ship the same definition key cannot see each other's checkpoints.  The
+    # hash is derived from topology only, so the name does not affect it.
+    effective_name = workflow_name or f"{tenant_id}:{defn.key}"
     builder = WorkflowBuilder(
-        name=defn.key,
+        name=effective_name,
         description=defn.description,
         start_executor=executors[0],
         output_executors=[executors[-1]],
+        checkpoint_storage=checkpoint_storage,
     )
 
     # Connect steps sequentially
@@ -513,6 +535,23 @@ def _extract_token_counts_from_workflow(
     return tokens_in, tokens_out, cache_hit
 
 
+def workflow_outcome(result: Any) -> str:
+    """Return ``"paused"`` when a run is idle awaiting input, else ``"completed"``.
+
+    MAF distinguishes ``WorkflowRunState.IDLE`` (finished) from
+    ``WorkflowRunState.IDLE_WITH_PENDING_REQUESTS`` (paused, awaiting a
+    response).  Inferring completion from the end of the event stream would
+    report a paused run as finished, so the run state is read explicitly.
+    """
+    try:
+        state = result.get_final_state()
+    except Exception:
+        return "completed"
+    if state is WorkflowRunState.IDLE_WITH_PENDING_REQUESTS:
+        return "paused"
+    return "completed"
+
+
 # ---------------------------------------------------------------------------
 # Workflow execution (non-streaming)
 # ---------------------------------------------------------------------------
@@ -520,8 +559,11 @@ def _extract_token_counts_from_workflow(
 
 async def run_workflow(
     workflow: Workflow,
-    message: str,
+    message: str | None = None,
     function_invocation_kwargs: dict | None = None,
+    *,
+    checkpoint_storage: Any | None = None,
+    checkpoint_id: str | None = None,
 ) -> tuple[str, Any]:  # tuple[str, WorkflowRunResult]
     """Execute a workflow synchronously and return (output_text, result).
 
@@ -529,16 +571,26 @@ async def run_workflow(
         workflow:                  Built MAF workflow.
         message:                   User message to pass to the workflow.
         function_invocation_kwargs: Optional kwargs forwarded to agent.run().
+        checkpoint_storage:        Optional MAF checkpoint storage for persisting/restoring runs.
+        checkpoint_id:             ID of a checkpoint to resume from.
 
     Returns:
         Tuple of (final_output_text, WorkflowRunResult).
 
     Raises:
         ValidationError: If workflow execution fails.
+
+    Note:
+        MAF requires ``message`` and ``checkpoint_id`` to be mutually exclusive.
+        Passing ``checkpoint_id`` with ``message=None`` is the resume path.
     """
     kwargs: dict[str, Any] = {}
     if function_invocation_kwargs:
         kwargs["function_invocation_kwargs"] = function_invocation_kwargs
+    if checkpoint_storage is not None:
+        kwargs["checkpoint_storage"] = checkpoint_storage
+    if checkpoint_id is not None:
+        kwargs["checkpoint_id"] = checkpoint_id
 
     result = await workflow.run(message, **kwargs)
 
@@ -570,13 +622,16 @@ async def run_workflow(
 
 async def iter_workflow_sse(
     workflow: Workflow,
-    message: str,
+    *,
+    message: str | None = None,
     session_id: str,
     message_id: str,
     token_counts: dict | None = None,
     function_invocation_kwargs: dict | None = None,
     system_prompt: str | None = None,
     tools: list | None = None,
+    checkpoint_storage: Any | None = None,
+    checkpoint_id: str | None = None,
 ) -> AsyncIterator[dict]:
     """Stream a workflow execution, yielding SSE event dicts per step.
 
@@ -585,17 +640,22 @@ async def iter_workflow_sse(
           {event: "workflow_step", data: {workflow_key, step_id, step_index, total_steps, status}}
         - ``token``: Token events from individual steps (delta text)
         - ``tool_start``, ``tool_result``: Tool execution events
-        - ``message_complete``: Final completion with token counts and metrics
+        - ``status``: Run-state events; consumed internally and **not** yielded.
+        - ``message_complete``: Final completion with token counts, metrics,
+          ``outcome`` (``"completed"`` or ``"paused"``), and
+          ``pending_request_ids`` (present only when ``outcome == "paused"``).
 
     Args:
         workflow:                  Built MAF workflow.
-        message:                   User message.
+        message:                   User message (``None`` for resumed runs).
         session_id:                Session ID for SSE tracking.
         message_id:                Message ID for SSE tracking.
         token_counts:              Mutable dict for accumulating token counts.
         function_invocation_kwargs: Optional kwargs forwarded to agent.run().
         system_prompt:             System prompt string for token estimation.
         tools:                     List of tool definitions for token estimation.
+        checkpoint_storage:        Optional MAF checkpoint storage for persisting/restoring runs.
+        checkpoint_id:             ID of a checkpoint to resume from.
 
     Yields:
         SSE event dicts.
@@ -628,6 +688,10 @@ async def iter_workflow_sse(
     stream_kwargs: dict[str, Any] = {"stream": True}
     if function_invocation_kwargs:
         stream_kwargs["function_invocation_kwargs"] = function_invocation_kwargs
+    if checkpoint_storage is not None:
+        stream_kwargs["checkpoint_storage"] = checkpoint_storage
+    if checkpoint_id is not None:
+        stream_kwargs["checkpoint_id"] = checkpoint_id
 
     # Run the workflow with streaming
     response_stream = workflow.run(message, **stream_kwargs)
@@ -639,6 +703,7 @@ async def iter_workflow_sse(
         streaming_cache_hit = 0
         event_types_seen = set()
         processed_event_types = set()
+        paused_with_pending = False
 
         # Iterate over the async stream of WorkflowEvent objects
         async for event in response_stream:
@@ -838,6 +903,15 @@ async def iter_workflow_sse(
                     }),
                 }
 
+            # ---- Run-state transitions ----
+            # MAF emits a status event for each run-state change.
+            # IDLE_WITH_PENDING_REQUESTS means the workflow paused awaiting a
+            # response and must not be reported as finished.  Status events are
+            # consumed here and are NOT yielded to the SSE client.
+            elif event_type == "status":
+                if getattr(event, "state", None) is WorkflowRunState.IDLE_WITH_PENDING_REQUESTS:
+                    paused_with_pending = True
+
             # ---- Request info events (token usage) ----
             elif event_type == "request_info":
                 data = event.data
@@ -872,6 +946,15 @@ async def iter_workflow_sse(
     if token_counts is not None:
         try:
             final_result = await response_stream.get_final_response()
+            outcome = workflow_outcome(final_result)
+            if paused_with_pending:
+                outcome = "paused"
+
+            pending_request_ids = [
+                getattr(ev, "request_id", None)
+                for ev in final_result.get_request_info_events()
+            ]
+            pending_request_ids = [rid for rid in pending_request_ids if rid]
             logger.info("PH-WORKFLOW-FINAL-result type=%s final_result_attrs=%s",
                        type(final_result).__name__, [a for a in dir(final_result) if not a.startswith('_')])
             tokens_in, tokens_out, cache_hit = _extract_token_counts_from_workflow(final_result)
@@ -887,6 +970,7 @@ async def iter_workflow_sse(
             token_counts["in"] = final_tokens_in
             token_counts["out"] = final_tokens_out
             token_counts["cache_hit"] = final_cache_hit
+            token_counts["outcome"] = outcome
             # Also store system_prompt/tools for metrics estimation
             token_counts["_system_prompt"] = system_prompt or ""
             token_counts["_tools"] = tools or []
@@ -906,6 +990,8 @@ async def iter_workflow_sse(
                     "tokens_in": final_tokens_in,
                     "tokens_out": final_tokens_out,
                     "cache_hit": final_cache_hit,
+                    "outcome": outcome,
+                    "pending_request_ids": pending_request_ids if outcome == "paused" else [],
                 }),
             }
         except Exception as exc:
@@ -923,6 +1009,7 @@ async def iter_workflow_sse(
                     "tokens_in": 0,
                     "tokens_out": 0,
                     "cache_hit": 0,
+                    "outcome": "paused" if paused_with_pending else "completed",
                 }),
             }
             # Still emit basic metrics even on extraction failure

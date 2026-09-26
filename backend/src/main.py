@@ -128,6 +128,21 @@ async def _timeout_background_tasks() -> None:
             pass  # Best-effort
 
 
+async def _expire_workflow_checkpoints() -> None:
+    """Periodic background task: enforce workflow checkpoint retention."""
+    from .agents.workflows.checkpoint_storage import enforce_checkpoint_retention
+
+    ttl = settings.WORKFLOW_CHECKPOINT_TTL_SECONDS
+    if ttl <= 0:
+        return
+    while True:
+        await asyncio.sleep(settings.WORKFLOW_CHECKPOINT_CLEANUP_INTERVAL_SECONDS)
+        try:
+            await enforce_checkpoint_retention(ttl)
+        except Exception:
+            pass  # Best-effort: never let a cleanup failure crash the task
+
+
 async def _run_scheduler_loop() -> None:
     """Periodic background task: poll for due scheduled tasks and execute
     them (Issue #297 — Scheduled & Recurring Agent Tasks).
@@ -238,6 +253,9 @@ async def lifespan(app: FastAPI):
     # Start background cleanup for orphaned temp uploads
     orphan_cleanup_task = asyncio.create_task(_cleanup_orphaned_temp_uploads())
 
+    # Start background task to expire workflow checkpoints
+    checkpoint_cleanup_task = asyncio.create_task(_expire_workflow_checkpoints())
+
     # Start background cleanup for demo tenant temp uploads (every 6 hours)
     demo_cleanup_task = asyncio.create_task(_cleanup_demo_temp_uploads())
 
@@ -254,6 +272,7 @@ async def lifespan(app: FastAPI):
     yield
 
     orphan_cleanup_task.cancel()
+    checkpoint_cleanup_task.cancel()
     demo_cleanup_task.cancel()
     _bg_timeout_task.cancel()
     if _scheduler_task is not None:

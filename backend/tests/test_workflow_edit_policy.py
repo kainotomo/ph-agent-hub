@@ -47,6 +47,7 @@ def _classification(**overrides) -> EditClassification:
         "proposed_signature_hash": "aaa",
         "added_step_ids": (),
         "removed_step_ids": (),
+        "routing_changed": False,
     }
     fields.update(overrides)
     return EditClassification(**fields)
@@ -175,3 +176,46 @@ class TestTopologyReport:
         assert "c" in report
         assert "b" in report
         assert "2" in report
+
+
+# =============================================================================
+# Routing wording
+# =============================================================================
+
+
+class TestRoutingWording:
+    """The topology report mentions routing conditions changed when appropriate."""
+
+    def test_routing_change_includes_routing_conditions_changed(self):
+        report = render_edit_report(
+            _classification(
+                kind=EditKind.TOPOLOGY,
+                routing_changed=True,
+            ),
+        )
+
+        assert "routing conditions changed" in report
+
+    def test_step_edit_excludes_routing_conditions_changed(self):
+        report = render_edit_report(
+            _classification(
+                kind=EditKind.TOPOLOGY,
+                added_step_ids=("c",),
+                removed_step_ids=("b",),
+                routing_changed=False,
+            ),
+        )
+
+        assert "routing conditions changed" not in report
+
+    def test_routing_change_with_paused_run_count(self):
+        report = render_edit_report(
+            _classification(
+                kind=EditKind.TOPOLOGY,
+                routing_changed=True,
+            ),
+            paused_run_count=5,
+        )
+
+        assert "routing conditions changed" in report
+        assert "5" in report

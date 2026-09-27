@@ -13,6 +13,7 @@ from src.agents.workflows.identity import (
     assert_key_immutable,
     classify_edit,
     graph_signature_hash,
+    routing_fingerprint,
 )
 from src.core.exceptions import ValidationError
 
@@ -203,3 +204,170 @@ class TestClassifyKeyRename:
             classify_edit(current, proposed)
 
         assert "immutable" in str(excinfo.value)
+
+
+# =============================================================================
+# Helpers for branchy definitions
+# =============================================================================
+
+
+def _branchy_defn(condition="default", key="wf_key", **overrides):
+    """Build a workflow definition.
+
+    When *condition* is the literal ``"default"``, creates a plain sequential
+    chain (no branches).  When *condition* is a condition reference (e.g.
+    ``"@always"``), creates a branching step at ``"a"`` with one conditional
+    branch (to ``"b"``) and one default fallback (to ``"c"``).
+    """
+    if condition == "default":
+        branches = []
+    else:
+        branches = [
+            {"source": "a", "condition": condition, "target": "b"},
+            {"source": "a", "condition": "default", "target": "c"},
+        ]
+    return _defn(
+        [_step("a"), _step("b"), _step("c")],
+        key=key,
+        branches=branches,
+        **overrides,
+    )
+
+
+# =============================================================================
+# Routing classification
+# =============================================================================
+
+
+class TestRoutingFingerprint:
+    """The routing fingerprint captures authored routing edges."""
+
+    def test_empty_when_no_branches(self):
+        defn = _defn([_step("a")])
+        assert routing_fingerprint(defn) == ()
+
+    def test_sequential_chain_no_routing(self):
+        """A plain sequential chain has no routing edges."""
+        defn = _branchy_defn()  # condition="default" → no branches
+        fp = routing_fingerprint(defn)
+        assert fp == ()
+
+    def test_routing_triples_with_conditional_branch(self):
+        defn = _branchy_defn(condition="@always")
+        fp = routing_fingerprint(defn)
+        assert len(fp) == 2
+        assert fp[0] == ("a", "@always", "b")
+        assert fp[1] == ("a", "default", "c")
+
+    def test_reflects_condition_reference(self):
+        defn = _branchy_defn(condition="@never")
+        fp = routing_fingerprint(defn)
+        assert fp[0][1] == "@never"
+
+    def test_reflects_target_change(self):
+        defn = _defn(
+            [_step("a"), _step("b"), _step("c")],
+            branches=[
+                {"source": "a", "condition": "@always", "target": "c"},
+                {"source": "a", "condition": "default", "target": "c"},
+            ],
+        )
+        fp = routing_fingerprint(defn)
+        assert fp[0][2] == "c"
+
+    def test_reflects_source_change(self):
+        defn = _defn(
+            [_step("a"), _step("b"), _step("c")],
+            branches=[
+                {"source": "b", "condition": "@always", "target": "c"},
+                {"source": "b", "condition": "default", "target": "c"},
+            ],
+        )
+        fp = routing_fingerprint(defn)
+        assert fp[0][0] == "b"
+
+
+class TestClassifyRouting:
+    """Changes to authored routing are always a topology edit."""
+
+    def test_routing_condition_change(self):
+        current = _branchy_defn(condition="@always")
+        proposed = _branchy_defn(condition="@never")
+
+        result = classify_edit(current, proposed)
+
+        assert result.kind is EditKind.TOPOLOGY
+        assert result.routing_changed is True
+        assert result.added_step_ids == ()
+        assert result.removed_step_ids == ()
+
+    def test_routing_condition_change_is_never_config_only(self):
+        current = _branchy_defn(condition="@always")
+        proposed = _branchy_defn(condition="@contains_keyword")
+
+        result = classify_edit(current, proposed)
+
+        assert result.kind is EditKind.TOPOLOGY
+        assert result.routing_changed is True
+        # Routing change always triggers TOPOLOGY even though the graph
+        # signature may also differ — the critical assertion is kind, not hashes.
+
+    def test_routing_unchanged_with_branches(self):
+        current = _branchy_defn()
+        proposed = _branchy_defn()
+
+        result = classify_edit(current, proposed)
+
+        assert result.kind is EditKind.UNCHANGED
+        assert result.routing_changed is False
+
+    def test_routing_target_change(self):
+        current = _defn(
+            [_step("a"), _step("b"), _step("c")],
+            branches=[
+                {"source": "a", "condition": "@always", "target": "b"},
+                {"source": "a", "condition": "default", "target": "c"},
+            ],
+        )
+        proposed = _defn(
+            [_step("a"), _step("b"), _step("c")],
+            branches=[
+                {"source": "a", "condition": "@always", "target": "c"},
+                {"source": "a", "condition": "default", "target": "b"},
+            ],
+        )
+
+        result = classify_edit(current, proposed)
+
+        assert result.kind is EditKind.TOPOLOGY
+        assert result.routing_changed is True
+
+    def test_routing_not_changed_on_step_config_edit(self):
+        current = _defn(
+            [_step("a"), _step("b"), _step("c")],
+            branches=[
+                {"source": "a", "condition": "@always", "target": "b"},
+                {"source": "a", "condition": "default", "target": "c"},
+            ],
+        )
+        proposed = _defn(
+            [_step("a", instructions="Changed"), _step("b"), _step("c")],
+            branches=[
+                {"source": "a", "condition": "@always", "target": "b"},
+                {"source": "a", "condition": "default", "target": "c"},
+            ],
+        )
+
+        result = classify_edit(current, proposed)
+
+        assert result.kind is EditKind.CONFIG_ONLY
+        assert result.routing_changed is False
+
+    def test_unchanged_branchy_defn(self):
+        current = _branchy_defn()
+        proposed = _branchy_defn()
+
+        result = classify_edit(current, proposed)
+
+        assert result.kind is EditKind.UNCHANGED
+        assert result.routing_changed is False

@@ -25,6 +25,16 @@
 # stated and reported here now; it must be honoured once checkpoint storage
 # lands, at which point a topology edit also reports how many paused runs of the
 # previous topology can no longer be resumed.
+#
+# Authored routing is the one documented exception to "derive topology-ness
+# from MAF alone": a branch lives in a config-shaped field, yet changing its
+# condition changes the graph a paused run would resume into.  MAF's signature
+# does fingerprint ``add_edge(..., condition=fn)`` edges (via ``condition_name``),
+# so the two signals normally agree; classification therefore compares a
+# canonical routing fingerprint — ``(source, condition, target)`` triples — in
+# addition to MAF's hash, and treats a difference in either as a topology edit.
+# MAF cannot fingerprint a ``SwitchCaseEdgeGroup``'s condition payload, which is
+# why that primitive is forbidden by construction rather than merely unoffered.
 # =============================================================================
 
 from __future__ import annotations
@@ -49,10 +59,12 @@ EDIT_POLICY: str = """Workflow definition edit policy
   renaming is a create, not an edit, and is rejected by validation.
 - A config-only edit changes nothing in MAF's graph signature (instructions,
   model_ref, tool_refs, temperature, reasoning_effort, context_mode, type, agent_ref,
-  input, on_error, display name, description). It is allowed and applies to
+  input, on_error, display name, description) and changes nothing in the
+  authored routing (branch condition, source, or target). It is allowed and applies to
   subsequent runs; paused runs of the previous definition remain resumable.
 - A topology edit changes the graph: a step is added, removed, renumbered or renamed,
-  or an edge changes. It is allowed, but paused runs of the previous topology can no
+  or an edge changes. It also includes any change to the authored routing (a branch
+  condition, source, or target). It is allowed, but paused runs of the previous topology can no
   longer be resumed. The edit must report the added and removed step ids, and, once
   checkpoint storage exists, the number of paused runs affected. Paused runs are
   never silently stranded and the edit is never silently blocked."""
@@ -82,8 +94,9 @@ def build_probe_workflow(defn: WorkflowDefinition) -> Any:
     """Build a real MAF ``Workflow`` from probe executors (one per step).
 
     Mirrors ``engine.build_workflow``'s builder usage exactly: same name,
-    description, start executor, output executor, and sequential chain.  No
-    database session and no model client are required, and the probe agents are
+    description, start executor, output executor, and sequential edges
+    (delegated to :func:`~.engine.add_definition_topology`).  No database
+    session and no model client are required, and the probe agents are
     never run.
 
     Args:
@@ -107,8 +120,10 @@ def build_probe_workflow(defn: WorkflowDefinition) -> Any:
         start_executor=executors[0],
         output_from=[executors[-1]],
     )
-    if len(executors) > 1:
-        builder.add_chain(executors)
+    # Shared deliberately — probe topology must not drift from the real build
+    from .engine import add_definition_topology
+
+    add_definition_topology(builder, executors, defn)
 
     return builder.build()
 
@@ -145,6 +160,23 @@ def graph_signature_hash(defn: WorkflowDefinition) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Routing fingerprint
+# ---------------------------------------------------------------------------
+
+
+def routing_fingerprint(defn: WorkflowDefinition) -> tuple[tuple[str, str, str], ...]:
+    """Return the canonical routing fingerprint of a definition.
+
+    A tuple of ``(source, condition, target)`` triples in declaration order.
+    Only the condition *reference* is included, never a resolved callable: the
+    reference is what an author writes, and it is what a routing change is
+    defined against.  An empty tuple means the definition has no authored
+    routing, i.e. a plain sequential chain.
+    """
+    return tuple((b.source, b.condition, b.target) for b in defn.branches)
+
+
+# ---------------------------------------------------------------------------
 # Edit classification
 # ---------------------------------------------------------------------------
 
@@ -166,6 +198,7 @@ class EditClassification:
     proposed_signature_hash: str
     added_step_ids: tuple[str, ...]
     removed_step_ids: tuple[str, ...]
+    routing_changed: bool = False
 
 
 def assert_key_immutable(current_key: str, proposed_key: str) -> None:
@@ -199,6 +232,11 @@ def classify_edit(
     non-empty ``removed_step_ids`` *and* a non-empty ``added_step_ids``, so it
     can never be reported silently.
 
+    A change to an authored routing condition is always a topology edit, even
+    though the branch lives in a config-shaped field, because the routing those
+    paused runs would resume into has changed.  The routing fingerprint is an
+    independent signal that supplements MAF's own hash.
+
     Args:
         current: The definition as it exists today.
         proposed: The proposed replacement definition.
@@ -220,7 +258,11 @@ def classify_edit(
     added_step_ids = tuple(sorted(proposed_ids - current_ids))
     removed_step_ids = tuple(sorted(current_ids - proposed_ids))
 
-    if current_hash != proposed_hash:
+    current_routing = routing_fingerprint(current)
+    proposed_routing = routing_fingerprint(proposed)
+    routing_changed = current_routing != proposed_routing
+
+    if current_hash != proposed_hash or routing_changed:
         kind = EditKind.TOPOLOGY
     elif current.model_dump() != proposed.model_dump():
         kind = EditKind.CONFIG_ONLY
@@ -233,6 +275,7 @@ def classify_edit(
         proposed_signature_hash=proposed_hash,
         added_step_ids=added_step_ids,
         removed_step_ids=removed_step_ids,
+        routing_changed=routing_changed,
     )
 
 
@@ -281,8 +324,13 @@ def render_edit_report(
     else:
         impact = f"{paused_run_count} paused run(s) are affected"
 
+    if classification.routing_changed:
+        routing_note = "routing conditions changed; "
+    else:
+        routing_note = ""
+
     return (
-        f"This is a topology edit: paused runs of the previous topology cannot "
+        f"This is a topology edit: {routing_note}paused runs of the previous topology cannot "
         f"be resumed. Added step ids: {added}; removed step ids: {removed}. "
         f"Impact: {impact}."
     )

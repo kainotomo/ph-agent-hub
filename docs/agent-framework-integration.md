@@ -119,6 +119,75 @@ Config-only versus topology changes are derived from MAF's `Workflow.graph_signa
 >   checkpoint storage exists, the number of paused runs affected. Paused runs are
 >   never silently stranded and the edit is never silently blocked.
 
+#### Conditional routing: condition declaration and edit classification
+
+A condition is a **closed vocabulary of named predicates declared in code**
+(module `backend/src/agents/workflows/conditions.py`). A definition references
+a condition by name (`@always`, `@never`, `@non_empty`,
+`@contains_keyword`); the predicate itself is a module-level Python callable.
+This follows the same *"primitives are code, topology is data"* split already
+used for model, tool, and agent roles.
+
+**Decision: branch edges are authored only as MAF `WorkflowBuilder.add_edge(source, target, condition=fn)`.**
+MAF's `Workflow._compute_graph_signature` records
+`getattr(edge, "condition_name", None)` for each edge, so a change to an
+authored condition changes `graph_signature_hash`. Edit classification and
+checkpoint `assert_resumable` therefore work with **no hand-maintained
+fingerprint**.
+
+**Rejected alternative (deferred, not dismissed): a definition-level condition digest.**
+It would extend the topology fingerprint with a canonical serialization of
+conditions instead of relying on MAF's signature. It is more robust — it copes
+with graph shapes MAF cannot fingerprint — but it bends the existing invariant
+that topology-ness is derived from MAF and never hand-maintained, and it is
+unnecessary while every authorable shape is a direct conditional edge.
+**Revisit it if and when** a branch primitive that MAF under-fingerprints becomes
+authorable.
+
+**Forbidden shapes.** `add_switch_case_edge_group` and
+`add_multi_selection_edge_group` **must not be offered or accepted** as branch
+primitives. MAF gives every edge inside a `SwitchCaseEdgeGroup` a
+`condition_name` of `None` and never serializes the group's `cases` payload, so
+two switch-case graphs whose conditions differ (`_always` vs `_never`) produce the
+**same** `graph_signature_hash` — verified by
+`backend/tests/test_workflow_viz_branching.py::test_graph_signature_ignores_switch_case_conditions`.
+A routing change there would be classified config-only, which would strand paused
+runs.
+
+**Consequence, stated plainly:** because switch-case authoring is impossible by
+construction, no routing change can be reported `CONFIG_ONLY`; the classification
+needs no special case, but it must be extended to compare routing explicitly
+(a routing field is a config field, so a routing change must be reported as
+topology even though the definition document changed).
+
+| Approach                       | Fingerprinted by MAF?   | Decision                          |
+| ------------------------------ | ----------------------- | --------------------------------- |
+| `add_edge(condition=fn)`       | yes (`condition_name`)  | **adopted**                       |
+| `add_switch_case_edge_group`   | no (conditions absent)  | **rejected**                      |
+| `add_multi_selection_edge_group` | yes (`selection_func_name`) | **not adopted in this slice** |
+| Definition-level condition digest | n/a (hand-maintained) | **deferred**                      |
+
+This slice evaluates conditions over the upstream step's output **text** only;
+structured / typed step outputs are a separate prerequisite.
+
+**Rendering limitation.** MAF ships `WorkflowViz`, and its Mermaid output
+decides conditional styling from `edge._condition`: a plain
+`add_edge(..., condition=fn)` edge renders as `-. conditional .->`, but every
+edge inside a `SwitchCaseEdgeGroup` has `_condition is None`, so such edges
+render as an unconditional `-->` with no marker at all. The project's
+characterization tests record this:
+`backend/tests/test_workflow_viz_branching.py::test_switch_case_group_keeps_nodes_but_not_conditional_marking`
+asserts `"-." not in mermaid`. The project does **not** own this renderer —
+`WorkflowViz` is MAF's class — there is no project renderer and no graph is
+rendered to a user anywhere yet. Therefore this limitation is **unfixed and
+cannot be fixed here**. Two consequences hold until a project-owned renderer
+(or admin visualization endpoint) exists: (a) any future graph display must
+not present a bare `-->` as proof that an edge is unconditional, and (b) the
+only branch primitive the project authors is `add_edge(..., condition=fn)`,
+which MAF *does* render conditionally, so any graph the project will show is
+rendered correctly for the shapes it can produce. This is a **surfaced**
+limitation, not a resolved one; a non-lossy branch emitter is future work.
+
 #### Workflow Execution & Streaming
 
 Each workflow step is built into a MAF `Agent` (see `build_agent_for_step`), wrapped with a `StepAgent` that applies step-level input semantics, and then connected sequentially via `WorkflowBuilder.add_chain`. The workflow is executed as a single MAF `Workflow.run()` call.

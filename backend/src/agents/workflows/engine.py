@@ -34,7 +34,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core.exceptions import NotFoundError, ValidationError
 from ...db.orm.models import Model
-from .definition import WorkflowDefinition
+from .conditions import condition_names, resolve_condition
+from .definition import DEFAULT_BRANCH, WorkflowDefinition
 from .executors import StepAgent
 from .roles import TOOL_ROLE_TARGETS, is_role_reference
 
@@ -343,6 +344,60 @@ def _resolve_step_tools(
 # ---------------------------------------------------------------------------
 
 
+def add_definition_topology(
+    builder: Any,
+    executors: list[AgentExecutor],
+    defn: WorkflowDefinition,
+) -> None:
+    """Add edges to *builder* for the definition's authored topology.
+
+    With no ``defn.branches`` this is exactly ``builder.add_chain(executors)``.
+    With branches, a step that branches is left out of the chain and its
+    outgoing edges are added individually: one
+    ``builder.add_edge(source, target, condition=fn)`` per conditional branch
+    (``fn`` from ``conditions.resolve_condition``) and one
+    ``builder.add_edge(source, target)`` for the ``"default"`` branch.  The
+    non-branching executors are still chained in ``executors`` order so the
+    linear parts of the graph are unchanged.
+    """
+    by_id: dict[str, AgentExecutor] = {e.id: e for e in executors}
+    branching_sources: set[str] = {b.source for b in defn.branches}
+
+    # Chain only the non-branching executors
+    chain = [e for e in executors if e.id not in branching_sources]
+    if len(chain) > 1:
+        builder.add_chain(chain)
+
+    # Emit conditional edges from branching sources in declaration order
+    for branch in defn.branches:
+        if branch.source not in by_id:
+            raise ValidationError(
+                f"Workflow '{defn.key}': branch source '{branch.source}' "
+                f"is not a step id (known: {', '.join(sorted(by_id))})"
+            )
+        if branch.target not in by_id:
+            raise ValidationError(
+                f"Workflow '{defn.key}': branch target '{branch.target}' "
+                f"is not a step id (known: {', '.join(sorted(by_id))})"
+            )
+
+        src = by_id[branch.source]
+        tgt = by_id[branch.target]
+
+        if branch.condition == DEFAULT_BRANCH:
+            builder.add_edge(src, tgt)
+        else:
+            try:
+                condition_fn = resolve_condition(branch.condition)
+            except ValueError as exc:
+                known = ", ".join(condition_names())
+                raise ValidationError(
+                    f"Workflow '{defn.key}': branch {branch.source} -> {branch.target} "
+                    f"references unknown condition {branch.condition!r}. {exc}"
+                ) from exc
+            builder.add_edge(src, tgt, condition=condition_fn)
+
+
 async def build_workflow(
     defn: WorkflowDefinition,
     db: AsyncSession,
@@ -466,9 +521,7 @@ async def build_workflow(
         checkpoint_storage=checkpoint_storage,
     )
 
-    # Connect steps sequentially
-    if len(executors) > 1:
-        builder.add_chain(executors)
+    add_definition_topology(builder, executors, defn)
 
     workflow = builder.build()
     logger.info(

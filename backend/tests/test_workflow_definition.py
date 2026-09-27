@@ -359,10 +359,92 @@ class TestReferenceValidation:
         branches = [
             _branch("a", "@always", "b"),  # a→b conditional (a has 2 outgoing)
             _branch("a", DEFAULT_BRANCH, "c"),  # a→c default (default literal used)
-            _branch("b", "@never", "a"),  # b→a conditional (b has 2 outgoing)
-            _branch("b", DEFAULT_BRANCH, "c"),  # b→c default
         ]
         # Should succeed — default is the unconditional fallback.
         defn = _defn(steps, branches=branches)
         assert defn.branches[0].condition == "@always"
+        assert defn.branches[1].condition == DEFAULT_BRANCH
+
+
+# =============================================================================
+# C — Directed-cycle rejection in the branch graph
+# =============================================================================
+
+
+class TestBranchCycles:
+    """Tests that cycles in the authored branch graph are rejected."""
+
+    def test_two_step_cycle_rejected(self):
+        steps = [
+            _step("a"),
+            _step("b"),
+            _step("c"),
+        ]
+        branches = [
+            _branch("a", "@always", "b"),
+            _branch("a", DEFAULT_BRANCH, "c"),
+            _branch("b", "@always", "a"),
+            _branch("b", DEFAULT_BRANCH, "c"),
+        ]
+        with pytest.raises(ValueError, match="cycle") as exc_info:
+            _defn(steps, branches=branches)
+        err = str(exc_info.value)
+        assert "a" in err
+        assert "b" in err
+
+    def test_three_step_cycle_rejected(self):
+        steps = [
+            _step("a"),
+            _step("b"),
+            _step("c"),
+            _step("d"),
+        ]
+        branches = [
+            _branch("a", "@always", "b"),
+            _branch("a", DEFAULT_BRANCH, "d"),
+            _branch("b", "@always", "c"),
+            _branch("b", DEFAULT_BRANCH, "d"),
+            _branch("c", "@always", "a"),
+            _branch("c", DEFAULT_BRANCH, "d"),
+        ]
+        with pytest.raises(ValueError, match="cycle") as exc_info:
+            _defn(steps, branches=branches)
+        err = str(exc_info.value)
+        assert "a" in err
+        assert "b" in err
+        assert "c" in err
+
+    def test_diamond_dag_accepted(self):
+        """A DAG with no cycle must construct without raising — false-positive guard."""
+        steps = [
+            _step("a"),
+            _step("b"),
+            _step("c"),
+            _step("d"),
+        ]
+        branches = [
+            _branch("a", "@always", "b"),
+            _branch("a", DEFAULT_BRANCH, "d"),
+            _branch("b", "@always", "c"),
+            _branch("b", DEFAULT_BRANCH, "d"),
+        ]
+        defn = _defn(steps, branches=branches)
+        assert len(defn.branches) == 4
+
+    def test_existing_valid_branching_defn_still_accepted(self):
+        """The existing valid 3-step example still constructs."""
+        steps = [
+            _step("a"),
+            _step("b"),
+            _step("c"),
+        ]
+        branches = [
+            _branch("a", "@always", "b"),
+            _branch("a", DEFAULT_BRANCH, "c"),
+        ]
+        defn = _defn(steps, branches=branches)
+        assert len(defn.branches) == 2
+        assert defn.branches[0].source == "a"
+        assert defn.branches[0].condition == "@always"
+        assert defn.branches[0].target == "b"
         assert defn.branches[1].condition == DEFAULT_BRANCH

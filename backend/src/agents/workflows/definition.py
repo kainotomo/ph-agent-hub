@@ -359,4 +359,45 @@ class WorkflowDefinition(BaseModel):
                         f"Known conditions: {', '.join(condition_names())}"
                     )
 
+        # Detect directed cycles in the branch graph.  Chain edges are
+        # excluded from the cycle check because a branching source is
+        # removed from the sequential chain (see engine.py
+        # `add_definition_topology`), and every non-source chain node
+        # has exactly one outgoing edge to its successor — so a cycle
+        # would require a back-edge into an intermediate chain node,
+        # which is impossible without a branching source on the path.
+        step_ids_order = [s.id for s in self.steps]
+        adj: dict[str, list[str]] = {}
+        for branch in self.branches:
+            adj.setdefault(branch.source, []).append(branch.target)
+
+        WHITE, GRAY, BLACK = 0, 1, 2
+        colour: dict[str, int] = {sid: WHITE for sid in step_ids_order}
+        path: list[str] = []
+
+        def _dfs(node: str) -> list[str] | None:
+            colour[node] = GRAY
+            path.append(node)
+            for nb in adj.get(node, []):
+                if colour[nb] == GRAY:
+                    # Back-edge: cycle found — build path from nb back
+                    idx = path.index(nb)
+                    return path[idx:] + [nb]
+                if colour[nb] == WHITE:
+                    cycle = _dfs(nb)
+                    if cycle is not None:
+                        return cycle
+            path.pop()
+            colour[node] = BLACK
+            return None
+
+        for sid in step_ids_order:
+            if colour[sid] == WHITE:
+                cycle = _dfs(sid)
+                if cycle is not None:
+                    raise ValueError(
+                        f"Branch cycle detected in workflow '{self.key}': "
+                        f"{' -> '.join(cycle)}"
+                    )
+
         return self

@@ -8,11 +8,13 @@
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from ..core.dependencies import get_current_user, get_db
+from ..core.pagination import PaginatedResponse
 from ..db.orm.users import User as UserORM
 from ..services import memory_service
+from ..services.memory_service import MEMORY_KEY_MAX_CHARS, MEMORY_VALUE_MAX_CHARS
 from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter(prefix="/memory", tags=["memory"])
@@ -23,14 +25,22 @@ router = APIRouter(prefix="/memory", tags=["memory"])
 
 
 class MemoryCreate(BaseModel):
-    key: str
-    value: str
+    key: str = Field(min_length=1, max_length=MEMORY_KEY_MAX_CHARS)
+    value: str = Field(min_length=1, max_length=MEMORY_VALUE_MAX_CHARS)
     session_id: str | None = None
+
+    @field_validator("key")
+    @classmethod
+    def strip_key(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("key must not be empty after stripping whitespace")
+        return stripped
 
 
 class MemoryUpdate(BaseModel):
-    key: str | None = None
-    value: str | None = None
+    key: str | None = Field(default=None, min_length=1, max_length=MEMORY_KEY_MAX_CHARS)
+    value: str | None = Field(default=None, min_length=1, max_length=MEMORY_VALUE_MAX_CHARS)
 
 
 class MemoryResponse(BaseModel):
@@ -52,7 +62,7 @@ class MemoryResponse(BaseModel):
 # =============================================================================
 
 
-@router.get("", response_model=list[MemoryResponse])
+@router.get("", response_model=PaginatedResponse[MemoryResponse])
 async def list_memory(
     session_id: str | None = Query(None),
     page: int = Query(1, ge=1, description="Page number (1-indexed)"),
@@ -72,7 +82,13 @@ async def list_memory(
         page=page,
         page_size=page_size,
     )
-    return [MemoryResponse.model_validate(e) for e in entries]
+    return PaginatedResponse(
+        items=[MemoryResponse.model_validate(e) for e in entries],
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=max(1, -(-total // page_size)),
+    )
 
 
 @router.post("", response_model=MemoryResponse, status_code=201)

@@ -7,17 +7,22 @@
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.exceptions import ForbiddenError, NotFoundError
+from src.core.exceptions import ConflictError, ForbiddenError, NotFoundError
 from src.db.orm.memory import Memory
 from src.services.memory_service import (
     admin_delete_memory,
+    admin_update_memory,
     create_memory,
     delete_memory,
     delete_memory_by_key,
+    find_global_memory,
     list_all_memories,
     list_memory,
+    remove_global_memory,
+    set_global_memory,
     update_memory,
     upsert_memory,
 )
@@ -566,3 +571,295 @@ class TestListMemory:
         )
         assert items == []
         assert total == 0
+
+
+# ===========================================================================
+# MemoryUniqueness
+# ===========================================================================
+
+
+class TestMemoryUniqueness:
+    """Tests for the unique constraint on (user_id, tenant_id, key, session_id)."""
+
+    async def test_duplicate_global_key_raises_integrity_error(
+        self, db_session: AsyncSession, test_user, test_tenant
+    ):
+        """A second global row with the same user_id, tenant_id and key
+        violates the unique constraint."""
+        from sqlalchemy import exc as sa_exc
+
+        # A flush alone sends the INSERT to the database, so the UNIQUE
+        # constraint is enforced without committing.  No real commit may be
+        # used here: the db_session fixture replaces commit() with a no-op
+        # precisely so that nothing escapes the transaction that the fixture
+        # rolls back at the end of the test.
+        mem1 = Memory(
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            key="unique_test",
+            value="first",
+            session_id=None,
+            source="manual",
+        )
+        mem2 = Memory(
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            key="unique_test",
+            value="second",
+            session_id=None,
+            source="manual",
+        )
+
+        db_session.add(mem1)
+        await db_session.flush()
+
+        db_session.add(mem2)
+        with pytest.raises(sa_exc.IntegrityError):
+            await db_session.flush()
+
+        # Roll back so the session stays usable after the failed flush
+        await db_session.rollback()
+
+    async def test_same_key_different_session_id_is_allowed(
+        self, db_session: AsyncSession, test_user, test_tenant, test_session
+    ):
+        """The same key is allowed twice when the two rows have different
+        session_id values."""
+        mem1 = await create_memory(
+            db_session,
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            key="shared_key",
+            value="global",
+        )
+        mem2 = await create_memory(
+            db_session,
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            key="shared_key",
+            value="session",
+            session_id=test_session.id,
+        )
+        assert mem1.id != mem2.id
+        assert mem1.session_id is None
+        assert mem2.session_id == test_session.id
+
+
+# ===========================================================================
+# FindGlobalMemory
+# ===========================================================================
+
+
+class TestFindGlobalMemory:
+    """Tests for find_global_memory."""
+
+    async def test_returns_none_for_unknown_key(
+        self, db_session: AsyncSession, test_user, test_tenant
+    ):
+        """Unknown key should return None."""
+        result = await find_global_memory(
+            db_session,
+            user_id=test_user.id,
+            tenant_id=test_tenant.id,
+            key="nonexistent",
+        )
+        assert result is None
+
+    async def test_returns_created_row_for_known_key(
+        self, db_session: AsyncSession, test_user, test_tenant
+    ):
+        """Known key should return the created row."""
+        mem = await create_memory(
+            db_session,
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            key="found_key",
+            value="found_value",
+        )
+        result = await find_global_memory(
+            db_session,
+            user_id=test_user.id,
+            tenant_id=test_tenant.id,
+            key="found_key",
+        )
+        assert result is not None
+        assert result.id == mem.id
+        assert result.value == "found_value"
+
+
+# ===========================================================================
+# SetGlobalMemory
+# ===========================================================================
+
+
+class TestSetGlobalMemory:
+    """Tests for set_global_memory."""
+
+    async def test_commit_false_rollback_discards(
+        self, db_session: AsyncSession, test_user, test_tenant
+    ):
+        """set_global_memory with commit=False leaves the new row visible
+        inside the session but uncommitted, so a following rollback discards it."""
+        mem = await set_global_memory(
+            db_session,
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            key="volatile_key",
+            value="volatile_value",
+            commit=False,
+        )
+        # Row is visible inside the session (flushed by _noop_commit)
+        assert mem.key == "volatile_key"
+        assert mem.value == "volatile_value"
+
+        # Roll back the session — the uncommitted row is discarded
+        await db_session.rollback()
+
+        # After rollback the row should no longer be findable
+        result = await find_global_memory(
+            db_session,
+            user_id=test_user.id,
+            tenant_id=test_tenant.id,
+            key="volatile_key",
+        )
+        assert result is None
+
+
+# ===========================================================================
+# RemoveGlobalMemory
+# ===========================================================================
+
+
+class TestRemoveGlobalMemory:
+    """Tests for remove_global_memory."""
+
+    async def test_returns_true_for_existing_key(
+        self, db_session: AsyncSession, test_user, test_tenant
+    ):
+        """Existing global key should return True."""
+        await create_memory(
+            db_session,
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            key="to_remove",
+            value="removable",
+        )
+        result = await remove_global_memory(
+            db_session,
+            user_id=test_user.id,
+            tenant_id=test_tenant.id,
+            key="to_remove",
+        )
+        assert result is True
+
+    async def test_returns_false_for_missing_key(
+        self, db_session: AsyncSession, test_user, test_tenant
+    ):
+        """Missing global key should return False."""
+        result = await remove_global_memory(
+            db_session,
+            user_id=test_user.id,
+            tenant_id=test_tenant.id,
+            key="no_such_key",
+        )
+        assert result is False
+
+
+# ===========================================================================
+# AdminUpdateMemory
+# ===========================================================================
+
+
+class TestAdminUpdateMemory:
+    """Tests for admin_update_memory."""
+
+    async def test_updates_entry_owned_by_different_user(
+        self, db_session: AsyncSession, test_user, test_tenant, second_user, second_tenant
+    ):
+        """Admin should be able to update an entry owned by a different user
+        without raising."""
+        mem = await create_memory(
+            db_session,
+            tenant_id=second_tenant.id,
+            user_id=second_user.id,
+            key="admin_target",
+            value="original",
+        )
+        updated = await admin_update_memory(
+            db_session,
+            memory_id=mem.id,
+            value="updated_by_admin",
+        )
+        assert updated.value == "updated_by_admin"
+        assert updated.user_id == second_user.id  # ownership unchanged
+
+    async def test_raises_not_found_for_unknown_id(
+        self, db_session: AsyncSession
+    ):
+        """Unknown ID should raise NotFoundError."""
+        import uuid
+        with pytest.raises(NotFoundError):
+            await admin_update_memory(
+                db_session,
+                memory_id=str(uuid.uuid4()),
+                value="nothing",
+            )
+
+
+# ===========================================================================
+# UpdateMemoryConflictDetection
+# ===========================================================================
+
+
+class TestUpdateMemoryConflictDetection:
+    """Tests for update_memory conflict detection on key collisions."""
+
+    async def test_raises_conflict_error_on_key_collision(
+        self, db_session: AsyncSession, test_user, test_tenant
+    ):
+        """update_memory raises ConflictError when renaming an entry onto a
+        key that already exists in the same scope."""
+        mem_a = await create_memory(
+            db_session,
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            key="key_a",
+            value="value_a",
+        )
+        mem_b = await create_memory(
+            db_session,
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            key="key_b",
+            value="value_b",
+        )
+        # Attempt to rename mem_a to key_b (which mem_b already owns)
+        with pytest.raises(ConflictError, match="already exists"):
+            await update_memory(
+                db_session,
+                memory_id=mem_a.id,
+                user_id=test_user.id,
+                tenant_id=test_tenant.id,
+                key="key_b",
+            )
+
+    async def test_no_conflict_when_key_unchanged(self, db_session, test_user, test_tenant):
+        """Should not raise when the entry keeps its own key while only its
+        value changes."""
+        mem = await create_memory(
+            db_session,
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            key="stable_key",
+            value="old",
+        )
+        # Updating value only — no conflict
+        updated = await update_memory(
+            db_session,
+            memory_id=mem.id,
+            user_id=test_user.id,
+            tenant_id=test_tenant.id,
+            value="new",
+        )
+        assert updated.key == "stable_key"
+        assert updated.value == "new"

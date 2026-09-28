@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 from textwrap import dedent as _dedent
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import DatabaseError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1182,17 +1182,29 @@ async def _build_system_prompt(
 
     # ---- Agent memory injection -------------------------------------------
     # Query global memory entries (session_id IS NULL) for the current user
-    # and append them as a persistent context block.
-    if user:
+    # and append them as a persistent context block.  Skip entirely for
+    # temporary sessions so nothing leaks into the system prompt.
+    if user and not session_data.get("is_temporary"):
         try:
             from ..db.orm.memory import Memory as MemoryORM
 
+            # true total for the omission message
+            count_stmt = select(func.count()).where(
+                MemoryORM.user_id == user.id,
+                MemoryORM.tenant_id == user.tenant_id,
+                MemoryORM.session_id.is_(None),
+            )
+            total_count = (await db.execute(count_stmt)).scalar_one()
+
+            # bounded query, ordered by most recently updated
             result = await db.execute(
                 select(MemoryORM).where(
                     MemoryORM.user_id == user.id,
                     MemoryORM.tenant_id == user.tenant_id,
                     MemoryORM.session_id.is_(None),
-                ).order_by(MemoryORM.created_at.desc())
+                ).order_by(
+                    func.coalesce(MemoryORM.updated_at, MemoryORM.created_at).desc()
+                ).limit(settings.MEMORY_PROMPT_MAX_ENTRIES)
             )
             memories = result.scalars().all()
 
@@ -1206,9 +1218,31 @@ async def _build_system_prompt(
                     "they are relevant to the current conversation:",
                     "",
                 ]
+                header_chars = sum(len(line) for line in memory_lines)
+                budget = settings.MEMORY_PROMPT_MAX_CHARS - header_chars
+                accumulated = 0
+                rendered = 0
+
                 for m in memories:
                     source_tag = "[auto]" if m.source == "automatic" else "[user]"
-                    memory_lines.append(f"- {source_tag} **{m.key}**: {m.value}")
+                    value = m.value[:settings.MEMORY_PROMPT_VALUE_TRUNCATE_CHARS] if len(m.value) > settings.MEMORY_PROMPT_VALUE_TRUNCATE_CHARS else m.value
+                    entry = f"- {source_tag} **{m.key}**: {value}"
+                    truncated = len(m.value) > settings.MEMORY_PROMPT_VALUE_TRUNCATE_CHARS
+                    if truncated:
+                        entry += "..."
+                    entry_len = len(entry) + 1  # +1 for the trailing newline
+                    if accumulated + entry_len > budget:
+                        break
+                    memory_lines.append(entry)
+                    accumulated += entry_len
+                    rendered += 1
+
+                omitted = total_count - rendered
+                if omitted > 0:
+                    memory_lines.append(
+                        f"{omitted} more entries are not shown here; "
+                        "call list_memory to review them."
+                    )
 
                 parts.append("\n".join(memory_lines))
         except DatabaseError as e:
@@ -1256,8 +1290,15 @@ async def _build_system_prompt(
             - After saving or updating, briefly acknowledge it naturally
               (e.g. "I've saved that, I'll remember for next time").
             - Use list_memory to see what you already know about the user.
-            - Do NOT overwrite user-created memories (source=manual). If you
-              need to update one, ask the user first.
+            - Entries marked [user] were created by the user themselves.
+              Never change or remove one silently: call save_memory (or
+              delete_memory) and, if the result is "needs_confirmation", tell
+              the user what you found and ask whether to change it. Only once
+              the user agrees, call save_memory again with overwrite=True, or
+              delete_memory with force=True. Updating a [user] entry keeps it
+              owned by the user.
+            - Only claim you have remembered or forgotten something when the
+              tool reported that it actually did.
         """))
 
     # ---- Cross-session memory retrieval (Issue #229) -----------------------
@@ -1269,33 +1310,29 @@ async def _build_system_prompt(
                 retrieve_similar as _retrieve_similar,
             )
 
-            # Resolve whether retrieval is enabled:
-            #   session override (tri-state) → skill default → off
-            retrieval_enabled = session_data.get("cross_session_retrieval_enabled")
-            if retrieval_enabled is None:
-                # Fall back to skill config
-                skill_id = session_data.get("selected_skill_id")
-                if skill_id:
-                    result = await db.execute(
-                        select(Skill).where(Skill.id == skill_id)
-                    )
-                    skill_row = result.scalar_one_or_none()
-                    if skill_row:
-                        retrieval_enabled = skill_row.cross_session_retrieval_enabled
-                        max_snippets = skill_row.cross_session_max_snippets
-                        min_score = skill_row.cross_session_min_score
-                    else:
-                        retrieval_enabled = False
-                        max_snippets = 3
-                        min_score = 0.70
+            # Resolve numeric limits from the attached skill FIRST, then
+            # use the session tri-state override only for the on/off decision.
+            skill_id = session_data.get("selected_skill_id")
+            max_snippets = 3
+            min_score = 0.30
+            if skill_id:
+                result = await db.execute(
+                    select(Skill).where(Skill.id == skill_id)
+                )
+                skill_row = result.scalar_one_or_none()
+                if skill_row:
+                    max_snippets = skill_row.cross_session_max_snippets
+                    min_score = skill_row.cross_session_min_score
+                    retrieval_enabled = skill_row.cross_session_retrieval_enabled
                 else:
                     retrieval_enabled = False
-                    max_snippets = 3
-                    min_score = 0.30
             else:
-                # Use session-level defaults when skill doesn't apply
-                max_snippets = 3
-                min_score = 0.30
+                retrieval_enabled = False
+
+            # Session-level tri-state override (only the on/off decision)
+            session_override = session_data.get("cross_session_retrieval_enabled")
+            if session_override is not None:
+                retrieval_enabled = session_override
 
             if retrieval_enabled:
                 query_emb = await _embed_query(user_message)
@@ -3623,12 +3660,11 @@ async def _run_agent_stream(
                 # When memory tools complete, emit a dedicated event so the
                 # frontend can show "Memory updated" notifications.
                 if tool_name in ("save_memory", "delete_memory"):
-                    memory_action = "saved"
-                    if tool_name == "delete_memory":
-                        memory_action = "deleted"
-                    # Try to extract the memory key from output
+                    # Derive the action from the tool's own returned value
+                    raw_action = None
                     memory_key = None
                     if isinstance(output, dict):
+                        raw_action = output.get("action")
                         memory_key = output.get("key")
                     elif isinstance(output, str):
                         # Fallback: parse JSON string
@@ -3636,9 +3672,18 @@ async def _run_agent_stream(
                         try:
                             parsed = _json.loads(output)
                             if isinstance(parsed, dict):
+                                raw_action = parsed.get("action")
                                 memory_key = parsed.get("key")
                         except (_json.JSONDecodeError, TypeError):
                             pass
+                    # Map raw tool action → SSE action
+                    if raw_action in ("created", "updated"):
+                        memory_action = "saved"
+                    elif raw_action == "deleted":
+                        memory_action = "deleted"
+                    else:
+                        # Pass through needs_confirmation, error, not_found, or None
+                        memory_action = raw_action
                     yield _sse_event("memory_updated", {
                         "tool_name": tool_name,
                         "action": memory_action,

@@ -1021,16 +1021,39 @@ export const ChatWindow = React.memo(function ChatWindow({
         },
         onMemoryUpdated: isReconnect
           ? () => { /* Sidebar auto-refreshes on session invalidation */ }
-          : (data: { action: string }) => {
+          : (data: { action: string; key: string | null; success: boolean; tool_name: string }) => {
               queryClient.invalidateQueries({ queryKey: ["memory", sessionId] });
-              notification.info({
-                message: data.action === "saved" ? "Information saved" : "Memory deleted",
-                description: data.action === "saved"
-                  ? "I'll remember this for next time."
-                  : "Memory entry has been removed.",
-                placement: "bottomRight",
-                duration: 4,
-              });
+              if (data.action === "saved") {
+                notification.success({
+                  message: "Information saved",
+                  description: "I'll remember this for next time.",
+                  placement: "bottomRight",
+                  duration: 4,
+                });
+              } else if (data.action === "deleted") {
+                notification.info({
+                  message: "Memory deleted",
+                  description: "Memory entry has been removed.",
+                  placement: "bottomRight",
+                  duration: 4,
+                });
+              } else if (data.action === "needs_confirmation") {
+                notification.warning({
+                  message: "Memory confirmation needed",
+                  description: "Please confirm the memory in the memory panel.",
+                  placement: "bottomRight",
+                  duration: 4,
+                });
+              } else {
+                notification.error({
+                  message: "Memory update failed",
+                  description: data.success === false
+                    ? `An error occurred while updating the memory${data.key ? ` ("${data.key}")` : ""}.`
+                    : `The memory tool "${data.tool_name}" returned an unexpected action: "${data.action}".`,
+                  placement: "bottomRight",
+                  duration: 4,
+                });
+              }
             },
         // ---- Autopilot event handlers -----------------------------------
         onAutopilotTurnStart: (data: { turn: number; max_turns: number }) => {
@@ -1598,14 +1621,37 @@ export const ChatWindow = React.memo(function ChatWindow({
       },
       onMemoryUpdated: (data: { action: string; key: string | null; success: boolean; tool_name: string }) => {
         queryClient.invalidateQueries({ queryKey: ["memory", sessionId] });
-        notification.info({
-          message: data.action === "saved" ? "Information saved" : "Memory deleted",
-          description: data.action === "saved"
-            ? "I'll remember this for next time."
-            : "Memory entry has been removed.",
-          placement: "bottomRight",
-          duration: 4,
-        });
+        if (data.action === "saved") {
+          notification.success({
+            message: "Information saved",
+            description: "I'll remember this for next time.",
+            placement: "bottomRight",
+            duration: 4,
+          });
+        } else if (data.action === "deleted") {
+          notification.info({
+            message: "Memory deleted",
+            description: "Memory entry has been removed.",
+            placement: "bottomRight",
+            duration: 4,
+          });
+        } else if (data.action === "needs_confirmation") {
+          notification.warning({
+            message: "Memory confirmation needed",
+            description: "Please confirm the memory in the memory panel.",
+            placement: "bottomRight",
+            duration: 4,
+          });
+        } else {
+          notification.error({
+            message: "Memory update failed",
+            description: data.success === false
+              ? `An error occurred while updating the memory${data.key ? ` ("${data.key}")` : ""}.`
+              : `The memory tool "${data.tool_name}" returned an unexpected action: "${data.action}".`,
+            placement: "bottomRight",
+            duration: 4,
+          });
+        }
       },
       onStepComplete: () => { /* No UI update needed */ },
       onFollowUpQuestions: (questions: string[]) => {

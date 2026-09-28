@@ -20,15 +20,20 @@ import {
   Card,
   Typography,
   Select,
+  Modal,
+  Form,
 } from "antd";
 import {
   DeleteOutlined,
+  EditOutlined,
+  EyeOutlined,
   SearchOutlined,
 } from "@ant-design/icons";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   listAdminMemories,
   deleteAdminMemory,
+  updateAdminMemory,
   listTenants,
   MemoryData,
 } from "../../services/admin";
@@ -45,6 +50,11 @@ export function MemoryList() {
   const [searchText, setSearchText] = useState("");
   const [searchParams] = useSearchParams();
   const tenantId = searchParams.get("tenant_id") || undefined;
+  const [editVisible, setEditVisible] = useState(false);
+  const [editingRecord, setEditingRecord] = useState<MemoryData | null>(null);
+  const [detailVisible, setDetailVisible] = useState(false);
+  const [viewingRecord, setViewingRecord] = useState<MemoryData | null>(null);
+  const [editForm] = Form.useForm();
 
   const debouncedSearch = useDebounce(searchText, 300);
 
@@ -73,6 +83,17 @@ export function MemoryList() {
     },
   });
 
+  const editMutation = useMutation({
+    mutationFn: ({ id, data }: { id: string; data: { key?: string; value?: string } }) =>
+      updateAdminMemory(id, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["admin-memories"] });
+      message.success("Memory entry updated");
+      setEditVisible(false);
+      setEditingRecord(null);
+    },
+  });
+
   const memoriesData = data?.items || [];
   const totalMemories = data?.total || 0;
 
@@ -96,8 +117,15 @@ export function MemoryList() {
       dataIndex: "value",
       key: "value",
       ellipsis: true,
-      render: (v: string) => (
-        <Paragraph ellipsis={{ rows: 2 }} style={{ margin: 0, maxWidth: 300 }}>
+      render: (v: string, record: MemoryData) => (
+        <Paragraph
+          ellipsis={{ rows: 2 }}
+          style={{ margin: 0, maxWidth: 300, cursor: "pointer" }}
+          onClick={() => {
+            setViewingRecord(record);
+            setDetailVisible(true);
+          }}
+        >
           {v}
         </Paragraph>
       ),
@@ -143,14 +171,34 @@ export function MemoryList() {
     {
       title: "Actions",
       key: "actions",
-      width: 80,
+      width: 120,
       render: (_: unknown, record: MemoryData) => (
-        <Popconfirm
-          title="Delete this memory entry?"
-          onConfirm={() => deleteMutation.mutate(record.id)}
-        >
-          <Button icon={<DeleteOutlined />} size="small" danger />
-        </Popconfirm>
+        <Space>
+          <Button
+            icon={<EyeOutlined />}
+            size="small"
+            aria-label={`View value for ${record.key}`}
+            onClick={() => {
+              setViewingRecord(record);
+              setDetailVisible(true);
+            }}
+          />
+          <Button
+            icon={<EditOutlined />}
+            size="small"
+            aria-label={`Edit memory ${record.key}`}
+            onClick={() => {
+              setEditingRecord(record);
+              setEditVisible(true);
+            }}
+          />
+          <Popconfirm
+            title="Delete this memory entry?"
+            onConfirm={() => deleteMutation.mutate(record.id)}
+          >
+            <Button icon={<DeleteOutlined />} size="small" danger />
+          </Popconfirm>
+        </Space>
       ),
     },
   ];
@@ -199,6 +247,26 @@ export function MemoryList() {
               size="small"
               style={{ marginBottom: 8 }}
               actions={[
+                <Button
+                  key="view"
+                  icon={<EyeOutlined />}
+                  size="small"
+                  aria-label={`View value for ${item.key}`}
+                  onClick={() => {
+                    setViewingRecord(item);
+                    setDetailVisible(true);
+                  }}
+                />,
+                <Button
+                  key="edit"
+                  icon={<EditOutlined />}
+                  size="small"
+                  aria-label={`Edit memory ${item.key}`}
+                  onClick={() => {
+                    setEditingRecord(item);
+                    setEditVisible(true);
+                  }}
+                />,
                 <Popconfirm
                   key="del"
                   title="Delete this memory entry?"
@@ -219,7 +287,14 @@ export function MemoryList() {
                 }
                 description={
                   <>
-                    <Paragraph ellipsis={{ rows: 2 }} style={{ margin: 0 }}>
+                    <Paragraph
+                      ellipsis={{ rows: 2 }}
+                      style={{ margin: 0, cursor: "pointer" }}
+                      onClick={() => {
+                        setViewingRecord(item);
+                        setDetailVisible(true);
+                      }}
+                    >
                       {item.value}
                     </Paragraph>
                     <Text type="secondary" style={{ fontSize: 11 }}>
@@ -250,6 +325,67 @@ export function MemoryList() {
           onChange={handleTableChange as any}
         />
       )}
+
+      <Modal
+        title="Edit Memory Entry"
+        open={editVisible}
+        onCancel={() => {
+          setEditVisible(false);
+          setEditingRecord(null);
+        }}
+        onOk={() => {
+          editForm
+            .validateFields()
+            .then((values) => {
+              if (editingRecord) {
+                editMutation.mutate({
+                  id: editingRecord.id,
+                  data: {
+                    key: values.key,
+                    value: values.value,
+                  },
+                });
+              }
+            })
+            .catch(() => {});
+        }}
+      >
+        {editingRecord && (
+          <Form
+            form={editForm}
+            layout="vertical"
+            initialValues={{ key: editingRecord.key, value: editingRecord.value }}
+          >
+            <Form.Item name="key" label="Key" rules={[{ required: true }]}>
+              <Input />
+            </Form.Item>
+            <Form.Item name="value" label="Value" rules={[{ required: true }]}>
+              <Input.TextArea rows={6} />
+            </Form.Item>
+          </Form>
+        )}
+      </Modal>
+
+      <Modal
+        title={
+          <Space direction="vertical" style={{ width: "100%" }}>
+            <Text strong>Memory Value</Text>
+            <Text type="secondary">Key: {viewingRecord?.key}</Text>
+          </Space>
+        }
+        open={detailVisible}
+        onCancel={() => {
+          setDetailVisible(false);
+          setViewingRecord(null);
+        }}
+        footer={null}
+        width={600}
+        forceRender
+      >
+        <Paragraph style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+          {viewingRecord?.value}
+        </Paragraph>
+      </Modal>
     </div>
   );
 }

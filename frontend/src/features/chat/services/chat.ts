@@ -139,6 +139,19 @@ export interface MemoryEntry {
   value: string;
   source: string;
   created_at: string;
+  updated_at: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Paginated response envelope
+// ---------------------------------------------------------------------------
+
+export interface PaginatedResponse<T> {
+  items: T[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -575,9 +588,17 @@ export function listMessageUploads(
 // Memory
 // ---------------------------------------------------------------------------
 
-export function listMemory(sessionId?: string): Promise<MemoryEntry[]> {
-  const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
-  return api<MemoryEntry[]>(`/memory${query}`);
+export function listMemory(params?: {
+  sessionId?: string;
+  page?: number;
+  pageSize?: number;
+}): Promise<PaginatedResponse<MemoryEntry>> {
+  const query = new URLSearchParams();
+  if (params?.sessionId) query.set("session_id", params.sessionId);
+  if (params?.page) query.set("page", String(params.page));
+  if (params?.pageSize) query.set("page_size", String(params.pageSize));
+  const qs = query.toString();
+  return api<PaginatedResponse<MemoryEntry>>(`/memory${qs ? `?${qs}` : ""}`);
 }
 
 export function createMemory(data: {

@@ -7,8 +7,13 @@
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..core.exceptions import ForbiddenError, NotFoundError
+from ..core.exceptions import ConflictError, ForbiddenError, NotFoundError, ValidationError
 from ..db.orm.memory import Memory
+
+# ---- validation constants ----------------------------------------------------
+
+MEMORY_KEY_MAX_CHARS = 255
+MEMORY_VALUE_MAX_CHARS = 8000
 
 
 async def list_memory(
@@ -77,6 +82,140 @@ async def list_all_memories(
     return await paginate(db, stmt, page=page, page_size=page_size)
 
 
+async def find_memory(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    tenant_id: str,
+    key: str,
+    session_id: str | None,
+) -> Memory | None:
+    """Find the memory entry for a key within a scope.
+
+    ``session_id=None`` matches global entries (``session_id IS NULL``).
+    Ordering plus ``.first()`` keeps the lookup deterministic and tolerant of
+    any legacy duplicate rows, so it can never raise ``MultipleResultsFound``.
+    """
+    scope = (
+        Memory.session_id.is_(None)
+        if session_id is None
+        else Memory.session_id == session_id
+    )
+    stmt = (
+        select(Memory)
+        .where(
+            Memory.user_id == user_id,
+            Memory.tenant_id == tenant_id,
+            Memory.key == key,
+            scope,
+        )
+        .order_by(Memory.created_at, Memory.id)
+    )
+    result = await db.execute(stmt)
+    return result.scalars().first()
+
+
+async def find_global_memory(
+    db: AsyncSession, *, user_id: str, tenant_id: str, key: str,
+) -> Memory | None:
+    """Find the global memory entry for a key (session_id IS NULL)."""
+    return await find_memory(
+        db, user_id=user_id, tenant_id=tenant_id, key=key, session_id=None,
+    )
+
+
+async def set_global_memory(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    user_id: str,
+    key: str,
+    value: str,
+    source: str = "automatic",
+    commit: bool = True,
+) -> Memory:
+    """Create or update a global memory entry.
+
+    Returns the Memory object.  Commits only when ``commit`` is True.
+    """
+    existing = await find_global_memory(
+        db, user_id=user_id, tenant_id=tenant_id, key=key,
+    )
+    if existing is not None:
+        existing.value = value
+    else:
+        memory = Memory(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            key=key,
+            value=value,
+            session_id=None,
+            source=source,
+        )
+        db.add(memory)
+        existing = memory
+
+    if commit:
+        await db.commit()
+        await db.refresh(existing)
+    return existing
+
+
+async def remove_global_memory(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    tenant_id: str,
+    key: str,
+    commit: bool = True,
+) -> bool:
+    """Delete a global memory entry by key.
+
+    Returns True if a row was deleted, False if none was found.
+    Commits only when ``commit`` is True.
+    """
+    memory = await find_global_memory(
+        db, user_id=user_id, tenant_id=tenant_id, key=key,
+    )
+    if memory is None:
+        return False
+
+    await db.execute(delete(Memory).where(Memory.id == memory.id))
+    if commit:
+        await db.commit()
+    return True
+
+
+async def memory_key_conflict(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    user_id: str,
+    key: str,
+    session_id: str | None,
+    exclude_id: str | None = None,
+) -> bool:
+    """Return True when another row shares the same scope and key."""
+    stmt = (
+        select(Memory)
+        .where(
+            Memory.user_id == user_id,
+            Memory.tenant_id == tenant_id,
+            Memory.key == key,
+        )
+    )
+    # Same scope: None matches IS NULL, value matches = value.
+    if session_id is None:
+        stmt = stmt.where(Memory.session_id.is_(None))
+    else:
+        stmt = stmt.where(Memory.session_id == session_id)
+    if exclude_id is not None:
+        stmt = stmt.where(Memory.id != exclude_id)
+
+    result = await db.execute(stmt)
+    return result.first() is not None
+
+
 async def create_memory(
     db: AsyncSession,
     tenant_id: str,
@@ -122,6 +261,31 @@ async def delete_memory(
     await db.commit()
 
 
+async def admin_update_memory(
+    db: AsyncSession,
+    memory_id: str,
+    key: str | None = None,
+    value: str | None = None,
+) -> Memory:
+    """Update a memory entry.  Admin use only — no ownership check."""
+    result = await db.execute(
+        select(Memory).where(Memory.id == memory_id)
+    )
+    memory = result.scalar_one_or_none()
+
+    if memory is None:
+        raise NotFoundError("Memory entry not found")
+
+    if key is not None:
+        memory.key = key
+    if value is not None:
+        memory.value = value
+
+    await db.commit()
+    await db.refresh(memory)
+    return memory
+
+
 async def update_memory(
     db: AsyncSession,
     memory_id: str,
@@ -140,6 +304,25 @@ async def update_memory(
         raise NotFoundError("Memory entry not found")
     if memory.user_id != user_id or memory.tenant_id != tenant_id:
         raise ForbiddenError("You do not own this memory entry")
+
+    # Validate input lengths before applying changes.
+    if key is not None and len(key) > MEMORY_KEY_MAX_CHARS:
+        raise ValidationError("Key exceeds maximum length of 255 characters")
+    if value is not None and len(value) > MEMORY_VALUE_MAX_CHARS:
+        raise ValidationError("Value exceeds maximum length of 8000 characters")
+
+    # Check for key conflicts in the same scope, ignoring this row itself so
+    # that editing the value without renaming the key is not a conflict.
+    if key is not None:
+        if await memory_key_conflict(
+            db,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            key=key,
+            session_id=memory.session_id,
+            exclude_id=memory.id,
+        ):
+            raise ConflictError("A memory entry with this key already exists")
 
     if key is not None:
         memory.key = key
@@ -175,41 +358,34 @@ async def upsert_memory(
 ) -> Memory:
     """Insert or update a memory entry by (user_id, tenant_id, key, session_id).
 
-    If an entry with the same user/tenant/key/session_id combo exists,
-    its value is updated.  Otherwise a new entry is created.
-
-    Returns the Memory ORM object.
+    Handles both global entries (``session_id=None``) and session-scoped ones.
+    The UNIQUE key ``uq_memory_user_tenant_key_scope`` guarantees that a
+    concurrent insert cannot create a duplicate.
     """
-    result = await db.execute(
-        select(Memory).where(
-            Memory.user_id == user_id,
-            Memory.tenant_id == tenant_id,
-            Memory.key == key,
-            Memory.session_id.is_(None)
-            if session_id is None
-            else Memory.session_id == session_id,
-        ).with_for_update()
-    )
-    existing = result.scalar_one_or_none()
-
-    if existing:
-        existing.value = value
-        await db.commit()
-        await db.refresh(existing)
-        return existing
-
-    memory = Memory(
-        tenant_id=tenant_id,
+    existing = await find_memory(
+        db,
         user_id=user_id,
+        tenant_id=tenant_id,
         key=key,
-        value=value,
         session_id=session_id,
-        source=source,
     )
-    db.add(memory)
+
+    if existing is not None:
+        existing.value = value
+    else:
+        existing = Memory(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            key=key,
+            value=value,
+            session_id=session_id,
+            source=source,
+        )
+        db.add(existing)
+
     await db.commit()
-    await db.refresh(memory)
-    return memory
+    await db.refresh(existing)
+    return existing
 
 
 async def delete_memory_by_key(
@@ -220,21 +396,11 @@ async def delete_memory_by_key(
 ) -> bool:
     """Delete a memory entry by key (global entries only — session_id IS NULL).
 
-    Returns True if an entry was deleted, False if none was found.
+    Thin wrapper over :func:`remove_global_memory`.
     """
-    result = await db.execute(
-        select(Memory).where(
-            Memory.user_id == user_id,
-            Memory.tenant_id == tenant_id,
-            Memory.session_id.is_(None),
-            Memory.key == key,
-        )
+    return await remove_global_memory(
+        db,
+        user_id=user_id,
+        tenant_id=tenant_id,
+        key=key,
     )
-    memory = result.scalar_one_or_none()
-
-    if memory is None:
-        return False
-
-    await db.execute(delete(Memory).where(Memory.id == memory.id))
-    await db.commit()
-    return True

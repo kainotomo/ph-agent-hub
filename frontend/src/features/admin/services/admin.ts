@@ -667,6 +667,13 @@ export function deleteAdminMemory(id: string): Promise<void> {
   return api<void>(`/admin/memories/${id}`, { method: "DELETE" });
 }
 
+export function updateAdminMemory(
+  id: string,
+  data: { key?: string; value?: string },
+): Promise<MemoryData> {
+  return api<MemoryData>(`/admin/memories/${id}`, { method: "PUT", body: data });
+}
+
 // =============================================================================
 // Sessions (admin)
 // =============================================================================

@@ -253,7 +253,7 @@ class TestMemoryTenantIsolation:
         # List as tenant B
         headers_b = auth_headers(second_user)
         resp = await async_client.get("/api/memory", headers=headers_b)
-        keys = [m["key"] for m in resp.json()]
+        keys = [m["key"] for m in resp.json()["items"]]
         assert "cross_tenant_secret" not in keys
 
     async def test_cross_tenant_memory_update_forbidden(

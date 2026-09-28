@@ -5,9 +5,14 @@
 # entries.  Always available — unconditionally appended in
 # ``_resolve_tool_callables()`` alongside the file_list tools.
 #
-# These tools use the runner's shared ``db`` session WITHOUT calling
-# ``commit()`` or ``flush()``.  The runner's transaction takes care of
-# persisting all changes at the end of the agent run.
+# These tools use the runner's shared ``db`` session but **commit their own
+# writes**.  They cannot rely on the caller committing: the streaming chat
+# path deliberately persists the assistant message through a separate session
+# and rolls the agent session back when it finishes, so an uncommitted memory
+# write was silently discarded and the model would then deny knowing something
+# it had just claimed to remember.
+#
+# ``list_memory`` stays read-only and never commits.
 # =============================================================================
 
 import logging
@@ -126,6 +131,7 @@ def build_memory_tools(
                 if overwrite and existing.source == "manual":
                     existing.value = value
                     existing.source = "manual"
+                    await db.commit()
                     logger.debug(
                         "save_memory overwrote manual key=%r for user=%s",
                         key, user_id,
@@ -137,6 +143,7 @@ def build_memory_tools(
                         "overwrote_manual": True,
                     }
                 existing.value = value
+                await db.commit()
                 logger.debug(
                     "save_memory updated key=%r for user=%s", key, user_id
                 )
@@ -155,6 +162,7 @@ def build_memory_tools(
                 source="automatic",
             )
             db.add(memory)
+            await db.commit()
             logger.debug(
                 "save_memory created key=%r for user=%s", key, user_id
             )
@@ -218,7 +226,7 @@ def build_memory_tools(
 
             await remove_global_memory(
                 db, user_id=user_id, tenant_id=tenant_id, key=key,
-                commit=False,
+                commit=True,
             )
             logger.debug(
                 "delete_memory deleted key=%r for user=%s", key, user_id

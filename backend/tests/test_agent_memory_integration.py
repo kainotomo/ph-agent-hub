@@ -831,3 +831,72 @@ def _mock_stream_updates(steps):
             yield item
 
     return _gen()
+
+
+# ===========================================================================
+# Memory writes must be committed by the tool itself
+# ===========================================================================
+class TestMemoryWritesAreCommitted:
+    """Saved memories must survive the caller's session teardown.
+
+    Regression: the tools left their write uncommitted and relied on the agent
+    runner to commit at the end of the run.  The streaming chat path persists
+    the assistant message through a *separate* session and rolls the agent
+    session back when it finishes, so ``save_memory`` reported success while
+    the row silently vanished — the model then denied remembering something it
+    had just told the user it would remember.
+    """
+
+    async def test_save_memory_commits_its_write(
+        self, db_session: AsyncSession, test_user, test_tenant
+    ):
+        """save_memory must commit, so no later rollback can discard it."""
+        commits: list[int] = []
+        original_commit = db_session.commit
+
+        async def _recording_commit():
+            commits.append(1)
+            await original_commit()
+
+        db_session.commit = _recording_commit  # type: ignore[method-assign]
+
+        tools = build_memory_tools(
+            db=db_session, user_id=test_user.id, tenant_id=test_tenant.id,
+        )
+        result = await tools[0](key="commit_probe", value="kept")
+
+        assert result["action"] == "created"
+        assert commits, (
+            "save_memory must commit its own write: the streaming path rolls "
+            "the agent session back, which silently discarded the memory"
+        )
+
+    async def test_delete_memory_commits_its_write(
+        self, db_session: AsyncSession, test_user, test_tenant
+    ):
+        """delete_memory must commit, so the deletion is not undone."""
+        await create_memory(
+            db_session,
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            key="commit_probe_del",
+            value="value",
+            source="automatic",
+        )
+
+        commits: list[int] = []
+        original_commit = db_session.commit
+
+        async def _recording_commit():
+            commits.append(1)
+            await original_commit()
+
+        db_session.commit = _recording_commit  # type: ignore[method-assign]
+
+        tools = build_memory_tools(
+            db=db_session, user_id=test_user.id, tenant_id=test_tenant.id,
+        )
+        result = await tools[1](key="commit_probe_del")
+
+        assert result["action"] == "deleted"
+        assert commits, "delete_memory must commit its own write"

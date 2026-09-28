@@ -1290,8 +1290,15 @@ async def _build_system_prompt(
             - After saving or updating, briefly acknowledge it naturally
               (e.g. "I've saved that, I'll remember for next time").
             - Use list_memory to see what you already know about the user.
-            - Do NOT overwrite user-created memories (source=manual). If you
-              need to update one, ask the user first.
+            - Entries marked [user] were created by the user themselves.
+              Never change or remove one silently: call save_memory (or
+              delete_memory) and, if the result is "needs_confirmation", tell
+              the user what you found and ask whether to change it. Only once
+              the user agrees, call save_memory again with overwrite=True, or
+              delete_memory with force=True. Updating a [user] entry keeps it
+              owned by the user.
+            - Only claim you have remembered or forgotten something when the
+              tool reported that it actually did.
         """))
 
     # ---- Cross-session memory retrieval (Issue #229) -----------------------
@@ -1303,33 +1310,29 @@ async def _build_system_prompt(
                 retrieve_similar as _retrieve_similar,
             )
 
-            # Resolve whether retrieval is enabled:
-            #   session override (tri-state) → skill default → off
-            retrieval_enabled = session_data.get("cross_session_retrieval_enabled")
-            if retrieval_enabled is None:
-                # Fall back to skill config
-                skill_id = session_data.get("selected_skill_id")
-                if skill_id:
-                    result = await db.execute(
-                        select(Skill).where(Skill.id == skill_id)
-                    )
-                    skill_row = result.scalar_one_or_none()
-                    if skill_row:
-                        retrieval_enabled = skill_row.cross_session_retrieval_enabled
-                        max_snippets = skill_row.cross_session_max_snippets
-                        min_score = skill_row.cross_session_min_score
-                    else:
-                        retrieval_enabled = False
-                        max_snippets = 3
-                        min_score = 0.70
+            # Resolve numeric limits from the attached skill FIRST, then
+            # use the session tri-state override only for the on/off decision.
+            skill_id = session_data.get("selected_skill_id")
+            max_snippets = 3
+            min_score = 0.30
+            if skill_id:
+                result = await db.execute(
+                    select(Skill).where(Skill.id == skill_id)
+                )
+                skill_row = result.scalar_one_or_none()
+                if skill_row:
+                    max_snippets = skill_row.cross_session_max_snippets
+                    min_score = skill_row.cross_session_min_score
+                    retrieval_enabled = skill_row.cross_session_retrieval_enabled
                 else:
                     retrieval_enabled = False
-                    max_snippets = 3
-                    min_score = 0.30
             else:
-                # Use session-level defaults when skill doesn't apply
-                max_snippets = 3
-                min_score = 0.30
+                retrieval_enabled = False
+
+            # Session-level tri-state override (only the on/off decision)
+            session_override = session_data.get("cross_session_retrieval_enabled")
+            if session_override is not None:
+                retrieval_enabled = session_override
 
             if retrieval_enabled:
                 query_emb = await _embed_query(user_message)
@@ -3657,12 +3660,11 @@ async def _run_agent_stream(
                 # When memory tools complete, emit a dedicated event so the
                 # frontend can show "Memory updated" notifications.
                 if tool_name in ("save_memory", "delete_memory"):
-                    memory_action = "saved"
-                    if tool_name == "delete_memory":
-                        memory_action = "deleted"
-                    # Try to extract the memory key from output
+                    # Derive the action from the tool's own returned value
+                    raw_action = None
                     memory_key = None
                     if isinstance(output, dict):
+                        raw_action = output.get("action")
                         memory_key = output.get("key")
                     elif isinstance(output, str):
                         # Fallback: parse JSON string
@@ -3670,9 +3672,18 @@ async def _run_agent_stream(
                         try:
                             parsed = _json.loads(output)
                             if isinstance(parsed, dict):
+                                raw_action = parsed.get("action")
                                 memory_key = parsed.get("key")
                         except (_json.JSONDecodeError, TypeError):
                             pass
+                    # Map raw tool action → SSE action
+                    if raw_action in ("created", "updated"):
+                        memory_action = "saved"
+                    elif raw_action == "deleted":
+                        memory_action = "deleted"
+                    else:
+                        # Pass through needs_confirmation, error, not_found, or None
+                        memory_action = raw_action
                     yield _sse_event("memory_updated", {
                         "tool_name": tool_name,
                         "action": memory_action,

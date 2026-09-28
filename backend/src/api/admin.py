@@ -9,7 +9,7 @@ from typing import Literal
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -3806,6 +3806,11 @@ class AdminMemoryResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class AdminMemoryUpdate(BaseModel):
+    key: str | None = Field(default=None, min_length=1, max_length=255)
+    value: str | None = Field(default=None, min_length=1, max_length=8000)
+
+
 @router.get("/memories", response_model=PaginatedResponse[AdminMemoryResponse])
 async def admin_list_memories(
     tenant_id: str | None = None,
@@ -3837,6 +3842,38 @@ async def admin_list_memories(
         items=[AdminMemoryResponse.model_validate(e) for e in entries],
         total=total, page=page, page_size=page_size, total_pages=total_pages,
     )
+
+
+@router.put("/memories/{memory_id}", response_model=AdminMemoryResponse)
+async def admin_update_memory(
+    memory_id: str,
+    body: AdminMemoryUpdate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Update a memory entry.  Admin: any.  Manager: own tenant only."""
+    from ..db.orm.memory import Memory as MemoryORM
+    result = await db.execute(
+        select(MemoryORM).where(MemoryORM.id == memory_id)
+    )
+    entry = result.scalar_one_or_none()
+    if entry is None:
+        raise NotFoundError("Memory entry not found")
+    if current_user.role == "manager" and entry.tenant_id != current_user.tenant_id:
+        raise ForbiddenError("Managers can only update memories in their own tenant")
+
+    updated = await memory_service.admin_update_memory(db, memory_id=memory_id, key=body.key, value=body.value)
+    await write_audit_log(
+        db,
+        actor=current_user,
+        action="memory.updated",
+        target_type="memory",
+        target_id=memory_id,
+        tenant_id=current_user.tenant_id,
+        ip_address=_get_client_ip(request),
+    )
+    return AdminMemoryResponse.model_validate(updated)
 
 
 @router.delete("/memories/{memory_id}", status_code=204)

@@ -13,11 +13,17 @@
 import logging
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from agent_framework import tool
 
 from ..db.orm.memory import Memory
+from ..services.memory_service import (
+    find_global_memory,
+    remove_global_memory,
+    MEMORY_KEY_MAX_CHARS,
+    MEMORY_VALUE_MAX_CHARS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +47,7 @@ def build_memory_tools(
     """
 
     @tool
-    async def save_memory(key: str, value: str) -> dict[str, Any]:
+    async def save_memory(key: str, value: str, overwrite: bool = False) -> dict[str, Any]:
         """Save a piece of information to persistent user memory.
 
         Use this to remember facts, preferences, decisions, or any other
@@ -49,38 +55,86 @@ def build_memory_tools(
         If a memory entry with the same ``key`` already exists, it will be
         updated.
 
+        To overwrite a user-created (``source="manual"``) memory entry, call
+        this function again with ``overwrite=True`` after the user has
+        confirmed the change.
+
         Args:
             key: A short, descriptive key for the memory (e.g. "user_name",
                 "preferred_language", "project_deadline").
             value: The information to store.  Can be any text.
+            overwrite: If ``True``, overwrites any existing entry even if its
+                source is ``"manual"``.  Defaults to ``False``.
 
         Returns:
-            A dict with ``key``, ``value``, and ``action`` ("created" or
-            "updated") to confirm the operation.
+            A dict with ``key``, ``value``, and ``action`` (one of
+            ``"created"``, ``"updated"``, ``"needs_confirmation"``, or
+            ``"error"``) to confirm the operation.  When
+            ``"overwrote_manual": True`` is present the entry was updated
+            despite having ``source="manual"``.
         """
         try:
-            # Check if a global memory entry with this key already exists
-            result = await db.execute(
-                select(Memory).where(
-                    Memory.user_id == user_id,
-                    Memory.tenant_id == tenant_id,
-                    Memory.session_id.is_(None),
-                    Memory.key == key,
-                )
-            )
-            existing = result.scalar_one_or_none()
+            key = key.strip()
+            value = value.strip()
 
-            if existing:
-                # Protect user-created (manual) entries from agent overwrite
-                if existing.source == "manual":
+            if not key:
+                return {
+                    "key": key,
+                    "value": value,
+                    "action": "error",
+                    "message": "Key must not be empty.",
+                }
+            if len(key) > MEMORY_KEY_MAX_CHARS:
+                return {
+                    "key": key,
+                    "value": value,
+                    "action": "error",
+                    "message": (
+                        f"Key length {len(key)} exceeds the maximum "
+                        f"of {MEMORY_KEY_MAX_CHARS} characters."
+                    ),
+                }
+            if len(value) > MEMORY_VALUE_MAX_CHARS:
+                return {
+                    "key": key,
+                    "value": value,
+                    "action": "error",
+                    "message": (
+                        f"Value length {len(value)} exceeds the maximum "
+                        f"of {MEMORY_VALUE_MAX_CHARS} characters."
+                    ),
+                }
+
+            existing = await find_global_memory(
+                db, user_id=user_id, tenant_id=tenant_id, key=key,
+            )
+
+            if existing is not None:
+                if existing.source == "manual" and not overwrite:
                     return {
                         "key": key,
                         "value": value,
-                        "action": "skipped",
+                        "action": "needs_confirmation",
+                        "current_value": existing.value,
                         "message": (
-                            f"A user-created memory with key {key!r} already "
-                            "exists. Ask the user if they'd like to update it."
+                            f"A user-created memory with key {key!r} "
+                            "already exists. Ask the user to confirm the "
+                            "change, then call save_memory again with "
+                            "overwrite=True."
                         ),
+                    }
+                if overwrite and existing.source == "manual":
+                    existing.value = value
+                    existing.source = "manual"
+                    logger.debug(
+                        "save_memory overwrote manual key=%r for user=%s",
+                        key, user_id,
+                    )
+                    return {
+                        "key": key,
+                        "value": value,
+                        "action": "updated",
+                        "overwrote_manual": True,
                     }
                 existing.value = value
                 logger.debug(
@@ -92,7 +146,6 @@ def build_memory_tools(
                     "action": "updated",
                 }
 
-            # Create new global memory entry
             memory = Memory(
                 tenant_id=tenant_id,
                 user_id=user_id,
@@ -122,40 +175,50 @@ def build_memory_tools(
             }
 
     @tool
-    async def delete_memory(key: str) -> dict[str, Any]:
+    async def delete_memory(key: str, force: bool = False) -> dict[str, Any]:
         """Delete a memory entry by its key.
 
-        Removes a previously saved memory entry.  Only deletes entries
-        you (the agent) created — will not affect user-managed entries.
+        Removes a previously saved memory entry.  Agent-created entries
+        are deleted immediately.  User-created (``source="manual"``) entries
+        require ``force=True`` — the agent must only set this after the
+        explicit user has agreed to the deletion.
 
         Args:
             key: The key of the memory entry to delete.
+            force: If ``True``, also deletes user-created (``"manual"``)
+                entries.  Defaults to ``False``.
 
         Returns:
-            A dict with ``key``, ``action`` ("deleted" or "not_found"),
-            and an optional ``message`` field.
+            A dict with ``key``, ``action`` (``"deleted"``, ``"not_found"``,
+            ``"needs_confirmation"``, or ``"error"``), and an optional
+            ``message`` field.
         """
         try:
-            result = await db.execute(
-                select(Memory).where(
-                    Memory.user_id == user_id,
-                    Memory.tenant_id == tenant_id,
-                    Memory.session_id.is_(None),
-                    Memory.key == key,
-                    Memory.source == "automatic",  # Only delete agent-created entries
-                )
+            existing = await find_global_memory(
+                db, user_id=user_id, tenant_id=tenant_id, key=key,
             )
-            existing = result.scalar_one_or_none()
 
-            if not existing:
+            if existing is None:
                 return {
                     "key": key,
                     "action": "not_found",
-                    "message": f"No automatic memory entry found with key {key!r}",
+                    "message": f"No memory entry found with key {key!r}",
                 }
 
-            await db.execute(
-                delete(Memory).where(Memory.id == existing.id)
+            if existing.source == "manual" and not force:
+                return {
+                    "key": key,
+                    "action": "needs_confirmation",
+                    "message": (
+                        f"A user-created memory with key {key!r} exists. "
+                        "Ask the user to confirm deletion, then call "
+                        "delete_memory with force=True."
+                    ),
+                }
+
+            await remove_global_memory(
+                db, user_id=user_id, tenant_id=tenant_id, key=key,
+                commit=False,
             )
             logger.debug(
                 "delete_memory deleted key=%r for user=%s", key, user_id
@@ -176,41 +239,67 @@ def build_memory_tools(
             }
 
     @tool
-    async def list_memory() -> list[dict[str, Any]]:
+    async def list_memory() -> dict[str, Any]:
         """List all memory entries for the current user.
 
-        Returns all global memory entries (both automatic and manual),
-        including their keys, values, and whether they were created by
-        the agent or the user.
+        Returns global memory entries (both automatic and manual),
+        ordered newest first, up to 100 rows.
 
         Returns:
-            A list of dicts, each with ``key``, ``value``, ``source``
-            ("automatic" or "manual"), and ``created_at``.
+            A dict with ``entries`` (list of dicts each containing
+            ``key``, ``value``, ``source``, and ``created_at``),
+            ``total`` (the true count of matching entries), and
+            ``truncated`` (``True`` when ``total`` exceeds the number
+            of returned entries).
         """
-        result = await db.execute(
-            select(Memory).where(
-                Memory.user_id == user_id,
-                Memory.tenant_id == tenant_id,
-                Memory.session_id.is_(None),
-            ).order_by(Memory.created_at.desc())
-        )
-        entries = result.scalars().all()
+        try:
+            count_result = await db.execute(
+                select(func.count()).select_from(Memory).where(
+                    Memory.user_id == user_id,
+                    Memory.tenant_id == tenant_id,
+                    Memory.session_id.is_(None),
+                )
+            )
+            total = count_result.scalar_one()
 
-        memory_list: list[dict[str, Any]] = []
-        for entry in entries:
-            memory_list.append({
-                "key": entry.key,
-                "value": entry.value,
-                "source": entry.source,
-                "created_at": (
-                    entry.created_at.isoformat()
-                    if entry.created_at else None
-                ),
-            })
+            result = await db.execute(
+                select(Memory).where(
+                    Memory.user_id == user_id,
+                    Memory.tenant_id == tenant_id,
+                    Memory.session_id.is_(None),
+                )
+                .order_by(Memory.created_at.desc())
+                .limit(100)
+            )
+            entries_raw = result.scalars().all()
 
-        logger.debug(
-            "list_memory for user=%s → %d entries", user_id, len(memory_list)
-        )
-        return memory_list
+            memory_list: list[dict[str, Any]] = []
+            for entry in entries_raw:
+                memory_list.append({
+                    "key": entry.key,
+                    "value": entry.value,
+                    "source": entry.source,
+                    "created_at": (
+                        entry.created_at.isoformat()
+                        if entry.created_at else None
+                    ),
+                })
+
+            truncated = total > len(memory_list)
+
+            logger.debug(
+                "list_memory for user=%s → %d entries (total=%d, truncated=%s)",
+                user_id, len(memory_list), total, truncated,
+            )
+            return {
+                "entries": memory_list,
+                "total": total,
+                "truncated": truncated,
+            }
+        except Exception as exc:
+            logger.error(
+                "list_memory failed for user=%s: %s", user_id, exc
+            )
+            return {"error": str(exc)}
 
     return [save_memory, delete_memory, list_memory]

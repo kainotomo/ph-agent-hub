@@ -35,6 +35,7 @@ import {
   deleteAdminMemory,
   updateAdminMemory,
   listTenants,
+  listUsers,
   MemoryData,
 } from "../../services/admin";
 import { useAdminTable } from "../../hooks/useAdminTable";
@@ -74,6 +75,18 @@ export function MemoryList() {
   });
 
   const tenantNameById = new Map((tenants?.items || []).map((t) => [t.id, t.name]));
+
+  const { data: users } = useQuery({
+    queryKey: ["admin-users-memory-list"],
+    queryFn: () => listUsers({ page: 1, page_size: 100 }),
+  });
+
+  const userIdToLabel = new Map(
+    (users?.items || []).map((u) => [
+      u.id,
+      u.display_name ? u.display_name : u.email,
+    ]),
+  );
 
   const deleteMutation = useMutation({
     mutationFn: deleteAdminMemory,
@@ -149,6 +162,14 @@ export function MemoryList() {
       width: 120,
       ellipsis: true,
       responsive: ["lg" as const],
+      render: (v: string) => {
+        const label = userIdToLabel.get(v);
+        return label ? (
+          <Text>{label}</Text>
+        ) : (
+          <Text title={v}>{v.slice(0, 8)}…</Text>
+        );
+      },
     },
     {
       title: "Session",
@@ -298,7 +319,10 @@ export function MemoryList() {
                       {item.value}
                     </Paragraph>
                     <Text type="secondary" style={{ fontSize: 11 }}>
-                      User: {item.user_id.slice(0, 8)}… ·{" "}
+                      User:{" "}
+                      {userIdToLabel.get(item.user_id) ??
+                        `${item.user_id.slice(0, 8)}…`}{" "}
+                      ·{" "}
                       {new Date(item.created_at).toLocaleDateString()}
                     </Text>
                   </>

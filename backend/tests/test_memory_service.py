@@ -5,23 +5,31 @@
 # Complements ``test_memory_api.py`` which tests the HTTP layer.
 # =============================================================================
 
+import datetime
+import uuid
+from datetime import timedelta, datetime as dt, timezone
+
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.exceptions import ConflictError, ForbiddenError, NotFoundError
+from src.core.exceptions import ConflictError, ForbiddenError, NotFoundError, ValidationError
 from src.db.orm.memory import Memory
 from src.services.memory_service import (
     admin_delete_memory,
     admin_update_memory,
+    clear_memories,
     create_memory,
     delete_memory,
     delete_memory_by_key,
     find_global_memory,
     list_all_memories,
     list_memory,
+    merge_memories,
+    prune_memories,
     remove_global_memory,
+    select_memories_for_prompt,
     set_global_memory,
     update_memory,
     upsert_memory,
@@ -863,3 +871,589 @@ class TestUpdateMemoryConflictDetection:
         )
         assert updated.key == "stable_key"
         assert updated.value == "new"
+
+
+# ===========================================================================
+# SelectMemoriesForPrompt
+# ===========================================================================
+
+
+class TestSelectMemoriesForPrompt:
+    """Tests for select_memories_for_prompt — ranking-based memory selection."""
+
+    async def test_returns_all_and_total_when_fewer_than_limit(
+        self, db_session: AsyncSession, test_user, test_tenant
+    ):
+        """Fewer entries than limit should return all entries with correct total."""
+        await set_global_memory(
+            db_session,
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            key="k1",
+            value="v1",
+        )
+        await set_global_memory(
+            db_session,
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            key="k2",
+            value="v2",
+        )
+
+        items, total = await select_memories_for_prompt(
+            db_session,
+            user_id=test_user.id,
+            tenant_id=test_tenant.id,
+            limit=10,
+        )
+        assert len(items) == 2
+        assert total == 2
+
+    async def test_falls_back_to_recency_without_query(
+        self, db_session: AsyncSession, test_user, test_tenant
+    ):
+        """With query=None, should return entries ordered by recency, not use embeddings."""
+        await set_global_memory(
+            db_session,
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            key="alpha",
+            value="first",
+        )
+        await set_global_memory(
+            db_session,
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            key="beta",
+            value="second",
+        )
+        await set_global_memory(
+            db_session,
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            key="gamma",
+            value="third",
+        )
+
+        items, total = await select_memories_for_prompt(
+            db_session,
+            user_id=test_user.id,
+            tenant_id=test_tenant.id,
+            limit=2,
+            query=None,
+        )
+        assert len(items) == 2
+        assert total == 3
+        # Verify returned set is a 2-element subset of global entries
+        keys = {m.key for m in items}
+        assert keys.issubset({"alpha", "beta", "gamma"})
+        assert len(keys) == 2
+
+    async def test_ranks_by_relevance_when_query_provided(
+        self, db_session: AsyncSession, test_user, test_tenant, monkeypatch
+    ):
+        """When query is provided, entries should be ranked by semantic relevance."""
+        await set_global_memory(
+            db_session,
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            key="apple",
+            value="a fruit",
+        )
+        await set_global_memory(
+            db_session,
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            key="banana",
+            value="also a fruit",
+        )
+        await set_global_memory(
+            db_session,
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            key="car",
+            value="a vehicle",
+        )
+
+        # Fetch candidate rows in recency order (same order as the function does)
+        recency_stmt = (
+            select(Memory)
+            .where(
+                Memory.user_id == test_user.id,
+                Memory.tenant_id == test_tenant.id,
+                Memory.session_id.is_(None),
+            )
+            .order_by(
+                func.coalesce(Memory.updated_at, Memory.created_at).desc(),
+                Memory.id,
+            )
+        )
+        result = await db_session.execute(recency_stmt)
+        candidates = list(result.scalars().all())
+        # candidates[0] = latest, candidates[1] = middle, candidates[2] = oldest
+
+        # Monkeypatch rank_by_similarity with a fake that returns a fixed ordering
+        async def fake_rank(query, texts):
+            return [(2, 0.9), (0, 0.5), (1, 0.1)]
+
+        monkeypatch.setattr("src.services.memory_service.rank_by_similarity", fake_rank)
+
+        items, total = await select_memories_for_prompt(
+            db_session,
+            user_id=test_user.id,
+            tenant_id=test_tenant.id,
+            limit=2,
+            query="x",
+        )
+        assert len(items) == 2
+        assert total == 3
+        # The top 2 from ranking: index 2 (candidates[2]) and index 0 (candidates[0])
+        keys = {m.key for m in items}
+        expected_keys = {candidates[2].key, candidates[0].key}
+        assert keys == expected_keys
+
+    async def test_skips_ranking_when_total_within_limit(
+        self, db_session: AsyncSession, test_user, test_tenant, monkeypatch
+    ):
+        """When total entries <= limit, no embedding ranking should be called."""
+        await set_global_memory(
+            db_session,
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            key="only_one",
+            value="singleton",
+        )
+
+        async def fake_rank(query, texts):
+            raise AssertionError("rank_by_similarity should not have been called")
+
+        monkeypatch.setattr("src.services.memory_service.rank_by_similarity", fake_rank)
+
+        items, total = await select_memories_for_prompt(
+            db_session,
+            user_id=test_user.id,
+            tenant_id=test_tenant.id,
+            limit=5,
+            query="x",
+        )
+        assert len(items) == 1
+        assert total == 1
+
+    async def test_excludes_session_scoped_entries(
+        self, db_session: AsyncSession, test_user, test_tenant, test_session
+    ):
+        """Only global (session_id IS NULL) entries should be returned."""
+        await set_global_memory(
+            db_session,
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            key="global_key",
+            value="global value",
+        )
+        await create_memory(
+            db_session,
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            key="session_key",
+            value="session value",
+            session_id=test_session.id,
+        )
+
+        items, total = await select_memories_for_prompt(
+            db_session,
+            user_id=test_user.id,
+            tenant_id=test_tenant.id,
+            limit=10,
+        )
+        assert len(items) == 1
+        assert total == 1
+        assert items[0].key == "global_key"
+
+    async def test_empty_for_new_user(
+        self, db_session: AsyncSession, test_user, test_tenant
+    ):
+        """User with no global memory should get empty results."""
+        items, total = await select_memories_for_prompt(
+            db_session,
+            user_id=test_user.id,
+            tenant_id=test_tenant.id,
+            limit=10,
+        )
+        assert items == []
+        assert total == 0
+
+
+# ===========================================================================
+# PruneMemories
+# ===========================================================================
+
+
+class TestPruneMemories:
+    """Tests for prune_memories — entry-cap and age-retention pruning."""
+
+    async def test_entry_cap_deletes_oldest_automatic_only(
+        self, db_session, test_user, test_tenant
+    ):
+        """Entry cap deletes only automatic rows, preserving manual."""
+        mems = [
+            Memory(
+                id=str(uuid.uuid4()), tenant_id=test_tenant.id, user_id=test_user.id,
+                session_id=None, key=f"auto{i}", value=f"v{i}",
+                source="automatic",
+                created_at=dt(2024, 1, 1, tzinfo=timezone.utc) + timedelta(days=i),
+            )
+            for i in range(5)
+        ]
+        mems += [
+            Memory(
+                id=str(uuid.uuid4()), tenant_id=test_tenant.id, user_id=test_user.id,
+                session_id=None, key=f"manual{i}", value=f"mv{i}",
+                source="manual",
+                created_at=dt(2024, 1, 10, tzinfo=timezone.utc) + timedelta(days=i),
+            )
+            for i in range(2)
+        ]
+        db_session.add_all(mems)
+        await db_session.flush()
+
+        result = await prune_memories(
+            db_session, user_id=test_user.id, tenant_id=test_tenant.id,
+            max_entries=3, retention_days=0,
+        )
+        assert result == 4  # 5 automatic deleted, keeping 1 auto + 2 manual = 3 total (cap 3)
+
+        rows = (
+            await db_session.execute(
+                select(Memory).where(
+                    Memory.user_id == test_user.id,
+                    Memory.tenant_id == test_tenant.id,
+                )
+            )
+        ).scalars().all()
+        ids = {r.id for r in rows}
+        keys = {r.key for r in rows}
+        assert len(rows) == 3
+        assert keys == {"manual0", "manual1", "auto4"}
+        for r in rows:
+            if r.key.startswith("auto"):
+                assert r.key == "auto4"
+
+    async def test_entry_cap_disabled_when_zero(
+        self, db_session, test_user, test_tenant
+    ):
+        """max_entries=0 disables the cap; no rows deleted."""
+        for i in range(5):
+            db_session.add(Memory(
+                id=str(uuid.uuid4()), tenant_id=test_tenant.id, user_id=test_user.id,
+                session_id=None, key=f"cap{i}", value=f"v{i}",
+                source="automatic",
+                created_at=dt(2024, 1, 1, tzinfo=timezone.utc) + timedelta(days=i),
+            ))
+        await db_session.flush()
+
+        result = await prune_memories(
+            db_session, user_id=test_user.id, tenant_id=test_tenant.id,
+            max_entries=0,
+        )
+        assert result == 0
+
+        rows = (
+            await db_session.execute(
+                select(Memory).where(
+                    Memory.user_id == test_user.id,
+                    Memory.tenant_id == test_tenant.id,
+                )
+            )
+        ).scalars().all()
+        assert len(rows) == 5
+
+    async def test_retention_days_deletes_only_old_automatic(
+        self, db_session, test_user, test_tenant
+    ):
+        """Only automatic entries older than retention_days are pruned."""
+        db_session.add(Memory(
+            id=str(uuid.uuid4()), tenant_id=test_tenant.id, user_id=test_user.id,
+            session_id=None, key="old_auto", value="old",
+            source="automatic",
+            created_at=dt.now(timezone.utc) - timedelta(days=40),
+        ))
+        db_session.add(Memory(
+            id=str(uuid.uuid4()), tenant_id=test_tenant.id, user_id=test_user.id,
+            session_id=None, key="new_auto", value="new",
+            source="automatic",
+            created_at=dt.now(timezone.utc) - timedelta(days=1),
+        ))
+        db_session.add(Memory(
+            id=str(uuid.uuid4()), tenant_id=test_tenant.id, user_id=test_user.id,
+            session_id=None, key="old_manual", value="old",
+            source="manual",
+            created_at=dt.now(timezone.utc) - timedelta(days=40),
+        ))
+        await db_session.flush()
+
+        result = await prune_memories(
+            db_session, user_id=test_user.id, tenant_id=test_tenant.id,
+            retention_days=30, max_entries=0,
+        )
+        assert result == 1  # only the old automatic row
+
+        keys = (
+            await db_session.execute(
+                select(Memory.key).where(
+                    Memory.user_id == test_user.id,
+                    Memory.tenant_id == test_tenant.id,
+                )
+            )
+        ).scalars().all()
+        assert set(keys) == {"new_auto", "old_manual"}
+
+    async def test_retention_disabled_when_zero(
+        self, db_session, test_user, test_tenant
+    ):
+        """retention_days=0 disables age pruning."""
+        db_session.add(Memory(
+            id=str(uuid.uuid4()), tenant_id=test_tenant.id, user_id=test_user.id,
+            session_id=None, key="old", value="data",
+            source="automatic",
+            created_at=dt.now(timezone.utc) - timedelta(days=40),
+        ))
+        await db_session.flush()
+
+        result = await prune_memories(
+            db_session, user_id=test_user.id, tenant_id=test_tenant.id,
+            retention_days=0, max_entries=0,
+        )
+        assert result == 0
+        rows = (
+            await db_session.execute(
+                select(Memory).where(
+                    Memory.user_id == test_user.id,
+                    Memory.tenant_id == test_tenant.id,
+                )
+            )
+        ).scalars().all()
+        assert len(rows) == 1
+
+    async def test_does_not_touch_other_users_rows(
+        self, db_session, test_user, test_tenant, second_user, second_tenant
+    ):
+        """Pruning one user's memories must not affect another user's."""
+        db_session.add(Memory(
+            id=str(uuid.uuid4()), tenant_id=second_tenant.id, user_id=second_user.id,
+            session_id=None, key="other", value="safe",
+            source="automatic",
+            created_at=dt.now(timezone.utc) - timedelta(days=100),
+        ))
+        await db_session.flush()
+
+        await prune_memories(
+            db_session, user_id=test_user.id, tenant_id=test_tenant.id,
+            max_entries=1,
+        )
+
+        other_row = (
+            await db_session.execute(
+                select(Memory).where(
+                    Memory.user_id == second_user.id,
+                    Memory.tenant_id == second_tenant.id,
+                )
+            )
+        ).scalars().first()
+        assert other_row is not None
+        assert other_row.key == "other"
+
+
+# ===========================================================================
+# ClearMemories
+# ===========================================================================
+
+
+class TestClearMemories:
+    """Tests for clear_memories — bulk-delete all entries for a user."""
+
+    async def test_deletes_all_rows_for_user_and_returns_count(
+        self, db_session, test_user, test_tenant, test_session
+    ):
+        """clear_memories deletes every row for the user and returns the count."""
+        await create_memory(
+            db_session, tenant_id=test_tenant.id, user_id=test_user.id,
+            key="g1", value="v1",
+        )
+        await create_memory(
+            db_session, tenant_id=test_tenant.id, user_id=test_user.id,
+            key="g2", value="v2",
+        )
+        await create_memory(
+            db_session, tenant_id=test_tenant.id, user_id=test_user.id,
+            key="s1", value="v3", session_id=test_session.id,
+        )
+
+        result = await clear_memories(
+            db_session, user_id=test_user.id, tenant_id=test_tenant.id,
+        )
+        assert result == 3
+
+        rows = (
+            await db_session.execute(
+                select(Memory).where(
+                    Memory.user_id == test_user.id,
+                    Memory.tenant_id == test_tenant.id,
+                )
+            )
+        ).scalars().all()
+        assert len(rows) == 0
+
+    async def test_does_not_touch_other_users_rows(
+        self, db_session, test_user, test_tenant, second_user, second_tenant
+    ):
+        """Clearing one user must not affect another user's memories."""
+        await create_memory(
+            db_session, tenant_id=second_tenant.id, user_id=second_user.id,
+            key="other", value="safe",
+        )
+
+        await clear_memories(
+            db_session, user_id=test_user.id, tenant_id=test_tenant.id,
+        )
+
+        other_row = (
+            await db_session.execute(
+                select(Memory).where(
+                    Memory.user_id == second_user.id,
+                    Memory.tenant_id == second_tenant.id,
+                )
+            )
+        ).scalars().first()
+        assert other_row is not None
+        assert other_row.key == "other"
+
+
+# ===========================================================================
+# MergeMemories
+# ===========================================================================
+
+
+class TestMergeMemories:
+    """Tests for merge_memories — merge values from sources into target."""
+
+    async def test_merges_values_and_deletes_sources(
+        self, db_session, test_user, test_tenant
+    ):
+        """Target value absorbs source values; sources are deleted."""
+        target = await set_global_memory(
+            db_session, tenant_id=test_tenant.id, user_id=test_user.id,
+            key="colour", value="blue",
+        )
+        source1 = await set_global_memory(
+            db_session, tenant_id=test_tenant.id, user_id=test_user.id,
+            key="city", value="Berlin",
+        )
+        source2 = await set_global_memory(
+            db_session, tenant_id=test_tenant.id, user_id=test_user.id,
+            key="job", value="engineer",
+        )
+
+        merged = await merge_memories(
+            db_session, user_id=test_user.id, tenant_id=test_tenant.id,
+            target_id=target.id, source_ids=[source1.id, source2.id],
+        )
+        assert "blue" in merged.value
+        assert "Berlin" in merged.value
+        assert "engineer" in merged.value
+
+        assert await find_global_memory(db_session, user_id=test_user.id, tenant_id=test_tenant.id, key="city") is None
+        assert await find_global_memory(db_session, user_id=test_user.id, tenant_id=test_tenant.id, key="job") is None
+        assert await find_global_memory(db_session, user_id=test_user.id, tenant_id=test_tenant.id, key="colour") is not None
+
+    async def test_skips_value_already_contained(
+        self, db_session, test_user, test_tenant
+    ):
+        """If a source value is already in the target value, it is skipped."""
+        target = await set_global_memory(
+            db_session, tenant_id=test_tenant.id, user_id=test_user.id,
+            key="t", value="blue",
+        )
+        source = await set_global_memory(
+            db_session, tenant_id=test_tenant.id, user_id=test_user.id,
+            key="s", value="blue",
+        )
+
+        merged = await merge_memories(
+            db_session, user_id=test_user.id, tenant_id=test_tenant.id,
+            target_id=target.id, source_ids=[source.id],
+        )
+        assert merged.value == "blue"
+
+    async def test_raises_not_found_for_unknown_id(
+        self, db_session, test_user, test_tenant
+    ):
+        """A non-existent ID in target_id raises NotFoundError."""
+        with pytest.raises(NotFoundError):
+            await merge_memories(
+                db_session, user_id=test_user.id, tenant_id=test_tenant.id,
+                target_id=str(uuid.uuid4()), source_ids=[],
+            )
+
+    async def test_raises_forbidden_for_other_users_target(
+        self, db_session, test_user, test_tenant, second_user, second_tenant
+    ):
+        """Target owned by another user raises ForbiddenError; source is untouched."""
+        target = await set_global_memory(
+            db_session, tenant_id=second_tenant.id, user_id=second_user.id,
+            key="mine", value="data",
+        )
+        source = await set_global_memory(
+            db_session, tenant_id=test_tenant.id, user_id=test_user.id,
+            key="theirs", value="info",
+        )
+
+        with pytest.raises(ForbiddenError):
+            await merge_memories(
+                db_session, user_id=test_user.id, tenant_id=test_tenant.id,
+                target_id=target.id, source_ids=[source.id],
+            )
+
+        # Source must still exist
+        check = await find_global_memory(db_session, user_id=test_user.id, tenant_id=test_tenant.id, key="theirs")
+        assert check is not None
+
+    async def test_raises_validation_error_when_target_is_a_source(
+        self, db_session, test_user, test_tenant
+    ):
+        """target_id in source_ids raises ValidationError."""
+        mem = await set_global_memory(
+            db_session, tenant_id=test_tenant.id, user_id=test_user.id,
+            key="dup", value="v",
+        )
+
+        with pytest.raises(ValidationError):
+            await merge_memories(
+                db_session, user_id=test_user.id, tenant_id=test_tenant.id,
+                target_id=mem.id, source_ids=[mem.id],
+            )
+
+    async def test_raises_validation_error_when_merged_too_long(
+        self, db_session, test_user, test_tenant
+    ):
+        """Merging values that exceed MEMORY_VALUE_MAX_CHARS raises ValidationError; both rows stay."""
+        target = await set_global_memory(
+            db_session, tenant_id=test_tenant.id, user_id=test_user.id,
+            key="big_target", value="a" * 5000,
+        )
+        source = await set_global_memory(
+            db_session, tenant_id=test_tenant.id, user_id=test_user.id,
+            key="big_source", value="b" * 5000,
+        )
+
+        with pytest.raises(ValidationError):
+            await merge_memories(
+                db_session, user_id=test_user.id, tenant_id=test_tenant.id,
+                target_id=target.id, source_ids=[source.id],
+            )
+
+        # Both rows must still exist
+        t_check = await find_global_memory(db_session, user_id=test_user.id, tenant_id=test_tenant.id, key="big_target")
+        s_check = await find_global_memory(db_session, user_id=test_user.id, tenant_id=test_tenant.id, key="big_source")
+        assert t_check is not None
+        assert s_check is not None
+

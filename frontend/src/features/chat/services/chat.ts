@@ -626,6 +626,30 @@ export function updateMemory(
   });
 }
 
+export interface MemoryExportResponse {
+  exported_at: string;
+  count: number;
+  entries: MemoryEntry[];
+}
+
+export function exportMemory(sessionId?: string): Promise<MemoryExportResponse> {
+  const query = new URLSearchParams();
+  if (sessionId) query.set("session_id", sessionId);
+  const qs = query.toString();
+  return api<MemoryExportResponse>("/memory/export" + (qs ? "?" + qs : ""));
+}
+
+export function clearMemory(): Promise<{ deleted: number }> {
+  return api<{ deleted: number }>("/memory", { method: "DELETE" });
+}
+
+export function mergeMemory(data: {
+  target_id: string;
+  source_ids: string[];
+}): Promise<MemoryEntry> {
+  return api<MemoryEntry>("/memory/merge", { method: "POST", body: data });
+}
+
 // ---------------------------------------------------------------------------
 // Session Folders (Issue #526)
 // ---------------------------------------------------------------------------

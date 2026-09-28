@@ -22,9 +22,11 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from agent_framework import tool
 
+from ..core.config import settings
 from ..db.orm.memory import Memory
 from ..services.memory_service import (
     find_global_memory,
+    prune_memories,
     remove_global_memory,
     MEMORY_KEY_MAX_CHARS,
     MEMORY_VALUE_MAX_CHARS,
@@ -50,6 +52,16 @@ def build_memory_tools(
         user_id: The current user's ID.
         tenant_id: The current tenant's ID.
     """
+
+    async def _enforce_limits():
+        """Run prune_memories so the agent save path honours the growth policy."""
+        try:
+            await prune_memories(db, user_id=user_id, tenant_id=tenant_id)
+        except Exception as exc:
+            logger.warning(
+                "prune_memories failed after save for user=%s: %s",
+                user_id, exc,
+            )
 
     @tool
     async def save_memory(key: str, value: str, overwrite: bool = False) -> dict[str, Any]:
@@ -132,6 +144,7 @@ def build_memory_tools(
                     existing.value = value
                     existing.source = "manual"
                     await db.commit()
+                    await _enforce_limits()
                     logger.debug(
                         "save_memory overwrote manual key=%r for user=%s",
                         key, user_id,
@@ -144,6 +157,7 @@ def build_memory_tools(
                     }
                 existing.value = value
                 await db.commit()
+                await _enforce_limits()
                 logger.debug(
                     "save_memory updated key=%r for user=%s", key, user_id
                 )
@@ -163,6 +177,7 @@ def build_memory_tools(
             )
             db.add(memory)
             await db.commit()
+            await _enforce_limits()
             logger.debug(
                 "save_memory created key=%r for user=%s", key, user_id
             )
@@ -251,14 +266,29 @@ def build_memory_tools(
         """List all memory entries for the current user.
 
         Returns global memory entries (both automatic and manual),
-        ordered newest first, up to 100 rows.
+        ordered newest first.  Output is self-bounded so the runner
+        tool-output cap cannot silently clip the response.
+
+        * At most ``settings.MEMORY_TOOL_MAX_ENTRIES`` newest entries
+          are fetched from the DB (default 100).
+        * Entries are then accumulated into the response while the
+          running character sum stays within
+          ``settings.MEMORY_TOOL_MAX_CHARS`` (default 20 000).  Each
+          entry costs ``len(key) + len(value) + 32`` characters toward
+          the budget.  When adding the next entry would overflow the
+          budget **and** at least one entry is already present the
+          loop stops early, so the model always receives something.
 
         Returns:
             A dict with ``entries`` (list of dicts each containing
             ``key``, ``value``, ``source``, and ``created_at``),
-            ``total`` (the true count of matching entries), and
+            ``total`` (the true count of matching entries),
             ``truncated`` (``True`` when ``total`` exceeds the number
-            of returned entries).
+            of returned entries),
+            ``returned`` (number of entries actually returned), and,
+            when ``truncated`` is ``True``, also ``omitted`` (total -
+            returned) and ``message`` explaining that older entries
+            were omitted to stay within the output budget.
         """
         try:
             count_result = await db.execute(
@@ -270,6 +300,9 @@ def build_memory_tools(
             )
             total = count_result.scalar_one()
 
+            max_entries = settings.MEMORY_TOOL_MAX_ENTRIES
+            max_chars = settings.MEMORY_TOOL_MAX_CHARS
+
             result = await db.execute(
                 select(Memory).where(
                     Memory.user_id == user_id,
@@ -277,12 +310,16 @@ def build_memory_tools(
                     Memory.session_id.is_(None),
                 )
                 .order_by(Memory.created_at.desc())
-                .limit(100)
+                .limit(max_entries)
             )
             entries_raw = result.scalars().all()
 
             memory_list: list[dict[str, Any]] = []
+            used = 0
             for entry in entries_raw:
+                item_len = len(entry.key) + len(entry.value) + 32
+                if memory_list and used + item_len > max_chars:
+                    break
                 memory_list.append({
                     "key": entry.key,
                     "value": entry.value,
@@ -292,18 +329,28 @@ def build_memory_tools(
                         if entry.created_at else None
                     ),
                 })
+                used += item_len
 
             truncated = total > len(memory_list)
+
+            resp: dict[str, Any] = {
+                "entries": memory_list,
+                "total": total,
+                "truncated": truncated,
+                "returned": len(memory_list),
+            }
+            if truncated:
+                resp["omitted"] = total - len(memory_list)
+                resp["message"] = (
+                    "Older entries were omitted to stay within the output "
+                    "budget. Use delete_memory to remove stale entries."
+                )
 
             logger.debug(
                 "list_memory for user=%s → %d entries (total=%d, truncated=%s)",
                 user_id, len(memory_list), total, truncated,
             )
-            return {
-                "entries": memory_list,
-                "total": total,
-                "truncated": truncated,
-            }
+            return resp
         except Exception as exc:
             logger.error(
                 "list_memory failed for user=%s: %s", user_id, exc

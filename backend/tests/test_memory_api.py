@@ -11,6 +11,8 @@ import httpx
 import pytest
 import pytest_asyncio
 
+from sqlalchemy import select
+from src.db.orm.audit_logs import AuditLog
 from src.main import app
 
 pytestmark = [
@@ -330,3 +332,235 @@ class TestMemoryTenantIsolation:
         headers_b = auth_headers(second_user)
         resp = await async_client.delete(f"/api/memory/{mem_id}", headers=headers_b)
         assert resp.status_code == 403
+
+
+# =============================================================================
+# Export, Clear, Merge, and Audit Logging Tests
+# =============================================================================
+
+
+class TestExportMemory:
+    """Tests for GET /memory/export."""
+
+    async def test_export_returns_all_entries(
+        self, async_client, auth_headers, test_user
+    ):
+        """Verify export returns all user entries."""
+        headers = auth_headers(test_user)
+        await async_client.post(
+            "/api/memory", json={"key": "key1", "value": "val1"}, headers=headers
+        )
+        await async_client.post(
+            "/api/memory", json={"key": "key2", "value": "val2"}, headers=headers
+        )
+        resp = await async_client.get("/api/memory/export", headers=headers)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["count"] == 2
+        assert len(data["entries"]) == 2
+        assert "exported_at" in data
+
+    async def test_export_requires_auth(self, async_client):
+        """Verify unauthenticated request is rejected."""
+        resp = await async_client.get("/api/memory/export")
+        assert resp.status_code == 401
+
+
+class TestClearMemory:
+    """Tests for DELETE /memory."""
+
+    async def test_clear_removes_all_entries(
+        self, async_client, auth_headers, test_user
+    ):
+        """Verify clearing removes all entries and returns correct count."""
+        headers = auth_headers(test_user)
+        await async_client.post(
+            "/api/memory", json={"key": "k1", "value": "v1"}, headers=headers
+        )
+        await async_client.post(
+            "/api/memory", json={"key": "k2", "value": "v2"}, headers=headers
+        )
+        resp = await async_client.delete("/api/memory", headers=headers)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["deleted"] == 2
+
+        list_resp = await async_client.get("/api/memory", headers=headers)
+        assert list_resp.json()["total"] == 0
+
+    async def test_clear_only_affects_current_user(
+        self, async_client, auth_headers, test_user, second_user
+    ):
+        """Verify clearing only removes the current user's entries."""
+        headers_a = auth_headers(test_user)
+        headers_b = auth_headers(second_user)
+        await async_client.post(
+            "/api/memory", json={"key": "a_key", "value": "a_val"}, headers=headers_a
+        )
+        await async_client.post(
+            "/api/memory", json={"key": "b_key", "value": "b_val"}, headers=headers_b
+        )
+        await async_client.delete("/api/memory", headers=headers_a)
+        list_resp = await async_client.get("/api/memory", headers=headers_b)
+        assert list_resp.json()["total"] == 1
+
+
+class TestMergeMemory:
+    """Tests for POST /memory/merge."""
+
+    async def test_merge_combines_entries(
+        self, async_client, auth_headers, test_user
+    ):
+        """Verify merging combines source values into the target entry."""
+        headers = auth_headers(test_user)
+        r1 = await async_client.post(
+            "/api/memory", json={"key": "colour", "value": "blue"}, headers=headers
+        )
+        r2 = await async_client.post(
+            "/api/memory", json={"key": "city", "value": "Berlin"}, headers=headers
+        )
+        id1 = r1.json()["id"]
+        id2 = r2.json()["id"]
+
+        resp = await async_client.post(
+            "/api/memory/merge",
+            json={"target_id": id1, "source_ids": [id2]},
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert "blue" in data["value"] and "Berlin" in data["value"]
+
+        list_resp = await async_client.get("/api/memory", headers=headers)
+        assert list_resp.json()["total"] == 1
+
+    async def test_merge_other_users_entry_forbidden(
+        self, async_client, auth_headers, test_user, second_user
+    ):
+        """Verify user B cannot merge an entry owned by user A."""
+        headers_a = auth_headers(second_user)
+        headers_b = auth_headers(test_user)
+        r1 = await async_client.post(
+            "/api/memory", json={"key": "target", "value": "t_val"}, headers=headers_a
+        )
+        r2 = await async_client.post(
+            "/api/memory", json={"key": "source", "value": "s_val"}, headers=headers_b
+        )
+        target_id = r1.json()["id"]
+        source_id = r2.json()["id"]
+
+        resp = await async_client.post(
+            "/api/memory/merge",
+            json={"target_id": target_id, "source_ids": [source_id]},
+            headers=headers_b,
+        )
+        assert resp.status_code == 403
+
+
+class TestMemoryAuditLogging:
+    """Verify audit rows are written for create, update, delete, and clear."""
+
+    async def test_create_writes_audit_row(
+        self, async_client, auth_headers, test_user, db_session
+    ):
+        """Verify creating a memory entry writes an audit row."""
+        headers = auth_headers(test_user)
+        resp = await async_client.post(
+            "/api/memory", json={"key": "audit_k", "value": "audit_v"}, headers=headers
+        )
+        created_id = resp.json()["id"]
+        rows = (
+            await db_session.execute(
+                select(AuditLog).where(
+                    AuditLog.action == "memory.created",
+                    AuditLog.target_id == created_id,
+                )
+            )
+        ).scalars().all()
+        assert len(rows) == 1
+
+    async def test_update_writes_audit_row(
+        self, async_client, auth_headers, test_user, db_session
+    ):
+        """Verify updating a memory entry writes an audit row."""
+        headers = auth_headers(test_user)
+        resp = await async_client.post(
+            "/api/memory", json={"key": "upd", "value": "orig"}, headers=headers
+        )
+        mem_id = resp.json()["id"]
+        await async_client.put(
+            f"/api/memory/{mem_id}", json={"value": "updated"}, headers=headers
+        )
+        rows = (
+            await db_session.execute(
+                select(AuditLog).where(
+                    AuditLog.action == "memory.updated",
+                    AuditLog.target_id == mem_id,
+                )
+            )
+        ).scalars().all()
+        assert len(rows) == 1
+
+    async def test_delete_writes_audit_row(
+        self, async_client, auth_headers, test_user, db_session
+    ):
+        """Verify deleting a memory entry writes an audit row."""
+        headers = auth_headers(test_user)
+        resp = await async_client.post(
+            "/api/memory", json={"key": "del", "value": "data"}, headers=headers
+        )
+        mem_id = resp.json()["id"]
+        resp = await async_client.delete(f"/api/memory/{mem_id}", headers=headers)
+        assert resp.status_code == 204
+        rows = (
+            await db_session.execute(
+                select(AuditLog).where(
+                    AuditLog.action == "memory.deleted",
+                    AuditLog.target_id == mem_id,
+                )
+            )
+        ).scalars().all()
+        assert len(rows) == 1
+
+    async def test_clear_writes_audit_row(
+        self, async_client, auth_headers, test_user, db_session
+    ):
+        """Verify clearing all memory writes an audit row for the actor."""
+        headers = auth_headers(test_user)
+        await async_client.post(
+            "/api/memory", json={"key": "clear_k", "value": "clear_v"}, headers=headers
+        )
+        await async_client.delete("/api/memory", headers=headers)
+        rows = (
+            await db_session.execute(
+                select(AuditLog).where(
+                    AuditLog.action == "memory.cleared",
+                    AuditLog.actor_id == test_user.id,
+                )
+            )
+        ).scalars().all()
+        assert len(rows) == 1
+
+
+# =============================================================================
+# Admin Memory Pagination Bounds Tests (Issue #569 L3)
+# =============================================================================
+
+
+class TestAdminMemoryPaginationBounds:
+    """Verify that the /admin/memories endpoint enforces page/page_size bounds."""
+
+    async def test_page_zero_rejected(self, async_client, auth_headers, admin_user):
+        resp = await async_client.get("/api/admin/memories?page=0", headers=auth_headers(admin_user))
+        assert resp.status_code == 422
+
+    async def test_page_size_zero_rejected(self, async_client, auth_headers, admin_user):
+        resp = await async_client.get("/api/admin/memories?page_size=0", headers=auth_headers(admin_user))
+        assert resp.status_code == 422
+
+    async def test_page_size_above_max_rejected(self, async_client, auth_headers, admin_user):
+        resp = await async_client.get("/api/admin/memories?page_size=201", headers=auth_headers(admin_user))
+        assert resp.status_code == 422
+
+    async def test_valid_bounds_accepted(self, async_client, auth_headers, admin_user):
+        resp = await async_client.get("/api/admin/memories?page=1&page_size=200", headers=auth_headers(admin_user))
+        assert resp.status_code == 200

@@ -10,6 +10,7 @@
 from .tenants import Tenant
 from .users import User
 from .models import Model
+from .model_role_bindings import ModelRoleBinding
 from .groups import UserGroup, UserGroupMember, ModelGroup
 from .mcp_servers import McpServer
 from .a2a_servers import A2aServer
@@ -36,6 +37,8 @@ from .embed_configs import EmbedConfig
 from .autopilot_runs import AutopilotRun
 from .scheduled_tasks import ScheduledTask
 from .notifications import Notification
+from .workflow_checkpoints import WorkflowCheckpointRecord
+from .workflow_definitions import WorkflowDefinitionRecord
 
 __all__ = [
     "A2aCallLog",
@@ -43,6 +46,7 @@ __all__ = [
     "Tenant",
     "User",
     "Model",
+    "ModelRoleBinding",
     "UserGroup",
     "UserGroupMember",
     "ModelGroup",
@@ -73,4 +77,6 @@ __all__ = [
     "AutopilotRun",
     "ScheduledTask",
     "Notification",
+    "WorkflowCheckpointRecord",
+    "WorkflowDefinitionRecord",
 ]

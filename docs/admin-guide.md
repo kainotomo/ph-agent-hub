@@ -309,6 +309,23 @@ Toggle the **Enabled** flag. Disabled models are hidden from the user-facing mod
 - API keys are **never returned in API responses** (even to admins)
 - To rotate a key, edit the model and enter the new key
 
+### 6.4 Binding Model Roles to Workflows
+
+Workflow definitions reference logical model roles — `@reasoning`, `@general`, `@fast` — declared in backend code; a definition must never name a concrete model. A tenant admin binds each role to one or more of that tenant's models on the **Admin Area → Model Roles** screen.
+
+1. Open **Admin Area → Model Roles**
+2. For each role, select the desired models in the multi-select widget
+3. Click **Save** to persist the bindings
+4. Use **Clear** to unbind all models from a role
+
+An admin may switch tenants with the tenant selector in the top bar; a manager always operates on their own tenant.
+
+Unbound roles are a hard runtime failure, not an empty state: running a workflow that uses an unbound role fails with `No model bound to role '@reasoning' for tenant '<tenant-id>'`. A role bound only to disabled models fails the same way.
+
+The backend re-validates on save: a model that does not exist, or that belongs to another tenant, is rejected and the screen shows the error.
+
+The change takes effect for subsequent runs; no restart is required.
+
 ---
 
 ## 7. Managing Tools

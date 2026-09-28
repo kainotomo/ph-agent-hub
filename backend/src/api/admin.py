@@ -27,6 +27,7 @@ from ..core.dependencies import (
 )
 from ..core.exceptions import ConflictError, ForbiddenError, NotFoundError, ValidationError
 from ..core.pagination import PaginatedResponse
+from ..core.config import settings
 from ..core.redis import store_a2a_oauth_state
 from ..db.orm.users import User as UserORM
 from ..services.audit_service import list_audit_logs, write_audit_log
@@ -145,6 +146,43 @@ from ..services.group_service import (
     update_group as _svc_update_group,
 )
 from ..services import memory_service
+from ..agents.workflows.roles import (
+    AGENT_ROLES,
+    MODEL_ROLES,
+    model_roles,
+    tool_roles,
+)
+from ..services.model_role_service import (
+    clear_role_bindings as _svc_clear_role_bindings,
+    list_role_bindings as _svc_list_role_bindings,
+    set_role_bindings as _svc_set_role_bindings,
+)
+from ..agents.registry import (
+    get_registered_agent,
+    list_registered_agent_keys,
+)
+from ..services.workflow_definition_service import (
+    create_definition as _svc_create_definition,
+    delete_definition as _svc_delete_definition,
+    get_definition as _svc_get_definition,
+    list_definitions as _svc_list_definitions,
+    update_definition as _svc_update_definition,
+)
+from ..agents.workflows.conditions import condition_names
+from ..agents.workflows.definition import (
+    DEFAULT_BRANCH,
+    WorkflowDefinition as _WorkflowDefinition,
+)
+from ..agents.workflows.identity import (
+    assert_key_immutable,
+    classify_edit,
+    edit_report_with_impact,
+    graph_signature_hash,
+)
+from ..services.workflow_reference_service import (
+    assert_definition_references,
+)
+from ..services.workflow_checkpoint_service import count_paused_runs
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -371,6 +409,7 @@ class ToolCreate(BaseModel):
     config: dict | None = None
     code: str | None = None
     enabled: bool = True
+    approval_required: bool = False
     is_public: bool = False
 
 
@@ -381,6 +420,7 @@ class ToolUpdate(BaseModel):
     config: dict | None = None
     code: str | None = None
     enabled: bool | None = None
+    approval_required: bool | None = None
     is_public: bool | None = None
 
 
@@ -395,6 +435,7 @@ class ToolResponse(BaseModel):
     config: dict | None
     code: str | None
     enabled: bool
+    approval_required: bool
     is_public: bool
     created_at: datetime
     updated_at: datetime
@@ -428,6 +469,7 @@ def _admin_tool_response(tool) -> dict:
         "config": getattr(tool, 'config', None),
         "code": getattr(tool, 'code', None),
         "enabled": bool(tool.enabled),
+        "approval_required": bool(getattr(tool, "approval_required", False)),
         "is_public": bool(tool.is_public),
         "created_at": tool.created_at,
         "updated_at": tool.updated_at,
@@ -494,6 +536,24 @@ class ModelAssign(BaseModel):
 
 class ToolAssign(BaseModel):
     tool_id: str
+
+
+class ModelRoleRefResponse(BaseModel):
+    id: str
+    name: str
+    model_id: str
+    enabled: bool
+
+    model_config = {"from_attributes": True}
+
+
+class ModelRoleBindingResponse(BaseModel):
+    role: str
+    models: list[ModelRoleRefResponse]
+
+
+class ModelRoleBindingUpdate(BaseModel):
+    model_ids: list[str]
 
 
 # =============================================================================
@@ -1244,6 +1304,7 @@ async def create_tool(
         config=body.config,
         code=body.code,
         enabled=body.enabled,
+        approval_required=body.approval_required,
         is_public=body.is_public,
     )
     await write_audit_log(
@@ -1294,6 +1355,8 @@ async def update_tool(
         update_kwargs["code"] = body.code
     if body.enabled is not None:
         update_kwargs["enabled"] = body.enabled
+    if body.approval_required is not None:
+        update_kwargs["approval_required"] = body.approval_required
     if body.is_public is not None:
         update_kwargs["is_public"] = body.is_public
     if body.tenant_id is not None:
@@ -2482,6 +2545,81 @@ class AdminSkillResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+# =============================================================================
+# Workflow Definition Admin Endpoints
+# =============================================================================
+
+
+class WorkflowDefinitionCreate(BaseModel):
+    tenant_id: str | None = None
+    key: str
+    name: str
+    description: str | None = None
+    definition: dict
+    visibility: Literal["tenant", "user"] = "tenant"
+    enabled: bool = True
+
+
+class WorkflowDefinitionUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    definition: dict | None = None
+    visibility: Literal["tenant", "user"] | None = None
+    enabled: bool | None = None
+    confirm_topology_edit: bool = False
+
+
+class WorkflowDefinitionResponse(BaseModel):
+    id: str
+    tenant_id: str
+    key: str
+    name: str
+    description: str | None
+    definition: dict
+    visibility: str
+    enabled: bool
+    signature_hash: str | None
+    created_by: str | None
+    updated_by: str | None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class WorkflowTopologyWarningResponse(BaseModel):
+    requires_confirmation: bool
+    report: str
+    added_step_ids: list[str]
+    removed_step_ids: list[str]
+    routing_changed: bool
+    paused_run_count: int
+
+
+class WorkflowSchemaResponse(BaseModel):
+    step_types: list[str]
+    context_modes: list[str]
+    on_error_values: list[str]
+    model_roles: list[str]
+    tool_roles: list[str]
+    agent_roles: list[str]
+    conditions: list[str]
+    default_branch: str
+    max_steps: int
+
+
+class RegisteredAgentResponse(BaseModel):
+    key: str
+    name: str
+    model_role: str
+
+
+class UnboundRolesResponse(BaseModel):
+    role: str
+    models: list[str]
+    workflow_keys: list[str]
+
+
 @router.get("/skills", response_model=PaginatedResponse[AdminSkillResponse])
 async def admin_list_skills(
     search: str | None = None,
@@ -2656,6 +2794,370 @@ async def admin_delete_skill(
         tenant_id=current_user.tenant_id,
         ip_address=_get_client_ip(request),
     )
+
+
+# =============================================================================
+# Workflow Definition Admin Endpoints
+# =============================================================================
+
+
+@router.get("/workflows", response_model=PaginatedResponse[WorkflowDefinitionResponse])
+async def admin_list_workflows(
+    tenant_id: str | None = None,
+    search: str | None = None,
+    visibility: str | None = None,
+    enabled: bool | None = None,
+    sort_by: str | None = None,
+    sort_dir: str | None = None,
+    page: int = 1,
+    page_size: int = 25,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """List workflow definitions. Admin sees all. Manager sees own tenant only."""
+    effective_tenant_id = _resolve_binding_tenant(current_user, tenant_id)
+    workflows, total = await _svc_list_definitions(
+        db,
+        tenant_id=effective_tenant_id,
+        search=search,
+        visibility=visibility,
+        enabled=enabled,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        page=page,
+        page_size=page_size,
+    )
+    return PaginatedResponse(
+        items=[WorkflowDefinitionResponse.model_validate(w) for w in workflows],
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=(total + page_size - 1) // page_size if page_size else 0,
+    )
+
+
+@router.get("/workflows/schema", response_model=WorkflowSchemaResponse)
+async def admin_workflow_schema(
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Return the vocabulary/schema for the workflow form (read-only)."""
+    return WorkflowSchemaResponse(
+        step_types=["inline", "agent"],
+        context_modes=["full", "last_agent"],
+        on_error_values=["stop", "continue"],
+        model_roles=sorted(model_roles()),
+        tool_roles=sorted(tool_roles()),
+        agent_roles=sorted(AGENT_ROLES),
+        conditions=list(condition_names()),
+        default_branch=DEFAULT_BRANCH,
+        max_steps=settings.WORKFLOW_MAX_STEPS,
+    )
+
+
+@router.get("/workflows/{definition_id}/unbound-roles", response_model=list[UnboundRolesResponse])
+async def admin_workflow_unbound_roles(
+    definition_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Return model roles referenced by the workflow definition that the
+    tenant has not bound (all models enabled for that role).  Manager scoped
+    to own tenant.
+    """
+    target = await _svc_get_definition(db, definition_id)
+
+    if target is None:
+        raise NotFoundError(f"Workflow definition '{definition_id}' not found")
+
+    if current_user.role == "manager" and target.tenant_id != current_user.tenant_id:
+        raise ForbiddenError("Managers can only inspect workflow definitions in their own tenant")
+
+    tenant_id = target.tenant_id
+
+    # Build the definition to extract step model_refs
+    defn = _WorkflowDefinition(**target.definition)
+    model_refs: set[str] = set()
+    for step in defn.steps:
+        ref = getattr(step, "model_ref", None)
+        if ref and ref.startswith("@"):
+            model_refs.add(ref)
+
+    if not model_refs:
+        return []
+
+    # Fetch tenant bindings
+    bindings = await _svc_list_role_bindings(db, tenant_id)
+
+    result: list[UnboundRolesResponse] = []
+    for role in sorted(model_refs):
+        models = bindings.get(role, [])
+        # A role is "unbound" when no enabled models are bound to it
+        enabled = [m for m in models if m.enabled]
+        if not enabled:
+            result.append(
+                UnboundRolesResponse(
+                    role=role,
+                    models=[m.model_id for m in models],
+                    workflow_keys=[target.key],
+                )
+            )
+
+    return result
+
+
+@router.get("/registered-agents", response_model=list[RegisteredAgentResponse])
+async def admin_list_registered_agents(
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Return the list of registered agent keys with their metadata."""
+    keys = list_registered_agent_keys()
+    agents: list[RegisteredAgentResponse] = []
+    for key in keys:
+        module = get_registered_agent(key)
+        if module is None:
+            continue
+        name = getattr(module, "NAME", key)
+        model_role = getattr(module, "MODEL_ROLE", "")
+        maf_key = getattr(module, "MAF_KEY", key)
+        agents.append(
+            RegisteredAgentResponse(
+                key=maf_key,
+                name=name,
+                model_role=model_role,
+            )
+        )
+    return agents
+
+
+@router.get("/workflows/{definition_id}", response_model=WorkflowDefinitionResponse)
+async def admin_get_workflow(
+    definition_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Get a workflow definition by ID. Manager scoped to own tenant."""
+    target = await _svc_get_definition(db, definition_id)
+
+    if target is None:
+        raise NotFoundError(f"Workflow definition '{definition_id}' not found")
+
+    if current_user.role == "manager" and target.tenant_id != current_user.tenant_id:
+        raise ForbiddenError("Managers can only access workflow definitions in their own tenant")
+
+    return WorkflowDefinitionResponse.model_validate(target)
+
+
+@router.post("/workflows", status_code=201)
+async def admin_create_workflow(
+    body: WorkflowDefinitionCreate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Create a workflow definition. Admin may specify tenant; manager scoped to own."""
+    tenant_id = _resolve_binding_tenant(current_user, body.tenant_id)
+
+    # Validate the definition structure
+    defn = _WorkflowDefinition(**body.definition)
+
+    # The definition's key must match the body's key
+    if defn.key != body.key:
+        raise ValidationError(
+            f"Definition key '{defn.key}' must match body key '{body.key}'"
+        )
+
+    # Validate all references against the tenant
+    await assert_definition_references(db, tenant_id, defn)
+
+    # Store the validated definition
+    store_defn = defn.model_dump(mode="json")
+    sig_hash = graph_signature_hash(defn)
+
+    record = await _svc_create_definition(
+        db,
+        tenant_id=tenant_id,
+        key=body.key,
+        name=body.name,
+        description=body.description,
+        definition=store_defn,
+        visibility=body.visibility,
+        enabled=body.enabled,
+        actor_id=current_user.id,
+        signature_hash=sig_hash,
+    )
+
+    await write_audit_log(
+        db,
+        actor=current_user,
+        action="workflow_definition.created",
+        target_type="workflow_definition",
+        target_id=record.id,
+        tenant_id=tenant_id,
+        ip_address=_get_client_ip(request),
+    )
+
+    return WorkflowDefinitionResponse.model_validate(record)
+
+
+@router.post("/workflows/{definition_id}/topology-preview", response_model=WorkflowTopologyWarningResponse)
+async def admin_workflow_topology_preview(
+    definition_id: str,
+    body: WorkflowDefinitionUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Preview topology changes without persisting. Returns classification results."""
+    record = await _svc_get_definition(db, definition_id)
+
+    if record is None:
+        raise NotFoundError(f"Workflow definition '{definition_id}' not found")
+
+    if current_user.role == "manager" and record.tenant_id != current_user.tenant_id:
+        raise ForbiddenError("Managers can only preview topology for definitions in their own tenant")
+
+    tenant_id = record.tenant_id
+
+    # Load the current definition
+    current_defn = _WorkflowDefinition(**record.definition)
+
+    # Build the proposed definition
+    if body.definition is not None:
+        proposed_defn = _WorkflowDefinition(**body.definition)
+    else:
+        # No definition change: propose the current definition
+        proposed_defn = _WorkflowDefinition(**record.definition)
+
+    # Classify without saving
+    classification = classify_edit(current_defn, proposed_defn)
+
+    requires_confirmation = classification.kind == "topology"
+    paused_run_count = await count_paused_runs(db, tenant_id, current_defn.key)
+
+    report = edit_report_with_impact(
+        classification,
+        paused_run_count=paused_run_count,
+    )
+
+    return WorkflowTopologyWarningResponse(
+        requires_confirmation=requires_confirmation,
+        report=report,
+        added_step_ids=list(classification.added_step_ids),
+        removed_step_ids=list(classification.removed_step_ids),
+        routing_changed=classification.routing_changed,
+        paused_run_count=paused_run_count,
+    )
+
+
+@router.put("/workflows/{definition_id}", response_model=WorkflowDefinitionResponse)
+async def admin_update_workflow(
+    definition_id: str,
+    body: WorkflowDefinitionUpdate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Update a workflow definition. Manager scoped to own tenant."""
+    record = await _svc_get_definition(db, definition_id)
+
+    if record is None:
+        raise NotFoundError(f"Workflow definition '{definition_id}' not found")
+
+    if current_user.role == "manager" and record.tenant_id != current_user.tenant_id:
+        raise ForbiddenError("Managers can only update workflow definitions in their own tenant")
+
+    tenant_id = record.tenant_id
+
+    # Load the current definition
+    current_defn = _WorkflowDefinition(**record.definition)
+
+    # Build the proposed definition
+    if body.definition is not None:
+        proposed_defn = _WorkflowDefinition(**body.definition)
+    else:
+        # No definition change: propose the current definition
+        proposed_defn = _WorkflowDefinition(**record.definition)
+
+    # Validate key immutability
+    assert_key_immutable(current_defn.key, proposed_defn.key)
+
+    # Validate references against the tenant
+    await assert_definition_references(db, tenant_id, proposed_defn)
+
+    # Classify the edit
+    classification = classify_edit(current_defn, proposed_defn)
+
+    # Block topology edits without confirmation
+    if classification.kind is not None and classification.kind == "topology" and not body.confirm_topology_edit:
+        report = edit_report_with_impact(
+            classification,
+            paused_run_count=await count_paused_runs(db, tenant_id, current_defn.key),
+        )
+        raise ConflictError(report)
+
+    # Persist updates
+    store_defn = proposed_defn.model_dump(mode="json")
+
+    if body.name is not None:
+        record.name = body.name
+    if body.description is not None:
+        record.description = body.description
+    record.definition = store_defn
+    record.signature_hash = classification.proposed_signature_hash
+    record.visibility = body.visibility if body.visibility is not None else record.visibility
+    record.enabled = body.enabled if body.enabled is not None else record.enabled
+    record.updated_by = current_user.id
+
+    await db.commit()
+    await db.refresh(record)
+
+    await write_audit_log(
+        db,
+        actor=current_user,
+        action="workflow_definition.updated",
+        target_type="workflow_definition",
+        target_id=record.id,
+        tenant_id=tenant_id,
+        ip_address=_get_client_ip(request),
+        payload={
+            "edit_kind": classification.kind.value,
+            "added_step_ids": list(classification.added_step_ids),
+            "removed_step_ids": list(classification.removed_step_ids),
+            "routing_changed": classification.routing_changed,
+        },
+    )
+
+    return WorkflowDefinitionResponse.model_validate(record)
+
+
+@router.delete("/workflows/{definition_id}", status_code=204)
+async def admin_delete_workflow(
+    definition_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Delete a workflow definition. Manager scoped to own tenant."""
+    target = await _svc_get_definition(db, definition_id)
+
+    if target is None:
+        raise NotFoundError(f"Workflow definition '{definition_id}' not found")
+
+    if current_user.role == "manager" and target.tenant_id != current_user.tenant_id:
+        raise ForbiddenError("Managers can only delete workflow definitions in their own tenant")
+
+    tenant_id = target.tenant_id
+
+    await write_audit_log(
+        db,
+        actor=current_user,
+        action="workflow_definition.deleted",
+        target_type="workflow_definition",
+        target_id=definition_id,
+        tenant_id=tenant_id,
+        ip_address=_get_client_ip(request),
+    )
+
+    await _svc_delete_definition(db, definition_id)
 
 
 # =============================================================================
@@ -3108,6 +3610,135 @@ async def remove_tool_from_group(
         target_id=group_id,
         payload={"tool_id": tool_id},
         tenant_id=current_user.tenant_id,
+        ip_address=_get_client_ip(request),
+    )
+
+
+# =============================================================================
+# Model Role Bindings (admin or manager)
+# =============================================================================
+# Binds the closed workflow model-role vocabulary to a tenant's own models.
+# A role may bind several models (a pool); resolution is deterministic and
+# cost-agnostic.  This is the admin-side half of Issue #550; the authoring UI
+# that consumes it is a separate issue.
+
+
+def _resolve_binding_tenant(
+    current_user: UserORM, tenant_id: str | None
+) -> str:
+    """Return the tenant a role-binding request acts on.
+
+    Admins may name a tenant; managers are pinned to their own tenant.
+    """
+    effective = (
+        tenant_id
+        if current_user.role == "admin" and tenant_id
+        else current_user.tenant_id
+    )
+    if current_user.role == "manager" and effective != current_user.tenant_id:
+        raise ForbiddenError(
+            "Managers can only manage role bindings in their own tenant"
+        )
+    return effective
+
+
+def _role_binding_response(role: str, models: list) -> ModelRoleBindingResponse:
+    return ModelRoleBindingResponse(
+        role=role,
+        models=[ModelRoleRefResponse.model_validate(m) for m in models],
+    )
+
+
+@router.get(
+    "/model-role-bindings", response_model=list[ModelRoleBindingResponse]
+)
+async def list_model_role_bindings(
+    tenant_id: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """List every declared model role and the models bound to it.
+
+    One entry per role in the closed vocabulary; unbound roles have an empty
+    ``models`` list.  Manager sees own tenant only; admin may pass
+    ``tenant_id``.
+    """
+    effective_tenant_id = _resolve_binding_tenant(current_user, tenant_id)
+    bindings = await _svc_list_role_bindings(db, effective_tenant_id)
+    return [
+        _role_binding_response(role, bindings.get(role, []))
+        for role in sorted(MODEL_ROLES)
+    ]
+
+
+@router.put(
+    "/model-role-bindings/{role}", response_model=ModelRoleBindingResponse
+)
+async def set_model_role_bindings(
+    role: str,
+    body: ModelRoleBindingUpdate,
+    request: Request,
+    tenant_id: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Replace the models bound to *role* for a tenant.
+
+    Every model must exist and belong to the target tenant; the backend
+    re-validates on save, never trusting a previously submitted form.
+    """
+    effective_tenant_id = _resolve_binding_tenant(current_user, tenant_id)
+
+    if role not in MODEL_ROLES:
+        raise ValidationError(
+            f"Unknown model role '{role}'. "
+            f"Known roles: {', '.join(sorted(MODEL_ROLES))}"
+        )
+
+    await _svc_set_role_bindings(
+        db, effective_tenant_id, role, body.model_ids
+    )
+    await write_audit_log(
+        db,
+        actor=current_user,
+        action="model_role_bindings.updated",
+        target_type="model_role_binding",
+        target_id=role,
+        payload={"tenant_id": effective_tenant_id, "model_ids": body.model_ids},
+        tenant_id=effective_tenant_id,
+        ip_address=_get_client_ip(request),
+    )
+
+    bindings = await _svc_list_role_bindings(db, effective_tenant_id)
+    return _role_binding_response(role, bindings.get(role, []))
+
+
+@router.delete("/model-role-bindings/{role}", status_code=204)
+async def clear_model_role_bindings(
+    role: str,
+    request: Request,
+    tenant_id: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Remove every model binding for *role*."""
+    effective_tenant_id = _resolve_binding_tenant(current_user, tenant_id)
+
+    if role not in MODEL_ROLES:
+        raise ValidationError(
+            f"Unknown model role '{role}'. "
+            f"Known roles: {', '.join(sorted(MODEL_ROLES))}"
+        )
+
+    await _svc_clear_role_bindings(db, effective_tenant_id, role)
+    await write_audit_log(
+        db,
+        actor=current_user,
+        action="model_role_bindings.cleared",
+        target_type="model_role_binding",
+        target_id=role,
+        payload={"tenant_id": effective_tenant_id},
+        tenant_id=effective_tenant_id,
         ip_address=_get_client_ip(request),
     )
 

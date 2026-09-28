@@ -4,10 +4,10 @@
 # Builds and executes MAF 1.19.0 workflows from ``WorkflowDefinition`` objects.
 #
 # Public API:
-#   ``build_workflow(defn, db_session, extra_tools)`` → built ``Workflow`` instance
+#   ``build_workflow(defn, db, tenant_id, extra_tools)`` → built ``Workflow`` instance
 #   ``run_workflow(workflow, message, **kwargs)``    → ``tuple[str, WorkflowRunResult]``
 #   ``iter_workflow_sse(workflow, message, ...)``    → ``AsyncIterator[dict]`` SSE events
-#   ``resolve_model(db, key)``                      → ``Model`` from DB
+#   ``resolve_model(db, key, tenant_id)``           → ``Model`` from DB (tenant-scoped)
 #   ``load_workflow_definition(mod)``               → ``WorkflowDefinition`` from module
 # =============================================================================
 
@@ -28,14 +28,48 @@ from agent_framework import (
     TokenBudgetComposedStrategy,
     Workflow,
     WorkflowBuilder,
+    WorkflowRunState,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core.exceptions import NotFoundError, ValidationError
 from ...db.orm.models import Model
-from .definition import WorkflowDefinition
+from ...models.cost import compute_run_cost_from_prices, prices_from_model
+from .conditions import condition_names, resolve_condition
+from .definition import DEFAULT_BRANCH, WorkflowDefinition
+from .executors import StepAgent
+from .roles import TOOL_ROLE_TARGETS, is_role_reference
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Registered-agent helpers
+# ---------------------------------------------------------------------------
+
+
+def _registered_agent_module(agent_ref: str) -> Any:
+    """Return the registered agent module for *agent_ref*, or ``None`` if not
+    found.  The import is local so the lookup can be patched at
+    ``src.agents.registry.get_registered_agent``.
+    """
+    from ..registry import get_registered_agent
+
+    return get_registered_agent(agent_ref)
+
+
+def _validate_agent_refs(defn: WorkflowDefinition) -> None:
+    """Raise ``ValidationError`` if any ``agent`` step references a key that
+    is not present in the registered-agent store.
+    """
+    for step in defn.steps:
+        if step.type == "agent":
+            mod = _registered_agent_module(step.agent_ref)  # type: ignore[union-attr]
+            if mod is None:
+                raise ValidationError(
+                    f"Workflow '{defn.key}': step '{step.id}' "
+                    f"references unknown registered agent '{step.agent_ref}'"
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -43,24 +77,66 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-async def resolve_model(db: AsyncSession, model_ref: str) -> Model:
-    """Look up a ``Model`` record by its ``id`` or ``model_id`` attribute.
+async def resolve_model(db: AsyncSession, model_ref: str, tenant_id: str) -> Model:
+    """Resolve a model reference for a tenant.
 
-    Raises ``NotFoundError`` if not found.
+    Two reference kinds are supported:
+
+    * ``@role`` — a logical role resolved through the tenant's role
+      bindings (``services.model_role_service``).  An unbound role raises
+      ``ValidationError`` naming the role; it must never fall back to an
+      arbitrary model.
+    * anything else — a concrete tenant model, matched against ``Model.id``
+      or ``Model.model_id`` within *tenant_id* only.
+
+    Raises:
+        ValidationError: If the role is unbound, or the concrete reference
+            matches a model owned by a different tenant.
+        NotFoundError: If the concrete reference does not resolve for this
+            tenant.
     """
     from sqlalchemy import select
 
+    if model_ref is not None and is_role_reference(model_ref):
+        from ...services.model_role_service import resolve_role_model
+
+        model = await resolve_role_model(db, tenant_id, model_ref)
+        if model is None:
+            raise ValidationError(
+                f"No model bound to role '{model_ref}' for tenant '{tenant_id}'"
+            )
+        return model
+
     result = await db.execute(
-        select(Model).where(
-            (Model.id == model_ref) | (Model.model_id == model_ref)
+        select(Model)
+        .where(
+            (Model.id == model_ref) | (Model.model_id == model_ref),
+            Model.tenant_id == tenant_id,
         )
+        .order_by(Model.created_at.asc(), Model.id.asc())
+        .limit(1)
     )
-    model = result.scalar_one_or_none()
-    if model is None:
-        raise NotFoundError(
-            f"Model not found for reference '{model_ref}'"
+    model = result.scalars().first()
+    if model is not None:
+        return model
+
+    # Distinguish "belongs to another tenant" from "does not exist" so that a
+    # cross-tenant reference is rejected loudly instead of being rescued by
+    # the caller's default-model fallback.
+    diagnostic = await db.execute(
+        select(Model)
+        .where((Model.id == model_ref) | (Model.model_id == model_ref))
+        .limit(1)
+    )
+    foreign = diagnostic.scalars().first()
+    if foreign is not None and foreign.tenant_id != tenant_id:
+        raise ValidationError(
+            f"Model '{model_ref}' belongs to a different tenant"
         )
-    return model
+
+    raise NotFoundError(
+        f"Model not found for reference '{model_ref}'"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +158,9 @@ def load_workflow_definition(mod: Any) -> WorkflowDefinition:
         A validated ``WorkflowDefinition``.
 
     Raises:
-        ValidationError: If the module has no workflow definition structure.
+        ValidationError: If the module has no workflow definition structure, or
+            if a declared ``WORKFLOW_DEFINITION`` key does not match the
+            module's ``MAF_KEY``.
     """
     if mod is None:
         raise ValidationError("Workflow module is None")
@@ -91,13 +169,25 @@ def load_workflow_definition(mod: Any) -> WorkflowDefinition:
     wf_def = getattr(mod, "WORKFLOW_DEFINITION", None)
     if wf_def is not None:
         if isinstance(wf_def, dict):
-            return WorkflowDefinition(**wf_def)
+            defn = WorkflowDefinition(**wf_def)
         elif isinstance(wf_def, WorkflowDefinition):
-            return wf_def
+            defn = wf_def
         else:
             raise ValidationError(
                 "WORKFLOW_DEFINITION must be a dict or WorkflowDefinition instance"
             )
+        # The key is the checkpoint namespace and the registry key, so a
+        # rename is a create, not an edit: it must track the module MAF_KEY.
+        # (The STEPS branch below cannot diverge: it derives key from MAF_KEY.)
+        maf_key = getattr(mod, "MAF_KEY", None)
+        if isinstance(maf_key, str) and maf_key != defn.key:
+            raise ValidationError(
+                f"Workflow definition key '{defn.key}' does not match module "
+                f"MAF_KEY '{maf_key}': a workflow key is immutable, renaming it is "
+                f"a create, not an edit"
+            )
+        _validate_agent_refs(defn)
+        return defn
 
     # Try STEPS as a shortcut (auto-wrapped into a WorkflowDefinition)
     steps = getattr(mod, "STEPS", None)
@@ -110,12 +200,14 @@ def load_workflow_definition(mod: Any) -> WorkflowDefinition:
             )
         name = getattr(mod, "NAME", key)
         description = getattr(mod, "DESCRIPTION", "")
-        return WorkflowDefinition(
+        defn = WorkflowDefinition(
             key=key,
             name=name,
             description=description,
             steps=steps,
         )
+        _validate_agent_refs(defn)
+        return defn
 
     raise ValidationError(
         f"Workflow module '{getattr(mod, '__name__', 'unknown')}' has no "
@@ -134,6 +226,7 @@ def _build_agent_for_step(
     tools: list | None,
     temperature: float = 0.7,
     reasoning_effort: str | None = None,
+    instructions: str | None = None,
 ) -> Agent:
     """Create a MAF ``Agent`` for a workflow step.
 
@@ -143,6 +236,8 @@ def _build_agent_for_step(
         tools:            Optional list of tool callables.
         temperature:      Model temperature.
         reasoning_effort: Optional CoT effort override.
+        instructions:     Explicit instructions to use (falls back to
+                          ``step.instructions`` when ``None``).
 
     Returns:
         A configured MAF Agent.
@@ -171,7 +266,7 @@ def _build_agent_for_step(
     agent = Agent(
         client=get_chat_client(model, thinking_enabled=False),
         name=step.name or step.id,
-        instructions=step.instructions or "",
+        instructions=instructions if instructions is not None else (step.instructions or ""),
         tools=tools or None,
         default_options=default_options,
         compaction_strategy=compaction,
@@ -180,18 +275,145 @@ def _build_agent_for_step(
     return agent
 
 
+def _resolve_step_tools(
+    step: Any, tool_pool: list | None, workflow_key: str
+) -> list:
+    """Select the tools a single workflow step may use.
+
+    Refs are matched against the already-resolved, tenant-scoped tool pool by
+    MAF tool-callable name.  This is a *restriction* filter — it can never
+    supply a tool the run did not resolve, so a tenant tool that is disabled
+    or not active for the run simply is not available and the build fails.
+
+    An ``@``-prefixed ref is a role from the closed vocabulary, resolved
+    through ``TOOL_ROLE_TARGETS``; any other ref is matched directly.
+
+    An empty ``tool_refs`` inherits the whole pool, so definitions that do not
+    restrict tools keep today's behaviour.  A ref matching nothing in the pool
+    raises ``ValidationError`` naming the step and the ref — a step silently
+    running without its tools is the failure mode this exists to remove.
+
+    Args:
+        step:         ``WorkflowStep`` whose ``tool_refs`` drive selection.
+        tool_pool:    Already-resolved tool callables for this run.
+        workflow_key: Workflow key, used in error messages.
+
+    Returns:
+        The selected callables in pool order, de-duplicated.
+    """
+    pool = list(tool_pool or [])
+    refs = list(getattr(step, "tool_refs", None) or [])
+    if not refs:
+        return pool
+
+    by_name: dict[str, Any] = {}
+    for tool in pool:
+        name = getattr(tool, "name", None)
+        if name:
+            by_name.setdefault(name, tool)
+
+    wanted: set[str] = set()
+    unresolved: list[str] = []
+
+    for ref in refs:
+        if is_role_reference(ref):
+            names = TOOL_ROLE_TARGETS.get(ref)
+            if names is None:
+                raise ValidationError(
+                    f"Step '{step.id}': tool role '{ref}' has no declared target"
+                )
+        else:
+            names = (ref,)
+
+        wanted.update(names)
+        if not any(name in by_name for name in names) and ref not in unresolved:
+            unresolved.append(ref)
+
+    if unresolved:
+        available = ", ".join(sorted(by_name)) or "(none)"
+        raise ValidationError(
+            f"Workflow '{workflow_key}': step '{step.id}' tool refs "
+            f"{sorted(unresolved)} are not available in this run. "
+            f"Available tools: {available}"
+        )
+
+    return [tool for tool in pool if getattr(tool, "name", None) in wanted]
+
+
 # ---------------------------------------------------------------------------
 # Workflow builder
 # ---------------------------------------------------------------------------
 
 
+def add_definition_topology(
+    builder: Any,
+    executors: list[AgentExecutor],
+    defn: WorkflowDefinition,
+) -> None:
+    """Add edges to *builder* for the definition's authored topology.
+
+    With no ``defn.branches`` this is exactly ``builder.add_chain(executors)``.
+    With branches, a step that branches is left out of the chain and its
+    outgoing edges are added individually: one
+    ``builder.add_edge(source, target, condition=fn)`` per conditional branch
+    (``fn`` from ``conditions.resolve_condition``) and one
+    ``builder.add_edge(source, target)`` for the ``"default"`` branch.  The
+    non-branching executors are still chained in ``executors`` order so the
+    linear parts of the graph are unchanged.
+    """
+    by_id: dict[str, AgentExecutor] = {e.id: e for e in executors}
+    branching_sources: set[str] = {b.source for b in defn.branches}
+
+    # Chain only the non-branching executors
+    chain = [e for e in executors if e.id not in branching_sources]
+    if len(chain) > 1:
+        builder.add_chain(chain)
+
+    # Emit conditional edges from branching sources in declaration order
+    for branch in defn.branches:
+        if branch.source not in by_id:
+            raise ValidationError(
+                f"Workflow '{defn.key}': branch source '{branch.source}' "
+                f"is not a step id (known: {', '.join(sorted(by_id))})"
+            )
+        if branch.target not in by_id:
+            raise ValidationError(
+                f"Workflow '{defn.key}': branch target '{branch.target}' "
+                f"is not a step id (known: {', '.join(sorted(by_id))})"
+            )
+
+        src = by_id[branch.source]
+        tgt = by_id[branch.target]
+
+        if branch.condition == DEFAULT_BRANCH:
+            builder.add_edge(src, tgt)
+        else:
+            try:
+                condition_fn = resolve_condition(branch.condition)
+            except ValueError as exc:
+                known = ", ".join(condition_names())
+                raise ValidationError(
+                    f"Workflow '{defn.key}': branch {branch.source} -> {branch.target} "
+                    f"references unknown condition {branch.condition!r}. {exc}"
+                ) from exc
+            builder.add_edge(src, tgt, condition=condition_fn)
+
+
 async def build_workflow(
     defn: WorkflowDefinition,
     db: AsyncSession,
+    tenant_id: str,
     extra_tools: list | None = None,
     base_temperature: float = 0.7,
     base_reasoning_effort: str | None = None,
     default_model_id: str | None = None,
+    *,
+    checkpoint_storage: Any | None = None,
+    workflow_name: str | None = None,
+    initial_state: dict[str, Any] | None = None,
+    max_total_tokens: int | None = None,
+    max_cost: float | None = None,
+    budget_state: dict[str, Any] | None = None,
 ) -> Workflow:
     """Build a MAF ``Workflow`` from a ``WorkflowDefinition``.
 
@@ -201,39 +423,110 @@ async def build_workflow(
     Args:
         defn:                  Workflow definition with steps.
         db:                    Database session (used to resolve Model records).
+        tenant_id:             Tenant owning the run; all model resolution is scoped to it.
         extra_tools:           Optional global tools injected into every step.
         base_temperature:      Base temperature for all steps (overridden by step).
         base_reasoning_effort: Base reasoning effort for all steps (overridden by step).
         default_model_id:      Fallback model id to use when a step's model_ref is not
                                found in the DB (typically the skill's default model).
+        checkpoint_storage:    Optional MAF ``CheckpointStorage`` for persisting and
+                               restoring workflow checkpoints across runs.
+        workflow_name:         Explicit name for the MAF workflow. When omitted the
+                               name defaults to ``"{tenant_id}:{defn.key}"`` so that
+                               checkpoints are namespaced per tenant.
+        initial_state:         Checkpoint-recovered cross-step state dict. Passed to the
+                               builder so that steps which already ran keep contributing
+                               to ``output_of:`` and ``user_message`` on a resumed run.
+        max_total_tokens:      Per-run token ceiling override for all steps (default: use
+                                the definition's ``max_total_tokens``).
+        max_cost:              Per-run cost ceiling override for all steps (default: use
+                                the definition's ``max_cost``).
+                                The resolved ceilings and timeout are handed to each
+                                step's guard via ``StepAgent``.
 
     Returns:
         A built ``Workflow`` instance ready for execution.
 
     Raises:
-        ValidationError: If step configuration is invalid.
+        ValidationError: If step configuration is invalid, if any model/tool/agent
+            reference in the definition does not resolve for the running tenant,
+            or if the database workflow definition is disabled.
     """
+    # Revalidate all references for the running tenant before any resolution.
+    # This prevents a reference that was valid at save time (or in a different
+    # tenant context) from silently falling back to a default model.
+    from ...services.workflow_definition_resolver import ensure_definition_enabled
+    from ...services.workflow_reference_service import assert_definition_references
+
+    await assert_definition_references(db, tenant_id, defn)
+    await ensure_definition_enabled(db, tenant_id, defn.key)
+
     # Build steps into agents + executors
     executors: list[AgentExecutor] = []
+    # Seed the run-wide cross-step state.  On a resumed run the caller passes
+    # the state snapshot recovered from the checkpoint so that steps which
+    # already ran keep contributing to `output_of:` and `user_message`.
+    shared: dict[str, Any] = dict(initial_state or {})
+
+    # Compute effective guardrail ceilings once, reusing for every step.
+    effective_max_total_tokens = (
+        max_total_tokens if max_total_tokens is not None else defn.max_total_tokens
+    )
+    effective_max_cost = (
+        max_cost if max_cost is not None else defn.max_cost
+    )
+
+    # Publish the effective ceilings so the streaming engine (``iter_workflow_sse``)
+    # can enforce them at step boundaries, where the definition is not in scope.
+    shared["_budget_limits"] = {
+        "max_total_tokens": effective_max_total_tokens,
+        "max_cost": effective_max_cost,
+    }
+
+    if budget_state is not None:
+        # Adopt the caller's dict as the live cross-step state so that spend
+        # recorded while streaming is observable by the caller.  It is seeded
+        # from any checkpoint-recovered ``initial_state``.
+        budget_state.clear()
+        budget_state.update(shared)
+        shared = budget_state
 
     for i, step in enumerate(defn.steps):
-        # Resolve model for this step (with fallback to skill default)
+        # Resolve the effective step configuration from the agent module
+        # when step.type == "agent".
+        instructions = step.instructions
+        model_ref = step.model_ref
+
+        if step.type == "agent":
+            agent_mod = _registered_agent_module(step.agent_ref)  # type: ignore[union-attr]
+            if agent_mod is None:
+                raise ValidationError(
+                    f"Workflow '{defn.key}': step '{step.id}' "
+                    f"references unknown registered agent '{step.agent_ref}'"
+                )
+            instructions = agent_mod.INSTRUCTIONS
+            if step.model_ref is None:
+                model_ref = agent_mod.MODEL_ROLE
+
+        # Resolve model for this step. Only an unresolved *concrete* reference
+        # may fall back to the skill's default model: an unbound role or a
+        # cross-tenant reference raises ValidationError and must surface.
         model = None
         try:
-            model = await resolve_model(db, step.model_ref)
+            model = await resolve_model(db, model_ref, tenant_id)
         except NotFoundError:
             if default_model_id:
                 logger.warning(
                     "Step '%s' model_ref '%s' not found, falling back to '%s'",
-                    step.id, step.model_ref, default_model_id,
+                    step.id, model_ref, default_model_id,
                 )
-                model = await resolve_model(db, default_model_id)
+                model = await resolve_model(db, default_model_id, tenant_id)
             else:
                 raise
 
-        # Resolve tools for this step (merge extra tools with step-specific)
-        step_tools = list(extra_tools) if extra_tools else []
-        # TODO: resolve step-specific tools from tool_names in future
+        # Resolve tools for this step: the run's tenant-scoped pool,
+        # restricted by the step's tool_refs (empty = inherit the pool).
+        step_tools = _resolve_step_tools(step, extra_tools, defn.key)
 
         # Build agent for this step
         temperature = step.temperature if step.temperature != 0.7 else base_temperature
@@ -245,26 +538,48 @@ async def build_workflow(
             tools=step_tools,
             temperature=temperature,
             reasoning_effort=reasoning_effort,
+            instructions=instructions,
+        )
+
+        # Record this step's prices so streaming spend can be attributed to it
+        shared.setdefault("_step_prices", {})[step.id] = prices_from_model(model)
+
+        # Apply step-level input semantics without changing topology
+        agent = StepAgent(
+            inner=agent,
+            step_id=step.id,
+            input_spec=step.input,
+            shared=shared,
+            model=model,
+            max_total_tokens=effective_max_total_tokens,
+            max_cost=effective_max_cost,
+            timeout_seconds=step.timeout_seconds
+            if step.timeout_seconds is not None
+            else defn.default_step_timeout_seconds,
         )
 
         # Wrap in executor with the step's id as executor id
-        executor = AgentExecutor(agent=agent, id=step.id)
+        executor = AgentExecutor(agent=agent, id=step.id, context_mode=step.context_mode)
         executors.append(executor)
 
     if not executors:
         raise ValidationError("Workflow must have at least one step")
 
     # Build the workflow
+    # MAF groups checkpoints by workflow name and validates them by graph
+    # signature hash.  Namespacing the name per tenant means two tenants that
+    # ship the same definition key cannot see each other's checkpoints.  The
+    # hash is derived from topology only, so the name does not affect it.
+    effective_name = workflow_name or f"{tenant_id}:{defn.key}"
     builder = WorkflowBuilder(
-        name=defn.key,
+        name=effective_name,
         description=defn.description,
         start_executor=executors[0],
         output_executors=[executors[-1]],
+        checkpoint_storage=checkpoint_storage,
     )
 
-    # Connect steps sequentially
-    if len(executors) > 1:
-        builder.add_chain(executors)
+    add_definition_topology(builder, executors, defn)
 
     workflow = builder.build()
     logger.info(
@@ -331,6 +646,23 @@ def _extract_token_counts_from_workflow(
     return tokens_in, tokens_out, cache_hit
 
 
+def workflow_outcome(result: Any) -> str:
+    """Return ``"paused"`` when a run is idle awaiting input, else ``"completed"``.
+
+    MAF distinguishes ``WorkflowRunState.IDLE`` (finished) from
+    ``WorkflowRunState.IDLE_WITH_PENDING_REQUESTS`` (paused, awaiting a
+    response).  Inferring completion from the end of the event stream would
+    report a paused run as finished, so the run state is read explicitly.
+    """
+    try:
+        state = result.get_final_state()
+    except Exception:
+        return "completed"
+    if state is WorkflowRunState.IDLE_WITH_PENDING_REQUESTS:
+        return "paused"
+    return "completed"
+
+
 # ---------------------------------------------------------------------------
 # Workflow execution (non-streaming)
 # ---------------------------------------------------------------------------
@@ -338,8 +670,12 @@ def _extract_token_counts_from_workflow(
 
 async def run_workflow(
     workflow: Workflow,
-    message: str,
+    message: str | None = None,
     function_invocation_kwargs: dict | None = None,
+    *,
+    checkpoint_storage: Any | None = None,
+    checkpoint_id: str | None = None,
+    responses: dict | None = None,
 ) -> tuple[str, Any]:  # tuple[str, WorkflowRunResult]
     """Execute a workflow synchronously and return (output_text, result).
 
@@ -347,16 +683,30 @@ async def run_workflow(
         workflow:                  Built MAF workflow.
         message:                   User message to pass to the workflow.
         function_invocation_kwargs: Optional kwargs forwarded to agent.run().
+        checkpoint_storage:        Optional MAF checkpoint storage for persisting/restoring runs.
+        checkpoint_id:             ID of a checkpoint to resume from.
+        responses:                 Optional MAF responses dict, forwarded as-is for
+                                   workflow resume.
 
     Returns:
         Tuple of (final_output_text, WorkflowRunResult).
 
     Raises:
         ValidationError: If workflow execution fails.
+
+    Note:
+        MAF requires ``message`` and ``checkpoint_id`` to be mutually exclusive.
+        Passing ``checkpoint_id`` with ``message=None`` is the resume path.
     """
     kwargs: dict[str, Any] = {}
     if function_invocation_kwargs:
         kwargs["function_invocation_kwargs"] = function_invocation_kwargs
+    if checkpoint_storage is not None:
+        kwargs["checkpoint_storage"] = checkpoint_storage
+    if checkpoint_id is not None:
+        kwargs["checkpoint_id"] = checkpoint_id
+    if responses:
+        kwargs["responses"] = responses
 
     result = await workflow.run(message, **kwargs)
 
@@ -382,19 +732,113 @@ async def run_workflow(
 
 
 # ---------------------------------------------------------------------------
+# Approval event helper
+# ---------------------------------------------------------------------------
+
+
+def approval_event_from_request_info(event: Any) -> dict | None:
+    """Build the SSE payload for a function-approval request_info event.
+
+    Returns None for any request_info that is not a function approval request.
+    """
+    data = event.data
+    if data is None or getattr(data, "type", None) != "function_approval_request":
+        return None
+    function_call = getattr(data, "function_call", None)
+    return {
+        "type": "function_approval_request",
+        "request_id": getattr(event, "request_id", ""),
+        "step_id": _get_step_id_from_event(event),
+        "tool_name": getattr(function_call, "name", None),
+        "arguments": getattr(function_call, "arguments", None),
+    }
+
+
+def _get_step_id_from_event(event: Any) -> str:
+    """Extract step_id from an event's source_executor_id, returning '' on failure."""
+    try:
+        return getattr(event, "source_executor_id", "") or ""
+    except (ValueError, AttributeError, RuntimeError):
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# Streaming: run guardrails
+# ---------------------------------------------------------------------------
+
+
+def _record_stream_spend(
+    budget_state: dict[str, Any], step_id: str, usage: dict
+) -> None:
+    """Accumulate one step's usage into the run budget (streaming path).
+
+    ``AgentResponseUpdate`` exposes no usage, so a streaming run cannot record
+    spend step-by-step inside ``StepAgent``.  MAF *does* surface the step's
+    final usage on the ``AgentResponse`` carried by ``executor_completed``
+    events, and this records from there instead.
+    """
+    budget = budget_state.setdefault(
+        "_budget", {"tokens_in": 0, "tokens_out": 0, "cost": 0.0}
+    )
+    tokens_in = usage.get("input_token_count", 0) or 0
+    tokens_out = usage.get("output_token_count", 0) or 0
+    cache_hit = usage.get("cache_read_input_token_count", 0) or 0
+
+    budget["tokens_in"] = (budget.get("tokens_in") or 0) + tokens_in
+    budget["tokens_out"] = (budget.get("tokens_out") or 0) + tokens_out
+    prices = (budget_state.get("_step_prices") or {}).get(step_id)
+    budget["cost"] = (budget.get("cost") or 0.0) + compute_run_cost_from_prices(
+        prices, tokens_in, tokens_out, cache_hit
+    )
+
+
+def _assert_stream_budget(budget_state: dict[str, Any]) -> None:
+    """Raise when a streaming run's accumulated spend meets a per-run ceiling.
+
+    Enforced at each step boundary.  A single step can overshoot before the next
+    boundary, but an exceeded ceiling stops the run loudly and is never
+    silently ignored.
+    """
+    limits = budget_state.get("_budget_limits") or {}
+    max_total_tokens = limits.get("max_total_tokens")
+    max_cost = limits.get("max_cost")
+    if max_total_tokens is None and max_cost is None:
+        return
+
+    budget = budget_state.get("_budget") or {}
+    total_tokens = (budget.get("tokens_in") or 0) + (budget.get("tokens_out") or 0)
+    cost = budget.get("cost") or 0.0
+
+    if max_total_tokens is not None and total_tokens >= max_total_tokens:
+        raise ValidationError(
+            f"Workflow per-run budget exceeded: total tokens "
+            f"{total_tokens} >= {max_total_tokens}"
+        )
+    if max_cost is not None and cost >= max_cost:
+        raise ValidationError(
+            f"Workflow per-run budget exceeded: cost {cost} >= {max_cost}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Streaming: iterate workflow events and yield SSE dicts
 # ---------------------------------------------------------------------------
 
 
 async def iter_workflow_sse(
     workflow: Workflow,
-    message: str,
+    *,
+    message: str | None = None,
     session_id: str,
     message_id: str,
     token_counts: dict | None = None,
     function_invocation_kwargs: dict | None = None,
     system_prompt: str | None = None,
     tools: list | None = None,
+    checkpoint_storage: Any | None = None,
+    checkpoint_id: str | None = None,
+    responses: dict | None = None,
+    budget_state: dict[str, Any] | None = None,
 ) -> AsyncIterator[dict]:
     """Stream a workflow execution, yielding SSE event dicts per step.
 
@@ -403,17 +847,27 @@ async def iter_workflow_sse(
           {event: "workflow_step", data: {workflow_key, step_id, step_index, total_steps, status}}
         - ``token``: Token events from individual steps (delta text)
         - ``tool_start``, ``tool_result``: Tool execution events
-        - ``message_complete``: Final completion with token counts and metrics
+        - ``status``: Run-state events; consumed internally and **not** yielded.
+        - ``message_complete``: Final completion with token counts, metrics,
+          ``outcome`` (``"completed"`` or ``"paused"``), and
+          ``pending_request_ids`` (present only when ``outcome == "paused"``).
+        - ``workflow_approval_required``: Emitted when the workflow pauses on a
+          function-approval request_info event.  Data is a dict with
+          ``type``, ``request_id``, ``step_id``, ``tool_name``, and ``arguments``.
 
     Args:
         workflow:                  Built MAF workflow.
-        message:                   User message.
+        message:                   User message (``None`` for resumed runs).
         session_id:                Session ID for SSE tracking.
         message_id:                Message ID for SSE tracking.
         token_counts:              Mutable dict for accumulating token counts.
         function_invocation_kwargs: Optional kwargs forwarded to agent.run().
         system_prompt:             System prompt string for token estimation.
         tools:                     List of tool definitions for token estimation.
+        checkpoint_storage:        Optional MAF checkpoint storage for persisting/restoring runs.
+        checkpoint_id:             ID of a checkpoint to resume from.
+        responses:                 Optional MAF ``responses`` dict, forwarded as-is
+                                   for workflow resume (function-call approvals).
 
     Yields:
         SSE event dicts.
@@ -446,6 +900,12 @@ async def iter_workflow_sse(
     stream_kwargs: dict[str, Any] = {"stream": True}
     if function_invocation_kwargs:
         stream_kwargs["function_invocation_kwargs"] = function_invocation_kwargs
+    if checkpoint_storage is not None:
+        stream_kwargs["checkpoint_storage"] = checkpoint_storage
+    if checkpoint_id is not None:
+        stream_kwargs["checkpoint_id"] = checkpoint_id
+    if responses:
+        stream_kwargs["responses"] = responses
 
     # Run the workflow with streaming
     response_stream = workflow.run(message, **stream_kwargs)
@@ -457,33 +917,22 @@ async def iter_workflow_sse(
         streaming_cache_hit = 0
         event_types_seen = set()
         processed_event_types = set()
+        paused_with_pending = False
 
         # Iterate over the async stream of WorkflowEvent objects
         async for event in response_stream:
             event_type = event.type
             event_types_seen.add(event_type)
-            # Debug: log the first request_info event
-            if event_type == "request_info" and event.data is not None:
-                data = event.data
-                req_attrs = [a for a in dir(data) if not a.startswith("_")]
-                logger.info("PH-WORKFLOW-REQUEST_INFO: data_type=%s data_attrs=%s",
-                           type(data).__name__, req_attrs)
-                # Try to extract token usage
-                if hasattr(data, "to_dict"):
-                    try:
-                        logger.info("PH-WORKFLOW-REQUEST_INFO-dict: %s", json.dumps(str(data.to_dict())[:2000]))
-                    except Exception:
-                        pass
-                elif isinstance(data, dict):
-                    logger.info("PH-WORKFLOW-REQUEST_INFO-dict: %s", json.dumps(data)[:2000])
-                else:
-                    logger.info("PH-WORKFLOW-REQUEST_INFO-str: %s", str(data)[:2000])
             # source_executor_id is only available on certain event types
             # (e.g. request_info); accessing it on others raises ValueError
             try:
                 executor_id = getattr(event, "source_executor_id", None) or ""
             except (ValueError, AttributeError, RuntimeError):
                 executor_id = ""
+
+            if event_type == "request_info":
+                logger.debug("Workflow request_info event: executor=%s request_id=%s",
+                             executor_id, getattr(event, "request_id", None))
 
             # ---- Step lifecycle events ----
             if event_type == "executor_invoked":
@@ -539,6 +988,16 @@ async def iter_workflow_sse(
                                 streaming_tokens_in += usage.get("input_token_count", 0) or 0
                                 streaming_tokens_out += usage.get("output_token_count", 0) or 0
                                 streaming_cache_hit += usage.get("cache_read_input_token_count", 0) or 0
+                                if budget_state is not None:
+                                    _record_stream_spend(
+                                        budget_state, actual_executor_id, usage
+                                    )
+
+                # Enforce the per-run ceilings at this step boundary.  The chat
+                # path streams, and updates carry no usage, so this is the only
+                # place a streaming run can be stopped.
+                if budget_state is not None:
+                    _assert_stream_budget(budget_state)
 
                 # Store step name for token events (for any late-arriving tokens)
                 step_tracker[actual_executor_id] = step_num
@@ -656,6 +1115,15 @@ async def iter_workflow_sse(
                     }),
                 }
 
+            # ---- Run-state transitions ----
+            # MAF emits a status event for each run-state change.
+            # IDLE_WITH_PENDING_REQUESTS means the workflow paused awaiting a
+            # response and must not be reported as finished.  Status events are
+            # consumed here and are NOT yielded to the SSE client.
+            elif event_type == "status":
+                if getattr(event, "state", None) is WorkflowRunState.IDLE_WITH_PENDING_REQUESTS:
+                    paused_with_pending = True
+
             # ---- Request info events (token usage) ----
             elif event_type == "request_info":
                 data = event.data
@@ -671,6 +1139,10 @@ async def iter_workflow_sse(
                         streaming_tokens_in += usage.get("input_token_count", 0) or 0
                         streaming_tokens_out += usage.get("output_token_count", 0) or 0
                         streaming_cache_hit += usage.get("cache_read_input_token_count", 0) or 0
+
+                approval = approval_event_from_request_info(event)
+                if approval is not None:
+                    yield {"event": "workflow_approval_required", "data": json.dumps(approval)}
 
     except asyncio.CancelledError:
         # Stream was cancelled — propagate
@@ -690,6 +1162,15 @@ async def iter_workflow_sse(
     if token_counts is not None:
         try:
             final_result = await response_stream.get_final_response()
+            outcome = workflow_outcome(final_result)
+            if paused_with_pending:
+                outcome = "paused"
+
+            pending_request_ids = [
+                getattr(ev, "request_id", None)
+                for ev in final_result.get_request_info_events()
+            ]
+            pending_request_ids = [rid for rid in pending_request_ids if rid]
             logger.info("PH-WORKFLOW-FINAL-result type=%s final_result_attrs=%s",
                        type(final_result).__name__, [a for a in dir(final_result) if not a.startswith('_')])
             tokens_in, tokens_out, cache_hit = _extract_token_counts_from_workflow(final_result)
@@ -705,6 +1186,7 @@ async def iter_workflow_sse(
             token_counts["in"] = final_tokens_in
             token_counts["out"] = final_tokens_out
             token_counts["cache_hit"] = final_cache_hit
+            token_counts["outcome"] = outcome
             # Also store system_prompt/tools for metrics estimation
             token_counts["_system_prompt"] = system_prompt or ""
             token_counts["_tools"] = tools or []
@@ -724,6 +1206,8 @@ async def iter_workflow_sse(
                     "tokens_in": final_tokens_in,
                     "tokens_out": final_tokens_out,
                     "cache_hit": final_cache_hit,
+                    "outcome": outcome,
+                    "pending_request_ids": pending_request_ids if outcome == "paused" else [],
                 }),
             }
         except Exception as exc:
@@ -741,6 +1225,7 @@ async def iter_workflow_sse(
                     "tokens_in": 0,
                     "tokens_out": 0,
                     "cache_hit": 0,
+                    "outcome": "paused" if paused_with_pending else "completed",
                 }),
             }
             # Still emit basic metrics even on extraction failure

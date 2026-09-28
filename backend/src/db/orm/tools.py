@@ -5,6 +5,7 @@
 import uuid
 from datetime import datetime, timezone
 
+import sqlalchemy as sa
 from sqlalchemy import String, Boolean, DateTime, Enum, ForeignKey, JSON, Text, func
 from sqlalchemy.dialects.mysql import CHAR
 from sqlalchemy.orm import Mapped, mapped_column
@@ -33,6 +34,7 @@ class Tool(Base):
         String(50), nullable=False, default="general", server_default="general"
     )
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    approval_required: Mapped[bool] = mapped_column(Boolean, default=False, server_default=sa.false(), nullable=False)
     is_public: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

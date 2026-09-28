@@ -1040,38 +1040,52 @@ class TestRunWorkflow:
         with pytest.raises(ValidationError, match="maf_target_key"):
             await self.fn(model, skill, "client", "prompt", [], "hi", "assistant")
 
-    @patch("src.agents.registry.get_registered", return_value=None)
+    @patch(
+        "src.services.workflow_definition_resolver.get_registered",
+        return_value=None,
+    )
     async def test_raises_when_not_registered(self, mock_reg):
         model = await self._make_mock_model()
         skill = self._make_mock_skill(maf_target_key="my_workflow")
+        skill.tenant_id = "test-tenant"
 
         from src.core.exceptions import NotFoundError
-        with pytest.raises(NotFoundError, match="No registered workflow"):
+        with pytest.raises(NotFoundError, match="not found for tenant"):
             await self.fn(model, skill, "client", "prompt", [], "hi", "assistant")
 
-    @patch("src.agents.registry.get_registered")
-    async def test_raises_when_not_registered(self, mock_reg):
-        mock_reg.return_value = MagicMock()
-
+    @patch("src.services.workflow_definition_resolver.get_registered")
+    @patch("src.agents.workflows.engine.resolve_model", new_callable=AsyncMock)
+    async def test_raises_when_definition_model_cannot_be_resolved(
+        self, mock_reg, mock_resolve_model
+    ):
         model = await self._make_mock_model()
         skill = self._make_mock_skill(maf_target_key="my_workflow")
+        skill.tenant_id = "test-tenant"
+        skill.default_model_id = None
 
         from src.agents.workflows.definition import WorkflowDefinition
+        from src.core.exceptions import NotFoundError
+
         wf_def = WorkflowDefinition(
             key="my_workflow",
             name="Test Workflow",
             steps=[
                 {
                     "id": "step1",
+                    "name": "Step 1",
+                    "type": "inline",
                     "instructions": "Test step",
                     "model_ref": "gpt-4",
                 }
             ],
         )
-        mock_reg.return_value = MagicMock(WORKFLOW_DEFINITION=wf_def)
+        mock_reg.return_value = MagicMock(MAF_KEY="my_workflow", WORKFLOW_DEFINITION=wf_def)
 
-        # Should raise because no DB session to resolve models
-        with pytest.raises(ValidationError, match="workflow"):
+        # Model resolution fails → NotFoundError propagates out of _run_workflow
+        err = NotFoundError("Model not found for reference 'gpt-4'")
+        mock_resolve_model.side_effect = err
+
+        with pytest.raises(NotFoundError, match=r"Model not found for reference 'gpt-4'"):
             await self.fn(model, skill, "client", "prompt", [], "hi", "assistant")
 
 

@@ -28,6 +28,8 @@ import {
   CodeOutlined,
   LinkOutlined,
   PhoneOutlined,
+  ApartmentOutlined,
+  ProjectOutlined,
 } from "@ant-design/icons";
 import { useNavigate, useLocation, Outlet, useSearchParams } from "react-router-dom";
 import { useAuth } from "../../../providers/AuthProvider";
@@ -89,6 +91,16 @@ export function AdminLayout() {
       key: "/admin/skills",
       icon: <ThunderboltOutlined />,
       label: "Skills",
+    },
+    {
+      key: "/admin/model-roles",
+      icon: <ApartmentOutlined />,
+      label: "Model Roles",
+    },
+    {
+      key: "/admin/workflows",
+      icon: <ProjectOutlined />,
+      label: "Workflows",
     },
     {
       key: "/admin/groups",

@@ -214,6 +214,7 @@ async def force_delete_tenant(db: AsyncSession, tenant_id: str) -> None:
     from ..db.orm.tenants import Tenant
     from ..db.orm.users import User as UserORM
     from ..db.orm.models import Model as ModelORM
+    from ..db.orm.model_role_bindings import ModelRoleBinding
     from ..db.orm.sessions import Session as SessionORM, SessionActiveTool
     from ..db.orm.tools import Tool
     from ..db.orm.templates import Template
@@ -303,6 +304,10 @@ async def force_delete_tenant(db: AsyncSession, tenant_id: str) -> None:
                 _select(UserGroup.id).where(UserGroup.tenant_id == tenant_id)
             )
         )
+    )
+    # Model role bindings FK to models.id — delete before the model rows below.
+    await db.execute(
+        _delete(ModelRoleBinding).where(ModelRoleBinding.tenant_id == tenant_id)
     )
     await db.execute(
         _delete(UserGroupMember).where(

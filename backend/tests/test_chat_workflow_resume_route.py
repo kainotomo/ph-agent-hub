@@ -208,6 +208,7 @@ class TestWorkflowResumeRouteContract:
         2. ``_resolve_session_config`` → returns valid workflow config
         3. ``get_registered`` → returns workflow module
         4. ``load_workflow_definition`` → returns definition
+           (both resolved through ``src.services.workflow_definition_resolver``)
         5. ``load_resume_target`` → returns a ResumeTarget
         6. ``_build_approval_responses`` receives the unknown request_id,
            looks up pending events, finds no match → raises
@@ -230,11 +231,11 @@ class TestWorkflowResumeRouteContract:
                 return_value=_make_session_config(skill=skill, execution_type="workflow"),
             ):
                 with patch(
-                    "src.agents.registry.get_registered",
+                    "src.services.workflow_definition_resolver.get_registered",
                     return_value=skill,
                 ):
                     with patch(
-                        "src.agents.workflows.engine.load_workflow_definition",
+                        "src.services.workflow_definition_resolver.load_workflow_definition",
                         return_value=_make_defn(),
                     ):
                         with patch(

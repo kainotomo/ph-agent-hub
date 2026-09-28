@@ -2683,36 +2683,16 @@ async def _run_workflow(
     """
     from ..agents.workflows.engine import (
         build_workflow,
-        load_workflow_definition,
         run_workflow as engine_run_workflow,
         _extract_token_counts_from_workflow,
     )
-    from .registry import get_registered
+    from ..services.workflow_definition_resolver import (
+        load_definition,
+        ensure_definition_enabled,
+    )
 
     if skill is None or not skill.maf_target_key:
         raise ValidationError("Workflow execution requires a skill with a maf_target_key")
-
-    target = get_registered(skill.maf_target_key)
-    if target is None:
-        raise NotFoundError(
-            f"No registered workflow for key '{skill.maf_target_key}'. "
-            "Register a workflow module in src/agents/workflows/."
-        )
-
-    # Load the workflow definition from the module
-    defn = load_workflow_definition(target)
-
-    # Durable checkpointing is enabled for this run.  This non-streaming
-    # path is used by autopilot / scheduled execution, which has no chat
-    # session, so session_id and message_id stay None: these checkpoints
-    # are addressable only by tenant and workflow name.
-    from ..agents.workflows.checkpoint_storage import MariaDBCheckpointStorage
-
-    checkpoint_storage = MariaDBCheckpointStorage(
-        tenant_id=skill.tenant_id,
-        session_id=None,
-        message_id=None,
-    )
 
     # Build the workflow (requires DB session to resolve Model records)
     if db is None:
@@ -2723,6 +2703,21 @@ async def _run_workflow(
         need_close = False
 
     try:
+        resolved = await load_definition(db, skill.tenant_id, skill.maf_target_key)
+        await ensure_definition_enabled(db, skill.tenant_id, skill.maf_target_key)
+        defn = resolved.definition
+
+        # Durable checkpointing is enabled for this run.  This non-streaming
+        # path is used by autopilot / scheduled execution, which has no chat
+        # session, so session_id and message_id stay None: these checkpoints
+        # are addressable only by tenant and workflow name.
+        from ..agents.workflows.checkpoint_storage import MariaDBCheckpointStorage
+
+        checkpoint_storage = MariaDBCheckpointStorage(
+            tenant_id=skill.tenant_id,
+            session_id=None,
+            message_id=None,
+        )
         workflow = await build_workflow(
             defn=defn,
             db=db,
@@ -3782,34 +3777,16 @@ async def _run_workflow_stream(
     from ..agents.workflows.engine import (
         build_workflow,
         iter_workflow_sse,
-        load_workflow_definition,
     )
-    from .registry import get_registered
+    from ..services.workflow_definition_resolver import (
+        load_definition,
+        ensure_definition_enabled,
+    )
 
     if skill is None or not skill.maf_target_key:
         raise ValidationError(
             "Workflow execution requires a skill with a maf_target_key"
         )
-
-    target = get_registered(skill.maf_target_key)
-    if target is None:
-        raise NotFoundError(
-            f"No registered workflow for key '{skill.maf_target_key}'. "
-            "Register a workflow module in src/agents/workflows/."
-        )
-
-    # Load the workflow definition from the module
-    defn = load_workflow_definition(target)
-
-    # Durable checkpointing is enabled for this run, bound to the chat
-    # session and message so a paused run can be located and resumed.
-    from ..agents.workflows.checkpoint_storage import MariaDBCheckpointStorage
-
-    checkpoint_storage = MariaDBCheckpointStorage(
-        tenant_id=skill.tenant_id,
-        session_id=session_id,
-        message_id=message_id,
-    )
 
     # Build the workflow (requires DB session to resolve Model records)
     if db is None:
@@ -3820,6 +3797,25 @@ async def _run_workflow_stream(
         need_close = False
 
     try:
+        resolved = await load_definition(db, skill.tenant_id, skill.maf_target_key)
+        await ensure_definition_enabled(db, skill.tenant_id, skill.maf_target_key)
+        defn = resolved.definition
+
+        # Durable checkpointing is enabled for this run, bound to the chat
+        # session and message so a paused run can be located and resumed.
+        from ..agents.workflows.checkpoint_storage import MariaDBCheckpointStorage
+
+        checkpoint_storage = MariaDBCheckpointStorage(
+            tenant_id=skill.tenant_id,
+            session_id=session_id,
+            message_id=message_id,
+        )
+        # Run-guardrail state.  ``build_workflow`` publishes the effective
+        # ceilings and per-step prices into this dict, and ``iter_workflow_sse``
+        # records each step's spend into it so a streaming run can be stopped
+        # at a step boundary.
+        budget_state: dict = {}
+
         workflow = await build_workflow(
             defn=defn,
             db=db,
@@ -3829,6 +3825,7 @@ async def _run_workflow_stream(
             base_reasoning_effort=reasoning_effort,
             default_model_id=skill.default_model_id,
             checkpoint_storage=checkpoint_storage,
+            budget_state=budget_state,
         )
 
         # Stream the workflow via the engine's SSE iterator
@@ -3842,6 +3839,7 @@ async def _run_workflow_stream(
             system_prompt=system_prompt,
             tools=tools,
             checkpoint_storage=checkpoint_storage,
+            budget_state=budget_state,
         ):
             yield event_dict
 

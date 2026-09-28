@@ -38,6 +38,7 @@ from .autopilot_runs import AutopilotRun
 from .scheduled_tasks import ScheduledTask
 from .notifications import Notification
 from .workflow_checkpoints import WorkflowCheckpointRecord
+from .workflow_definitions import WorkflowDefinitionRecord
 
 __all__ = [
     "A2aCallLog",
@@ -77,4 +78,5 @@ __all__ = [
     "ScheduledTask",
     "Notification",
     "WorkflowCheckpointRecord",
+    "WorkflowDefinitionRecord",
 ]

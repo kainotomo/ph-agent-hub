@@ -334,3 +334,24 @@ def render_edit_report(
         f"be resumed. Added step ids: {added}; removed step ids: {removed}. "
         f"Impact: {impact}."
     )
+
+
+def edit_report_with_impact(
+    classification: EditClassification, *, paused_run_count: int | None
+) -> str:
+    """Return an impact report for a classified edit.
+
+    This is a thin delegation to ``render_edit_report`` that keeps the report
+    wording in exactly one place: changing the report text only requires
+    editing ``render_edit_report``.
+
+    Args:
+        classification: The result of comparing a proposed definition against
+            the current one.
+        paused_run_count: Number of paused runs of the previous definition, when
+            known.
+
+    Returns:
+        A one-line, human-readable report.
+    """
+    return render_edit_report(classification, paused_run_count=paused_run_count)

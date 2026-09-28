@@ -11,6 +11,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.services.workflow_definition_resolver import (
+    DefinitionSource,
+    ResolvedDefinition,
+)
+
 
 @pytest.mark.unit
 async def test_run_workflow_stream_constructs_checkpoint_storage():
@@ -49,11 +54,17 @@ async def test_run_workflow_stream_constructs_checkpoint_storage():
         "src.agents.workflows.engine.iter_workflow_sse",
         fake_iter_workflow_sse,
     ), patch(
-        "src.agents.workflows.engine.load_workflow_definition",
-        MagicMock(return_value=MagicMock()),
+        "src.services.workflow_definition_resolver.load_definition",
+        AsyncMock(
+            return_value=ResolvedDefinition(
+                definition=MagicMock(),
+                source=DefinitionSource.MODULE,
+                record=None,
+            )
+        ),
     ), patch(
-        "src.agents.registry.get_registered",
-        MagicMock(return_value=MagicMock()),
+        "src.services.workflow_definition_resolver.ensure_definition_enabled",
+        AsyncMock(return_value=None),
     ):
         from src.agents.runner import _run_workflow_stream
 

@@ -23,7 +23,13 @@ from __future__ import annotations
 
 from typing import Any, AsyncGenerator
 
+import asyncio
+import time
+
 from agent_framework import AgentResponse, AgentResponseUpdate, Message
+
+from src.core.exceptions import ValidationError
+from src.models.cost import compute_run_cost
 
 
 class StepAgent:
@@ -48,6 +54,11 @@ class StepAgent:
         step_id: str,
         input_spec: str,
         shared: dict[str, Any] | None = None,
+        *,
+        model: Any = None,
+        max_total_tokens: int | None = None,
+        max_cost: float | None = None,
+        timeout_seconds: float | None = None,
     ) -> None:
         self._inner: Any = inner
         self._step_id: str = step_id
@@ -56,6 +67,10 @@ class StepAgent:
         self.id: str = step_id
         self.name: str = getattr(inner, "name", step_id)
         self.description: str | None = getattr(inner, "description", None)
+        self._model = model
+        self._max_total_tokens = max_total_tokens
+        self._max_cost = max_cost
+        self._timeout_seconds = timeout_seconds
 
     def create_session(self):
         """Delegate to the inner agent."""
@@ -74,6 +89,62 @@ class StepAgent:
         checkpoint persistence.
         """
         return self._shared
+
+    # ------------------------------------------------------------------
+    # Budget enforcement
+    # ------------------------------------------------------------------
+
+    def _assert_budget(self, state: dict[str, Any]) -> None:
+        """Raise ``ValidationError`` when accumulated spend already meets a ceiling.
+
+        Tolerates a missing ``_budget`` key (treats as zero spend) and a
+        ``None`` ceiling (no limit).  Does not raise when both ceilings are
+        ``None``.
+        """
+        budget = state.get("_budget") or {}
+        tokens_in = budget.get("tokens_in", 0) or 0
+        tokens_out = budget.get("tokens_out", 0) or 0
+        cost = budget.get("cost", 0.0) or 0.0
+
+        total_tokens = tokens_in + tokens_out
+
+        if self._max_total_tokens is not None and total_tokens >= self._max_total_tokens:
+            raise ValidationError(
+                f"Step '{self._step_id}: per-run budget exceeded "
+                f"(total tokens {total_tokens} >= {self._max_total_tokens})'"
+            )
+        if self._max_cost is not None and cost >= self._max_cost:
+            raise ValidationError(
+                f"Step '{self._step_id}: per-run budget exceeded "
+                f"(cost {cost} >= {self._max_cost})'"
+            )
+
+    def _record_spend(
+        self, state: dict[str, Any], response: AgentResponse
+    ) -> None:
+        """Record token/cost spend from a response into the budget dict.
+
+        Reads ``response.usage_details`` (a dict with
+        ``input_token_count``, ``output_token_count``,
+        ``cache_read_input_token_count``) when present.  If no usage is
+        available, records nothing and does not fail.
+        """
+        usage = getattr(response, "usage_details", None)
+        if usage is None or not isinstance(usage, dict):
+            return
+
+        tokens_in = usage.get("input_token_count") or 0
+        tokens_out = usage.get("output_token_count") or 0
+        cache_hit = usage.get("cache_read_input_token_count") or 0
+
+        budget = state.setdefault(
+            "_budget", {"tokens_in": 0, "tokens_out": 0, "cost": 0.0}
+        )
+        budget["tokens_in"] = (budget.get("tokens_in") or 0) + tokens_in
+        budget["tokens_out"] = (budget.get("tokens_out") or 0) + tokens_out
+        budget["cost"] = (budget.get("cost") or 0.0) + compute_run_cost(
+            self._model, tokens_in, tokens_out, cache_hit
+        )
 
     # ------------------------------------------------------------------
     # Two-source lookup
@@ -212,10 +283,26 @@ class StepAgent:
         **kwargs: Any,
     ) -> AgentResponse:
         """Non-streaming path: await inner.run, store result, return it."""
-        response = await self._inner.run(
-            messages, stream=False, session=session, **kwargs
-        )
+        self._assert_budget(state)
+
+        async def _run():
+            return await self._inner.run(
+                messages, stream=False, session=session, **kwargs
+            )
+
+        if self._timeout_seconds is not None:
+            try:
+                response = await asyncio.wait_for(_run(), self._timeout_seconds)
+            except asyncio.TimeoutError:
+                raise ValidationError(
+                    f"Step '{self._step_id}: step timeout after "
+                    f"{self._timeout_seconds}s'"
+                )
+        else:
+            response = await _run()
+
         state.setdefault("outputs", {})[self._step_id] = response.text
+        self._record_spend(state, response)
         self._sync_state_to_session(session, state)
         return response
 
@@ -227,19 +314,59 @@ class StepAgent:
         **kwargs: Any,
     ) -> AsyncGenerator[AgentResponseUpdate, None]:
         """Streaming path: yield each update, accumulate text, store at end."""
+        self._assert_budget(state)
+
         inner_stream = self._inner.run(
             messages, stream=True, session=session, **kwargs
         )
         accumulated: list[str] = []
+        last_update: AgentResponseUpdate | None = None
 
-        async for update in inner_stream:
-            yield update
-            text_part = getattr(update, "text", "") or ""
-            accumulated.append(text_part)
+        if self._timeout_seconds is None:
+            async for update in inner_stream:
+                last_update = update
+                yield update
+                accumulated.append(getattr(update, "text", "") or "")
+        else:
+            # Wall-clock ceiling for the whole step.  ``asyncio.wait_for``
+            # cannot wrap an ``async for`` directly, so iterate the stream
+            # explicitly and bound each ``__anext__`` by the time remaining
+            # until the deadline.  A timeout raises — the run must stop, not
+            # silently truncate.
+            deadline = time.monotonic() + self._timeout_seconds
+            iterator = inner_stream.__aiter__()
+            try:
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ValidationError(
+                            f"Step '{self._step_id}: step timeout after "
+                            f"{self._timeout_seconds}s'"
+                        )
+                    try:
+                        update = await asyncio.wait_for(
+                            iterator.__anext__(), remaining
+                        )
+                    except StopAsyncIteration:
+                        break
+                    except asyncio.TimeoutError:
+                        raise ValidationError(
+                            f"Step '{self._step_id}: step timeout after "
+                            f"{self._timeout_seconds}s'"
+                        )
+                    last_update = update
+                    yield update
+                    accumulated.append(getattr(update, "text", "") or "")
+            finally:
+                aclose = getattr(inner_stream, "aclose", None)
+                if aclose is not None:
+                    await aclose()
 
         state.setdefault("outputs", {})[self._step_id] = "".join(
             accumulated
         )
+        if last_update is not None:
+            self._record_spend(state, last_update)
         self._sync_state_to_session(session, state)
 
     def _sync_state_to_session(self, session: Any, state: dict[str, Any]) -> None:

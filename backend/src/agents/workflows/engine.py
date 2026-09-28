@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core.exceptions import NotFoundError, ValidationError
 from ...db.orm.models import Model
+from ...models.cost import compute_run_cost_from_prices, prices_from_model
 from .conditions import condition_names, resolve_condition
 from .definition import DEFAULT_BRANCH, WorkflowDefinition
 from .executors import StepAgent
@@ -410,6 +411,9 @@ async def build_workflow(
     checkpoint_storage: Any | None = None,
     workflow_name: str | None = None,
     initial_state: dict[str, Any] | None = None,
+    max_total_tokens: int | None = None,
+    max_cost: float | None = None,
+    budget_state: dict[str, Any] | None = None,
 ) -> Workflow:
     """Build a MAF ``Workflow`` from a ``WorkflowDefinition``.
 
@@ -433,19 +437,59 @@ async def build_workflow(
         initial_state:         Checkpoint-recovered cross-step state dict. Passed to the
                                builder so that steps which already ran keep contributing
                                to ``output_of:`` and ``user_message`` on a resumed run.
+        max_total_tokens:      Per-run token ceiling override for all steps (default: use
+                                the definition's ``max_total_tokens``).
+        max_cost:              Per-run cost ceiling override for all steps (default: use
+                                the definition's ``max_cost``).
+                                The resolved ceilings and timeout are handed to each
+                                step's guard via ``StepAgent``.
 
     Returns:
         A built ``Workflow`` instance ready for execution.
 
     Raises:
-        ValidationError: If step configuration is invalid.
+        ValidationError: If step configuration is invalid, if any model/tool/agent
+            reference in the definition does not resolve for the running tenant,
+            or if the database workflow definition is disabled.
     """
+    # Revalidate all references for the running tenant before any resolution.
+    # This prevents a reference that was valid at save time (or in a different
+    # tenant context) from silently falling back to a default model.
+    from ...services.workflow_definition_resolver import ensure_definition_enabled
+    from ...services.workflow_reference_service import assert_definition_references
+
+    await assert_definition_references(db, tenant_id, defn)
+    await ensure_definition_enabled(db, tenant_id, defn.key)
+
     # Build steps into agents + executors
     executors: list[AgentExecutor] = []
     # Seed the run-wide cross-step state.  On a resumed run the caller passes
     # the state snapshot recovered from the checkpoint so that steps which
     # already ran keep contributing to `output_of:` and `user_message`.
     shared: dict[str, Any] = dict(initial_state or {})
+
+    # Compute effective guardrail ceilings once, reusing for every step.
+    effective_max_total_tokens = (
+        max_total_tokens if max_total_tokens is not None else defn.max_total_tokens
+    )
+    effective_max_cost = (
+        max_cost if max_cost is not None else defn.max_cost
+    )
+
+    # Publish the effective ceilings so the streaming engine (``iter_workflow_sse``)
+    # can enforce them at step boundaries, where the definition is not in scope.
+    shared["_budget_limits"] = {
+        "max_total_tokens": effective_max_total_tokens,
+        "max_cost": effective_max_cost,
+    }
+
+    if budget_state is not None:
+        # Adopt the caller's dict as the live cross-step state so that spend
+        # recorded while streaming is observable by the caller.  It is seeded
+        # from any checkpoint-recovered ``initial_state``.
+        budget_state.clear()
+        budget_state.update(shared)
+        shared = budget_state
 
     for i, step in enumerate(defn.steps):
         # Resolve the effective step configuration from the agent module
@@ -497,8 +541,22 @@ async def build_workflow(
             instructions=instructions,
         )
 
+        # Record this step's prices so streaming spend can be attributed to it
+        shared.setdefault("_step_prices", {})[step.id] = prices_from_model(model)
+
         # Apply step-level input semantics without changing topology
-        agent = StepAgent(inner=agent, step_id=step.id, input_spec=step.input, shared=shared)
+        agent = StepAgent(
+            inner=agent,
+            step_id=step.id,
+            input_spec=step.input,
+            shared=shared,
+            model=model,
+            max_total_tokens=effective_max_total_tokens,
+            max_cost=effective_max_cost,
+            timeout_seconds=step.timeout_seconds
+            if step.timeout_seconds is not None
+            else defn.default_step_timeout_seconds,
+        )
 
         # Wrap in executor with the step's id as executor id
         executor = AgentExecutor(agent=agent, id=step.id, context_mode=step.context_mode)
@@ -705,6 +763,64 @@ def _get_step_id_from_event(event: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Streaming: run guardrails
+# ---------------------------------------------------------------------------
+
+
+def _record_stream_spend(
+    budget_state: dict[str, Any], step_id: str, usage: dict
+) -> None:
+    """Accumulate one step's usage into the run budget (streaming path).
+
+    ``AgentResponseUpdate`` exposes no usage, so a streaming run cannot record
+    spend step-by-step inside ``StepAgent``.  MAF *does* surface the step's
+    final usage on the ``AgentResponse`` carried by ``executor_completed``
+    events, and this records from there instead.
+    """
+    budget = budget_state.setdefault(
+        "_budget", {"tokens_in": 0, "tokens_out": 0, "cost": 0.0}
+    )
+    tokens_in = usage.get("input_token_count", 0) or 0
+    tokens_out = usage.get("output_token_count", 0) or 0
+    cache_hit = usage.get("cache_read_input_token_count", 0) or 0
+
+    budget["tokens_in"] = (budget.get("tokens_in") or 0) + tokens_in
+    budget["tokens_out"] = (budget.get("tokens_out") or 0) + tokens_out
+    prices = (budget_state.get("_step_prices") or {}).get(step_id)
+    budget["cost"] = (budget.get("cost") or 0.0) + compute_run_cost_from_prices(
+        prices, tokens_in, tokens_out, cache_hit
+    )
+
+
+def _assert_stream_budget(budget_state: dict[str, Any]) -> None:
+    """Raise when a streaming run's accumulated spend meets a per-run ceiling.
+
+    Enforced at each step boundary.  A single step can overshoot before the next
+    boundary, but an exceeded ceiling stops the run loudly and is never
+    silently ignored.
+    """
+    limits = budget_state.get("_budget_limits") or {}
+    max_total_tokens = limits.get("max_total_tokens")
+    max_cost = limits.get("max_cost")
+    if max_total_tokens is None and max_cost is None:
+        return
+
+    budget = budget_state.get("_budget") or {}
+    total_tokens = (budget.get("tokens_in") or 0) + (budget.get("tokens_out") or 0)
+    cost = budget.get("cost") or 0.0
+
+    if max_total_tokens is not None and total_tokens >= max_total_tokens:
+        raise ValidationError(
+            f"Workflow per-run budget exceeded: total tokens "
+            f"{total_tokens} >= {max_total_tokens}"
+        )
+    if max_cost is not None and cost >= max_cost:
+        raise ValidationError(
+            f"Workflow per-run budget exceeded: cost {cost} >= {max_cost}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Streaming: iterate workflow events and yield SSE dicts
 # ---------------------------------------------------------------------------
 
@@ -722,6 +838,7 @@ async def iter_workflow_sse(
     checkpoint_storage: Any | None = None,
     checkpoint_id: str | None = None,
     responses: dict | None = None,
+    budget_state: dict[str, Any] | None = None,
 ) -> AsyncIterator[dict]:
     """Stream a workflow execution, yielding SSE event dicts per step.
 
@@ -871,6 +988,16 @@ async def iter_workflow_sse(
                                 streaming_tokens_in += usage.get("input_token_count", 0) or 0
                                 streaming_tokens_out += usage.get("output_token_count", 0) or 0
                                 streaming_cache_hit += usage.get("cache_read_input_token_count", 0) or 0
+                                if budget_state is not None:
+                                    _record_stream_spend(
+                                        budget_state, actual_executor_id, usage
+                                    )
+
+                # Enforce the per-run ceilings at this step boundary.  The chat
+                # path streams, and updates carry no usage, so this is the only
+                # place a streaming run can be stopped.
+                if budget_state is not None:
+                    _assert_stream_budget(budget_state)
 
                 # Store step name for token events (for any late-arriving tokens)
                 step_tracker[actual_executor_id] = step_num

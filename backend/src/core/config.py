@@ -99,6 +99,11 @@ class Settings(BaseSettings):
     """Maximum number of tool-call steps before the agent loop terminates.
     Prevents runaway agents that loop indefinitely on tool results."""
 
+    # --- Workflows ---
+    WORKFLOW_MAX_STEPS: int = 25
+    """Maximum number of steps before a workflow terminates.
+    Prevents runaway workflows that loop indefinitely."""
+
     # --- Autopilot (Issue #446) ---
     AUTOPILOT_MAX_TURNS: int = 20
     """Maximum number of agent-invocation turns before the autopilot

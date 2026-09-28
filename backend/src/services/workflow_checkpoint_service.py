@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.exceptions import NotFoundError, ValidationError
@@ -80,6 +80,31 @@ async def latest_resumable_checkpoint(
         .limit(1)
     )
     return result.scalars().first()
+
+
+async def count_paused_runs(db: AsyncSession, tenant_id: str, key: str) -> int:
+    """Count paused (non-completed) checkpoints for a workflow key.
+
+    Returns the number of rows where ``tenant_id`` matches,
+    ``workflow_name`` matches the tenant-namespaced key
+    (see :func:`checkpoint_namespace`), and the row is **not** completed —
+    expressed as ``run_state`` is NULL *or*
+    ``run_state != "COMPLETED"`` — so that never-marked checkpoints still count.
+
+    This answers the question: how many paused runs would a topology edit strand?
+    """
+    namespace = checkpoint_namespace(tenant_id, key)
+    result = await db.execute(
+        select(func.count()).where(
+            WorkflowCheckpointRecord.tenant_id == tenant_id,
+            WorkflowCheckpointRecord.workflow_name == namespace,
+            or_(
+                WorkflowCheckpointRecord.run_state.is_(None),
+                WorkflowCheckpointRecord.run_state != RUN_STATE_COMPLETED,
+            ),
+        )
+    )
+    return result.scalar()
 
 
 async def list_session_checkpoints(

@@ -6,7 +6,7 @@
 // =============================================================================
 
 import React, { Suspense } from "react";
-import { Routes, Route, Navigate } from "react-router-dom";
+import { Routes, Route, Navigate, useParams } from "react-router-dom";
 import { AdminLayout } from "../layouts/AdminLayout";
 
 const UserList = React.lazy(() => import("../resources/users/UserList"));
@@ -43,6 +43,8 @@ const AnalyticsPage = React.lazy(
 const SettingsPage = React.lazy(
   () => import("../pages/settings/SettingsPage"),
 );
+const WorkflowList = React.lazy(() => import("../resources/workflows/WorkflowList"));
+const WorkflowForm = React.lazy(() => import("../resources/workflows/WorkflowForm"));
 
 /** Fallback while a lazy admin route loads. */
 function AdminFallback() {
@@ -62,6 +64,12 @@ function AdminFallback() {
       Loading…
     </div>
   );
+}
+
+/** Route wrapper that passes :id from params to WorkflowForm. */
+function WorkflowEditPage() {
+  const { id } = useParams();
+  return <WorkflowForm id={id} />;
 }
 
 export function AdminApp() {
@@ -146,6 +154,30 @@ export function AdminApp() {
           element={
             <Suspense fallback={<AdminFallback />}>
               <ModelRoleList />
+            </Suspense>
+          }
+        />
+        <Route
+          path="workflows"
+          element={
+            <Suspense fallback={<AdminFallback />}>
+              <WorkflowList />
+            </Suspense>
+          }
+        />
+        <Route
+          path="workflows/new"
+          element={
+            <Suspense fallback={<AdminFallback />}>
+              <WorkflowForm />
+            </Suspense>
+          }
+        />
+        <Route
+          path="workflows/:id/edit"
+          element={
+            <Suspense fallback={<AdminFallback />}>
+              <WorkflowEditPage />
             </Suspense>
           }
         />

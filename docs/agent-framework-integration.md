@@ -365,6 +365,59 @@ MAF has built-in OpenTelemetry integration. PH Agent Hub configures:
 
 ---
 
+## 10. Workflow definition resolution
+
+### Source resolution
+
+A workflow definition is delivered by **exactly one** of two sources:
+
+| Condition | Source |
+|---|---|
+| Only a shipped Python module (registered via `MAF_KEY`) exists | The module supplies the definition via `load_workflow_definition` |
+| Only a tenant-scoped database row (`workflow_definitions`) exists | The row's stored JSON supplies the definition (provided `enabled` is `true`) |
+| Both sources exist for the same key | An explicit collision error is raised; no precedence is inferred |
+| Neither source exists | A `NotFoundError` is raised naming the key and tenant |
+
+### Collision behaviour
+
+If a tenant has both a `workflow_definitions` row and a shipped module for the same key, resolution **raises an explicit collision error** and never silently picks a winner. The caller must resolve the conflict before the definition can be used. A disabled database row (`enabled` is `false`) is refused and never used, even if no module exists.
+
+### Reference validation
+
+References inside a definition are validated at **two points**: at save time and on every `execute` call. Because a valid reference can be deleted or unbound between the save and the run, the engine revalidates all references against the running tenant at the start of each build.
+
+- A reference beginning with `@` is a closed-vocabulary **role reference**, resolved through the tenant's role bindings. An unprefixed reference is a **concrete** tenant resource id, matched against the tenant's own tables.
+- A role with no binding is an error; the resolver **never** falls back to an arbitrary model or tool.
+- Concrete references that do not exist for the tenant are rejected; a cross-tenant reference is rejected loudly rather than silently falling through.
+
+### Per-run guardrails
+
+The following ceilings are enforced at **step boundaries** (not mid-step):
+
+| Guardrail | Scope | Behaviour on exceed |
+|---|---|---|
+| `max_total_tokens` | Per-run total (all steps) | Stops the run loudly with a `ValidationError` |
+| `max_cost` | Per-run total cost | Stops the run loudly with a `ValidationError` |
+| `timeout_seconds` / `default_step_timeout_seconds` | Per-step | The step times out; the run continues according to `on_error` |
+
+An exceeded ceiling stops the run rather than truncating it silently.
+
+### Security constraints
+
+Graph topology is data (defined in step dicts and branch edges), while the primitives — conditions, roles, and executors — are code. Definitions never contain arbitrary HTTP calls, MCP server configurations, URLs, or executable expressions; only the primitives enumerated above are available as authorable elements.
+
+### Implementing symbols
+
+| Symbol | File | Responsibility |
+|---|---|---|
+| `load_definition` | `backend/src/services/workflow_definition_resolver.py` | Resolves a definition from DB or module; raises on collision |
+| `ensure_definition_enabled` | `backend/src/services/workflow_definition_resolver.py` | Refuses a disabled database row |
+| `assert_definition_references` | `backend/src/services/workflow_reference_service.py` | Revalidates all references at build time; raises on failure |
+
+These three functions form the complete resolution pipeline: `load_definition` selects the source, `ensure_definition_enabled` checks the enable flag, and `assert_definition_references` validates every reference before the workflow engine builds executors.
+
+---
+
 ## 11. References
 
 - [MAF GitHub](https://github.com/microsoft/agent-framework)

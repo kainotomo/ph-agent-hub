@@ -29,6 +29,13 @@
 #
 # WorkflowDefinition.branches is a list of conditional edges; an empty list
 # means a plain sequential chain.
+#
+# WorkflowDefinition guardrail fields (config-only, not enforced yet):
+#   - ``max_total_tokens``: per-run token ceiling for the whole workflow.
+#   - ``max_cost``: per-run cost ceiling for the whole workflow.
+#   - ``default_step_timeout_seconds``: default per-step wall-clock timeout.
+# WorkflowStep.timeout_seconds: per-step wall-clock timeout overriding the
+#   definition default.
 # =============================================================================
 
 from __future__ import annotations
@@ -129,6 +136,7 @@ class WorkflowStep(BaseModel):
         input:             Description of the step's input source.
         context_mode:      How prior conversation context is passed: ``"full"`` or ``"last_agent"``.
         on_error:          How to handle step failure: ``"stop"`` or ``"continue"``.
+        timeout_seconds:   Per-step wall-clock timeout overriding the definition default.
     """
 
     id: str
@@ -143,6 +151,11 @@ class WorkflowStep(BaseModel):
     input: str = ""
     context_mode: Literal["full", "last_agent"] = "last_agent"
     on_error: Literal["stop", "continue"] = "stop"
+    timeout_seconds: float | None = Field(
+        default=None,
+        gt=0,
+        description="Per-step wall-clock timeout overriding the definition default.",
+    )
 
     @field_validator("id")
     @classmethod
@@ -215,11 +228,18 @@ class WorkflowDefinition(BaseModel):
         name:        Display name for the workflow.
         description: Human-readable description.
         steps:       Ordered list of workflow steps.
-        branches:    Conditional edges between steps; an empty list means a
-                     plain sequential chain.  Each branch references a
-                     condition from the closed vocabulary (``@``-prefixed)
-                     or the literal ``"default"`` for the unconditional
-                     fallback edge.
+        branches:              Conditional edges between steps; an empty list means a
+                               plain sequential chain.  Each branch references a
+                               condition from the closed vocabulary (``@``-prefixed)
+                               or the literal ``"default"`` for the unconditional
+                               fallback edge.
+        max_total_tokens:      Per-run token ceiling for the whole workflow;
+                               ``None`` means the tenant default applies.
+        max_cost:              Per-run cost ceiling for the whole workflow,
+                               in the tenant's currency; ``None`` means the
+                               tenant default applies.
+        default_step_timeout_seconds: Default per-step wall-clock timeout;
+                                     ``None`` means no timeout.
     """
 
     key: str = Field(
@@ -239,6 +259,21 @@ class WorkflowDefinition(BaseModel):
     branches: list[WorkflowBranch] = Field(
         default_factory=list,
         description="Conditional edges; an empty list means a plain sequential chain.",
+    )
+    max_total_tokens: int | None = Field(
+        default=None,
+        ge=1,
+        description="Per-run token ceiling for the whole workflow; None means the tenant default applies.",
+    )
+    max_cost: float | None = Field(
+        default=None,
+        gt=0,
+        description="Per-run cost ceiling for the whole workflow, in the tenant's currency; None means the tenant default applies.",
+    )
+    default_step_timeout_seconds: float | None = Field(
+        default=None,
+        gt=0,
+        description="Default per-step wall-clock timeout; None means no timeout.",
     )
 
     @field_validator("steps")

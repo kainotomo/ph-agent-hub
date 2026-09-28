@@ -56,6 +56,16 @@ def known_roles(kind: str) -> frozenset[str]:
     return _VOCABULARIES[kind]
 
 
+def model_roles() -> frozenset[str]:
+    """Return the known model role references."""
+    return MODEL_ROLES
+
+
+def tool_roles() -> frozenset[str]:
+    """Return the known tool role references."""
+    return TOOL_ROLES
+
+
 def validate_reference(value: str, kind: str) -> None:
     """Validate that a reference value is either an unprefixed concrete
     tenant resource or a known role for the given *kind*.

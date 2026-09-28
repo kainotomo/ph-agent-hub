@@ -1058,3 +1058,160 @@ export function regenerateEmbedToken(
     method: "POST",
   });
 }
+
+// =============================================================================
+// Workflow Definitions
+// =============================================================================
+
+export interface WorkflowStepData {
+  id: string;
+  name: string;
+  type: "inline" | "agent";
+  agent_ref?: string | null;
+  instructions?: string | null;
+  model_ref?: string | null;
+  tool_refs: string[];
+  reasoning_effort?: string | null;
+  temperature?: number;
+  input?: string;
+  context_mode?: "full" | "last_agent";
+  on_error?: "stop" | "continue";
+  timeout_seconds?: number | null;
+}
+
+export interface WorkflowBranchData {
+  source: string;
+  condition: string;
+  target: string;
+}
+
+export interface WorkflowDefinitionDocument {
+  key: string;
+  name: string;
+  description?: string;
+  steps: WorkflowStepData[];
+  branches: WorkflowBranchData[];
+  max_total_tokens?: number | null;
+  max_cost?: number | null;
+  default_step_timeout_seconds?: number | null;
+}
+
+export interface WorkflowDefinitionData {
+  id: string;
+  tenant_id: string;
+  key: string;
+  name: string;
+  description: string | null;
+  definition: WorkflowDefinitionDocument;
+  visibility: string;
+  enabled: boolean;
+  signature_hash: string | null;
+  created_by: string | null;
+  updated_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkflowSchemaData {
+  step_types: string[];
+  context_modes: string[];
+  on_error_values: string[];
+  model_roles: string[];
+  tool_roles: string[];
+  agent_roles: string[];
+  conditions: string[];
+  default_branch: string;
+  max_steps: number;
+}
+
+export interface WorkflowTopologyWarningData {
+  requires_confirmation: boolean;
+  report: string;
+  added_step_ids: string[];
+  removed_step_ids: string[];
+  routing_changed: boolean;
+  paused_run_count: number;
+}
+
+export interface RegisteredAgentData {
+  key: string;
+  name: string;
+  model_role: string;
+}
+
+export interface UnboundRoleData {
+  role: string;
+  models: string[];
+  workflow_keys: string[];
+}
+
+export function listWorkflows(
+  params?: ListParams,
+): Promise<PaginatedResponse<WorkflowDefinitionData>> {
+  const qs = buildQueryString({ ...params });
+  return api<PaginatedResponse<WorkflowDefinitionData>>(`/admin/workflows${qs}`);
+}
+
+export function getWorkflow(id: string): Promise<WorkflowDefinitionData> {
+  return api<WorkflowDefinitionData>(`/admin/workflows/${encodeURIComponent(id)}`);
+}
+
+export function createWorkflow(
+  payload: {
+    tenant_id?: string;
+    key: string;
+    name: string;
+    description?: string | null;
+    definition: WorkflowDefinitionDocument;
+    visibility: string;
+    enabled: boolean;
+  },
+): Promise<WorkflowDefinitionData> {
+  return api<WorkflowDefinitionData>("/admin/workflows", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export function updateWorkflow(
+  id: string,
+  payload: {
+    name?: string;
+    description?: string | null;
+    definition?: WorkflowDefinitionDocument;
+    visibility?: string;
+    enabled?: boolean;
+    confirm_topology_edit?: boolean;
+  },
+): Promise<WorkflowDefinitionData> {
+  return api<WorkflowDefinitionData>(`/admin/workflows/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: payload,
+  });
+}
+
+export function deleteWorkflow(id: string): Promise<void> {
+  return api<void>(`/admin/workflows/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export function previewWorkflowTopology(
+  id: string,
+  definition: WorkflowDefinitionDocument,
+): Promise<WorkflowTopologyWarningData> {
+  return api<WorkflowTopologyWarningData>(`/admin/workflows/${encodeURIComponent(id)}/topology-preview`, {
+    method: "POST",
+    body: { definition },
+  });
+}
+
+export function getWorkflowSchema(): Promise<WorkflowSchemaData> {
+  return api<WorkflowSchemaData>("/admin/workflows/schema");
+}
+
+export function listRegisteredAgents(): Promise<RegisteredAgentData[]> {
+  return api<RegisteredAgentData[]>("/admin/registered-agents");
+}
+
+export function listUnboundRoles(id: string): Promise<UnboundRoleData[]> {
+  return api<UnboundRoleData[]>(`/admin/workflows/${encodeURIComponent(id)}/unbound-roles`);
+}

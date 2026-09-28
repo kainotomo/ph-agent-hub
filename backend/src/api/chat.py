@@ -1950,16 +1950,14 @@ async def resume_workflow(
     # ------------------------------------------------------------------
     # Look up the registered workflow module and load its definition
     # ------------------------------------------------------------------
-    from ..agents.registry import get_registered
-    from ..agents.workflows.engine import load_workflow_definition
+    from ..services.workflow_definition_resolver import (
+        load_definition,
+        ensure_definition_enabled,
+    )
 
-    target_mod = get_registered(cfg.skill.maf_target_key)
-    if target_mod is None:
-        raise NotFoundError(
-            f"No registered workflow for key '{cfg.skill.maf_target_key}'"
-        )
-
-    defn = load_workflow_definition(target_mod)
+    resolved = await load_definition(db, tenant_id, cfg.skill.maf_target_key)
+    await ensure_definition_enabled(db, tenant_id, cfg.skill.maf_target_key)
+    defn = resolved.definition
 
     # ------------------------------------------------------------------
     # Create checkpoint storage, load target (resolves + loads checkpoint),

@@ -16,6 +16,25 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
+@pytest.fixture(autouse=True)
+def _stub_execute_time_reference_validation(monkeypatch):
+    """Stub execute-time reference validation.
+
+    These tests build workflow graphs with a mocked DB session and do not
+    exercise tenant reference validation (which needs real rows).  Since
+    ``build_workflow`` revalidates references on every build, that seam is
+    stubbed here so the tests keep testing what they are about.
+    """
+    monkeypatch.setattr(
+        "src.services.workflow_reference_service.assert_definition_references",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        "src.services.workflow_definition_resolver.ensure_definition_enabled",
+        AsyncMock(return_value=None),
+    )
+
+
 class _ProbeAgent:
     """Minimal agent stub so no model client is constructed."""
 

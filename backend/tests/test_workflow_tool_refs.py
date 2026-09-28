@@ -11,7 +11,7 @@ import uuid
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, AsyncMock
 
 import src.agents.workflows.web_research_report as web_research_report
 from src.agents.workflows.definition import WorkflowDefinition
@@ -23,6 +23,25 @@ from src.db.orm.tools import Tool
 from src.services.model_role_service import set_role_bindings
 
 pytestmark = [pytest.mark.integration]
+
+
+@pytest.fixture(autouse=True)
+def _stub_execute_time_reference_validation(monkeypatch):
+    """Stub execute-time reference validation.
+
+    These tests build workflow graphs with a mocked DB session and do not
+    exercise tenant reference validation (which needs real rows).  Since
+    ``build_workflow`` revalidates references on every build, that seam is
+    stubbed here so the tests keep testing what they are about.
+    """
+    monkeypatch.setattr(
+        "src.services.workflow_reference_service.assert_definition_references",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        "src.services.workflow_definition_resolver.ensure_definition_enabled",
+        AsyncMock(return_value=None),
+    )
 
 
 def _tool_stub(name: str):

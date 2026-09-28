@@ -163,8 +163,8 @@ def _build_patch_contexts(
     Patch locations match the **import targets** inside the endpoint:
     _load_session        → src.api.chat
     _resolve_session_config → src.agents.runner
-    get_registered       → src.agents.registry
-    load_workflow_defn   → src.agents.workflows.engine
+    get_registered       → src.services.workflow_definition_resolver
+    load_workflow_defn   → src.services.workflow_definition_resolver
     resume_workflow_with_responses → src.services.workflow_resume_service
     """
     if skill is None:
@@ -178,11 +178,11 @@ def _build_patch_contexts(
             return_value=cfg,
         ),
         patch(
-            "src.agents.registry.get_registered",
+            "src.services.workflow_definition_resolver.get_registered",
             return_value=skill,
         ),
         patch(
-            "src.agents.workflows.engine.load_workflow_definition",
+            "src.services.workflow_definition_resolver.load_workflow_definition",
             return_value=defn,
         ),
     )
@@ -314,11 +314,11 @@ class TestWorkflowResumeSuccess:
                 return_value=_make_session_config(skill=skill, execution_type="workflow"),
             ):
                 with patch(
-                    "src.agents.registry.get_registered",
+                    "src.services.workflow_definition_resolver.get_registered",
                     return_value=skill,
                 ):
                     with patch(
-                        "src.agents.workflows.engine.load_workflow_definition",
+                        "src.services.workflow_definition_resolver.load_workflow_definition",
                         return_value=_make_defn(),
                     ):
                         with _load_resume_target_patch():
@@ -403,11 +403,11 @@ class TestWorkflowResumeSuccess:
                 return_value=_make_session_config(skill=skill, execution_type="workflow"),
             ):
                 with patch(
-                    "src.agents.registry.get_registered",
+                    "src.services.workflow_definition_resolver.get_registered",
                     return_value=skill,
                 ):
                     with patch(
-                        "src.agents.workflows.engine.load_workflow_definition",
+                        "src.services.workflow_definition_resolver.load_workflow_definition",
                         return_value=_make_defn(),
                     ):
                         with patch(
@@ -473,11 +473,11 @@ class TestWorkflowResumeSuccess:
                 return_value=_make_session_config(skill=skill, execution_type="workflow"),
             ):
                 with patch(
-                    "src.agents.registry.get_registered",
+                    "src.services.workflow_definition_resolver.get_registered",
                     return_value=skill,
                 ):
                     with patch(
-                        "src.agents.workflows.engine.load_workflow_definition",
+                        "src.services.workflow_definition_resolver.load_workflow_definition",
                         return_value=_make_defn(),
                     ):
                         with patch(
@@ -537,11 +537,11 @@ class TestWorkflowResumeSuccess:
                 return_value=_make_session_config(skill=skill, execution_type="workflow"),
             ):
                 with patch(
-                    "src.agents.registry.get_registered",
+                    "src.services.workflow_definition_resolver.get_registered",
                     return_value=skill,
                 ):
                     with patch(
-                        "src.agents.workflows.engine.load_workflow_definition",
+                        "src.services.workflow_definition_resolver.load_workflow_definition",
                         return_value=_make_defn(),
                     ):
                         with patch(
@@ -592,11 +592,11 @@ class TestWorkflowResumeSuccess:
                 return_value=_make_session_config(skill=skill, execution_type="workflow"),
             ):
                 with patch(
-                    "src.agents.registry.get_registered",
+                    "src.services.workflow_definition_resolver.get_registered",
                     return_value=skill,
                 ):
                     with patch(
-                        "src.agents.workflows.engine.load_workflow_definition",
+                        "src.services.workflow_definition_resolver.load_workflow_definition",
                         return_value=_make_defn(),
                     ):
                         with patch(
@@ -646,11 +646,11 @@ class TestWorkflowResumeSuccess:
                 return_value=_make_session_config(skill=skill, execution_type="workflow"),
             ):
                 with patch(
-                    "src.agents.registry.get_registered",
+                    "src.services.workflow_definition_resolver.get_registered",
                     return_value=skill,
                 ):
                     with patch(
-                        "src.agents.workflows.engine.load_workflow_definition",
+                        "src.services.workflow_definition_resolver.load_workflow_definition",
                         return_value=_make_defn(),
                     ):
                         with patch(
@@ -699,11 +699,11 @@ class TestWorkflowResumeSuccess:
                 return_value=_make_session_config(skill=skill, execution_type="workflow"),
             ):
                 with patch(
-                    "src.agents.registry.get_registered",
+                    "src.services.workflow_definition_resolver.get_registered",
                     return_value=skill,
                 ):
                     with patch(
-                        "src.agents.workflows.engine.load_workflow_definition",
+                        "src.services.workflow_definition_resolver.load_workflow_definition",
                         return_value=_make_defn(),
                     ):
                         with patch(
@@ -743,11 +743,11 @@ class TestWorkflowResumeSuccess:
                 return_value=_make_session_config(skill=skill, execution_type="workflow"),
             ):
                 with patch(
-                    "src.agents.registry.get_registered",
+                    "src.services.workflow_definition_resolver.get_registered",
                     return_value=skill,
                 ):
                     with patch(
-                        "src.agents.workflows.engine.load_workflow_definition",
+                        "src.services.workflow_definition_resolver.load_workflow_definition",
                         return_value=_make_defn(),
                     ):
                         with patch(
@@ -791,11 +791,11 @@ class TestWorkflowResumeSuccess:
                 return_value=_make_session_config(skill=skill, execution_type="workflow"),
             ):
                 with patch(
-                    "src.agents.registry.get_registered",
+                    "src.services.workflow_definition_resolver.get_registered",
                     return_value=skill,
                 ):
                     with patch(
-                        "src.agents.workflows.engine.load_workflow_definition",
+                        "src.services.workflow_definition_resolver.load_workflow_definition",
                         return_value=_make_defn(),
                     ):
                         with patch(

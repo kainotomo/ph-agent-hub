@@ -141,6 +141,10 @@ async def resume_workflow_stream(
     # paused run keeps its instance active.  Not passing ``workflow_name``
     # lets it default to ``f"{tenant_id}:{defn.key}"``, matching the name
     # used when the checkpoint was originally written.
+    # Run-guardrail state, published by ``build_workflow`` and consumed by
+    # ``iter_workflow_sse`` so a resumed streaming run enforces its ceilings.
+    budget_state: dict = {}
+
     workflow = await build_workflow(
         defn=defn,
         db=db,
@@ -151,6 +155,7 @@ async def resume_workflow_stream(
         default_model_id=default_model_id,
         checkpoint_storage=checkpoint_storage,
         initial_state=snapshot,
+        budget_state=budget_state,
     )
 
     # 6. Stream the resumed run, forwarding each SSE event dict
@@ -162,6 +167,7 @@ async def resume_workflow_stream(
         message_id=message_id,
         checkpoint_storage=checkpoint_storage,
         checkpoint_id=target.checkpoint_id,
+        budget_state=budget_state,
         # A mutable token sink is required: `iter_workflow_sse` only emits its
         # terminal `message_complete` event when `token_counts` is not None,
         # and that event is where the run outcome ("completed" vs "paused") is
@@ -228,6 +234,10 @@ async def resume_workflow_with_responses(
     snapshot = extract_state_snapshot(checkpoint)
 
     # 3. Build a fresh workflow instance seeded with the recovered state.
+    # Run-guardrail state, published by ``build_workflow`` and consumed by
+    # ``iter_workflow_sse`` so a resumed streaming run enforces its ceilings.
+    budget_state: dict = {}
+
     workflow = await build_workflow(
         defn=defn,
         db=db,
@@ -238,6 +248,7 @@ async def resume_workflow_with_responses(
         default_model_id=default_model_id,
         checkpoint_storage=checkpoint_storage,
         initial_state=snapshot,
+        budget_state=budget_state,
     )
 
     # 4. Emit synthetic first event with resumption context
@@ -268,6 +279,7 @@ async def resume_workflow_with_responses(
         checkpoint_id=target.checkpoint_id,
         responses=responses,
         token_counts=tc,
+        budget_state=budget_state,
     ):
         if event_dict.get("event") == "message_complete":
             try:

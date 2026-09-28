@@ -20,6 +20,7 @@ import {
   Form,
   Input,
   Space,
+  Pagination,
 } from "antd";
 import {
   PlusOutlined,
@@ -55,20 +56,24 @@ export function MemoryManager({
   const [editValue, setEditValue] = useState("");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [searchText, setSearchText] = useState("");
+  const [page, setPage] = useState(1);
+  const pageSize = 20;
   const [form] = Form.useForm();
   const queryClient = useQueryClient();
 
-  const { data: entries, isLoading, isError, error, refetch } = useQuery({
-    queryKey: ["memory", sessionId],
-    queryFn: () => listMemory(sessionId),
+  const { data: envelope, isLoading, isError, error, refetch } = useQuery({
+    queryKey: ["memory", sessionId, page],
+    queryFn: () => listMemory({ sessionId, page, pageSize }),
     enabled: open || !!sessionId,
   });
 
+  const entries = envelope?.items ?? [];
+
   const createMutation = useMutation({
     mutationFn: (data: { key: string; value: string }) =>
-      createMemory({ ...data, session_id: sessionId }),
+      createMemory(data),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["memory", sessionId] });
+      queryClient.invalidateQueries({ queryKey: ["memory", sessionId, page] });
       message.success("Memory entry added");
       setAdding(false);
       form.resetFields();
@@ -80,7 +85,7 @@ export function MemoryManager({
     mutationFn: ({ id, data }: { id: string; data: { key?: string; value?: string } }) =>
       updateMemory(id, data),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["memory", sessionId] });
+      queryClient.invalidateQueries({ queryKey: ["memory", sessionId, page] });
       message.success("Memory entry updated");
       setEditing(null);
     },
@@ -90,7 +95,7 @@ export function MemoryManager({
   const deleteMutation = useMutation({
     mutationFn: (id: string) => deleteMemory(id),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["memory", sessionId] });
+      queryClient.invalidateQueries({ queryKey: ["memory", sessionId, page] });
       message.success("Memory entry deleted");
     },
     onError: (err) => message.error(`Failed to delete memory: ${(err as Error).message}`),
@@ -107,6 +112,10 @@ export function MemoryManager({
         e.value.toLowerCase().includes(lower),
     );
   }, [entries, searchText]);
+
+  // NOTE: pagination is done by the server (see the listMemory call above).
+  // The search box only filters the rows of the page currently loaded, so the
+  // already-paginated list must NOT be sliced again here.
 
   const handleAdd = async () => {
     const values = await form.validateFields();
@@ -204,6 +213,9 @@ export function MemoryManager({
                     >
                       {item.source}
                     </Tag>
+                    <Tag color="purple">
+                      {item.session_id === null ? "Global" : "This session"}
+                    </Tag>
                   </Space>
                 }
                 description={
@@ -245,7 +257,19 @@ export function MemoryManager({
             </List.Item>
           );
         }}
-      />
+        />
+      )}
+
+      {/* Pagination */}
+      {envelope && envelope.total_pages > 1 && (
+        <Pagination
+          current={page}
+          total={envelope.total}
+          pageSize={pageSize}
+          onChange={(p) => setPage(p)}
+          showTotal={(total) => `${total} entries`}
+          style={{ marginTop: 16, textAlign: "center" }}
+        />
       )}
 
       {/* Add Modal */}
@@ -274,6 +298,7 @@ export function MemoryManager({
           >
             <TextArea rows={4} placeholder="Memory value..." />
           </Form.Item>
+          <Text type="secondary">Saved for all your conversations.</Text>
         </Form>
       </Modal>
 

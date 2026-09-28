@@ -10,12 +10,15 @@ from src.agents.workflows.roles import (
     AGENT_ROLES,
     MODEL_ROLES,
     REFERENCE_PREFIX,
+    TOOL_ROLE_TYPES,
     TOOL_ROLES,
     TOOL_ROLE_TARGETS,
     known_roles,
     is_role_reference,
     validate_reference,
 )
+
+from src.services.tool_service import VALID_TOOL_TYPES
 
 
 # =============================================================================
@@ -130,3 +133,38 @@ class TestKnownRoles:
     def test_unknown_kind_raises(self):
         with pytest.raises(ValueError, match="Unknown reference kind 'bogus'"):
             known_roles("bogus")
+
+
+# =============================================================================
+# TOOL_ROLE_TYPES
+# =============================================================================
+
+
+class TestToolRoleTypes:
+    """Verify the tool-role to tenant tools.type mapping."""
+
+    def test_every_tool_role_has_a_type_mapping(self):
+        assert set(TOOL_ROLE_TYPES) == set(TOOL_ROLES)
+
+    def test_types_are_non_empty_tuples_of_strings(self):
+        for role, types in TOOL_ROLE_TYPES.items():
+            assert isinstance(types, tuple), f"{role} types must be a tuple"
+            assert types, f"{role} types must not be empty"
+            for type_name in types:
+                assert isinstance(type_name, str) and type_name.strip(), (
+                    f"{role} type values must be non-empty strings"
+                )
+
+    def test_web_search_maps_to_web_search_tool_type(self):
+        assert TOOL_ROLE_TYPES["@web_search"] == ("web_search",)
+
+    def test_declared_types_are_known_tool_types(self):
+        for role, types in TOOL_ROLE_TYPES.items():
+            for type_name in types:
+                assert type_name in VALID_TOOL_TYPES, (
+                    f"{role} declares unknown tools.type {type_name}"
+                )
+
+    def test_every_type_key_starts_with_at(self):
+        for role in TOOL_ROLE_TYPES:
+            assert role.startswith(REFERENCE_PREFIX)

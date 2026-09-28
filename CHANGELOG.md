@@ -55,6 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Workflow definition identity and edit policy** — `WorkflowDefinition.key` must match the module's `MAF_KEY` and is immutable (renaming is a create, not an edit); step `id` must be a non-empty, whitespace-free executor identity; and a new derived classification (`unchanged` / `config_only` / `topology`) states which edits leave paused runs resumable and which cannot be resumed. ([#551])
 
 ### Fixed
+- **Workflow tool-role references** now resolve against the tenant's enabled tool **type** (the tools.type column) instead of the tool's display name, so the shipped web_research_report workflow runs for tenants that have Web Search enabled. ([#550])
 - Search queries are now matched as a literal, case-insensitive substring of the selected field (e.g. `MC:xpar` returns only that session, `XXX:xpar` returns none). Wildcard characters (`%`, `_`) are matched literally. The stale FULLTEXT index `idx_sessions_title_ft` has been dropped. ([#541])
 - Admin session deletion now works correctly. ([#460])
 - Chat no longer auto-scrolls to the end when a response finishes while the user

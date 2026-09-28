@@ -17,6 +17,9 @@
 # ``src/tools/<module>.py``.  These are code-level tool kinds, not tenant
 # ``tools`` rows: the tenant supplies which tools are enabled and active for
 # a run, and a step's ``tool_refs`` restricts that already-resolved pool.
+#
+# ``TOOL_ROLE_TYPES`` maps each tool role to the tenant ``tools.type`` values that
+# satisfy it; the two mappings must always cover the same role set.
 # =============================================================================
 
 REFERENCE_PREFIX: str = "@"
@@ -29,6 +32,16 @@ AGENT_ROLES: frozenset[str] = frozenset()
 
 # Every key of ``TOOL_ROLES`` must have an entry here.
 TOOL_ROLE_TARGETS: dict[str, tuple[str, ...]] = {
+    "@web_search": ("web_search",),
+}
+
+# Every key of ``TOOL_ROLES`` must have an entry here.  Unlike
+# ``TOOL_ROLE_TARGETS`` (MAF tool-callable names), these are the tenant
+# ``tools.type`` values that identify the tenant rows able to satisfy the
+# role - the identity the tenant-scoped reference validator resolves
+# against.  Always-available builtins (``file_list``, ``memory``) have no
+# tenant row and are deliberately not role-addressable.
+TOOL_ROLE_TYPES: dict[str, tuple[str, ...]] = {
     "@web_search": ("web_search",),
 }
 

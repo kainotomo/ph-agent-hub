@@ -15,10 +15,10 @@
 # 2. **Role references** (``@``-prefixed) — for example ``"@reasoning"`` for
 #    a model role or ``"@web_search"`` for a tool role.  These are resolved
 #    through the tenant's role bindings (``model_role_service`` for models,
-#    ``TOOL_ROLE_TARGETS`` plus the tenant ``tools`` table for tools).  A role
-#    reference that cannot be resolved through the tenant's own bindings is
-#    an error; the resolver **never** falls back to an arbitrary or cross-
-#    tenant resource.
+#    ``TOOL_ROLE_TYPES`` matched against the tenant ``tools`` table's ``type``
+#    column for tools).  A role reference that cannot be resolved through the
+#    tenant's own bindings is an error; the resolver **never** falls back to an
+#    arbitrary or cross-tenant resource.
 #
 # Every database query issued by this module includes the tenant filter.
 # A role must never fall back to an arbitrary resource — if the role is
@@ -29,12 +29,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..agents.workflows.definition import WorkflowDefinition
-from ..agents.workflows.roles import TOOL_ROLE_TARGETS, is_role_reference
+from ..agents.workflows.roles import TOOL_ROLE_TYPES, is_role_reference
 from ..core.exceptions import ValidationError
 from ..db.orm.models import Model
 from ..db.orm.tools import Tool
@@ -63,6 +64,33 @@ class ReferenceIssue:
     reference: str
     kind: ReferenceKind
     reason: str
+
+
+async def _unresolved_tool_reason(
+    db: AsyncSession,
+    tenant_id: str,
+    target_filter: Any,
+    *,
+    disabled_reason: str,
+    missing_reason: str,
+) -> str:
+    """Diagnose why a tool reference did not resolve for *tenant_id*.
+
+    Distinguishes a same-tenant row that exists but is disabled from a row
+    owned by another tenant, and from no row at all, so the reported reason
+    names the actual cause instead of a generic miss.
+
+    The lookup is deliberately unscoped so that a reference which only exists
+    for another tenant is reported as such, mirroring the model-reference
+    branch's diagnostic in this module.
+    """
+    result = await db.execute(select(Tool).where(target_filter))
+    rows = list(result.scalars().all())
+    if any(row.tenant_id == tenant_id for row in rows):
+        return disabled_reason
+    if rows:
+        return "belongs to a different tenant"
+    return missing_reason
 
 
 async def validate_definition_references(
@@ -151,74 +179,82 @@ async def validate_definition_references(
         # ------------------------------------------------------------------
         for tool_ref in step.tool_refs:
             if is_role_reference(tool_ref):
-                targets = TOOL_ROLE_TARGETS.get(tool_ref)
-                if targets is None:
+                types = TOOL_ROLE_TYPES.get(tool_ref)
+                if types is None:
                     issues.append(
                         ReferenceIssue(
                             step_id=step.id,
                             reference=tool_ref,
                             kind=ReferenceKind.TOOL,
-                            reason=f"unknown tool role '{tool_ref}'",
+                            reason=(
+                                f"tool role '{tool_ref}' has no declared "
+                                f"tenant tool type"
+                            ),
                         )
                     )
                 else:
                     result = await db.execute(
                         select(Tool)
                         .where(
-                            Tool.name.in_(targets),
+                            Tool.type.in_(types),
                             Tool.tenant_id == tenant_id,
                             Tool.enabled.is_(True),
                         )
                     )
                     found = result.scalars().first()
                     if found is None:
+                        label = ", ".join(types)
                         issues.append(
                             ReferenceIssue(
                                 step_id=step.id,
                                 reference=tool_ref,
                                 kind=ReferenceKind.TOOL,
-                                reason=f"no enabled tool in this tenant for role '{tool_ref}'",
+                                reason=await _unresolved_tool_reason(
+                                    db,
+                                    tenant_id,
+                                    Tool.type.in_(types),
+                                    disabled_reason=(
+                                        f"tool type '{label}' is disabled "
+                                        f"for this tenant"
+                                    ),
+                                    missing_reason=(
+                                        f"no enabled tool of type '{label}' "
+                                        f"for role '{tool_ref}' in this tenant"
+                                    ),
+                                ),
                             )
                         )
             else:
+                match = (Tool.name == tool_ref) | (Tool.type == tool_ref)
                 result = await db.execute(
                     select(Tool)
                     .where(
-                        Tool.name == tool_ref,
+                        match,
                         Tool.tenant_id == tenant_id,
                         Tool.enabled.is_(True),
                     )
                 )
                 tool = result.scalars().first()
-                if tool is not None:
-                    pass  # resolved successfully
-
-                else:
-                    # Check if it belongs to another tenant
-                    diagnostic = await db.execute(
-                        select(Tool).where(
-                            Tool.name == tool_ref,
+                if tool is None:
+                    issues.append(
+                        ReferenceIssue(
+                            step_id=step.id,
+                            reference=tool_ref,
+                            kind=ReferenceKind.TOOL,
+                            reason=await _unresolved_tool_reason(
+                                db,
+                                tenant_id,
+                                match,
+                                disabled_reason=(
+                                    f"tool '{tool_ref}' is disabled for this tenant"
+                                ),
+                                missing_reason=(
+                                    f"no enabled tool with name or type "
+                                    f"'{tool_ref}' for this tenant"
+                                ),
+                            ),
                         )
                     )
-                    foreign = diagnostic.scalars().first()
-                    if foreign is not None and foreign.tenant_id != tenant_id:
-                        issues.append(
-                            ReferenceIssue(
-                                step_id=step.id,
-                                reference=tool_ref,
-                                kind=ReferenceKind.TOOL,
-                                reason="belongs to a different tenant",
-                            )
-                        )
-                    else:
-                        issues.append(
-                            ReferenceIssue(
-                                step_id=step.id,
-                                reference=tool_ref,
-                                kind=ReferenceKind.TOOL,
-                                reason=f"no enabled tool named '{tool_ref}' for this tenant",
-                            )
-                        )
 
         # ------------------------------------------------------------------
         # Agent reference (only for agent steps)

@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 from textwrap import dedent as _dedent
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import DatabaseError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1182,17 +1182,29 @@ async def _build_system_prompt(
 
     # ---- Agent memory injection -------------------------------------------
     # Query global memory entries (session_id IS NULL) for the current user
-    # and append them as a persistent context block.
-    if user:
+    # and append them as a persistent context block.  Skip entirely for
+    # temporary sessions so nothing leaks into the system prompt.
+    if user and not session_data.get("is_temporary"):
         try:
             from ..db.orm.memory import Memory as MemoryORM
 
+            # true total for the omission message
+            count_stmt = select(func.count()).where(
+                MemoryORM.user_id == user.id,
+                MemoryORM.tenant_id == user.tenant_id,
+                MemoryORM.session_id.is_(None),
+            )
+            total_count = (await db.execute(count_stmt)).scalar_one()
+
+            # bounded query, ordered by most recently updated
             result = await db.execute(
                 select(MemoryORM).where(
                     MemoryORM.user_id == user.id,
                     MemoryORM.tenant_id == user.tenant_id,
                     MemoryORM.session_id.is_(None),
-                ).order_by(MemoryORM.created_at.desc())
+                ).order_by(
+                    func.coalesce(MemoryORM.updated_at, MemoryORM.created_at).desc()
+                ).limit(settings.MEMORY_PROMPT_MAX_ENTRIES)
             )
             memories = result.scalars().all()
 
@@ -1206,9 +1218,31 @@ async def _build_system_prompt(
                     "they are relevant to the current conversation:",
                     "",
                 ]
+                header_chars = sum(len(line) for line in memory_lines)
+                budget = settings.MEMORY_PROMPT_MAX_CHARS - header_chars
+                accumulated = 0
+                rendered = 0
+
                 for m in memories:
                     source_tag = "[auto]" if m.source == "automatic" else "[user]"
-                    memory_lines.append(f"- {source_tag} **{m.key}**: {m.value}")
+                    value = m.value[:settings.MEMORY_PROMPT_VALUE_TRUNCATE_CHARS] if len(m.value) > settings.MEMORY_PROMPT_VALUE_TRUNCATE_CHARS else m.value
+                    entry = f"- {source_tag} **{m.key}**: {value}"
+                    truncated = len(m.value) > settings.MEMORY_PROMPT_VALUE_TRUNCATE_CHARS
+                    if truncated:
+                        entry += "..."
+                    entry_len = len(entry) + 1  # +1 for the trailing newline
+                    if accumulated + entry_len > budget:
+                        break
+                    memory_lines.append(entry)
+                    accumulated += entry_len
+                    rendered += 1
+
+                omitted = total_count - rendered
+                if omitted > 0:
+                    memory_lines.append(
+                        f"{omitted} more entries are not shown here; "
+                        "call list_memory to review them."
+                    )
 
                 parts.append("\n".join(memory_lines))
         except DatabaseError as e:

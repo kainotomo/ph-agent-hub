@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     # --- Cross-session memory (Issue #229) ---
     CROSS_SESSION_EMBEDDING_MODEL: str = "text-embedding-3-small"
 
+    # --- Persistent memory prompt budgeting ---
+    MEMORY_PROMPT_MAX_ENTRIES: int = 50  # cap on fetched memory entries
+    MEMORY_PROMPT_MAX_CHARS: int = 8000  # max chars for the memory block
+    MEMORY_PROMPT_VALUE_TRUNCATE_CHARS: int = 500  # truncate long values
+
     # --- Embedding API (RAG + cross-session memory) ---
     OPENAI_API_KEY: str = ""
     """API key for the embedding endpoint (OpenAI-compatible)."""

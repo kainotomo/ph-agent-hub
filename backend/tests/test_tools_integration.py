@@ -330,7 +330,7 @@ class TestMemoryTools:
     async def test_save_memory_creates_new(self):
         db = _make_mock_db_session()
         result_mock = MagicMock()
-        result_mock.scalar_one_or_none.return_value = None
+        result_mock.scalars.return_value.first.return_value = None
         async def mock_execute(*args, **kwargs):
             return result_mock
         db.execute = mock_execute
@@ -350,7 +350,7 @@ class TestMemoryTools:
         existing.value = "Bob"
         existing.source = "automatic"
         result_mock = MagicMock()
-        result_mock.scalar_one_or_none.return_value = existing
+        result_mock.scalars.return_value.first.return_value = existing
         async def mock_execute(*args, **kwargs):
             return result_mock
         db.execute = mock_execute
@@ -383,7 +383,7 @@ class TestMemoryTools:
         existing.source = "automatic"
         existing.id = "mem-1"
         result_mock = MagicMock()
-        result_mock.scalar_one_or_none.return_value = existing
+        result_mock.scalars.return_value.first.return_value = existing
         async def mock_execute(*args, **kwargs):
             return result_mock
         db.execute = mock_execute
@@ -399,7 +399,7 @@ class TestMemoryTools:
     async def test_delete_memory_not_found(self):
         db = _make_mock_db_session()
         result_mock = MagicMock()
-        result_mock.scalar_one_or_none.return_value = None
+        result_mock.scalars.return_value.first.return_value = None
         async def mock_execute(*args, **kwargs):
             return result_mock
         db.execute = mock_execute
@@ -432,6 +432,7 @@ class TestMemoryTools:
         entry.source = "automatic"
         entry.created_at = None
         result_mock = MagicMock()
+        result_mock.scalar_one.return_value = 1
         result_mock.scalars.return_value = result_mock
         result_mock.all.return_value = [entry]
         async def mock_execute(*args, **kwargs):
@@ -443,13 +444,15 @@ class TestMemoryTools:
         list_memory = tools[2]
 
         result = await list_memory()
-        assert len(result) == 1
-        assert result[0]["key"] == "name"
-        assert result[0]["value"] == "Alice"
+        assert result["entries"][0]["key"] == "name"
+        assert result["entries"][0]["value"] == "Alice"
+        assert result["total"] == 1
+        assert result["truncated"] is False
 
     async def test_list_memory_empty(self):
         db = _make_mock_db_session()
         result_mock = MagicMock()
+        result_mock.scalar_one.return_value = 0
         result_mock.scalars.return_value = result_mock
         result_mock.all.return_value = []
         async def mock_execute(*args, **kwargs):
@@ -461,7 +464,9 @@ class TestMemoryTools:
         list_memory = tools[2]
 
         result = await list_memory()
-        assert result == []
+        assert result["entries"] == []
+        assert result["total"] == 0
+        assert result["truncated"] is False
 
 
 # ===================================================================

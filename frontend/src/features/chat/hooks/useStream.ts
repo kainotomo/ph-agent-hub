@@ -64,7 +64,7 @@ export interface MemoryUpdatedEvent {
     session_id: string;
     message_id: string;
     tool_name: string;
-    action: "saved" | "deleted";
+    action: string;
     key: string | null;
     success: boolean;
   };

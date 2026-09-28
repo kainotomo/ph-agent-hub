@@ -172,10 +172,31 @@ vi.mock("../services/widget", () => ({
 // query, which triggers the mobile layout in ChatWindow (the ModelSelector
 // is hidden behind an "Options" button).  We mock on the main "antd" entry
 // so that `const { useBreakpoint } = Grid` picks up the override.
+// hoisted spy for antd's notification API so test cases can inspect
+// which method (success / info / warning / error) was called.
+const notificationSpy = vi.hoisted(() => ({
+  success: vi.fn(),
+  info: vi.fn(),
+  warning: vi.fn(),
+  error: vi.fn(),
+  config: vi.fn(),
+  open: vi.fn(),
+  destroy: vi.fn(),
+}));
+
 vi.mock("antd", async (importOriginal) => {
   const antd = await importOriginal<typeof import("antd")>();
   return {
     ...antd,
+    notification: {
+      success: notificationSpy.success,
+      info: notificationSpy.info,
+      warning: notificationSpy.warning,
+      error: notificationSpy.error,
+      config: notificationSpy.config,
+      open: notificationSpy.open,
+      destroy: notificationSpy.destroy,
+    },
     Grid: {
       useBreakpoint: () => ({ xs: false, sm: true, md: true, lg: true, xl: true }),
     },
@@ -965,5 +986,144 @@ describe("ChatWindow — message page size (Issue #536)", () => {
     await settle();
 
     expect(mockListMessages).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Action-based memory_updated notification handling
+// ---------------------------------------------------------------------------
+
+describe("ChatWindow — memory_updated notification by action", () => {
+  beforeEach(() => {
+    notificationSpy.success.mockReset();
+    notificationSpy.info.mockReset();
+    notificationSpy.warning.mockReset();
+    notificationSpy.error.mockReset();
+
+    mockApi.mockReset();
+    mockApi.mockImplementation((url: string) => {
+      if (url === "/models") return Promise.resolve(FAKE_MODELS);
+      return Promise.resolve([]);
+    });
+    mockGetStreamStatus.mockReset();
+    mockGetStreamStatus.mockResolvedValue({ active: false });
+    mockListMessages.mockReset();
+    mockListMessages.mockResolvedValue({ items: [], has_more: false });
+    lastStreamHandlers.current = null;
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  /**
+   * Send a message through the ChatWindow UI and return the captured
+   * stream handlers.  Needed because handlers are only set when
+   * startStream is invoked (which happens on user message send).
+   */
+  async function getHandlers() {
+    const user = userEvent.setup();
+    const textarea = screen.getByPlaceholderText(/Type a message/);
+    await user.clear(textarea);
+    await user.type(textarea, "test message");
+    const sendButton = screen
+      .getAllByRole("button")
+      .find(
+        (btn) =>
+          btn.textContent?.includes("Send") &&
+          !(btn as HTMLButtonElement).disabled,
+      );
+    expect(sendButton).toBeTruthy();
+    await user.click(sendButton!);
+    return lastStreamHandlers.current;
+  }
+
+  it('calls notification.success when action is "saved"', async () => {
+    renderChatWindow({ isPending: false, sessionId: "test-session-1" });
+    await settle();
+
+    const handlers = await getHandlers();
+    expect(handlers).not.toBeNull();
+    handlers.onMemoryUpdated({
+      action: "saved",
+      key: "test-key",
+      success: true,
+      tool_name: "save_memory",
+    });
+
+    expect(notificationSpy.success).toHaveBeenCalledWith({
+      message: "Information saved",
+      description: "I'll remember this for next time.",
+      placement: "bottomRight",
+      duration: 4,
+    });
+    expect(notificationSpy.info).not.toHaveBeenCalled();
+    expect(notificationSpy.warning).not.toHaveBeenCalled();
+    expect(notificationSpy.error).not.toHaveBeenCalled();
+  });
+
+  it('calls notification.info when action is "deleted"', async () => {
+    renderChatWindow({ isPending: false, sessionId: "test-session-1" });
+    await settle();
+
+    const handlers = await getHandlers();
+    expect(handlers).not.toBeNull();
+    handlers.onMemoryUpdated({
+      action: "deleted",
+      key: "test-key",
+      success: true,
+      tool_name: "delete_memory",
+    });
+
+    expect(notificationSpy.info).toHaveBeenCalledWith({
+      message: "Memory deleted",
+      description: "Memory entry has been removed.",
+      placement: "bottomRight",
+      duration: 4,
+    });
+    expect(notificationSpy.success).not.toHaveBeenCalled();
+    expect(notificationSpy.warning).not.toHaveBeenCalled();
+    expect(notificationSpy.error).not.toHaveBeenCalled();
+  });
+
+  it('calls notification.warning when action is "needs_confirmation" and does NOT render the saved message', async () => {
+    renderChatWindow({ isPending: false, sessionId: "test-session-1" });
+    await settle();
+
+    const handlers = await getHandlers();
+    expect(handlers).not.toBeNull();
+    handlers.onMemoryUpdated({
+      action: "needs_confirmation",
+      key: "test-key",
+      success: false,
+      tool_name: "save_memory",
+    });
+
+    expect(notificationSpy.warning).toHaveBeenCalledWith({
+      message: "Memory confirmation needed",
+      description: "Please confirm the memory in the memory panel.",
+      placement: "bottomRight",
+      duration: 4,
+    });
+    // Verify the "saved" success notification is NOT triggered
+    expect(notificationSpy.success).not.toHaveBeenCalled();
+  });
+
+  it('calls notification.error when action is an unexpected value', async () => {
+    renderChatWindow({ isPending: false, sessionId: "test-session-1" });
+    await settle();
+
+    const handlers = await getHandlers();
+    expect(handlers).not.toBeNull();
+    handlers.onMemoryUpdated({
+      action: "error",
+      key: null,
+      success: false,
+      tool_name: "save_memory",
+    });
+
+    expect(notificationSpy.error).toHaveBeenCalled();
+    expect(notificationSpy.error.mock.calls[0][0].description).toContain("An error occurred while updating the memory");
   });
 });

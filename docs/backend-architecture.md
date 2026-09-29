@@ -277,12 +277,36 @@ DELETE /skills/:id
 
 ### **3.5 Memory**
 ```
-GET    /memory
-POST   /memory
-DELETE /memory/:id
+GET    /memory                 # paginated list (optional ?session_id=)
+POST   /memory                 # create a global entry (source="manual")
+PUT    /memory/:id             # update key/value (owner only)
+DELETE /memory/:id             # delete one entry (owner only)
+GET    /memory/export          # full JSON export (optional ?session_id=)
+DELETE /memory                 # clear every entry for the caller
+POST   /memory/merge           # merge source entries into a target entry
 ```
 
 Memory supports pagination via `?page=&page_size=` query parameters. When a `session_id` filter is applied, global memories (`session_id IS NULL`) are also included alongside session-scoped entries.
+
+User-initiated create, update, delete, clear and merge are written to the audit
+log (`memory.created`, `memory.updated`, `memory.deleted`, `memory.cleared`,
+`memory.merged`). Payloads carry the key and changed field names — never the
+stored value.
+
+**Growth policy** (`memory_service.prune_memories`) runs on every write path
+(API create and the agent's `save_memory` tool). It only ever deletes
+`source="automatic"` global entries: `MEMORY_MAX_ENTRIES_PER_USER` (default 500,
+0 disables) caps the global entry count by removing the oldest automatic
+entries, and `MEMORY_RETENTION_DAYS` (default 0 = disabled) removes automatic
+entries older than that. User-created entries are never pruned.
+
+**Prompt injection** (`select_memories_for_prompt`) injects only global entries.
+When the user has more entries than `MEMORY_PROMPT_MAX_ENTRIES` and
+`MEMORY_PROMPT_SEMANTIC_RANKING` is enabled, the candidate pool
+(`MEMORY_PROMPT_CANDIDATE_ENTRIES`) is ranked by embedding similarity to the
+current message — the same mechanism used for cross-session retrieval. Within
+the limit the previous most-recently-updated ordering is kept, so the common
+small-memory case never pays for embeddings.
 
 ### **3.6 Session Tools**
 ```

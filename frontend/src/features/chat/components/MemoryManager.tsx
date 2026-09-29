@@ -21,12 +21,15 @@ import {
   Input,
   Space,
   Pagination,
+  Descriptions,
 } from "antd";
 import {
   PlusOutlined,
   DeleteOutlined,
   EditOutlined,
   SearchOutlined,
+  DownloadOutlined,
+  WarningOutlined,
 } from "@ant-design/icons";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -34,6 +37,10 @@ import {
   createMemory,
   deleteMemory,
   updateMemory,
+  exportMemory,
+  clearMemory,
+  mergeMemory,
+  type MemoryEntry,
 } from "../services/chat";
 
 const { Text, Paragraph } = Typography;
@@ -60,6 +67,7 @@ export function MemoryManager({
   const pageSize = 20;
   const [form] = Form.useForm();
   const queryClient = useQueryClient();
+  const [showDuplicates, setShowDuplicates] = useState(false);
 
   const { data: envelope, isLoading, isError, error, refetch } = useQuery({
     queryKey: ["memory", sessionId, page],
@@ -68,6 +76,40 @@ export function MemoryManager({
   });
 
   const entries = envelope?.items ?? [];
+
+  // ---------------------------------------------------------------------------
+  // Near-duplicate key detection
+  // ---------------------------------------------------------------------------
+
+  interface DuplicateGroup {
+    normKey: string;
+    entries: MemoryEntry[];
+  }
+
+  const duplicateGroups: DuplicateGroup[] = useMemo(() => {
+    if (!entries || entries.length < 2) return [];
+    const groups = new Map<string, MemoryEntry[]>();
+    for (const entry of entries) {
+      const norm = entry.key
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "");
+      const existing = groups.get(norm) || [];
+      existing.push(entry);
+      groups.set(norm, existing);
+    }
+    const result: DuplicateGroup[] = [];
+    for (const [normKey, group] of groups) {
+      if (group.length < 2) continue;
+      const rawKeys = new Set(group.map((e) => e.key));
+      if (rawKeys.size > 1) {
+        result.push({ normKey, entries: group });
+      }
+    }
+    return result;
+  }, [entries]);
+
+  const hasDuplicates = duplicateGroups.length > 0;
 
   const createMutation = useMutation({
     mutationFn: (data: { key: string; value: string }) =>
@@ -99,6 +141,44 @@ export function MemoryManager({
       message.success("Memory entry deleted");
     },
     onError: (err) => message.error(`Failed to delete memory: ${(err as Error).message}`),
+  });
+
+  const exportMutation = useMutation({
+    mutationFn: () => exportMemory(sessionId),
+    onSuccess: (data) => {
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "memory-export.json";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      message.success(`Exported ${data.count} entries`);
+    },
+    onError: (err) => message.error(`Failed to export memory: ${(err as Error).message}`),
+  });
+
+  const clearMutation = useMutation({
+    mutationFn: () => clearMemory(),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["memory", sessionId, page] });
+      setPage(1);
+      message.success(`Deleted ${data.deleted} entries`);
+    },
+    onError: (err) => message.error(`Failed to clear memory: ${(err as Error).message}`),
+  });
+
+  const mergeMutation = useMutation({
+    mutationFn: (data: { target_id: string; source_ids: string[] }) =>
+      mergeMemory(data),
+    onSuccess: (_, variables) => {
+      queryClient.invalidateQueries({ queryKey: ["memory", sessionId, page] });
+      message.success(`Merged ${variables.source_ids.length + 1} entries`);
+      setShowDuplicates(false);
+    },
+    onError: (err) => message.error(`Failed to merge memory: ${(err as Error).message}`),
   });
 
   // Filter entries by search text (case-insensitive match on key or value)
@@ -151,6 +231,18 @@ export function MemoryManager({
           >
             Add Entry
           </Button>
+          <Button
+            icon={<DownloadOutlined />}
+            onClick={() => exportMutation.mutate()}
+          >
+            Export
+          </Button>
+          <Popconfirm
+            title="Delete all memory entries?"
+            onConfirm={() => clearMutation.mutate()}
+          >
+            <Button danger>Clear all</Button>
+          </Popconfirm>
         </Space>
       }
     >
@@ -163,6 +255,25 @@ export function MemoryManager({
         onChange={(e) => setSearchText(e.target.value)}
         style={{ marginBottom: 16 }}
       />
+
+      {/* Duplicate warning */}
+      {hasDuplicates && (
+        <Alert
+          type="warning"
+          showIcon
+          icon={<WarningOutlined />}
+          message={`${duplicateGroups.length} possible duplicate memory key${duplicateGroups.length > 1 ? "s" : ""}`}
+          action={
+            <Button
+              size="small"
+              onClick={() => setShowDuplicates(true)}
+            >
+              Review duplicates
+            </Button>
+          }
+          style={{ marginBottom: 16 }}
+        />
+      )}
 
       {isError ? (
         <Alert
@@ -330,6 +441,59 @@ export function MemoryManager({
             />
           </Form.Item>
         </Form>
+      </Modal>
+
+      {/* Duplicate Review Modal */}
+      <Modal
+        title="Possible duplicate memory keys"
+        open={showDuplicates}
+        onCancel={() => setShowDuplicates(false)}
+        footer={null}
+      >
+        <p style={{ color: "#666", marginBottom: 16 }}>
+          The oldest entry is kept as the target and values from the other entries are appended to it.
+        </p>
+        {duplicateGroups.map((group, idx) => {
+          // Target is the entry with the earliest created_at; fall back to first entry
+          const sorted = [...group.entries].sort(
+            (a, b) =>
+              (a.created_at ?? "").localeCompare(b.created_at ?? ""),
+          );
+          const target = sorted[0];
+          const sources = sorted.slice(1);
+          const handleMerge = () => {
+            mergeMutation.mutate({
+              target_id: target.id,
+              source_ids: sources.map((s) => s.id),
+            });
+          };
+          return (
+            <div key={idx} style={{ marginBottom: 16, paddingBottom: 16, borderBottom: "1px solid #f0f0f0" }}>
+              <div style={{ marginBottom: 8 }}>
+                <Space direction="vertical" size={2} style={{ width: "100%" }}>
+                  {group.entries.map((e) => (
+                    <Tag key={e.id} color={e.id === target.id ? "green" : "orange"}>
+                      {e.key}
+                    </Tag>
+                  ))}
+                </Space>
+              </div>
+              <Descriptions size="small" column={1} style={{ marginBottom: 8 }}>
+                <Descriptions.Item label="Target">{target.value}</Descriptions.Item>
+                {sources.map((s) => (
+                  <Descriptions.Item key={s.id} label={`Source (merged)`}>{s.value}</Descriptions.Item>
+                ))}
+              </Descriptions>
+              <Button
+                type="primary"
+                loading={mergeMutation.isPending}
+                onClick={handleMerge}
+              >
+                Merge
+              </Button>
+            </div>
+          );
+        })}
       </Modal>
     </Drawer>
   );

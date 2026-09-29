@@ -15,8 +15,9 @@
 # =============================================================================
 
 import pytest
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.orm.memory import Memory
@@ -621,6 +622,90 @@ class TestSystemPromptMemoryInjection:
         assert len(bullets) <= settings.MEMORY_PROMPT_MAX_ENTRIES
 
     @patch("src.agents.runner._AGENT_IDENTITY", "## Platform Identity\n\nTest identity.")
+    async def test_semantic_ranking_used_when_over_limit(
+        self, db_session, test_tenant, test_user, monkeypatch
+    ):
+        """Issue #569: over the prompt limit the entries are ranked by relevance."""
+        from src.agents.runner import _build_system_prompt
+        from src.core.config import settings
+        from src.db.orm.memory import Memory
+
+        count = settings.MEMORY_PROMPT_MAX_ENTRIES + 5
+        for i in range(count):
+            db_session.add(Memory(
+                tenant_id=test_tenant.id,
+                user_id=test_user.id,
+                key=f"ranked_key_{i}",
+                value=f"value_{i}",
+                session_id=None,
+                source="automatic",
+            ))
+        await db_session.flush()
+
+        calls: list[tuple[str, list[str]]] = []
+
+        async def fake_rank(query, texts):
+            calls.append((query, list(texts)))
+            # Reverse the candidate order so the effect is observable.
+            return [(i, float(i)) for i in reversed(range(len(texts)))]
+
+        monkeypatch.setattr(
+            "src.services.memory_service.rank_by_similarity", fake_rank
+        )
+
+        prompt = await _build_system_prompt(
+            db=db_session,
+            session_data={
+                "user_id": test_user.id,
+                "tenant_id": test_tenant.id,
+                "is_temporary": False,
+            },
+            user=test_user,
+            user_message="what did I say about value_2?",
+        )
+
+        assert len(calls) == 1, "semantic ranking should run exactly once"
+        assert calls[0][0] == "what did I say about value_2?"
+        assert "## Persistent User Memory" in prompt
+
+    @patch("src.agents.runner._AGENT_IDENTITY", "## Platform Identity\n\nTest identity.")
+    async def test_semantic_ranking_skipped_within_limit(
+        self, db_session, test_tenant, test_user, monkeypatch
+    ):
+        """The common small-memory case must not pay for embeddings."""
+        from src.agents.runner import _build_system_prompt
+        from src.db.orm.memory import Memory
+
+        db_session.add(Memory(
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            key="only_key",
+            value="only_value",
+            session_id=None,
+            source="automatic",
+        ))
+        await db_session.flush()
+
+        async def exploding_rank(query, texts):
+            raise AssertionError("ranking must not run when within the limit")
+
+        monkeypatch.setattr(
+            "src.services.memory_service.rank_by_similarity", exploding_rank
+        )
+
+        prompt = await _build_system_prompt(
+            db=db_session,
+            session_data={
+                "user_id": test_user.id,
+                "tenant_id": test_user.tenant_id,
+                "is_temporary": False,
+            },
+            user=test_user,
+            user_message="hello",
+        )
+        assert "## Persistent User Memory" in prompt
+
+    @patch("src.agents.runner._AGENT_IDENTITY", "## Platform Identity\n\nTest identity.")
     async def test_no_persistent_heading_for_temp_session(
         self, db_session, test_tenant, test_user
     ):
@@ -798,8 +883,42 @@ class TestMemoryUpdatedSSE:
 
 
 # ===========================================================================
-# Helpers
+# list_memory output budget test
 # ===========================================================================
+
+class TestListMemoryOutputBudget:
+    """list_memory self-bounds its output so the runner cap never clips it."""
+
+    async def test_large_values_are_truncated_by_char_budget(
+        self, db_session, test_tenant, test_user
+    ):
+        """5 entries × 6000 chars each exceeds MEMORY_TOOL_MAX_CHARS (20000)."""
+        from src.core.config import settings
+
+        # 5 entries, each value is 6000 chars → valid (MEMORY_VALUE_MAX_CHARS=8000)
+        value = "x" * 6000
+        for i in range(5):
+            tools_i = build_memory_tools(
+                db=db_session,
+                user_id=test_user.id,
+                tenant_id=test_tenant.id,
+            )
+            await tools_i[0](key=f"k{i}", value=value)
+
+        # Build tools again and call list_memory
+        tools = build_memory_tools(
+            db=db_session,
+            user_id=test_user.id,
+            tenant_id=test_tenant.id,
+        )
+        lst = tools[2]
+        result = await lst()
+
+        assert result["truncated"] is True
+        assert len(result["entries"]) < 5
+        assert sum(len(e["value"]) for e in result["entries"]) <= 20000
+        assert result["omitted"] == result["total"] - result["returned"]
+        assert "message" in result
 
 def _mock_stream_updates(steps):
     """Yield a sequence of mock MAF ChatResponseUpdate items.
@@ -900,3 +1019,75 @@ class TestMemoryWritesAreCommitted:
 
         assert result["action"] == "deleted"
         assert commits, "delete_memory must commit its own write"
+
+
+# ===========================================================================
+# Memory growth policy enforcement on save
+# ===========================================================================
+
+class TestSaveMemoryGrowthPolicy:
+    """After a successful save the tool runs prune_memories so the
+    growth policy (MEMORY_MAX_ENTRIES_PER_USER) is always respected."""
+
+    async def test_pruning_runs_and_keeps_newest(
+        self, db_session, test_tenant, test_user, monkeypatch
+    ):
+        """With a tiny cap, saving 4 keys leaves only the 2 newest."""
+        from src.core.config import settings
+        from src.db.orm.memory import Memory
+
+        # Clean up any pre-existing entries from previous tests
+        existing = (await db_session.execute(
+            select(Memory).where(
+                Memory.user_id == test_user.id,
+                Memory.tenant_id == test_tenant.id,
+                Memory.session_id.is_(None),
+            )
+        )).scalars().all()
+        for row in existing:
+            await db_session.delete(row)
+        await db_session.commit()
+
+        monkeypatch.setattr(
+            settings, "MEMORY_MAX_ENTRIES_PER_USER", 2
+        )
+
+        tools = build_memory_tools(
+            db=db_session,
+            user_id=test_user.id,
+            tenant_id=test_tenant.id,
+        )
+        save = tools[0]
+
+        for i in range(4):
+            result = await save(key=f"growth_k{i}", value=f"v{i}")
+            assert result["action"] in ("created", "updated")
+            # ``created_at`` has second granularity, so several saves inside the
+            # same second would tie and prune would pick a victim by random
+            # UUID.  Backdate each row to a distinct, increasing timestamp so
+            # the "oldest automatic entries are pruned first" rule is testable.
+            await db_session.execute(
+                update(Memory)
+                .where(
+                    Memory.user_id == test_user.id,
+                    Memory.key == f"growth_k{i}",
+                )
+                .values(created_at=datetime(2024, 1, 1) + timedelta(minutes=i))
+            )
+            await db_session.commit()
+
+        # Only 2 global automatic rows should remain
+        rows = (await db_session.execute(
+            select(Memory).where(
+                Memory.user_id == test_user.id,
+                Memory.tenant_id == test_tenant.id,
+                Memory.session_id.is_(None),
+                Memory.source == "automatic",
+            )
+            .order_by(Memory.created_at.desc())
+            .limit(10)
+        )).scalars().all()
+        assert len(rows) == 2
+        # The surviving keys should be the two newest (growth_k2 and growth_k3)
+        keys = {r.key for r in rows}
+        assert keys == {"growth_k2", "growth_k3"}

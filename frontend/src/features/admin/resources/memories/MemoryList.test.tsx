@@ -17,12 +17,14 @@ const {
   mockDeleteAdminMemory,
   mockUpdateAdminMemory,
   mockListTenants,
+  mockListUsers,
 } = vi.hoisted(
   () => ({
     mockListAdminMemories: vi.fn(),
     mockDeleteAdminMemory: vi.fn(),
     mockUpdateAdminMemory: vi.fn(),
     mockListTenants: vi.fn(),
+    mockListUsers: vi.fn(),
   }),
 );
 
@@ -32,7 +34,7 @@ vi.mock("../../services/admin", () => ({
   deleteAdminMemory: (...args: unknown[]) => mockDeleteAdminMemory(...args),
   updateAdminMemory: (...args: unknown[]) => mockUpdateAdminMemory(...args),
   listTenants: (...args: unknown[]) => mockListTenants(...args),
-  listUsers: vi.fn(),
+  listUsers: (...args: unknown[]) => mockListUsers(...args),
 }));
 
 // Mock the AuthProvider so useAuth() returns a test user
@@ -99,6 +101,27 @@ vi.setConfig({ testTimeout: 20000 });
 describe("MemoryList", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockListUsers.mockResolvedValue({
+      items: [
+        {
+          id: "user-1",
+          email: "jane@example.com",
+          display_name: "Jane Doe",
+          role: "user",
+          tenant_id: "tenant-1",
+          is_active: true,
+          created_at: "2024-01-01T00:00:00Z",
+          updated_at: "2024-01-01T00:00:00Z",
+          total_tokens_in: 0,
+          total_tokens_out: 0,
+          total_cost: 0,
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 100,
+      total_pages: 1,
+    });
   });
 
   afterEach(() => {
@@ -323,5 +346,40 @@ describe("MemoryList", () => {
     );
     // The modal renders the complete value (the cell is ellipsized)
     expect(screen.getAllByText(longValue).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("shows resolved user display name instead of raw user_id", async () => {
+    mockListAdminMemories.mockResolvedValue({
+      items: [
+        {
+          id: "mem-3",
+          tenant_id: "tenant-1",
+          user_id: "user-1",
+          session_id: "sess-1",
+          key: "testKey",
+          value: "testValue",
+          source: "manual",
+          created_at: "2024-01-15T00:00:00Z",
+          updated_at: null,
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 25,
+      total_pages: 1,
+    });
+    mockListTenants.mockResolvedValue({
+      items: [{ id: "tenant-1", name: "Test Tenant", is_demo: false, balance_euros: null, warning_threshold_eur: null, balance_warning: false, created_at: "", updated_at: "", total_tokens_in: 0, total_tokens_out: 0, total_cost: 0 }],
+      total: 1,
+      page: 1,
+      page_size: 25,
+      total_pages: 1,
+    });
+
+    renderScreen();
+    await settle();
+
+    expect(await screen.findByText("testKey")).toBeInTheDocument();
+    expect(screen.getByText(/Jane Doe/)).toBeInTheDocument();
   });
 });

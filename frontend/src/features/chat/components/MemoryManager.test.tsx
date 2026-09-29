@@ -19,12 +19,18 @@ const mockListMemory = vi.fn();
 const mockCreateMemory = vi.fn();
 const mockDeleteMemory = vi.fn();
 const mockUpdateMemory = vi.fn();
+const mockExportMemory = vi.fn();
+const mockClearMemory = vi.fn();
+const mockMergeMemory = vi.fn();
 
 vi.mock("../services/chat", () => ({
   listMemory: (...args: any[]) => mockListMemory(...args),
   createMemory: (...args: any[]) => mockCreateMemory(...args),
   deleteMemory: (...args: any[]) => mockDeleteMemory(...args),
   updateMemory: (...args: any[]) => mockUpdateMemory(...args),
+  exportMemory: (...args: any[]) => mockExportMemory(...args),
+  clearMemory: (...args: any[]) => mockClearMemory(...args),
+  mergeMemory: (...args: any[]) => mockMergeMemory(...args),
 }));
 
 // ---------------------------------------------------------------------------
@@ -245,5 +251,154 @@ describe("MemoryManager — pagination calls listMemory", () => {
 
     expect(screen.getByText("key_20")).toBeInTheDocument();
     expect(screen.queryByText("key_0")).not.toBeInTheDocument();
+  });
+});
+
+describe("MemoryManager — Export button", () => {
+  beforeEach(() => {
+    mockListMemory.mockResolvedValue(
+      makeEnvelope([GLOBAL_ENTRY], 1, 1, 20),
+    );
+    mockCreateMemory.mockResolvedValue(GLOBAL_ENTRY);
+    mockDeleteMemory.mockResolvedValue(undefined);
+    mockUpdateMemory.mockResolvedValue(GLOBAL_ENTRY);
+    // Stub URL.createObjectURL / revokeObjectURL because jsdom doesn't have them
+    vi.stubGlobal("createObjectURL", vi.fn(() => "blob:x"));
+    vi.stubGlobal("revokeObjectURL", vi.fn());
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("calls the export API", async () => {
+    mockExportMemory.mockResolvedValue({
+      exported_at: "2025-01-01T00:00:00Z",
+      count: 1,
+      entries: [GLOBAL_ENTRY],
+    });
+
+    renderMemoryManager();
+    await settle();
+
+    const user = userEvent.setup();
+    const exportButton = screen.getByRole("button", { name: /export/i });
+    await act(async () => {
+      await user.click(exportButton);
+    });
+    await settle();
+
+    expect(mockExportMemory).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("MemoryManager — Clear all", () => {
+  beforeEach(() => {
+    mockListMemory.mockResolvedValue(
+      makeEnvelope([GLOBAL_ENTRY, SESSION_ENTRY], 2, 1, 20),
+    );
+    mockCreateMemory.mockResolvedValue(GLOBAL_ENTRY);
+    mockDeleteMemory.mockResolvedValue(undefined);
+    mockUpdateMemory.mockResolvedValue(GLOBAL_ENTRY);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  it("calls the clear API after confirmation", async () => {
+    mockClearMemory.mockResolvedValue({ deleted: 2 });
+
+    renderMemoryManager();
+    await settle();
+
+    const user = userEvent.setup();
+    // Click the "Clear all" button which opens the Popconfirm
+    const clearButton = screen.getByRole("button", { name: /clear all/i });
+    await act(async () => {
+      await user.click(clearButton);
+    });
+    // Click the confirm button in the Popconfirm
+    await act(async () => {
+      await user.click(screen.getByRole("button", { name: "OK" }));
+    });
+    await settle();
+
+    expect(mockClearMemory).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("MemoryManager — detects near-duplicate keys and merges them", () => {
+  const dupOld = {
+    id: "dup-old",
+    tenant_id: "tenant-1",
+    user_id: "user-1",
+    session_id: null,
+    key: "user_preference",
+    value: "dark mode",
+    source: "manual",
+    created_at: "2025-01-01T00:00:00Z",
+    updated_at: null,
+  };
+
+  const dupNew = {
+    id: "dup-new",
+    tenant_id: "tenant-1",
+    user_id: "user-1",
+    session_id: null,
+    key: "user-preference",
+    value: "light mode",
+    source: "manual",
+    created_at: "2025-06-01T00:00:00Z",
+    updated_at: null,
+  };
+
+  beforeEach(() => {
+    mockListMemory.mockResolvedValue(
+      makeEnvelope([dupOld, dupNew], 2, 1, 20),
+    );
+    mockCreateMemory.mockResolvedValue(dupOld);
+    mockDeleteMemory.mockResolvedValue(undefined);
+    mockUpdateMemory.mockResolvedValue(dupOld);
+    mockMergeMemory.mockResolvedValue({
+      ...dupOld,
+      value: "dark mode",
+    });
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  it("detects near-duplicate keys and merges them", async () => {
+    renderMemoryManager();
+    await settle();
+
+    // The duplicate warning should be visible
+    expect(screen.getByText(/possible duplicate memory key/)).toBeInTheDocument();
+
+    // Click "Review duplicates" to open the modal
+    const user = userEvent.setup();
+    await act(async () => {
+      await user.click(screen.getByRole("button", { name: /review duplicates/i }));
+    });
+    await settle();
+
+    // Merge button should be visible inside the modal
+    await act(async () => {
+      await user.click(screen.getByRole("button", { name: /merge/i }));
+    });
+    await settle();
+
+    // Verify mergeMemory was called with the correct arguments
+    expect(mockMergeMemory).toHaveBeenCalledTimes(1);
+    expect(mockMergeMemory).toHaveBeenCalledWith({
+      target_id: "dup-old",
+      source_ids: ["dup-new"],
+    });
   });
 });

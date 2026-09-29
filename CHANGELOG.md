@@ -27,6 +27,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Improved Sidebar** — redesigned sidebar navigation for better usability. ([#467])
 - **Mobile Compatible Scheduled Tasks** — scheduled tasks view is now mobile-responsive. ([#466])
 - **Mass Delete Chat Sessions** — admin can delete multiple chat sessions at once. ([#460])
+- **Memory export, clear-all and merge** — `GET /memory/export` returns every entry
+  (full values) as JSON, `DELETE /memory` clears the caller's memory, and
+  `POST /memory/merge` folds near-duplicate entries into one. The chat Memory
+  drawer gains **Export** and **Clear all** buttons plus a duplicate-key warning
+  with a merge dialog. ([#569])
+- **Memory growth policy** — new `MEMORY_MAX_ENTRIES_PER_USER` (default 500, 0
+  disables) and `MEMORY_RETENTION_DAYS` (default 0 = disabled) settings bound the
+  memory table. Pruning runs on every write path and only ever removes
+  `source="automatic"` global entries; user-created entries are never deleted. ([#569])
+- **Memory audit logging** — user-initiated memory create, update, delete, clear
+  and merge now write audit-log rows (`memory.created`, `memory.updated`,
+  `memory.deleted`, `memory.cleared`, `memory.merged`), matching the existing
+  admin actions. Payloads never include the stored value. ([#569])
 
 ### Changed
 - **In-Sidebar Session Search** — session search now filters the left sidebar in place
@@ -66,6 +79,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Context-window gauge is now accessible: visible percentage text, non-hue-only
   severity bands, and a warning icon at ≥75% usage. Relocated from the sidebar
   header to the chat top bar, hidden for unsent new chats. ([#530])
+- **Relevance-ranked memory injection** — when a user has more global memory
+  entries than `MEMORY_PROMPT_MAX_ENTRIES`, the injected entries are now ranked by
+  embedding similarity to the current message instead of always being the newest
+  ones. The candidate pool is bounded by the new
+  `MEMORY_PROMPT_CANDIDATE_ENTRIES` (default 100) and can be disabled with
+  `MEMORY_PROMPT_SEMANTIC_RANKING=false`. Below the limit the previous
+  most-recently-updated ordering is kept, so no embeddings are computed for the
+  common small-memory case. ([#569])
+- **Memory value caps revisited** — the injected prompt block now truncates each
+  value at 1000 characters (was 500) while the storage cap stays at 8000
+  characters, and `list_memory` has its own self-bounded output
+  (`MEMORY_TOOL_MAX_ENTRIES` = 100, `MEMORY_TOOL_MAX_CHARS` = 20000). A very large
+  memory set can no longer be silently clipped by the runner tool-output cap: the
+  tool reports `truncated`, `omitted` and a message instead. Full values remain
+  available through the tool and the export endpoint. ([#569])
+- **`/admin/memories` pagination is validated** — `page` must be ≥ 1 and
+  `page_size` between 1 and 200, matching the other admin list endpoints. ([#569])
+- **Admin memory list resolves user names** — the User column now shows the user's
+  display name (falling back to their email, then a shortened id) instead of a raw
+  UUID. ([#569])
+- **`read_only` goal-based skills no longer write memory** — `save_memory` and
+  `delete_memory` are stripped along with the other write tools, and the memory
+  guidance block is omitted from the prompt so the model is not told to call a
+  tool it no longer has. `list_memory` stays available. ([#569])
+- **Temporary sessions no longer run cross-session retrieval** — temporary
+  sessions are documented as leaving no trace, but the semantic retrieval of past
+  conversation snippets still ran for them. It is now skipped, matching the
+  persistent-memory block. ([#569])
 
 ---
 

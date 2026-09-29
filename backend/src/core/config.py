@@ -65,7 +65,13 @@ class Settings(BaseSettings):
     # --- Persistent memory prompt budgeting ---
     MEMORY_PROMPT_MAX_ENTRIES: int = 50  # cap on fetched memory entries
     MEMORY_PROMPT_MAX_CHARS: int = 8000  # max chars for the memory block
-    MEMORY_PROMPT_VALUE_TRUNCATE_CHARS: int = 500  # truncate long values
+    MEMORY_PROMPT_VALUE_TRUNCATE_CHARS: int = 1000  # per-entry cap inside the prompt block (a context-tax control; the full value stays available to the model through list_memory)
+    MEMORY_MAX_ENTRIES_PER_USER: int = 500  # 0 disables the global-entry cap
+    MEMORY_RETENTION_DAYS: int = 0  # 0 disables age-based retention
+    MEMORY_TOOL_MAX_ENTRIES: int = 100  # max entries the list_memory tool returns
+    MEMORY_TOOL_MAX_CHARS: int = 20000  # hard character budget for list_memory output
+    MEMORY_PROMPT_SEMANTIC_RANKING: bool = True  # rank memory entries by relevance to the user message
+    MEMORY_PROMPT_CANDIDATE_ENTRIES: int = 100  # max entries fetched as ranking candidates
 
     # --- Embedding API (RAG + cross-session memory) ---
     OPENAI_API_KEY: str = ""

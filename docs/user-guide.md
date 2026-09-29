@@ -493,6 +493,37 @@ Click the delete icon on any memory entry to remove it. The AI will no longer re
 
 Memory is private to you — no other user can see your memory entries.
 
+### 8.5 Export Memory
+
+Click **Export** in the Memory drawer to download every entry as a JSON file
+(`memory-export.json`). The export contains the full, untruncated value of each
+entry, so it is also the way to read back a value that the AI's prompt only saw
+a shortened version of.
+
+### 8.6 Clear All Memory
+
+Click **Clear all** and confirm to delete every memory entry you own. This cannot
+be undone — export first if you want a backup.
+
+### 8.7 Duplicate Keys and Merging
+
+If several entries have keys that differ only in punctuation or casing
+(for example `user_preference` and `user-preference`), the drawer shows a
+**possible duplicate memory keys** warning. Click **Review duplicates** to see the
+groups, then **Merge** on a group to combine it: the oldest entry is kept as the
+target and the other values are appended to it, and the now-redundant entries are
+removed.
+
+### 8.8 How Memory Reaches the Model
+
+Only global entries (those labelled **Global**) are injected into the AI's
+system prompt. When you have more entries than the prompt budget allows, the
+entries most relevant to your current message are injected first (rather than
+simply the newest ones), and the prompt tells the AI how many entries were left
+out so it can call `list_memory` when it needs them. Long values are shortened
+inside the prompt; the full value is always available through the tool and
+through **Export**.
+
 ---
 
 ## 9. Message Actions

@@ -1604,6 +1604,74 @@ class TestResolveModel:
         assert model.id == test_model.id
 
 
+class TestStripReadOnlyWriteTools:
+    """Pure unit tests for ``_strip_read_only_write_tools``."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self):
+        from src.agents.runner import _strip_read_only_write_tools
+        self.fn = _strip_read_only_write_tools
+
+    def test_strips_write_tool(self):
+        tool = MagicMock()
+        tool.name = "create_user"
+        result = self.fn([tool], skill_title="Test Skill")
+        assert len(result) == 0
+
+    def test_keeps_read_tool(self):
+        tool = MagicMock()
+        tool.name = "get_user"
+        result = self.fn([tool], skill_title="Test Skill")
+        assert result == [tool]
+
+    def test_strips_memory_write_tools(self):
+        """Issue #569: read_only skills must not write persistent memory."""
+        save = MagicMock()
+        save.name = "save_memory"
+        delete = MagicMock()
+        delete.name = "delete_memory"
+        result = self.fn([save, delete], skill_title="Test Skill")
+        assert result == []
+
+    def test_keeps_always_exempt_tools(self):
+        tools = []
+        for name in ("list_memory", "propose_schedule", "confirm_schedule"):
+            tool = MagicMock()
+            tool.name = name
+            tools.append(tool)
+        result = self.fn(tools, skill_title="Test Skill")
+        assert result == tools
+
+    def test_keeps_tool_without_name(self):
+        tool = MagicMock(spec=[])  # no 'name' attribute
+        result = self.fn([tool], skill_title="Test Skill")
+        assert result == [tool]
+
+    def test_removes_multiple_write_tools(self):
+        t1 = MagicMock()
+        t1.name = "create_user"
+        t2 = MagicMock()
+        t2.name = "delete_data"
+        t3 = MagicMock()
+        t3.name = "read_only_func"
+        result = self.fn([t1, t2, t3], skill_title="Test Skill")
+        assert result == [t3]
+
+    def test_removes_save_tool_but_keeps_list_memory(self):
+        t1 = MagicMock()
+        t1.name = "save_note"  # starts with save_
+        t2 = MagicMock()
+        t2.name = "save_memory"  # memory writes are NOT exempt (Issue #569)
+        t3 = MagicMock()
+        t3.name = "list_memory"  # read-only, exempt
+        result = self.fn([t1, t2, t3], skill_title="Test Skill")
+        assert result == [t3]
+
+    def test_empty_list_returns_empty(self):
+        result = self.fn([], skill_title="Test Skill")
+        assert result == []
+
+
 @pytest.mark.integration
 class TestBuildSystemPrompt:
     """Tests for ``_build_system_prompt`` with real DB fixtures."""
@@ -1710,6 +1778,53 @@ class TestBuildSystemPrompt:
         }
         prompt = await self.fn(db_session, session_data, user=test_user, user_message="test")
         assert "Relevant Past Conversations" not in prompt
+
+    # --- memory_writes_allowed tests for _build_system_prompt -----------
+
+    async def test_memory_writes_allowed_true_includes_memory_guidance(
+        self, db_session, test_tenant, test_user
+    ):
+        session_data = {"tenant_id": test_tenant.id, "user_id": test_user.id}
+        prompt = await self.fn(
+            db_session, session_data, user=test_user, memory_writes_allowed=True,
+        )
+        assert "## Memory Guidance" in prompt
+
+    async def test_memory_writes_allowed_false_excludes_memory_guidance(
+        self, db_session, test_tenant, test_user
+    ):
+        # user_id is present so the only reason the block can be missing is
+        # memory_writes_allowed=False - otherwise this assertion would pass
+        # trivially.
+        session_data = {"tenant_id": test_tenant.id, "user_id": test_user.id}
+        prompt_allowed = await self.fn(
+            db_session, session_data, user=test_user, memory_writes_allowed=True,
+        )
+        assert "## Memory Guidance" in prompt_allowed
+
+        prompt_blocked = await self.fn(
+            db_session, session_data, user=test_user, memory_writes_allowed=False,
+        )
+        assert "## Memory Guidance" not in prompt_blocked
+
+    async def test_cross_session_retrieval_skipped_for_temporary_sessions(
+        self, db_session, test_tenant, test_user, test_skill
+    ):
+        from unittest.mock import AsyncMock
+
+        with patch("src.services.embedding_service.embed_query", new_callable=AsyncMock) as mock_embed:
+            mock_embed.return_value = [0.1, 0.2, 0.3]
+            session_data = {
+                "selected_skill_id": test_skill.id,
+                "cross_session_retrieval_enabled": True,
+                "is_temporary": True,
+                "tenant_id": test_tenant.id,
+            }
+            prompt = await self.fn(
+                db_session, session_data, user=test_user, user_message="test",
+            )
+            assert "Relevant Past Conversations" not in prompt
+            mock_embed.assert_not_called()
 
 
 @pytest.mark.integration

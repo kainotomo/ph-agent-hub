@@ -61,6 +61,58 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Helper: strip read-only tools from a goal-based skill
+# ---------------------------------------------------------------------------
+
+_WRITE_TOOL_PREFIXES = (
+    "create_", "update_", "delete_", "save_", "send_",
+    "insert_", "submit_", "write_", "upload_", "remove_",
+    "edit_", "modify_", "add_", "set_", "put_", "post_",
+)
+# Tools that survive the read_only strip even though their name looks like a
+# write.  ``list_memory`` is a read.  ``propose_schedule`` / ``confirm_schedule``
+# drive the scheduling confirmation flow and do not mutate tenant data.
+#
+# ``save_memory`` / ``delete_memory`` are deliberately NOT exempt (Issue #569):
+# a read-only agent must not mutate the user's persistent memory either.  The
+# memory guidance block that tells the model to call them is suppressed in
+# ``_build_system_prompt`` (``memory_writes_allowed=False``) so the prompt never
+# advertises a tool that has been stripped.
+_EXEMPT_TOOLS = frozenset({
+    "propose_schedule", "confirm_schedule", "list_memory",
+})
+
+
+def _strip_read_only_write_tools(
+    tools: list,
+    *,
+    skill_title: str = "",
+) -> list:
+    """Return a copy of *tools* with write-capable tools removed.
+
+    When a goal-based skill carries the ``read_only`` constraint the agent
+    must not modify any data.  This helper removes tools whose ``name``
+    starts with a write prefix, while preserving the read/scheduling tools
+    listed in ``_EXEMPT_TOOLS`` (memory writes are *not* exempt).
+    """
+    before = len(tools)
+    filtered = [
+        t for t in tools
+        if not hasattr(t, "name")
+        or not t.name.lower().startswith(_WRITE_TOOL_PREFIXES)
+        or t.name in _EXEMPT_TOOLS
+    ]
+    removed = before - len(filtered)
+    if removed:
+        logger.info(
+            "read_only constraint removed %d write tool(s) "
+            "for goal_based skill '%s'",
+            removed, skill_title,
+        )
+    return filtered
+
+
+# ---------------------------------------------------------------------------
 # Session config resolution (shared by run_agent / run_agent_stream)
 # ---------------------------------------------------------------------------
 
@@ -97,13 +149,22 @@ async def _resolve_session_config(
     # 1. Resolve model
     model = await _resolve_model(db, session_data, user)
 
-    # 2. Build system prompt (includes cross-session memory retrieval if enabled)
-    system_prompt = await _build_system_prompt(
-        db, session_data, user=user, user_message=user_message,
+    # 2. Resolve skill (needed to determine read_only constraint BEFORE
+    #    building the system prompt, so we can gate memory writes).
+    skill = await _resolve_skill(db, session_data)
+
+    read_only = (
+        skill
+        and skill.execution_type == "goal_based"
+        and skill.constraints
+        and "read_only" in skill.constraints
     )
 
-    # 3. Resolve skill
-    skill = await _resolve_skill(db, session_data)
+    # 3. Build system prompt (includes cross-session memory retrieval if enabled)
+    system_prompt = await _build_system_prompt(
+        db, session_data, user=user, user_message=user_message,
+        memory_writes_allowed=not read_only,
+    )
 
     # 4. Resolve active tools
     context_length = getattr(model, "context_length", None)
@@ -181,36 +242,13 @@ async def _resolve_session_config(
     except Exception:
         logger.warning("Failed to resolve tenant name for tenant %s", tenant_id)
 
-    # ---- Constraint-aware tool filtering (Goal-Based Skills, Issue #448) --
-    # When a goal_based skill has a "read_only" constraint, strip tools
-    # that perform write operations so the agent cannot modify data.
-    if (
-        skill
-        and skill.execution_type == "goal_based"
-        and skill.constraints
-        and "read_only" in skill.constraints
-    ):
-        _WRITE_TOOL_PREFIXES = (
-            "create_", "update_", "delete_", "save_", "send_",
-            "insert_", "submit_", "write_", "upload_", "remove_",
-            "edit_", "modify_", "add_", "set_", "put_", "post_",
+    # 6. Constraint-aware tool filtering (Goal-Based Skills, Issue #448) --
+    # When a goal_based skill has a "read_only" constraint, strip write
+    # tools so the agent cannot modify data.
+    if read_only:
+        active_tool_callables = _strip_read_only_write_tools(
+            active_tool_callables, skill_title=skill.title or "",
         )
-        _EXEMPT_TOOLS = {"propose_schedule", "confirm_schedule", "save_memory",
-                         "delete_memory", "list_memory"}
-        before = len(active_tool_callables)
-        active_tool_callables = [
-            t for t in active_tool_callables
-            if not hasattr(t, "name")
-            or not t.name.lower().startswith(_WRITE_TOOL_PREFIXES)
-            or t.name in _EXEMPT_TOOLS
-        ]
-        removed = before - len(active_tool_callables)
-        if removed:
-            logger.info(
-                "read_only constraint removed %d write tool(s) "
-                "for goal_based skill '%s'",
-                removed, skill.title,
-            )
 
     return SessionConfig(
         model=model,
@@ -1140,6 +1178,7 @@ async def _build_system_prompt(
     session_data: dict,
     user: User | None = None,
     user_message: str | None = None,
+    memory_writes_allowed: bool = True,
 ) -> str:
     """Build the system prompt from template + agent memory + cross-session retrieval.
 
@@ -1186,27 +1225,23 @@ async def _build_system_prompt(
     # temporary sessions so nothing leaks into the system prompt.
     if user and not session_data.get("is_temporary"):
         try:
-            from ..db.orm.memory import Memory as MemoryORM
+            from ..services.memory_service import select_memories_for_prompt
 
-            # true total for the omission message
-            count_stmt = select(func.count()).where(
-                MemoryORM.user_id == user.id,
-                MemoryORM.tenant_id == user.tenant_id,
-                MemoryORM.session_id.is_(None),
+            # Select the entries to inject.  When the user has more global
+            # entries than the prompt budget allows they are ranked by
+            # relevance to the current message (Issue #569); in every other
+            # case this keeps the previous most-recently-updated ordering and
+            # never pays for embeddings.  ``total_count`` is the true number of
+            # entries so the omission notice stays accurate.
+            memories, total_count = await select_memories_for_prompt(
+                db,
+                user_id=user.id,
+                tenant_id=user.tenant_id,
+                query=user_message,
+                limit=settings.MEMORY_PROMPT_MAX_ENTRIES,
+                candidate_limit=settings.MEMORY_PROMPT_CANDIDATE_ENTRIES,
+                semantic_ranking=settings.MEMORY_PROMPT_SEMANTIC_RANKING,
             )
-            total_count = (await db.execute(count_stmt)).scalar_one()
-
-            # bounded query, ordered by most recently updated
-            result = await db.execute(
-                select(MemoryORM).where(
-                    MemoryORM.user_id == user.id,
-                    MemoryORM.tenant_id == user.tenant_id,
-                    MemoryORM.session_id.is_(None),
-                ).order_by(
-                    func.coalesce(MemoryORM.updated_at, MemoryORM.created_at).desc()
-                ).limit(settings.MEMORY_PROMPT_MAX_ENTRIES)
-            )
-            memories = result.scalars().all()
 
             if memories:
                 memory_lines: list[str] = [
@@ -1270,7 +1305,7 @@ async def _build_system_prompt(
     # for user facts, preferences, and recurring needs.
     user_id = session_data.get("user_id", "")
     is_temporary = session_data.get("is_temporary", False)
-    if user and user_id and not is_temporary:
+    if user and user_id and not is_temporary and memory_writes_allowed:
         parts.append(_dedent("""\
             ## Memory Guidance
 
@@ -1303,7 +1338,8 @@ async def _build_system_prompt(
 
     # ---- Cross-session memory retrieval (Issue #229) -----------------------
     # Inject relevant past conversation snippets via semantic search.
-    if user and user_message:
+    # temporary sessions must leave no trace, so retrieval is skipped for them.
+    if user and user_message and not session_data.get("is_temporary"):
         try:
             from ..services.embedding_service import (
                 embed_query as _embed_query,

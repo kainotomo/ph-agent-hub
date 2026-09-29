@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Literal
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -3819,8 +3819,8 @@ async def admin_list_memories(
     source: str | None = None,
     sort_by: str | None = None,
     sort_dir: str | None = None,
-    page: int = 1,
-    page_size: int = 25,
+    page: int = Query(1, ge=1, description="Page number (1-indexed)"),
+    page_size: int = Query(25, ge=1, le=200, description="Items per page"),
     db: AsyncSession = Depends(get_db),
     current_user: UserORM = Depends(require_admin_or_manager),
 ):

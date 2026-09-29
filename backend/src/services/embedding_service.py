@@ -61,6 +61,26 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (na * nb)
 
 
+async def rank_by_similarity(query: str, texts: list[str]) -> list[tuple[int, float]]:
+    """Rank texts by cosine similarity to query.
+
+    Returns (index, score) pairs sorted by descending score.  Ties keep
+    their original relative order.  Returns an empty list when query or
+    texts is empty or when embeddings cannot be produced, so callers must
+    fall back to their own default ordering.
+    """
+    if not query or not texts:
+        return []
+
+    vectors = await _get_embeddings([query] + list(texts))
+
+    if len(vectors) != len(texts) + 1:
+        return []
+
+    pairs = [(i, _cosine_similarity(vectors[0], v)) for i, v in enumerate(vectors[1:])]
+    return sorted(pairs, key=lambda p: p[1], reverse=True)
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------

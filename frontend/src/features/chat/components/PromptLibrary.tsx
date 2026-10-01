@@ -48,21 +48,31 @@ interface PromptLibraryProps {
   onUse?: (resolvedText: string) => void;
 }
 
+// Placeholders owned by the platform rather than the user (Issue #572). The
+// backend substitutes these in system prompts, so they must never be offered as
+// a fill-in field nor silently blanked out of a personal prompt.
+const RESERVED_VARIABLES = new Set(["SESSION_ID", "SESSION_URL"]);
+
 // Extract {{variable_name}} patterns from prompt content
 function extractVariables(content: string): string[] {
   const re = /\{\{(\w+)\}\}/g;
   const names = new Set<string>();
   let match: RegExpExecArray | null;
   while ((match = re.exec(content)) !== null) {
-    names.add(match[1]);
+    if (!RESERVED_VARIABLES.has(match[1])) {
+      names.add(match[1]);
+    }
   }
   return Array.from(names);
 }
 
 // Replace {{variable}} placeholders with user-provided values.
-// Unfilled variables are replaced with an empty string.
+// Unfilled variables are replaced with an empty string. Reserved platform
+// placeholders are left intact for the backend to substitute.
 function resolveTemplate(content: string, values: Record<string, string>): string {
-  return content.replace(/\{\{(\w+)\}\}/g, (_, name) => values[name] ?? "");
+  return content.replace(/\{\{(\w+)\}\}/g, (match, name) =>
+    RESERVED_VARIABLES.has(name) ? match : (values[name] ?? ""),
+  );
 }
 
 export function PromptLibrary({

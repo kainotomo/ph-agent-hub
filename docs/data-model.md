@@ -381,6 +381,21 @@ A session belongs to a user and a tenant.
 
 Sessions have a many-to-many relationship with tags via the `session_tags` join table. Tags are generated automatically after each agent response (3–5 topic tags).
 
+### Session retention and the canonical session URL *(Issue #572)*
+
+`sessions.id` is a UUID4 and doubles as the identifier in the canonical web URL `{FRONTEND_URL}/chat/{session_id}` — the same shape the scheduler publishes in notification emails. The agent is given its own session id and URL so it can cite the conversation it ran in; see `docs/backend-architecture.md` §3.2.1 for how the value reaches the model and the tools.
+
+A session URL is only as durable as its session, so the retention rule is part of the contract:
+
+| Session type | Storage | Retention | Link resolves? |
+|---|---|---|---|
+| Permanent | MariaDB | No expiry. Removed only by an explicit user or admin delete, which revokes the link. | Yes, for the owning user |
+| Temporary | Redis | `TEMPORARY_SESSION_TTL_SECONDS` (default 24 h), and purged on logout or expiry | Only until it expires; the agent is told not to present it as durable |
+| Demo | Redis | `DEMO_SESSION_TTL_SECONDS` (default 1 h) | No — the owner is `demo:{tenant_id}`, which cannot sign in |
+| Embed widget | Redis | `TEMPORARY_SESSION_TTL_SECONDS` | No — the owner is `guest:{embed_config_id}`, which cannot sign in |
+
+Opening any session URL requires authentication as the session's owner within its tenant (`_require_session_owner` checks both `user_id` and `tenant_id`); there is no public or share-token view of a session. Session ids are UUID4, so they are not guessable or enumerable and cannot be used to reach another tenant's session.
+
 **Table: session_tags**
 - session_id (UUID, FK → sessions.id)
 - tag_id (UUID, FK → tags.id)

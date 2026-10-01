@@ -229,6 +229,26 @@ DELETE /chat/folders/:id                # Delete folder (sessions move to Unfile
 
 > **Session folders** (Issue #526) — Sessions can be grouped into user-scoped, single-level folders. `sessions.folder_id` is nullable; `NULL` means the session appears under "Unfiled" in the sidebar. Folder ids are validated against the caller's own folders on both session creation and update, so a session can never be filed into another user's folder. Move a session with `PUT /chat/session/:id` and `{"folder_id": "<id>"}`, or `{"folder_id": null}` to unfile it. Deleting a folder keeps its sessions and moves them to Unfiled. Folders are not supported for temporary (Redis) sessions.
 
+### **3.2.1 Current Session Context** *(Issue #572)*
+
+The agent is told which conversation it is running in, so it can cite that conversation in its answers and in anything it writes downstream.
+
+**System prompt block.** `_build_system_prompt()` (`src/agents/runner.py`) appends a `## Current Session` block directly after the platform identity, before the template. It carries the session id and, when one exists, the canonical URL. Admins may also reference the running session from a template system prompt with the literals `{{SESSION_ID}}` and `{{SESSION_URL}}`; both are expanded when the prompt is assembled. `{{SESSION_URL}}` expands to a short "no resolvable link" marker rather than an empty string when the session has no link.
+
+**Workflow steps.** Step agents are built from `step.instructions` (or the registered agent module's `INSTRUCTIONS`) and never receive the session system prompt, so `build_workflow()` takes an optional `session_context` string and appends it to every step's instructions. `instructions` is a config-only property and is absent from MAF's `graph_signature`, so this per-run text does not affect edit classification or checkpoint resumability. A resumed run passes the same block, so the session id and URL do not change across a pause/resume.
+
+**Tool invocation context.** Every tool invocation is seeded with `session_id` and `session_url` in addition to `session_data` (`_seed_invocation_kwargs`). A tool opts in by declaring `ctx: FunctionInvocationContext | None = None` and reading `ctx.kwargs`. For a `FunctionTool` these values are kept separate from the model-supplied arguments, so the model cannot override them — which is what makes the value trustworthy in a downstream record. See `docs/agent-framework-integration.md` for the contract and its MCP caveats.
+
+**URL shape and access.**
+- Shape: `{FRONTEND_URL}/chat/{session_id}` — the same link the scheduler publishes in notification emails. No tenant segment is included; a deployment resolves the tenant from the signed-in user.
+- **Authentication is required.** `/chat/:sessionId` sits behind the frontend route guard and `GET /chat/session/:id` enforces `_require_session_owner` (owner *and* tenant match). A link published into a record therefore resolves only for the user who owns the session, and only while signed in. There is no public or share-token view.
+- **Ids are not guessable or enumerable.** `sessions.id` is a UUID4 primary key, not sequential, so a published link cannot be walked to another session.
+- The id is stable for the life of the session and never changes between turns.
+
+**When no link is available.** The block states that no URL exists instead of omitting the field, and `session_url` is left out of the invocation kwargs entirely. This applies when `FRONTEND_URL` is unconfigured, and for ephemeral guest identities created by the embed widget (`guest:<embed_config_id>`) and demo mode (`demo:<tenant_id>`) — neither has an account that can sign in, so `/chat/{id}` is unreachable for them.
+
+**Retention.** See `docs/data-model.md` §3.1 for the per-session-type retention rule. A link is only as durable as its session: temporary sessions expire, and a user can delete a permanent session at any time, which revokes its link.
+
 ### **3.3 File Uploads**
 ```
 POST   /chat/session/:id/upload

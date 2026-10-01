@@ -1984,6 +1984,11 @@ async def resume_workflow(
         db, tenant_id, target, checkpoint_storage, body.approvals
     )
 
+    # Issue #572 — keep the resumed step agents aware of their session.
+    from ..agents.runner import _build_session_context_block
+
+    session_context = _build_session_context_block(data)
+
     # Use the skill's default model as the resume fallback
     default_model_id = getattr(cfg.skill, "default_model_id", None)
 
@@ -1999,6 +2004,7 @@ async def resume_workflow(
             base_temperature=cfg.temperature,
             base_reasoning_effort=cfg.reasoning_effort,
             default_model_id=default_model_id,
+            session_context=session_context,
         ):
             yield event_dict
 

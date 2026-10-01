@@ -414,6 +414,7 @@ async def build_workflow(
     max_total_tokens: int | None = None,
     max_cost: float | None = None,
     budget_state: dict[str, Any] | None = None,
+    session_context: str | None = None,
 ) -> Workflow:
     """Build a MAF ``Workflow`` from a ``WorkflowDefinition``.
 
@@ -443,7 +444,12 @@ async def build_workflow(
                                 the definition's ``max_cost``).
                                 The resolved ceilings and timeout are handed to each
                                 step's guard via ``StepAgent``.
-
+        session_context:       Optional "current session" block (Issue #572) appended to
+                               every step's instructions.  Step agents are built from
+                               ``step.instructions`` / the registered agent module's
+                               ``INSTRUCTIONS`` rather than the session system prompt, so
+                               the block must be appended here for step agents to know
+                               which conversation they are running in.
     Returns:
         A built ``Workflow`` instance ready for execution.
 
@@ -507,6 +513,19 @@ async def build_workflow(
             instructions = agent_mod.INSTRUCTIONS
             if step.model_ref is None:
                 model_ref = agent_mod.MODEL_ROLE
+
+        # Issue #572 — append the current-session block so step agents can cite
+        # the conversation they are running in.  Step agents never receive the
+        # session system prompt, so this is the only place the block can reach
+        # them.  ``instructions`` is a config-only property and is deliberately
+        # absent from MAF's graph signature, so appending a per-run string here
+        # does not affect edit classification or checkpoint resumability.
+        if session_context:
+            instructions = (
+                f"{instructions}\n\n{session_context}"
+                if instructions
+                else session_context
+            )
 
         # Resolve model for this step. Only an unresolved *concrete* reference
         # may fall back to the skill's default model: an unbound role or a

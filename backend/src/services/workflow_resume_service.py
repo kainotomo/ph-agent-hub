@@ -121,11 +121,16 @@ async def resume_workflow_stream(
     base_temperature: float = 0.7,
     base_reasoning_effort: str | None = None,
     default_model_id: str | None = None,
+    session_context: str | None = None,
 ) -> AsyncIterator[dict]:
     """Resume a workflow run from its latest resumable checkpoint.
 
     This is the durable-resume primitive: locate, validate, load, extract,
     build a fresh instance, and stream the resumed run.
+
+    ``session_context`` is the current-session block (Issue #572) appended to
+    every step's instructions, so a resumed run keeps the same session id and
+    canonical URL as the run it continues.
     """
     # 1-3. Locate, validate, and load the checkpoint
     target, checkpoint = await load_resume_target(
@@ -156,6 +161,7 @@ async def resume_workflow_stream(
         checkpoint_storage=checkpoint_storage,
         initial_state=snapshot,
         budget_state=budget_state,
+        session_context=session_context,
     )
 
     # 6. Stream the resumed run, forwarding each SSE event dict
@@ -214,6 +220,7 @@ async def resume_workflow_with_responses(
     base_reasoning_effort: str | None = None,
     default_model_id: str | None = None,
     token_counts: dict | None = None,
+    session_context: str | None = None,
 ) -> AsyncIterator[dict]:
     """Resume a workflow run with approval responses, streaming SSE events.
 
@@ -249,6 +256,7 @@ async def resume_workflow_with_responses(
         checkpoint_storage=checkpoint_storage,
         initial_state=snapshot,
         budget_state=budget_state,
+        session_context=session_context,
     )
 
     # 4. Emit synthetic first event with resumption context

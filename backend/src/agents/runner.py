@@ -930,12 +930,13 @@ async def run_agent(
         # Prepend so they're available but don't shadow other tools
         _tools = [ask_user, request_auth] + list(_tools)
 
-    # Ensure session_data is always available to tools via function_invocation_kwargs
-    # (needed by confirm_schedule, propose_schedule, etc.)
-    if function_invocation_kwargs is None:
-        function_invocation_kwargs = {}
-    if "session_data" not in function_invocation_kwargs:
-        function_invocation_kwargs["session_data"] = session_data
+    # Ensure session_data / session_id / session_url are always available to
+    # tools via function_invocation_kwargs (needed by confirm_schedule,
+    # propose_schedule, task_complete, ... and by consumer writer tools that
+    # stamp provenance — Issue #572).
+    function_invocation_kwargs = _seed_invocation_kwargs(
+        function_invocation_kwargs, session_data
+    )
 
     # ---- Inject scheduling tools (Issue #297) - always available ----------
     from ..tools.propose_schedule import propose_schedule
@@ -966,6 +967,7 @@ async def run_agent(
                     reasoning_effort=cfg.reasoning_effort,
                     function_invocation_kwargs=function_invocation_kwargs,
                     db=db,
+                    session_context=_build_session_context_block(session_data),
                 )
             else:
                 raw_response, tokens_in, tokens_out, cache_hit_tokens = await _run_agent(
@@ -1173,6 +1175,157 @@ async def _resolve_model(
     )
 
 
+# ---------------------------------------------------------------------------
+# Current-session context (Issue #572)
+# ---------------------------------------------------------------------------
+
+# Owner-id prefixes of ephemeral identities that can never open a session URL.
+# The embed widget creates ``guest:<embed_config_id>`` (api/widget.py) and demo
+# mode creates ``demo:<tenant_id>`` (api/demo.py).  Neither has an account that
+# can sign in, so ``/chat/{id}`` is unreachable for them and no canonical link
+# exists to publish.
+_NON_RESOLVABLE_OWNER_PREFIXES = ("guest:", "demo:")
+
+#: Marker substituted for ``{{SESSION_URL}}`` when the session has no link.
+_NO_SESSION_URL_MARKER = "(this session has no resolvable link)"
+
+
+def _session_url(session_data: dict) -> str | None:
+    """Return the canonical web URL for *session_data*, or ``None``.
+
+    The shape is ``{FRONTEND_URL}/chat/{session_id}`` — the same link the
+    scheduler already publishes in notification emails
+    (``services/scheduler_executor.py``).  A URL is only returned when it can
+    actually resolve:
+
+    * ``settings.FRONTEND_URL`` must be configured, and
+    * the session must belong to a real user.  Guest/demo identities are
+      excluded (see ``_NON_RESOLVABLE_OWNER_PREFIXES``).
+
+    Temporary sessions *do* get a URL — they live in Redis for
+    ``TEMPORARY_SESSION_TTL_SECONDS``, so the link works until the session
+    expires.  Callers state that rather than withholding the link.
+    """
+    base = (settings.FRONTEND_URL or "").strip().rstrip("/")
+    session_id = session_data.get("id")
+    if not base or not session_id:
+        return None
+    owner_id = str(session_data.get("user_id") or "")
+    if owner_id.startswith(_NON_RESOLVABLE_OWNER_PREFIXES):
+        return None
+    return f"{base}/chat/{session_id}"
+
+
+def _build_session_context_block(session_data: dict) -> str | None:
+    """Return the ``## Current Session`` block for the system prompt, or None.
+
+    The block gives the agent its own session id and canonical URL so it can
+    cite the conversation it ran in (Issue #572).  It is *documentation of a
+    fact about the run*: the id is a UUID4 and is stable for the session's
+    life, and the URL is the same one a user reaches from the chat list.
+
+    Returns ``None`` when there is no session id to report.
+    """
+    session_id = session_data.get("id")
+    if not session_id:
+        return None
+
+    lines: list[str] = [
+        "## Current Session",
+        "",
+        f"- Session ID: `{session_id}`",
+    ]
+
+    url = _session_url(session_data)
+    if url:
+        lines.append(f"- Session URL: {url}")
+        if session_data.get("is_temporary"):
+            hours = max(1, settings.TEMPORARY_SESSION_TTL_SECONDS // 3600)
+            lines.append(
+                f"- This is a temporary session: it is discarded when it "
+                f"expires (about {hours} hours after its last activity), and "
+                f"the URL above stops working then. Never present it as a "
+                f"durable link."
+            )
+        lines += [
+            "",
+            "This is the conversation you are running in. When the user asks "
+            "for your URL, your session link, or your session id, answer with "
+            "the value(s) above copied exactly — never alter, shorten, or "
+            "guess any part of it. The link opens only for the user who owns "
+            "this session, and only while they are signed in.",
+        ]
+    else:
+        lines += [
+            "- Session URL: unavailable — this session has no resolvable web "
+            "link.",
+            "",
+            "This is the conversation you are running in. There is no link to "
+            "give out for this session: if you are asked for one, say plainly "
+            "that this session has no shareable URL. Do not invent, guess, or "
+            "approximate one.",
+        ]
+
+    return "\n".join(lines)
+
+
+def _substitute_session_placeholders(prompt: str, session_data: dict) -> str:
+    """Expand ``{{SESSION_ID}}`` / ``{{SESSION_URL}}`` in an assembled prompt.
+
+    Lets an administrator reference the running session from a template's
+    system prompt.  ``{{SESSION_URL}}`` collapses to a short explanatory marker
+    when no canonical URL exists for the session (see ``_session_url``) so a
+    template never renders a half-built link that the agent might quote.
+    """
+    if "{{SESSION_" not in prompt:
+        return prompt
+    session_id = str(session_data.get("id") or "")
+    url = _session_url(session_data) or _NO_SESSION_URL_MARKER
+    return prompt.replace("{{SESSION_ID}}", session_id).replace(
+        "{{SESSION_URL}}", url
+    )
+
+
+def _seed_invocation_kwargs(
+    function_invocation_kwargs: dict | None,
+    session_data: dict,
+) -> dict:
+    """Seed the runtime data every tool invocation should have (Issues #297, #572).
+
+    The returned mapping is handed to MAF's ``agent.run()`` and surfaces to
+    tools as ``ctx.kwargs`` (a tool opts in by declaring a
+    ``ctx: FunctionInvocationContext | None = None`` parameter — see
+    ``tools/confirm_schedule.py``).  For a ``FunctionTool`` these values are
+    kept separate from the model-supplied arguments, so a tool that reads them
+    gets the platform value and the model cannot override it.  That is what
+    makes the session id and canonical URL trustworthy in a downstream record.
+
+    Seeds:
+
+    * ``session_data`` — the unified session dict (``confirm_schedule``,
+      ``propose_schedule``, ``task_complete``, ...).
+    * ``session_id`` — the current session's identifier.
+    * ``session_url`` — the canonical web URL, present only when it can
+      actually resolve (see :func:`_session_url`).  Tools must treat its
+      absence as "this session has no durable link", never as a cue to build
+      one.
+
+    Note: these keys are visible to any MCP server whose tool schema declares a
+    property with the same name, and a model-supplied argument wins over the
+    seeded value there.  Never seed credentials here.
+    """
+    if function_invocation_kwargs is None:
+        function_invocation_kwargs = {}
+    function_invocation_kwargs.setdefault("session_data", session_data)
+    session_id = session_data.get("id")
+    if session_id:
+        function_invocation_kwargs.setdefault("session_id", session_id)
+    url = _session_url(session_data)
+    if url:
+        function_invocation_kwargs.setdefault("session_url", url)
+    return function_invocation_kwargs
+
+
 async def _build_system_prompt(
     db: AsyncSession,
     session_data: dict,
@@ -1209,6 +1362,14 @@ async def _build_system_prompt(
     # knows what PH Agent Hub is and can answer questions about itself.
     if _AGENT_IDENTITY:
         parts.append(_AGENT_IDENTITY)
+
+    # ---- Current session (Issue #572) ------------------------------------
+    # Placed directly after the platform identity so the agent always knows
+    # which conversation it is running in and can cite it.  Injected before the
+    # memory blocks so it can never be dropped by the memory prompt budget.
+    _session_block = _build_session_context_block(session_data)
+    if _session_block:
+        parts.append(_session_block)
 
     # Template system prompt
     if template_id:
@@ -1569,7 +1730,11 @@ async def _build_system_prompt(
             logger.warning("Failed to load goal-based skill context", exc_info=True)
 
     if parts:
-        return "\n\n---\n\n".join(parts)
+        # Expand {{SESSION_ID}} / {{SESSION_URL}} so admin-authored templates
+        # can reference the running session (Issue #572).
+        return _substitute_session_placeholders(
+            "\n\n---\n\n".join(parts), session_data
+        )
 
     return "You are a helpful assistant."
 
@@ -2736,6 +2901,7 @@ async def _run_workflow(
     reasoning_effort: str | None = None,
     function_invocation_kwargs: dict | None = None,
     db: AsyncSession | None = None,
+    session_context: str | None = None,
 ) -> tuple[str, int, int, int]:
     """Run a MAF Workflow via the registry.
 
@@ -2745,6 +2911,8 @@ async def _run_workflow(
         function_invocation_kwargs: Forwarded to ``agent.run()`` for tool
             invocation layers (A2A ``ask_user`` tool uses ``task_id``).
         db: Database session for resolving model records and tools.
+        session_context: Optional current-session block (Issue #572) appended to
+            every step's instructions.
 
     Returns:
         A tuple of (response_text, tokens_in, tokens_out, cache_hit_tokens).
@@ -2800,6 +2968,7 @@ async def _run_workflow(
             base_reasoning_effort=reasoning_effort,
             default_model_id=skill.default_model_id,
             checkpoint_storage=checkpoint_storage,
+            session_context=session_context,
         )
 
         # Execute the workflow
@@ -3176,11 +3345,11 @@ async def run_agent_stream(
         )
         # ---- Inject extra tools into streaming tool list --------------------
         _stream_tools = cfg.active_tool_callables
-        # Ensure session_data is always available to tools (Issue #297)
-        if function_invocation_kwargs is None:
-            function_invocation_kwargs = {}
-        if "session_data" not in function_invocation_kwargs:
-            function_invocation_kwargs["session_data"] = session_data
+        # Ensure session_data / session_id / session_url are always available to
+        # tools (Issues #297, #572)
+        function_invocation_kwargs = _seed_invocation_kwargs(
+            function_invocation_kwargs, session_data
+        )
 
         from ..tools.propose_schedule import propose_schedule
         from ..tools.confirm_schedule import confirm_schedule
@@ -3204,6 +3373,7 @@ async def run_agent_stream(
                 reasoning_effort=cfg.reasoning_effort,
                 function_invocation_kwargs=function_invocation_kwargs,
                 db=db,
+                session_context=_build_session_context_block(session_data),
             )
         else:
             stream = _run_agent_stream(
@@ -3834,6 +4004,7 @@ async def _run_workflow_stream(
     reasoning_effort: str | None = None,
     function_invocation_kwargs: dict | None = None,
     db: AsyncSession | None = None,
+    session_context: str | None = None,
 ) -> AsyncIterator[dict]:
     """Run a MAF Workflow in streaming mode, yielding SSE event dicts.
 
@@ -3850,6 +4021,8 @@ async def _run_workflow_stream(
         function_invocation_kwargs: Forwarded to ``agent.run()`` for tool
             invocation layers (A2A ``ask_user`` tool uses ``task_id``).
         db: Database session for resolving model records and tools.
+        session_context: Optional current-session block (Issue #572) appended to
+            every step's instructions.
 
     Raises:
         ValidationError: If the skill has no maf_target_key.
@@ -3907,6 +4080,7 @@ async def _run_workflow_stream(
             default_model_id=skill.default_model_id,
             checkpoint_storage=checkpoint_storage,
             budget_state=budget_state,
+            session_context=session_context,
         )
 
         # Stream the workflow via the engine's SSE iterator

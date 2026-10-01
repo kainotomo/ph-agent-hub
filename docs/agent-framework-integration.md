@@ -239,6 +239,7 @@ HTTP Request (POST /chat/session/:id/message)
     - selected_template_id → system prompt
     - selected_skill_id → maf_target_key + execution_type
     - session_active_tools → tool list
+    - current session id + canonical URL → "## Current Session" prompt block
         │
         ▼
 [3] Route by execution_type
@@ -281,6 +282,55 @@ async def get_sales_order(order_id: str) -> dict:
     """Retrieve a sales order from ERPNext."""
     return await erpnext_client.get_doc("Sales Order", order_id)
 ```
+
+### 5.1 Tool-invocation context (`ctx.kwargs`)
+
+The runner seeds runtime data into MAF's `function_invocation_kwargs`, which
+surfaces to every tool as `ctx.kwargs`. A tool opts in by declaring a parameter
+annotated `FunctionInvocationContext` — MAF injects it and never exposes it in
+the tool schema, so the model cannot supply or influence it:
+
+```python
+from agent_framework import FunctionInvocationContext, tool
+
+@tool
+async def write_evaluation(
+    isin: str,
+    rating: str,
+    ctx: FunctionInvocationContext | None = None,
+) -> dict:
+    """Write an evaluation record, stamping provenance from the run context."""
+    session_url = ctx.kwargs.get("session_url") if ctx else None
+    ...
+```
+
+Seeded keys:
+
+| Key | Notes |
+|---|---|
+| `session_data` | The unified session dict (tenant, user, flags). Used by `confirm_schedule`, `propose_schedule`, `task_complete`. |
+| `session_id` | The current session's UUID4 id. Always present. |
+| `session_url` | Canonical `{FRONTEND_URL}/chat/{id}` link. **Absent** when the session has no resolvable link — see `docs/backend-architecture.md` §3.2.1. |
+
+**Prefer `ctx.kwargs` over a tool parameter for provenance.** For a
+`FunctionTool`, `ctx.kwargs` and the model-supplied arguments are kept separate,
+so a value read from the context is authoritative: the model cannot overwrite it.
+That is what makes a session link safe to stamp into a downstream record — it is
+never retyped by the model.
+
+**MCP caveats.** For an MCP tool the rules differ and are enforced by MAF:
+
+- A runtime kwarg is forwarded only when the remote server declares a property of
+  that name in the tool's `inputSchema`. If the server does not declare
+  `session_url`, it will not receive it.
+- If the model *also* supplies an argument with the same name, **the model's value
+  wins** over the seeded one. An MCP writer therefore cannot be made fully
+  model-proof; if provenance must be guaranteed, use a `@tool` function or have
+  the server resolve the value itself.
+- Any MCP server whose schema declares one of these property names can read the
+  seeded value even when the model never mentions it. Treat these keys as visible
+  to every connected MCP server and **never seed credentials or secrets** into
+  `function_invocation_kwargs`.
 
 ---
 

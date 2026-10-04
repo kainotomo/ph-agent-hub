@@ -39,10 +39,16 @@ import {
   CheckOutlined,
   CloseOutlined,
   FileTextOutlined,
+  RobotOutlined,
 } from "@ant-design/icons";
 import { Tag, Spin, Button } from "antd";
 import type { ProcessStep, ProcessRowBatch } from "../utils/buildSteps";
-import { groupProcessRows, reasoningSummary, summarizeProcess } from "../utils/buildSteps";
+import {
+  buildSubagentSteps,
+  groupProcessRows,
+  reasoningSummary,
+  summarizeProcess,
+} from "../utils/buildSteps";
 import { getMessageStep } from "../services/chat";
 import { useQuery } from "@tanstack/react-query";
 
@@ -54,10 +60,13 @@ function StepRow({
   step,
   sessionId,
   messageId,
+  nested = false,
 }: {
   step: ProcessStep;
   sessionId: string;
   messageId: string;
+  /** Nested sub-agent rows carry their bodies inline and never lazy-fetch. */
+  nested?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const toggle = () => setOpen((v) => !v);
@@ -68,9 +77,10 @@ function StepRow({
   // We only need to fetch when the part is summary-only (no text/output
   // already present) AND the step is expanded.
   const needsFetch =
-    (step.kind === "reasoning" && !step.text) ||
-    (step.kind === "tool_result" && step.output === undefined) ||
-    (step.kind === "text" && !step.text);
+    !nested &&
+    ((step.kind === "reasoning" && !step.text) ||
+      (step.kind === "tool_result" && step.output === undefined) ||
+      (step.kind === "text" && !step.text));
 
   const { data: fullStep, isLoading, isError, refetch } = useQuery({
     queryKey: ["message-step", messageId, step.index],
@@ -305,6 +315,188 @@ function StepRow({
 }
 
 // ---------------------------------------------------------------------------
+// Internal: SubagentRow (Issue #574)
+// ---------------------------------------------------------------------------
+// Renders a delegated sub-agent as its own fold: header shows the persona,
+// live status, duration and tokens; the body shows the parent's brief, the
+// inherited/omitted tool chips, and the child's nested timeline.
+// ---------------------------------------------------------------------------
+
+function SubagentRow({ step }: { step: ProcessStep }) {
+  const [open, setOpen] = useState(false);
+  const sub = step.subagent;
+  if (!sub) return null;
+
+  const status = sub.status ?? "complete";
+  const running = status === "running";
+  const failed = status === "error";
+  const nestedSteps = buildSubagentSteps(sub.steps);
+  const rows = groupProcessRows(nestedSteps);
+  const duration =
+    typeof sub.duration_ms === "number"
+      ? `${(sub.duration_ms / 1000).toFixed(1)}s`
+      : null;
+  const tokens = (sub.tokens_in ?? 0) + (sub.tokens_out ?? 0);
+  const meta = [
+    duration,
+    tokens > 0 ? `${tokens} tok` : null,
+    typeof sub.depth === "number" && sub.depth > 0 ? `depth ${sub.depth}` : null,
+  ].filter(Boolean) as string[];
+
+  return (
+    <div style={{ marginBottom: 4 }} data-testid="subagent-row">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        data-testid="subagent-header"
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          width: "100%",
+          textAlign: "left",
+          border: "none",
+          background: "transparent",
+          padding: "4px 0",
+          cursor: "pointer",
+          fontSize: 13,
+          color: "#333",
+          fontFamily: "inherit",
+        }}
+      >
+        <span style={{ fontSize: 10, color: "#999", flexShrink: 0 }}>
+          {open ? <CaretDownOutlined /> : <CaretRightOutlined />}
+        </span>
+        <RobotOutlined style={{ color: "#722ed1", fontSize: 13 }} />
+        <Tag color="purple" style={{ margin: 0, fontSize: 12 }}>
+          Subagent
+        </Tag>
+        <span style={{ color: "#531dab", fontWeight: 500 }}>
+          {sub.name || "sub-agent"}
+        </span>
+        {running && <Spin size="small" />}
+        {running && <span style={{ color: "#888", fontSize: 12 }}>working…</span>}
+        {!running && failed && (
+          <Tag color="red" style={{ margin: 0, fontSize: 12 }}>
+            <CloseOutlined /> error
+          </Tag>
+        )}
+        {!running && !failed && (
+          <Tag color="green" style={{ margin: 0, fontSize: 12 }}>
+            <CheckOutlined /> done
+          </Tag>
+        )}
+        {meta.length > 0 && (
+          <span style={{ color: "#888", fontSize: 12 }}>{meta.join(" · ")}</span>
+        )}
+      </button>
+
+      {open && (
+        <div
+          data-testid="subagent-body"
+          style={{
+            marginLeft: 20,
+            marginTop: 2,
+            maxHeight: 320,
+            overflow: "auto",
+            borderLeft: "3px solid #d3adf7",
+            padding: "4px 12px",
+          }}
+        >
+          {sub.prompt && (
+            <div
+              data-testid="subagent-prompt"
+              style={{
+                fontSize: 12,
+                fontStyle: "italic",
+                color: "#666",
+                whiteSpace: "pre-wrap",
+                marginBottom: 6,
+              }}
+            >
+              “
+              {sub.prompt.length > 300
+                ? `${sub.prompt.slice(0, 300)}…`
+                : sub.prompt}
+              ”
+            </div>
+          )}
+
+          <div style={{ marginBottom: 6 }}>
+            {sub.model_role && (
+              <Tag style={{ fontSize: 11 }}>
+                {sub.model_role}
+                {sub.model_name ? ` → ${sub.model_name}` : ""}
+              </Tag>
+            )}
+            {(sub.tools ?? []).map((t) => (
+              <Tag key={`tool-${t}`} color="blue" style={{ fontSize: 11 }}>
+                {t}
+              </Tag>
+            ))}
+            {(sub.omitted ?? []).map((t) => (
+              <Tag key={`omitted-${t}`} style={{ fontSize: 11, color: "#999" }}>
+                {t} — omitted
+              </Tag>
+            ))}
+          </div>
+
+          {sub.error && (
+            <div
+              data-testid="subagent-error"
+              style={{ fontSize: 12, color: "#cf1322", marginBottom: 6 }}
+            >
+              {sub.error}
+            </div>
+          )}
+
+          {rows.length === 0 ? (
+            <div style={{ fontSize: 12, color: "#999" }}>
+              (no sub-agent activity recorded)
+            </div>
+          ) : (
+            rows.map((row, i) => {
+              if (row.type === "step") {
+                return (
+                  <StepRow
+                    key={row.step.key}
+                    step={row.step}
+                    sessionId=""
+                    messageId=""
+                    nested
+                  />
+                );
+              }
+              const batch = row as ProcessRowBatch;
+              return (
+                <div key={`subagent-batch-${i}`}>
+                  {batch.steps.map((s) => (
+                    <StepRow
+                      key={s.key}
+                      step={s}
+                      sessionId=""
+                      messageId=""
+                      nested
+                    />
+                  ))}
+                </div>
+              );
+            })
+          )}
+
+          {sub.steps_truncated && (
+            <div style={{ fontSize: 11, color: "#999" }}>
+              …earlier sub-agent activity truncated
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
@@ -364,6 +556,10 @@ export function ProcessSteps({
         <div id={bodyId} style={{ paddingLeft: 16 }}>
           {rows.map((row, i) => {
             if (row.type === "step") {
+              // Delegated sub-agent results render as their own nested fold.
+              if (row.step.kind === "tool_result" && row.step.subagent) {
+                return <SubagentRow key={row.step.key} step={row.step} />;
+              }
               return (
                 <StepRow
                   key={row.step.key}
@@ -388,14 +584,18 @@ export function ProcessSteps({
                     ⚡ Running {batch.steps.length} tools in parallel…
                   </div>
                 )}
-                {batch.steps.map((s) => (
-                  <StepRow
-                    key={s.key}
-                    step={s}
-                    sessionId={sessionId}
-                    messageId={messageId}
-                  />
-                ))}
+                {batch.steps.map((s) =>
+                  s.kind === "tool_result" && s.subagent ? (
+                    <SubagentRow key={s.key} step={s} />
+                  ) : (
+                    <StepRow
+                      key={s.key}
+                      step={s}
+                      sessionId={sessionId}
+                      messageId={messageId}
+                    />
+                  ),
+                )}
               </div>
             );
           })}

@@ -59,10 +59,10 @@ class TestTypeCapabilities:
         assert not any("not configured" in n for n in names_lower)
 
     def test_excluded_types_empty(self):
-        """mcp, a2a, membrane, custom should return empty lists."""
+        """mcp, a2a, membrane, custom, subagent should return empty lists."""
         from backend.src.tools.descriptions import type_capabilities
 
-        for t in ("mcp", "a2a", "membrane", "custom"):
+        for t in ("mcp", "a2a", "membrane", "custom", "subagent"):
             caps = type_capabilities(t)
             assert caps == [], f"{t} should have no capabilities"
 
@@ -217,7 +217,7 @@ class TestGuardrails:
         """Every non-excluded type in VALID_TOOL_TYPES yields ≥1 capability."""
         from backend.src.services.tool_service import VALID_TOOL_TYPES
 
-        excluded = {"mcp", "a2a", "membrane", "custom"}
+        excluded = {"mcp", "a2a", "membrane", "custom", "subagent"}
 
         for tool_type in sorted(VALID_TOOL_TYPES):
             from backend.src.tools.descriptions import type_capabilities

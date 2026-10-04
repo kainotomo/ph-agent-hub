@@ -103,10 +103,16 @@ export function ToolForm({ open, tool, duplicateFrom, onClose }: ToolFormProps) 
           fields.doc_company_logo_url = duplicateFrom.config.company_logo_url || "";
         }
         if (duplicateFrom.type === "custom") {
+          fields.code = duplicateFrom.code || "";
+        }
+        // Subagents keep their persona in config too (Issue #574).
+        if (
+          duplicateFrom.type === "custom" ||
+          duplicateFrom.type === "subagent"
+        ) {
           fields.config_json = duplicateFrom.config
             ? JSON.stringify(duplicateFrom.config, null, 2)
             : "";
-          fields.code = duplicateFrom.code || "";
         }
         form.setFieldsValue(fields);
         setToolType(duplicateFrom.type);
@@ -150,10 +156,13 @@ export function ToolForm({ open, tool, duplicateFrom, onClose }: ToolFormProps) 
         }
         // Populate config_json and code for custom type
         if (tool.type === "custom") {
+          fields.code = tool.code || "";
+        }
+        // Subagents keep their persona in config too (Issue #574).
+        if (tool.type === "custom" || tool.type === "subagent") {
           fields.config_json = tool.config
             ? JSON.stringify(tool.config, null, 2)
             : "";
-          fields.code = tool.code || "";
         }
         form.setFieldsValue(fields);
         setToolType(tool.type);
@@ -394,6 +403,7 @@ export function ToolForm({ open, tool, duplicateFrom, onClose }: ToolFormProps) 
               { label: "SQL Query", value: "sql_query" },
               { label: "Stock Data", value: "stock_data" },
               { label: "Stock Screener", value: "stock_screener" },
+              { label: "Subagent", value: "subagent" },
               { label: "Tasks", value: "tasks" },
               { label: "Weather", value: "weather" },
               { label: "Web Search", value: "web_search" },
@@ -524,11 +534,19 @@ export function ToolForm({ open, tool, duplicateFrom, onClose }: ToolFormProps) 
           <Form.Item
             name="config_json"
             label="Configuration (JSON)"
-            extra="Optional JSON configuration for this tool (e.g., API keys, endpoints, options)"
+            extra={
+              toolType === "subagent"
+                ? "Required: instructions (the sub-agent's system prompt) and model_role (@reasoning, @general or @fast). Optional: tool_deny (list of tool names to withhold), temperature, timeout_s."
+                : "Optional JSON configuration for this tool (e.g., API keys, endpoints, options)"
+            }
           >
             <TextArea
               rows={6}
-              placeholder='{"api_key": "...", "provider": "openai"}'
+              placeholder={
+                toolType === "subagent"
+                  ? '{\n  "instructions": "You research topics and return a concise, source-cited summary.",\n  "model_role": "@general"\n}'
+                  : '{"api_key": "...", "provider": "openai"}'
+              }
             />
           </Form.Item>
         )}

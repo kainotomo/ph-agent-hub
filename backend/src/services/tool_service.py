@@ -6,6 +6,7 @@ from sqlalchemy import select, or_, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.exceptions import NotFoundError, ValidationError
+from ..agents.workflows.roles import MODEL_ROLES, is_role_reference
 from ..db.orm.groups import ToolGroup, UserGroupMember
 from ..db.orm.tools import Tool
 from ..db.orm.skills import SkillAllowedTool
@@ -19,7 +20,7 @@ VALID_TOOL_TYPES = {
     "stock_screener", "portfolio", "sec_filings", "pdf_extractor",
     "code_interpreter", "sql_query", "document_generation", "browser",
     "rag_search", "github", "calendar", "image_generation",
-    "slack", "email", "mcp", "tasks", "a2a",
+    "slack", "email", "mcp", "tasks", "a2a", "subagent",
     "file_list", "memory",
 }
 
@@ -55,6 +56,7 @@ TOOL_TYPE_TO_CATEGORY = {
     "email": "communication",
     "mcp": "mcp",
     "a2a": "communication",
+    "subagent": "agents",
     "file_list": "system",
     "memory": "system",
 }
@@ -133,6 +135,80 @@ async def list_tools(
     return await paginate(db, stmt, page=page, page_size=page_size)
 
 
+def _validate_subagent_config(config: dict | None) -> None:
+    """Validate the ``config`` payload of a ``subagent`` tool row.
+
+    A subagent persona must declare the child's system prompt and the
+    model role it runs on.  ``tool_deny`` is deliberately *not* validated
+    against tool names: the child's tool set is the parent session's
+    resolved pool minus this list, so denying an absent tool is a no-op.
+
+    Raises:
+        ValidationError: If the config is missing or malformed.
+    """
+    if not isinstance(config, dict):
+        raise ValidationError(
+            "Subagent tools require a config object with 'instructions' "
+            "and 'model_role'."
+        )
+
+    instructions = config.get("instructions")
+    if not isinstance(instructions, str) or not instructions.strip():
+        raise ValidationError(
+            "Subagent config requires a non-empty 'instructions' string."
+        )
+
+    model_role = config.get("model_role")
+    if not isinstance(model_role, str) or not model_role:
+        raise ValidationError(
+            "Subagent config requires a non-empty 'model_role' string."
+        )
+    if not is_role_reference(model_role) or model_role not in MODEL_ROLES:
+        raise ValidationError(
+            f"Subagent 'model_role' must be one of the declared model roles "
+            f"({', '.join(sorted(MODEL_ROLES))}); got '{model_role}'."
+        )
+
+    tool_deny = config.get("tool_deny")
+    if tool_deny is not None:
+        if not isinstance(tool_deny, list) or not all(
+            isinstance(item, str) and item for item in tool_deny
+        ):
+            raise ValidationError(
+                "Subagent 'tool_deny' must be a list of non-empty strings."
+            )
+
+    temperature = config.get("temperature")
+    if temperature is not None:
+        if (
+            isinstance(temperature, bool)
+            or not isinstance(temperature, (int, float))
+            or not 0 <= float(temperature) <= 2
+        ):
+            raise ValidationError(
+                "Subagent 'temperature' must be a number between 0 and 2."
+            )
+
+    timeout_s = config.get("timeout_s")
+    if timeout_s is not None:
+        if (
+            isinstance(timeout_s, bool)
+            or not isinstance(timeout_s, int)
+            or timeout_s <= 0
+        ):
+            raise ValidationError(
+                "Subagent 'timeout_s' must be a positive integer."
+            )
+
+    include_session_context = config.get("include_session_context")
+    if include_session_context is not None and not isinstance(
+        include_session_context, bool
+    ):
+        raise ValidationError(
+            "Subagent 'include_session_context' must be a boolean."
+        )
+
+
 async def get_tool_by_id(db: AsyncSession, tool_id: str) -> Tool | None:
     """Look up a tool by primary key."""
     result = await db.execute(select(Tool).where(Tool.id == tool_id))
@@ -157,6 +233,9 @@ async def create_tool(
             f"Invalid tool type '{type}'. "
             f"Must be one of: {', '.join(sorted(VALID_TOOL_TYPES))}"
         )
+
+    if type == "subagent":
+        _validate_subagent_config(config)
 
     tool = Tool(
         tenant_id=tenant_id,
@@ -188,6 +267,11 @@ async def update_tool(db: AsyncSession, tool_id: str, **fields) -> Tool:
             f"Invalid tool type '{fields['type']}'. "
             f"Must be one of: {', '.join(sorted(VALID_TOOL_TYPES))}"
         )
+
+    effective_type = fields.get("type", tool.type)
+    if effective_type == "subagent":
+        _validate_subagent_config(fields.get("config", tool.config))
+
     # Category is system-derived from type and not user-editable.
     fields.pop("category", None)
 

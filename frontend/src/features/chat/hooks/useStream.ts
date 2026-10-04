@@ -340,6 +340,11 @@ export function useStream(apiPrefix: string = "chat") {
         onProgress?: (data: ProgressEvent["data"]) => void;
         onWorkflowStep?: (data: WorkflowStepEvent["data"]) => void;
         onWorkflowApprovalRequired?: (data: WorkflowApprovalRequiredEvent["data"]) => void;
+        /** Delegated sub-agent progress event (Issue #574). */
+        onSubagentEvent?: (
+          name: string,
+          data: Record<string, unknown>,
+        ) => void;
         onError?: (error: string, messageId: string) => void;
         onClose?: () => void;
       },
@@ -469,6 +474,15 @@ export function useStream(apiPrefix: string = "chat") {
                     break;
                   case "message_complete":
                     handlers.onMessageComplete?.(parsed);
+                    break;
+                  case "subagent_start":
+                  case "subagent_token":
+                  case "subagent_reasoning_token":
+                  case "subagent_tool_start":
+                  case "subagent_tool_result":
+                  case "subagent_complete":
+                  case "subagent_error":
+                    handlers?.onSubagentEvent?.(ev.event, parsed);
                     break;
                   case "workflow_approval_required":
                     handlers.onWorkflowApprovalRequired?.(parsed);
@@ -644,6 +658,11 @@ export function useStream(apiPrefix: string = "chat") {
         onProgress?: (data: ProgressEvent["data"]) => void;
         onWorkflowStep?: (data: WorkflowStepEvent["data"]) => void;
         onWorkflowApprovalRequired?: (data: WorkflowApprovalRequiredEvent["data"]) => void;
+        /** Delegated sub-agent progress event (Issue #574). */
+        onSubagentEvent?: (
+          name: string,
+          data: Record<string, unknown>,
+        ) => void;
         onError?: (error: string, messageId: string) => void;
         onClose?: () => void;
       },
@@ -749,6 +768,15 @@ export function useStream(apiPrefix: string = "chat") {
                     break;
                   case "message_complete":
                     handlers.onMessageComplete?.(parsed);
+                    break;
+                  case "subagent_start":
+                  case "subagent_token":
+                  case "subagent_reasoning_token":
+                  case "subagent_tool_start":
+                  case "subagent_tool_result":
+                  case "subagent_complete":
+                  case "subagent_error":
+                    handlers?.onSubagentEvent?.(ev.event, parsed);
                     break;
                   case "workflow_approval_required":
                     handlers.onWorkflowApprovalRequired?.(parsed);
@@ -856,6 +884,11 @@ export function useStream(apiPrefix: string = "chat") {
         onProgress?: (data: ProgressEvent["data"]) => void;
         onWorkflowStep?: (data: WorkflowStepEvent["data"]) => void;
         onWorkflowApprovalRequired?: (data: WorkflowApprovalRequiredEvent["data"]) => void;
+        /** Delegated sub-agent progress event (Issue #574). */
+        onSubagentEvent?: (
+          name: string,
+          data: Record<string, unknown>,
+        ) => void;
         onError?: (error: string, messageId: string) => void;
         onClose?: () => void;
       } | undefined,
@@ -911,6 +944,15 @@ export function useStream(apiPrefix: string = "chat") {
                     break;
                   case "message_complete":
                     if (handlers) handlers.onMessageComplete?.(parsed);
+                    break;
+                  case "subagent_start":
+                  case "subagent_token":
+                  case "subagent_reasoning_token":
+                  case "subagent_tool_start":
+                  case "subagent_tool_result":
+                  case "subagent_complete":
+                  case "subagent_error":
+                    handlers?.onSubagentEvent?.(ev.event, parsed);
                     break;
                   case "workflow_approval_required":
                     if (handlers) handlers.onWorkflowApprovalRequired?.(parsed);
@@ -995,6 +1037,11 @@ export function useStream(apiPrefix: string = "chat") {
         onStreamStart?: () => void;
         onWorkflowStep?: (data: WorkflowStepEvent["data"]) => void;
         onWorkflowApprovalRequired?: (data: WorkflowApprovalRequiredEvent["data"]) => void;
+        /** Delegated sub-agent progress event (Issue #574). */
+        onSubagentEvent?: (
+          name: string,
+          data: Record<string, unknown>,
+        ) => void;
         onError?: (error: string, messageId: string) => void;
         onClose?: () => void;
       },
@@ -1056,6 +1103,15 @@ export function useStream(apiPrefix: string = "chat") {
                     break;
                   case "message_complete":
                     handlers.onMessageComplete?.(parsed);
+                    break;
+                  case "subagent_start":
+                  case "subagent_token":
+                  case "subagent_reasoning_token":
+                  case "subagent_tool_start":
+                  case "subagent_tool_result":
+                  case "subagent_complete":
+                  case "subagent_error":
+                    handlers?.onSubagentEvent?.(ev.event, parsed);
                     break;
                   case "workflow_approval_required":
                     handlers.onWorkflowApprovalRequired?.(parsed);

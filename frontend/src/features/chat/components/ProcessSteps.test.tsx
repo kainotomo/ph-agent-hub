@@ -318,3 +318,143 @@ describe("ProcessSteps", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Delegated sub-agent rendering (Issue #574)
+// ---------------------------------------------------------------------------
+
+function subagentStep(payloadOverrides: Record<string, unknown> = {}) {
+  return {
+    kind: "tool_result" as const,
+    key: "tool_result:0",
+    index: 0,
+    name: "delegate_to_researcher",
+    output: "child answer",
+    subagent: {
+      name: "Researcher",
+      status: "complete",
+      model_role: "@general",
+      model_name: "Cheap Model",
+      tools: ["web_search"],
+      omitted: ["send_email"],
+      duration_ms: 1500,
+      tokens_in: 10,
+      tokens_out: 5,
+      prompt: "Find the answer.",
+      steps: [
+        { type: "reasoning", text: "Let me think" },
+        { type: "function_call", name: "web_search", arguments: { q: "x" } },
+        { type: "function_result", name: "web_search", output: "found" },
+      ],
+      ...payloadOverrides,
+    },
+  };
+}
+
+describe("ProcessSteps subagent rendering", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetFetchPromise();
+  });
+
+  afterEach(() => {
+    resetFetchPromise();
+  });
+
+  async function expandSubagent(payloadOverrides: Record<string, unknown> = {}) {
+    const user = userEvent.setup();
+    renderProcessSteps({ steps: [subagentStep(payloadOverrides)] });
+    await user.click(screen.getByRole("button")); // open the process fold
+    const row = screen.getByTestId("subagent-row");
+    await user.click(within(row).getByTestId("subagent-header"));
+    return { user, row, body: screen.getByTestId("subagent-body") };
+  }
+
+  it("renders a subagent row with persona name and done status", async () => {
+    const user = userEvent.setup();
+    renderProcessSteps({ steps: [subagentStep()] });
+    await user.click(screen.getByRole("button"));
+
+    const row = screen.getByTestId("subagent-row");
+    expect(row.textContent).toContain("Researcher");
+    expect(row.textContent).toContain("done");
+    expect(row.textContent).toContain("1.5s");
+    expect(row.textContent).toContain("15 tok");
+    expect(screen.queryByTestId("subagent-body")).not.toBeInTheDocument();
+  });
+
+  it("shows the parent brief and tool chips when expanded", async () => {
+    const { body } = await expandSubagent();
+
+    expect(within(body).getByTestId("subagent-prompt").textContent).toContain(
+      "Find the answer.",
+    );
+    expect(body.textContent).toContain("@general");
+    expect(body.textContent).toContain("Cheap Model");
+    expect(body.textContent).toContain("web_search");
+    expect(body.textContent).toContain("send_email — omitted");
+  });
+
+  it("renders the nested child timeline", async () => {
+    const { user, body } = await expandSubagent();
+
+    expect(body.textContent).toContain("Let me think");
+    expect(
+      within(body).getAllByTestId("step-row-tool_result").length,
+    ).toBeGreaterThan(0);
+
+    // Nested rows collapse like parent rows; expanding one reveals its body.
+    await user.click(within(body).getByTestId("step-row-tool_result"));
+    expect(body.textContent).toContain("found");
+  });
+
+  it("does not lazy-fetch nested step bodies", async () => {
+    await expandSubagent();
+    expect(getMessageStep).not.toHaveBeenCalled();
+  });
+
+  it("shows a working indicator while running", async () => {
+    const user = userEvent.setup();
+    renderProcessSteps({ steps: [subagentStep({ status: "running" })] });
+    await user.click(screen.getByRole("button"));
+
+    const row = screen.getByTestId("subagent-row");
+    expect(row.textContent).toContain("working…");
+    expect(row.textContent).not.toContain("done");
+  });
+
+  it("surfaces the error message on failure", async () => {
+    const { body } = await expandSubagent({
+      status: "error",
+      error: "Subagent exceeded the 300s time limit.",
+    });
+
+    expect(within(body).getByTestId("subagent-error").textContent).toContain(
+      "time limit",
+    );
+  });
+
+  it("notes truncated activity", async () => {
+    const { body } = await expandSubagent({ steps_truncated: true });
+    expect(body.textContent).toContain("truncated");
+  });
+
+  it("renders a plain tool result without a subagent fold", async () => {
+    const user = userEvent.setup();
+    renderProcessSteps({
+      steps: [
+        {
+          kind: "tool_result" as const,
+          key: "tool_result:0",
+          index: 0,
+          name: "web_search",
+          output: "plain",
+        },
+      ],
+    });
+    await user.click(screen.getByRole("button"));
+
+    expect(screen.queryByTestId("subagent-row")).not.toBeInTheDocument();
+    expect(screen.getByTestId("step-row-tool_result")).toBeInTheDocument();
+  });
+});

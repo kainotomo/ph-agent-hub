@@ -201,6 +201,44 @@ describe("useStream", () => {
     );
   });
 
+  // ── Delegated sub-agent events (Issue #574) ───────────────────────────
+
+  it.each([
+    "subagent_start",
+    "subagent_token",
+    "subagent_reasoning_token",
+    "subagent_tool_start",
+    "subagent_tool_result",
+    "subagent_complete",
+    "subagent_error",
+  ])("dispatches %s to onSubagentEvent", async (eventName) => {
+    const { result } = renderHook(() => useStream());
+    const onSubagentEvent = vi.fn();
+
+    act(() => {
+      result.current.startStream(
+        "session-1",
+        "Hello",
+        [],
+        undefined,
+        {},
+        { onSubagentEvent },
+      );
+    });
+
+    await waitFor(() => expect(mockFetchEventSource).toHaveBeenCalled());
+
+    act(() => {
+      sseEvent(eventName, { parent_call_id: "call-1", delta: "x" });
+    });
+
+    expect(onSubagentEvent).toHaveBeenCalledTimes(1);
+    expect(onSubagentEvent).toHaveBeenCalledWith(
+      eventName,
+      expect.objectContaining({ parent_call_id: "call-1" }),
+    );
+  });
+
   // ── Stop / cancel stream ──────────────────────────────────────────────
 
   it("stopStream sends DELETE and sets streaming to false", async () => {

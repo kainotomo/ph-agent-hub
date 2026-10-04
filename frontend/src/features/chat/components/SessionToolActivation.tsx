@@ -60,6 +60,7 @@ const CATEGORY_LABELS: Record<string, string> = {
   mcp: "MCP",
   system: "System",
   general: "General",
+  agents: "Subagents",
 };
 
 // System tools are never shown in the UI picker

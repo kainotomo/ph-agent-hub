@@ -110,6 +110,17 @@ class Settings(BaseSettings):
     """Maximum number of tool-call steps before the agent loop terminates.
     Prevents runaway agents that loop indefinitely on tool results."""
 
+    # --- Sub-agent delegation (Issue #574) ---
+    SUBAGENT_TIMEOUT: int = 300
+    """Maximum wall-clock seconds a single delegated sub-agent run may take
+    before it is aborted. Sub-agent runs legitimately exceed the default
+    90s per-tool timeout."""
+
+    SUBAGENT_MAX_STEPS: int = 12
+    """Maximum number of tool-call rounds a delegated sub-agent may perform.
+    Bounds a runaway child independently of AGENT_MAX_STEPS, which only
+    governs the parent loop."""
+
     # --- Workflows ---
     WORKFLOW_MAX_STEPS: int = 25
     """Maximum number of steps before a workflow terminates.

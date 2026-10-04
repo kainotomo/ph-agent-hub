@@ -359,3 +359,147 @@ class TestDeleteTool:
             select(UserToolPreference).where(UserToolPreference.tool_id == test_tool.id)
         )
         assert utp_result.scalar_one_or_none() is None
+
+class TestSubagentConfigValidation:
+    """Tests for _validate_subagent_config and subagent tool create/update validation."""
+
+    async def test_valid_config_accepted(self, db_session: AsyncSession, test_tenant):
+        """Should accept a subagent tool with a valid config."""
+        config = {
+            "instructions": "You are a subagent.",
+            "model_role": "@reasoning",
+        }
+        tool = await create_tool(
+            db_session,
+            tenant_id=test_tenant.id,
+            name="Valid Subagent",
+            type="subagent",
+            config=config,
+        )
+        assert tool.type == "subagent"
+        assert tool.config == config
+
+    async def test_missing_config_rejected(self, db_session: AsyncSession, test_tenant):
+        """Should reject a subagent tool with a missing config."""
+        with pytest.raises(ValidationError, match="config object"):
+            await create_tool(
+                db_session,
+                tenant_id=test_tenant.id,
+                name="Missing Config",
+                type="subagent",
+                config=None,
+            )
+
+    async def test_empty_instructions_rejected(self, db_session: AsyncSession, test_tenant):
+        """Should reject a subagent tool with empty instructions."""
+        config = {
+            "instructions": "",
+            "model_role": "@reasoning",
+        }
+        with pytest.raises(ValidationError, match="non-empty 'instructions'"):
+            await create_tool(
+                db_session,
+                tenant_id=test_tenant.id,
+                name="Empty Instructions",
+                type="subagent",
+                config=config,
+            )
+
+    async def test_unknown_model_role_rejected(self, db_session: AsyncSession, test_tenant):
+        """Should reject a subagent tool with an unknown model role."""
+        config = {
+            "instructions": "You are a subagent.",
+            "model_role": "unknown_role",
+        }
+        with pytest.raises(ValidationError, match="model_role"):
+            await create_tool(
+                db_session,
+                tenant_id=test_tenant.id,
+                name="Unknown Role",
+                type="subagent",
+                config=config,
+            )
+
+    async def test_concrete_model_id_rejected(self, db_session: AsyncSession, test_tenant):
+        """Should reject a subagent tool with a concrete model id."""
+        config = {
+            "instructions": "You are a subagent.",
+            "model_role": "gpt-4o",
+        }
+        with pytest.raises(ValidationError, match="model_role"):
+            await create_tool(
+                db_session,
+                tenant_id=test_tenant.id,
+                name="Concrete Model",
+                type="subagent",
+                config=config,
+            )
+
+    async def test_tool_deny_must_be_string_list(self, db_session: AsyncSession, test_tenant):
+        """Should reject a subagent tool with a non-string tool_deny list."""
+        config = {
+            "instructions": "You are a subagent.",
+            "model_role": "@reasoning",
+            "tool_deny": "not-a-list",
+        }
+        with pytest.raises(ValidationError, match="tool_deny"):
+            await create_tool(
+                db_session,
+                tenant_id=test_tenant.id,
+                name="Bad Tool Deny",
+                type="subagent",
+                config=config,
+            )
+
+    async def test_update_subagent_config_validated(self, db_session: AsyncSession, test_tenant):
+        """Should validate subagent config on update and accept valid config."""
+        tool = await create_tool(
+            db_session,
+            tenant_id=test_tenant.id,
+            name="Subagent Tool",
+            type="subagent",
+            config={
+                "instructions": "Original instructions.",
+                "model_role": "@reasoning",
+            },
+        )
+        await db_session.flush()
+
+        updated = await update_tool(
+            db_session,
+            tool.id,
+            config={
+                "instructions": "Updated instructions.",
+                "model_role": "@general",
+            },
+        )
+        assert updated.type == "subagent"
+        assert updated.config["instructions"] == "Updated instructions."
+        assert updated.config["model_role"] == "@general"
+
+        # Invalid config on update should be rejected.
+        with pytest.raises(ValidationError, match="non-empty 'instructions'"):
+            await update_tool(
+                db_session,
+                tool.id,
+                config={"instructions": "", "model_role": "@reasoning"},
+            )
+
+    async def test_non_subagent_unaffected(self, db_session: AsyncSession, test_tenant):
+        """Should not validate config for non-subagent tools."""
+        tool = await create_tool(
+            db_session,
+            tenant_id=test_tenant.id,
+            name="Regular Tool",
+            type="calculator",
+            config={"instructions": "", "model_role": "gpt-4o"},
+        )
+        await db_session.flush()
+
+        # A calculator tool with a malformed config should not raise.
+        updated = await update_tool(
+            db_session,
+            tool.id,
+            config={"instructions": "", "model_role": "gpt-4o"},
+        )
+        assert updated.type == "calculator"

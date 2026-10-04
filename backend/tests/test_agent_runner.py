@@ -500,7 +500,7 @@ class TestAccumulateStreamState:
     def test_tool_result_does_not_insert_reasoning(self):
         tool_result = {"event": "tool_result", "data": json.dumps({"tool_name": "calc", "output": "42", "success": True})}
         segments, pending, text = self.fn(tool_result, [], "", "")
-        assert segments == [{"type": "function_result", "name": "calc", "output": "42", "is_error": False}]
+        assert segments == [{"type": "function_result", "name": "calc", "output": "42", "is_error": False, "id": ""}]
         assert pending == ""
 
     def test_full_multi_step_sequence(self):
@@ -530,10 +530,10 @@ class TestAccumulateStreamState:
         assert segments == [
             {"type": "reasoning", "text": "r1"},
             {"type": "function_call", "name": "calc", "arguments": {}, "id": "c1"},
-            {"type": "function_result", "name": "calc", "output": "42", "is_error": False},
+            {"type": "function_result", "name": "calc", "output": "42", "is_error": False, "id": ""},
             {"type": "reasoning", "text": "r2"},
             {"type": "function_call", "name": "fetch", "arguments": {}, "id": "c2"},
-            {"type": "function_result", "name": "fetch", "output": "data", "is_error": False},
+            {"type": "function_result", "name": "fetch", "output": "data", "is_error": False, "id": ""},
             {"type": "reasoning", "text": "tail"},
         ]
         assert text == "answer"

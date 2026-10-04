@@ -29,7 +29,39 @@ export interface ContentPart {
   chars?: number;
   output_summary?: string;
   output_chars?: number;
+  /** Nested delegated sub-agent record (Issue #574). */
+  subagent?: SubagentPayload;
   [k: string]: unknown;
+}
+
+/** A single part inside a sub-agent's nested timeline. */
+export interface SubagentStepPart {
+  type: string;
+  text?: string;
+  name?: string;
+  arguments?: Record<string, unknown>;
+  output?: unknown;
+  is_error?: boolean;
+  id?: string;
+}
+
+/** Nested record attached to a delegate tool result (Issue #574). */
+export interface SubagentPayload {
+  name?: string;
+  tool_name?: string;
+  prompt?: string;
+  model_role?: string;
+  model_name?: string;
+  tools?: string[];
+  omitted?: string[];
+  depth?: number;
+  status?: "running" | "complete" | "error" | string;
+  duration_ms?: number | null;
+  tokens_in?: number;
+  tokens_out?: number;
+  steps?: SubagentStepPart[];
+  steps_truncated?: boolean;
+  error?: string;
 }
 
 export function parseContent(content: unknown): ContentPart[] {
@@ -66,6 +98,8 @@ export interface ProcessStep {
   outputSummary?: string;
   /** Number of chars in the full function_result output. */
   outputChars?: number;
+  /** Nested delegated sub-agent record, present on delegate results. */
+  subagent?: SubagentPayload;
 }
 
 export interface TurnSteps {
@@ -225,8 +259,60 @@ export function buildSteps(content: unknown): TurnSteps {
       outputSummary:
         kind === "tool_result" ? part.output_summary : undefined,
       outputChars: kind === "tool_result" ? part.output_chars : undefined,
+      subagent: kind === "tool_result" ? part.subagent : undefined,
     });
   }
 
   return { process, answer };
+}
+
+// ---------------------------------------------------------------------------
+// buildSubagentSteps
+// ---------------------------------------------------------------------------
+
+/**
+ * Map a sub-agent's nested timeline parts onto ProcessSteps (Issue #574).
+ *
+ * Reuses the same part→step vocabulary as the parent transcript so nested
+ * rows can be rendered by the existing StepRow component.  Nested steps are
+ * never lazy-fetched, so no index-based lookup is attached.
+ */
+export function buildSubagentSteps(
+  steps: SubagentStepPart[] | undefined,
+): ProcessStep[] {
+  if (!steps || steps.length === 0) return [];
+
+  const out: ProcessStep[] = [];
+  steps.forEach((part, i) => {
+    const kind: StepKind | null =
+      part.type === "reasoning"
+        ? "reasoning"
+        : part.type === "function_call"
+          ? "tool_call"
+          : part.type === "function_result"
+            ? "tool_result"
+            : part.type === "text"
+              ? "text"
+              : null;
+
+    if (kind === null) return;
+
+    const hasText = typeof part.text === "string" && part.text.trim().length > 0;
+    if ((kind === "reasoning" || kind === "text") && !hasText) return;
+
+    out.push({
+      kind,
+      key: `subagent:${kind}:${i}`,
+      index: i,
+      text: kind === "reasoning" || kind === "text" ? part.text : undefined,
+      name:
+        kind === "tool_call" || kind === "tool_result" ? part.name : undefined,
+      args: kind === "tool_call" ? part.arguments : undefined,
+      output: kind === "tool_result" ? part.output : undefined,
+      isError: kind === "tool_result" ? !!part.is_error : undefined,
+      batchId: null,
+    });
+  });
+
+  return out;
 }

@@ -38,6 +38,12 @@ from agent_framework import (
 
 from ..core.config import settings
 from ..core.exceptions import ValidationError, NotFoundError
+from .subagent_bus import SubagentBus, register_bus, remove_bus
+from .subagent_events import (
+    accumulate_subagent_event,
+    get_payload_for_call,
+    new_state as new_subagent_state,
+)
 from ..core.redis import (
     append_temp_message,
     check_stream_cancel,
@@ -1912,7 +1918,13 @@ async def _resolve_tool_callables(
     callables: list = []
     approval_names: set[str] = set()
     mcp_by_server: dict[str, list[Tool]] = {}
+    subagent_rows: list[Tool] = []
     for tool in tools:
+        if tool.type == "subagent":
+            # Issue #574 — built in a second pass, once the whole session
+            # pool is known, because the child inherits that pool.
+            subagent_rows.append(tool)
+            continue
         if tool.type == "mcp":
             server_id = (tool.config or {}).get("mcp_server_id")
             if server_id:
@@ -1994,10 +2006,19 @@ async def _resolve_tool_callables(
                 "Failed to build memory tools for user=%s", user_id, exc_info=True
             )
 
+    # ---- Delegated sub-agent tools (Issue #574) --------------------------
+    _append_subagent_delegates(
+        callables,
+        subagent_rows,
+        tenant_id=tenant_id,
+        session_id=session_id,
+        session_data=session_data,
+    )
+
     # ---- Cap tool output size to prevent context overflow (Issue #206) ----
     # Wrap every FunctionTool with a truncation wrapper that caps
     # oversized results before they enter the MAF agent context.
-    callables = [_wrap_tool_with_output_cap(t, context_length=context_length) for t in callables]
+    callables = _wrap_tools_with_output_cap(callables, context_length=context_length)
 
     # ---- Connect MCPTool instances -----------------------------------------
     # MCP tools (from MCP servers) need an active connection before the
@@ -2358,8 +2379,13 @@ async def _auto_select_tools(
 
     callables: list = []
     mcp_by_server: dict[str, list[Tool]] = {}
+    subagent_rows: list[Tool] = []
 
     for tool in shortlisted_tools:
+        if tool.type == "subagent":
+            # Issue #574 — built below, against the final shortlisted pool.
+            subagent_rows.append(tool)
+            continue
         if tool.type == "mcp":
             server_id = (tool.config or {}).get("mcp_server_id")
             if server_id:
@@ -2437,8 +2463,17 @@ async def _auto_select_tools(
                 )
                 callables.remove(item)
 
+    # ---- Delegated sub-agent tools (Issue #574) --------------------------
+    _append_subagent_delegates(
+        callables,
+        subagent_rows,
+        tenant_id=tenant_id,
+        session_id=session_id,
+        session_data=session_data,
+    )
+
     # ---- Cap tool output size to prevent context overflow (Issue #206) ----
-    callables = [_wrap_tool_with_output_cap(t, context_length=context_length) for t in callables]
+    callables = _wrap_tools_with_output_cap(callables, context_length=context_length)
 
     return callables
 
@@ -2689,7 +2724,11 @@ async def _build_erpnext_callables(
 # ---------------------------------------------------------------------------
 
 
-def _wrap_tool_with_output_cap(tool_obj: Any, context_length: int | None = None) -> Any:
+def _wrap_tool_with_output_cap(
+    tool_obj: Any,
+    context_length: int | None = None,
+    timeout: float = TOOL_EXECUTION_TIMEOUT,
+) -> Any:
     """Wrap a MAF FunctionTool to cap its output size before it enters the agent context.
 
     Patches ``FunctionTool.func`` with an async wrapper that truncates
@@ -2703,6 +2742,8 @@ def _wrap_tool_with_output_cap(tool_obj: Any, context_length: int | None = None)
     Args:
         tool_obj: The MAF FunctionTool to wrap.
         context_length: The model's context window in tokens, or None.
+        timeout: Seconds before the invocation is abandoned.  Delegate
+            tools pass a larger value (Issue #574).
 
     Returns:
         The same ``FunctionTool`` object (mutated).
@@ -2718,10 +2759,10 @@ def _wrap_tool_with_output_cap(tool_obj: Any, context_length: int | None = None)
         try:
             result = await asyncio.wait_for(
                 original_func(*args, **kwargs),
-                timeout=TOOL_EXECUTION_TIMEOUT,
+                timeout=timeout,
             )
         except asyncio.TimeoutError:
-            return {"error": f"Tool '{tool_name}' timed out after {TOOL_EXECUTION_TIMEOUT}s"}
+            return {"error": f"Tool '{tool_name}' timed out after {timeout}s"}
         truncated = _truncate_tool_output(result, max_chars=max_chars)
         return truncated
 
@@ -2734,6 +2775,76 @@ def _wrap_tool_with_output_cap(tool_obj: Any, context_length: int | None = None)
 
     tool_obj.func = capped_func
     return tool_obj
+
+
+def _wrap_tools_with_output_cap(
+    callables: list, context_length: int | None = None,
+) -> list:
+    """Apply the output cap to every callable (Issue #206).
+
+    Delegate tools (Issue #574) get a longer invocation timeout than the
+    default so the child's own timeout fires first and can report a clean
+    error instead of a generic "tool timed out" message.
+    """
+    wrapped: list = []
+    for t in callables:
+        if getattr(t, "_delegate_tool", False):
+            timeout = float(
+                getattr(t, "_subagent_timeout_s", settings.SUBAGENT_TIMEOUT)
+            ) + 30.0
+        else:
+            timeout = float(TOOL_EXECUTION_TIMEOUT)
+        wrapped.append(
+            _wrap_tool_with_output_cap(
+                t, context_length=context_length, timeout=timeout,
+            )
+        )
+    return wrapped
+
+
+def _append_subagent_delegates(
+    callables: list,
+    subagent_rows: list,
+    *,
+    tenant_id: str,
+    session_id: str,
+    session_data: dict,
+) -> None:
+    """Append one delegate FunctionTool per active ``subagent`` tool row.
+
+    The child's tool set is derived from *callables* as it stands at this
+    point — the session's resolved pool.  The snapshot is taken *before*
+    any delegate is appended, so no delegate ever sees itself or a sibling
+    (Issue #574: one level of nesting only).
+    """
+    if not subagent_rows:
+        return
+
+    from ..tools.subagent import build_subagent_delegate
+
+    pool = list(callables)
+    used_names = {getattr(c, "name", "") for c in callables}
+    for row in subagent_rows:
+        try:
+            callables.append(
+                build_subagent_delegate(
+                    tool=row,
+                    tenant_id=tenant_id,
+                    session_id=session_id,
+                    pool=pool,
+                    session_data=session_data,
+                    parent_temperature=float(
+                        session_data.get("temperature") or 0.7
+                    ),
+                    used_names=used_names,
+                )
+            )
+        except Exception:
+            logger.warning(
+                "Failed to build subagent delegate for tool %s",
+                getattr(row, "id", "?"),
+                exc_info=True,
+            )
 
 
 def _build_compaction_strategy(
@@ -3305,6 +3416,14 @@ async def run_agent_stream(
         except Exception:
             logger.warning("Failed to schedule embedding for message %s", user_msg_id, exc_info=True)
 
+    # Issue #574 — initialised before the try so the finally block can always
+    # drain the sub-agent side channel, even when setup fails early.
+    subagent_bus: SubagentBus | None = None
+    subagent_state: dict = new_subagent_state()
+    accumulated_segments: list[dict] = []
+    accumulated_reasoning = ""
+    accumulated_text = ""
+
     try:
         # ---- 1-6. Resolve session config --------------------------------
         cfg = await _resolve_session_config(db, session_data, tenant_id, current_user, file_ids=file_ids, user_message=user_message)
@@ -3390,9 +3509,21 @@ async def run_agent_stream(
                 reasoning_effort=cfg.reasoning_effort,
                 function_invocation_kwargs=function_invocation_kwargs,
             )
+        # Issue #574 — side channel for delegated sub-agent progress.  Created
+        # before the stream is consumed so delegate tools can find it.
+        subagent_bus = SubagentBus(session_id=session_id)
+        register_bus(session_id, subagent_bus)
+
         event_count = 0
-        async for event_dict in stream:
+        async for event_dict in _multiplex_with_subagents(stream, subagent_bus):
             event_count += 1
+
+            # Delegated sub-agent events fold into the nested payload and are
+            # forwarded verbatim; they never carry parent text/tool state.
+            if accumulate_subagent_event(event_dict, subagent_state):
+                yield event_dict
+                continue
+
             # Check for cancellation before each yield
             if await check_stream_cancel(session_id):
                 await clear_stream_cancel(session_id)
@@ -3410,6 +3541,14 @@ async def run_agent_stream(
             accumulated_segments, accumulated_reasoning, accumulated_text = _accumulate_stream_state(
                 event_dict, accumulated_segments, accumulated_reasoning, accumulated_text,
             )
+
+            # A delegate result must not be attached before the child's own
+            # events have been folded in, so drain the bus here first.
+            if event_dict.get("event") == "tool_result":
+                for extra in subagent_bus.drain_nowait():
+                    accumulate_subagent_event(extra, subagent_state)
+                    yield extra
+                _attach_subagent_payloads(accumulated_segments, subagent_state)
 
             yield event_dict
 
@@ -3442,6 +3581,19 @@ async def run_agent_stream(
         # passed from ``_handle_streaming_message`` may be rolled back or
         # closed by the outer generator's cleanup before this runs.
         try:
+            # Issue #574 — fold in any child events that arrived after the
+            # last parent event so their payloads are still persisted, then
+            # release the per-run bus.
+            if subagent_bus is not None:
+                for _extra in subagent_bus.drain_nowait():
+                    accumulate_subagent_event(_extra, subagent_state)
+                _attach_subagent_payloads(accumulated_segments, subagent_state)
+                # Child tokens are billed with the turn (Issue #574).  The
+                # parent's own counts were written by _run_agent_stream before
+                # the multiplexer returned, so adding here keeps them together.
+                _fold_subagent_usage(_stream_token_info, subagent_bus)
+                remove_bus(session_id)
+
             from ..db.base import AsyncSessionLocal as _AsyncSessionLocal
 
             async with _AsyncSessionLocal() as _persist_db:
@@ -4162,6 +4314,89 @@ def _flush_reasoning_segment(segments: list[dict], pending: str) -> list[dict]:
     return segments
 
 
+def _attach_subagent_payloads(segments: list[dict], state: dict) -> None:
+    """Attach completed sub-agent payloads to their tool-result parts.
+
+    Sub-agent state is keyed by the parent's MAF ``call_id``, which is also
+    stored on the persisted ``function_result`` part (Issue #574).
+    """
+    for seg in segments:
+        if seg.get("type") != "function_result" or "subagent" in seg:
+            continue
+        payload = get_payload_for_call(state, seg.get("id") or "")
+        if payload:
+            seg["subagent"] = payload
+
+
+def _fold_subagent_usage(token_info: dict, bus: Any) -> None:
+    """Add delegated sub-agent token usage into the turn's totals (Issue #574).
+
+    Child tokens are billed with the parent turn; the per-sub-agent breakdown
+    is kept separately in the nested transcript payload.
+    """
+    if bus is None:
+        return
+    usage_in = getattr(bus, "usage_in", 0) or 0
+    usage_out = getattr(bus, "usage_out", 0) or 0
+    if not usage_in and not usage_out:
+        return
+    token_info["in"] = (token_info.get("in", 0) or 0) + usage_in
+    token_info["out"] = (token_info.get("out", 0) or 0) + usage_out
+
+
+async def _multiplex_with_subagents(
+    stream: AsyncIterator[dict], bus: SubagentBus,
+) -> AsyncIterator[dict]:
+    """Interleave the parent agent stream with delegated sub-agent events.
+
+    ``_run_agent_stream`` is suspended for the entire duration of a delegate
+    tool call, so child events cannot flow through it.  They are published to
+    *bus* instead and merged here, which keeps a single downstream pipeline
+    for both live streaming and persistence (Issue #574).
+    """
+    parent_task: asyncio.Task | None = None
+    bus_task: asyncio.Task | None = None
+    parent_done = False
+    try:
+        while True:
+            if parent_task is None and not parent_done:
+                parent_task = asyncio.ensure_future(stream.__anext__())
+            if bus_task is None:
+                bus_task = asyncio.ensure_future(bus.get())
+
+            pending = [t for t in (parent_task, bus_task) if t is not None]
+            if not pending:
+                break
+
+            done, _ = await asyncio.wait(
+                pending, return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            # Prefer child events so a completed sub-agent is fully folded in
+            # before its parent tool_result is processed.
+            if bus_task is not None and bus_task in done:
+                yield bus_task.result()
+                bus_task = None
+                continue
+
+            if parent_task is not None and parent_task in done:
+                try:
+                    event = parent_task.result()
+                except StopAsyncIteration:
+                    parent_done = True
+                    parent_task = None
+                    # Flush anything still queued, then finish.
+                    for extra in bus.drain_nowait():
+                        yield extra
+                    break
+                parent_task = None
+                yield event
+    finally:
+        for task in (parent_task, bus_task):
+            if task is not None and not task.done():
+                task.cancel()
+
+
 def _accumulate_stream_state(
     event_dict: dict,
     segments: list[dict],
@@ -4298,6 +4533,8 @@ def _maybe_accumulate_tool_events(
             "name": payload.get("tool_name", "unknown"),
             "output": _format_tool_output_for_storage(payload.get("output")),
             "is_error": not payload.get("success", True),
+            # Issue #574 — keeps the sub-agent payload attachable by call id.
+            "id": payload.get("tool_call_id", ""),
         }]
 
 

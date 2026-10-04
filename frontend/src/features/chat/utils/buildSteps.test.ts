@@ -6,6 +6,7 @@ import {
   summarizeProcess,
   reasoningSummary,
   type ProcessRowBatch,
+  buildSubagentSteps,
 } from "./buildSteps";
 
 // ---------------------------------------------------------------------------
@@ -315,5 +316,133 @@ describe("reasoningSummary", () => {
 
   it("trims whitespace-only lines", () => {
     expect(reasoningSummary("  \n  \nActual text", false)).toBe("Actual text");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Sub-agent delegation (Issue #574)
+// ---------------------------------------------------------------------------
+
+describe("buildSteps subagent passthrough", () => {
+  it("attaches the subagent payload to the delegate tool result", () => {
+    const payload = {
+      name: "Researcher",
+      status: "complete",
+      tokens_in: 10,
+      tokens_out: 5,
+      steps: [{ type: "reasoning", text: "thinking" }],
+    };
+    const { process } = buildSteps([
+      { type: "function_call", name: "delegate_to_researcher", id: "c1" },
+      {
+        type: "function_result",
+        name: "delegate_to_researcher",
+        output: "answer",
+        id: "c1",
+        subagent: payload,
+      },
+      { type: "text", text: "final" },
+    ]);
+
+    const result = process.find((s) => s.kind === "tool_result");
+    expect(result?.subagent).toEqual(payload);
+  });
+
+  it("leaves subagent undefined on plain tool results", () => {
+    const { process } = buildSteps([
+      { type: "function_result", name: "web_search", output: "x" },
+      { type: "text", text: "final" },
+    ]);
+
+    expect(process[0].subagent).toBeUndefined();
+  });
+
+  it("does not attach subagent to function_call parts", () => {
+    const { process } = buildSteps([
+      {
+        type: "function_call",
+        name: "delegate_to_researcher",
+        subagent: { name: "ignored" },
+      },
+      { type: "text", text: "final" },
+    ]);
+
+    expect(process[0].subagent).toBeUndefined();
+  });
+});
+
+describe("buildSubagentSteps", () => {
+  it("returns an empty array for undefined or empty input", () => {
+    expect(buildSubagentSteps(undefined)).toEqual([]);
+    expect(buildSubagentSteps([])).toEqual([]);
+  });
+
+  it("maps reasoning, tool call and tool result parts in order", () => {
+    const steps = buildSubagentSteps([
+      { type: "reasoning", text: "Let me think" },
+      {
+        type: "function_call",
+        name: "web_search",
+        arguments: { q: "x" },
+        id: "c1",
+      },
+      {
+        type: "function_result",
+        name: "web_search",
+        output: "found",
+        is_error: false,
+      },
+    ]);
+
+    expect(steps.map((s) => s.kind)).toEqual([
+      "reasoning",
+      "tool_call",
+      "tool_result",
+    ]);
+    expect(steps[1].args).toEqual({ q: "x" });
+    expect(steps[2].output).toBe("found");
+    expect(steps[2].isError).toBe(false);
+  });
+
+  it("flags error results", () => {
+    const steps = buildSubagentSteps([
+      { type: "function_result", name: "x", output: "boom", is_error: true },
+    ]);
+
+    expect(steps[0].isError).toBe(true);
+  });
+
+  it("drops empty reasoning rows and unknown part types", () => {
+    const steps = buildSubagentSteps([
+      { type: "reasoning", text: "   " },
+      { type: "metrics", text: "ignore me" },
+      { type: "function_result", name: "x", output: "ok" },
+    ]);
+
+    expect(steps).toHaveLength(1);
+    expect(steps[0].kind).toBe("tool_result");
+  });
+
+  it("uses unique keys and null batch ids", () => {
+    const steps = buildSubagentSteps([
+      { type: "reasoning", text: "a" },
+      { type: "reasoning", text: "b" },
+    ]);
+
+    expect(steps[0].key).not.toBe(steps[1].key);
+    expect(steps[0].batchId).toBeNull();
+    expect(steps[1].batchId).toBeNull();
+  });
+
+  it("renders nested rows through groupProcessRows", () => {
+    const steps = buildSubagentSteps([
+      { type: "function_call", name: "web_search", id: "c1" },
+      { type: "function_result", name: "web_search", output: "found" },
+    ]);
+
+    const rows = groupProcessRows(steps);
+    expect(rows).toHaveLength(1);
+    expect((rows[0] as ProcessRowBatch).type).toBe("toolBatch");
+    expect((rows[0] as ProcessRowBatch).steps).toHaveLength(2);
   });
 });

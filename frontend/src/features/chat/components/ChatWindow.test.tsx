@@ -172,6 +172,10 @@ vi.mock("../services/widget", () => ({
 // query, which triggers the mobile layout in ChatWindow (the ModelSelector
 // is hidden behind an "Options" button).  We mock on the main "antd" entry
 // so that `const { useBreakpoint } = Grid` picks up the override.
+// hoisted mutable breakpoint state so individual tests can render ChatWindow
+// in the mobile layout (Issue #573).
+const breakpointMock = vi.hoisted(() => ({ md: true }));
+
 // hoisted spy for antd's notification API so test cases can inspect
 // which method (success / info / warning / error) was called.
 const notificationSpy = vi.hoisted(() => ({
@@ -198,7 +202,13 @@ vi.mock("antd", async (importOriginal) => {
       destroy: notificationSpy.destroy,
     },
     Grid: {
-      useBreakpoint: () => ({ xs: false, sm: true, md: true, lg: true, xl: true }),
+      useBreakpoint: () => ({
+        xs: false,
+        sm: true,
+        md: breakpointMock.md,
+        lg: true,
+        xl: true,
+      }),
     },
   };
 });
@@ -271,6 +281,7 @@ function deferred<T>() {
 beforeEach(() => {
   virtuosoState.props = null;
   virtuosoState.scrollToIndex.mockReset();
+  breakpointMock.md = true;
 });
 
 // ---------------------------------------------------------------------------
@@ -1125,5 +1136,56 @@ describe("ChatWindow — memory_updated notification by action", () => {
 
     expect(notificationSpy.error).toHaveBeenCalled();
     expect(notificationSpy.error.mock.calls[0][0].description).toContain("An error occurred while updating the memory");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #573 — mobile top bar and the controlled chat-options drawer
+// ---------------------------------------------------------------------------
+
+describe("ChatWindow — mobile top bar and controlled options drawer (Issue #573)", () => {
+  beforeEach(() => {
+    mockApi.mockReset();
+    mockApi.mockImplementation((url: string) => {
+      if (url === "/models") return Promise.resolve(FAKE_MODELS);
+      return Promise.resolve([]);
+    });
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+    breakpointMock.md = true;
+  });
+
+  it("renders no Options button and no badge row on mobile for a non-temporary session", async () => {
+    breakpointMock.md = false;
+    renderChatWindow({ isTemporary: false });
+    await settle();
+
+    expect(screen.queryByRole("button", { name: /options/i })).toBeNull();
+    expect(screen.queryByTestId("temp-badge")).toBeNull();
+  });
+
+  it("renders the temporary badge row on mobile for a temporary session", async () => {
+    breakpointMock.md = false;
+    renderChatWindow({ isTemporary: true });
+    await settle();
+
+    expect(screen.getByTestId("temp-badge")).toBeInTheDocument();
+  });
+
+  it("renders the chat options drawer from the controlled settingsOpen prop and reports close back", async () => {
+    const onSettingsOpenChange = vi.fn();
+    const user = userEvent.setup();
+    renderChatWindow({ settingsOpen: true, onSettingsOpenChange });
+    await settle();
+
+    // "Memories" lives inside the drawer body, so finding it proves the drawer
+    // is mounted because of the controlled prop.
+    const memoriesButton = screen.getByRole("button", { name: /memories/i });
+    await user.click(memoriesButton);
+
+    expect(onSettingsOpenChange).toHaveBeenCalledWith(false);
   });
 });

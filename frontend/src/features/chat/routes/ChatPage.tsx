@@ -4,9 +4,10 @@
 // Main chat layout: SessionSidebar + ChatWindow + input area.
 // =============================================================================
 
+import { useState } from "react";
 import { useParams, useNavigate, useLocation } from "react-router-dom";
-import { Layout, Button, Typography, message, Space } from "antd";
-import { PlusOutlined, ThunderboltOutlined, FolderOpenOutlined, ClockCircleOutlined } from "@ant-design/icons";
+import { Layout, Button, Typography, message, Space, Grid, Tooltip } from "antd";
+import { PlusOutlined, ThunderboltOutlined, FolderOpenOutlined, ClockCircleOutlined, SettingOutlined } from "@ant-design/icons";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { SessionSidebar } from "../components/SessionSidebar";
 import { ChatWindow } from "../components/ChatWindow";
@@ -15,12 +16,19 @@ import { NotificationBell } from "../../../shared/components/NotificationBell";
 
 const { Content } = Layout;
 const { Title, Text } = Typography;
+const { useBreakpoint } = Grid;
 
 export function ChatPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const navigate = useNavigate();
   const location = useLocation();
   const queryClient = useQueryClient();
+  const screens = useBreakpoint();
+  const isMobile = !screens.md;
+
+  // Issue #573 — the mobile "Options" trigger lives in this header row, so the
+  // chat-options drawer state is owned here and passed down to ChatWindow.
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   // Issue #526 — starting a chat from a folder's "+" button passes the target
   // folder through navigation state.  It only matters while the session is
@@ -98,22 +106,59 @@ export function ChatPage() {
             background: "#fff",
           }}
         >
-          <Space size={4}>
-            <Button
-              type="text"
-              icon={<FolderOpenOutlined />}
-              onClick={() => navigate("/background-tasks")}
-            >
-              Tasks
-            </Button>
-            <Button
-              type="text"
-              icon={<ClockCircleOutlined />}
-              onClick={() => navigate("/scheduled-tasks")}
-            >
-              Scheduled
-            </Button>
-            <NotificationBell />
+          <Space size={isMobile ? 2 : 4}>
+            {isMobile ? (
+              <>
+                <Tooltip title="Tasks">
+                  <Button
+                    type="text"
+                    icon={<FolderOpenOutlined />}
+                    aria-label="Tasks"
+                    onClick={() => navigate("/background-tasks")}
+                  />
+                </Tooltip>
+                <Tooltip title="Scheduled">
+                  <Button
+                    type="text"
+                    icon={<ClockCircleOutlined />}
+                    aria-label="Scheduled"
+                    onClick={() => navigate("/scheduled-tasks")}
+                  />
+                </Tooltip>
+                {/* Only meaningful once a session (even a pending one) exists —
+                    the drawer lives in ChatWindow. */}
+                {sessionId && (
+                  <Tooltip title="Options">
+                    <Button
+                      type="text"
+                      icon={<SettingOutlined />}
+                      aria-label="Options"
+                      data-testid="chat-options-button"
+                      onClick={() => setSettingsOpen(true)}
+                    />
+                  </Tooltip>
+                )}
+                <NotificationBell />
+              </>
+            ) : (
+              <>
+                <Button
+                  type="text"
+                  icon={<FolderOpenOutlined />}
+                  onClick={() => navigate("/background-tasks")}
+                >
+                  Tasks
+                </Button>
+                <Button
+                  type="text"
+                  icon={<ClockCircleOutlined />}
+                  onClick={() => navigate("/scheduled-tasks")}
+                >
+                  Scheduled
+                </Button>
+                <NotificationBell />
+              </>
+            )}
           </Space>
         </div>
         {!sessionId ? (
@@ -167,6 +212,8 @@ export function ChatPage() {
             autoRouteEnabled={session?.auto_route_enabled ?? false}
             autoSelectTools={session?.auto_select_tools ?? true}
             onSessionUpdate={handleSessionUpdate}
+            settingsOpen={settingsOpen}
+            onSettingsOpenChange={setSettingsOpen}
           />
         )}
       </Content>

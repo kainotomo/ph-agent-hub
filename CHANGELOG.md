@@ -69,6 +69,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Workflow definition identity and edit policy** — `WorkflowDefinition.key` must match the module's `MAF_KEY` and is immutable (renaming is a create, not an edit); step `id` must be a non-empty, whitespace-free executor identity; and a new derived classification (`unchanged` / `config_only` / `topology`) states which edits leave paused runs resumable and which cannot be resumed. ([#551])
 
 ### Fixed
+- **Mobile chat header and usage row** — on phones the chat header now keeps
+  Tasks, Scheduled and the new Options trigger on the same row as the
+  notification bell (icon-only with tooltips; desktop keeps its text labels),
+  and the session usage row below the message input no longer wraps: session
+  statistics and token usage collapse to icon buttons that open the same
+  popovers, while the context ring keeps showing its percentage. ([#573])
 - **Workflow tool-role references** now resolve against the tenant's enabled tool **type** (the tools.type column) instead of the tool's display name, so the shipped web_research_report workflow runs for tenants that have Web Search enabled. ([#550])
 - Search queries are now matched as a literal, case-insensitive substring of the selected field (e.g. `MC:xpar` returns only that session, `XXX:xpar` returns none). Wildcard characters (`%`, `_`) are matched literally. The stale FULLTEXT index `idx_sessions_title_ft` has been dropped. ([#541])
 - Admin session deletion now works correctly. ([#460])
@@ -256,3 +262,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#536]: https://github.com/kainotomo/ph-agent-hub/issues/536
 [#539]: https://github.com/kainotomo/ph-agent-hub/issues/539
 [#541]: https://github.com/kainotomo/ph-agent-hub/issues/541
+[#573]: https://github.com/kainotomo/ph-agent-hub/issues/573

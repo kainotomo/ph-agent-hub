@@ -33,6 +33,10 @@ vi.mock("../services/chat", () => ({
   updateSession: mockUpdateSession,
 }));
 
+// Mutable breakpoint state so individual tests can render ChatPage in the
+// mobile layout (Issue #573).
+const breakpointMock = vi.hoisted(() => ({ md: true }));
+
 // Mock react-router-dom at the test level so we can control sessionId per test
 const mockNavigate = vi.fn();
 let mockSessionId: string | undefined = undefined;
@@ -59,6 +63,7 @@ vi.mock("../components/ChatWindow", () => ({
       data-is-pending={String(!!props.isPending)}
       data-is-temporary={String(!!props.isTemporary)}
       data-folder-id={String(props.folderId ?? "")}
+      data-settings-open={String(!!props.settingsOpen)}
     />
   ),
 }));
@@ -69,7 +74,13 @@ vi.mock("antd", async (importOriginal) => {
   return {
     ...antd,
     Grid: {
-      useBreakpoint: () => ({ xs: false, sm: true, md: true, lg: true, xl: true }),
+      useBreakpoint: () => ({
+        xs: false,
+        sm: true,
+        md: breakpointMock.md,
+        lg: true,
+        xl: true,
+      }),
     },
   };
 });
@@ -135,6 +146,7 @@ describe("ChatPage", () => {
     mockCreateSession.mockReset();
     mockUpdateSession.mockReset();
     mockSessionId = undefined;
+    breakpointMock.md = true;
 
     mockGetSession.mockResolvedValue(FAKE_SESSION);
     mockCreateSession.mockResolvedValue({ id: "new-temp", title: "New Chat" });
@@ -312,5 +324,64 @@ describe("ChatPage", () => {
       "data-folder-id",
       "",
     );
+  });
+
+  // ── Issue #573: mobile header row ──────────────────────────────────────
+
+  it("shows icon-only Tasks/Scheduled/Options controls in the header on mobile", async () => {
+    breakpointMock.md = false;
+    mockSessionId = "session-1";
+    renderChatPage();
+    await settle();
+
+    expect(screen.getByRole("button", { name: "Tasks" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Scheduled" })).toBeInTheDocument();
+    expect(screen.getByTestId("chat-options-button")).toBeInTheDocument();
+
+    // Visible text labels are dropped on phones.
+    expect(screen.queryByText("Tasks")).toBeNull();
+    expect(screen.queryByText("Scheduled")).toBeNull();
+  });
+
+  it("opens the chat options drawer through the header button on mobile", async () => {
+    breakpointMock.md = false;
+    mockSessionId = "session-1";
+    renderChatPage();
+    await settle();
+
+    expect(screen.getByTestId("chat-window")).toHaveAttribute(
+      "data-settings-open",
+      "false",
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("chat-options-button"));
+
+    expect(screen.getByTestId("chat-window")).toHaveAttribute(
+      "data-settings-open",
+      "true",
+    );
+  });
+
+  it("keeps text labels and no header Options button on desktop", async () => {
+    breakpointMock.md = true;
+    mockSessionId = "session-1";
+    renderChatPage();
+    await settle();
+
+    expect(screen.getByText("Tasks")).toBeInTheDocument();
+    expect(screen.getByText("Scheduled")).toBeInTheDocument();
+    expect(screen.queryByTestId("chat-options-button")).toBeNull();
+  });
+
+  it("hides the header Options button on the welcome screen (no session)", async () => {
+    breakpointMock.md = false;
+    mockSessionId = undefined;
+    renderChatPage();
+    await settle();
+
+    expect(screen.queryByTestId("chat-options-button")).toBeNull();
+    expect(screen.getByRole("button", { name: "Tasks" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Scheduled" })).toBeInTheDocument();
   });
 });

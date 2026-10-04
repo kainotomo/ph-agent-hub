@@ -15,11 +15,14 @@ import { ContextIndicator } from "./ContextIndicator";
 export interface SessionUsageToolbarProps {
   sessionId?: string;
   streaming?: boolean;
+  /** Issue #573 — phone layout: single non-wrapping line with icon-only buttons. */
+  compact?: boolean;
 }
 
 export const SessionUsageToolbar = React.memo(function SessionUsageToolbar({
   sessionId,
   streaming,
+  compact = false,
 }: SessionUsageToolbarProps) {
   // Hook must run unconditionally (Rules of Hooks); `enabled` guards the fetch.
   const { data, isLoading, isError } = useQuery({
@@ -36,17 +39,29 @@ export const SessionUsageToolbar = React.memo(function SessionUsageToolbar({
   return (
     <div
       data-testid="session-usage-toolbar"
+      data-compact={compact ? "true" : "false"}
       style={{
         display: "flex",
-        gap: 4,
-        flexWrap: "wrap",
+        gap: compact ? 2 : 4,
+        flexWrap: compact ? "nowrap" : "wrap",
         alignItems: "center",
+        minWidth: 0,
         // Breathing room from the message input directly above (Issue #531 QA).
         marginTop: 8,
       }}
     >
-      <SessionStatsButton usage={data} isLoading={isLoading} isError={isError} />
-      <TokenUsageButton usage={data} isLoading={isLoading} isError={isError} />
+      <SessionStatsButton
+        usage={data}
+        isLoading={isLoading}
+        isError={isError}
+        compact={compact}
+      />
+      <TokenUsageButton
+        usage={data}
+        isLoading={isLoading}
+        isError={isError}
+        compact={compact}
+      />
       <ContextIndicator sessionId={sessionId} />
     </div>
   );

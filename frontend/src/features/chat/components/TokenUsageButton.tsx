@@ -7,6 +7,7 @@
 
 import React from "react";
 import { Button, Popover, Spin, Typography } from "antd";
+import { ThunderboltOutlined } from "@ant-design/icons";
 import type { SessionUsageData } from "../services/chat";
 import { formatTokensCompact, formatTokensExact, formatPercent } from "../utils/formatMetrics";
 
@@ -16,12 +17,15 @@ export interface TokenUsageButtonProps {
   usage?: SessionUsageData;
   isLoading: boolean;
   isError: boolean;
+  /** Issue #573 — icon-only rendering for the single-line phone toolbar. */
+  compact?: boolean;
 }
 
 export const TokenUsageButton = React.memo(function TokenUsageButton({
   usage,
   isLoading,
   isError,
+  compact = false,
 }: TokenUsageButtonProps) {
   // Loading state
   if (isLoading) {
@@ -83,9 +87,12 @@ export const TokenUsageButton = React.memo(function TokenUsageButton({
         data-testid="token-usage-button"
         type="text"
         size="small"
-        style={{ fontSize: 12 }}
+        icon={compact ? <ThunderboltOutlined /> : undefined}
+        aria-label={compact ? `Token usage: ${buttonLabel}` : undefined}
+        title={compact ? buttonLabel : undefined}
+        style={{ fontSize: 12, ...(compact ? { paddingInline: 6 } : null) }}
       >
-        {buttonLabel}
+        {compact ? null : buttonLabel}
       </Button>
     </Popover>
   );

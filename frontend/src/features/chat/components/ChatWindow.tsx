@@ -11,7 +11,6 @@ import { Virtuoso, VirtuosoHandle } from "react-virtuoso";
 import { Badge, Button, Drawer, Grid, Input, Select, Slider, Space, Spin, Empty, Alert, Switch, Tag, Typography, Upload, message, notification } from "antd";
 import {
   SendOutlined,
-  SettingOutlined,
   StopOutlined,
   DownOutlined,
   PaperClipOutlined,
@@ -177,6 +176,10 @@ interface ChatWindowProps {
    * message's session_data so the backend creates the session in place. */
   folderId?: string;
   onSessionUpdate?: (data: Record<string, unknown>) => void;
+  /** Issue #573 — controlled chat-options drawer.  ChatPage owns the state so
+   * the mobile trigger can live in the page header row. */
+  settingsOpen?: boolean;
+  onSettingsOpenChange?: (open: boolean) => void;
 }
 
 export const ChatWindow = React.memo(function ChatWindow({
@@ -200,6 +203,8 @@ export const ChatWindow = React.memo(function ChatWindow({
   isPending = false,
   folderId,
   onSessionUpdate,
+  settingsOpen: settingsOpenProp,
+  onSettingsOpenChange,
 }: ChatWindowProps) {
   // ---- Draft persistence for pending (lazy) sessions --------------------
   // When isPending is true, the session doesn't exist on the backend yet,
@@ -446,7 +451,17 @@ export const ChatWindow = React.memo(function ChatWindow({
   }, [selectedSkillId, sessionId, queryClient]);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  // Issue #573 — the drawer is controlled when the parent supplies state (the
+  // mobile trigger lives in the ChatPage header); otherwise it stays internal.
+  const [uncontrolledSettingsOpen, setUncontrolledSettingsOpen] = useState(false);
+  const settingsOpen = settingsOpenProp ?? uncontrolledSettingsOpen;
+  const setSettingsOpen = useCallback(
+    (open: boolean) => {
+      if (onSettingsOpenChange) onSettingsOpenChange(open);
+      else setUncontrolledSettingsOpen(open);
+    },
+    [onSettingsOpenChange],
+  );
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const [uploading, setUploading] = useState(false);
 
@@ -1936,30 +1951,23 @@ export const ChatWindow = React.memo(function ChatWindow({
           </Text>
         </div>
       ) : isMobile ? (
-        <div
-          style={{
-            padding: "8px 16px 8px 56px",
-            borderBottom: "1px solid #f0f0f0",
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-          }}
-        >
-          {isTemporary !== undefined && (
+        isTemporary ? (
+          <div
+            style={{
+              padding: "8px 16px 8px 56px",
+              borderBottom: "1px solid #f0f0f0",
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+            }}
+          >
             <TemporaryChatBadge
               isTemporary={isTemporary}
               onFinalize={handleFinalize}
               loading={finalizing}
             />
-          )}
-          <Button
-            size="small"
-            icon={<SettingOutlined />}
-            onClick={() => setSettingsOpen(true)}
-          >
-            Options
-          </Button>
-        </div>
+          </div>
+        ) : null
       ) : (
         <div
           style={{
@@ -2700,7 +2708,11 @@ export const ChatWindow = React.memo(function ChatWindow({
           )}
         </div>
         {!pendingFlag && (
-          <SessionUsageToolbar sessionId={sessionId} streaming={streaming} />
+          <SessionUsageToolbar
+            sessionId={sessionId}
+            streaming={streaming}
+            compact={isMobile}
+          />
         )}
       </div>
 

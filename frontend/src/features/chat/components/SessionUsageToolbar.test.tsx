@@ -148,4 +148,40 @@ describe("SessionUsageToolbar", () => {
     expect(screen.getByTestId("session-stats-error")).toBeInTheDocument();
     expect(screen.getByTestId("token-usage-error")).toBeInTheDocument();
   });
+
+  it("collapses to a single non-wrapping line in compact (mobile) mode (Issue #573)", async () => {
+    mockGetSessionUsage.mockResolvedValue(mockUsageData);
+    mockGetSessionContext.mockResolvedValue({
+      tokens_used: 1200,
+      context_length: 2000,
+      percentage: 60,
+      system_prompt_tokens: 500,
+      tool_definition_tokens: 300,
+      messages_tokens: 400,
+    });
+
+    renderWithProvider(
+      <SessionUsageToolbar sessionId={mockSessionId} compact />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("session-stats-button")).toBeInTheDocument();
+    });
+
+    const toolbar = screen.getByTestId("session-usage-toolbar") as HTMLElement;
+    expect(toolbar.getAttribute("data-compact")).toBe("true");
+    expect(toolbar.style.flexWrap).toBe("nowrap");
+
+    // Icon-only children keep an accessible name but drop the visible label.
+    expect(
+      screen.getByRole("button", { name: /session statistics/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /token usage/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/turns ·/)).toBeNull();
+
+    // The context ring stays visible so the percentage is still readable.
+    expect(screen.getByTestId("context-indicator-ring")).toBeInTheDocument();
+  });
 });

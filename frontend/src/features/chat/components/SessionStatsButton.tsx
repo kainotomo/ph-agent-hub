@@ -7,6 +7,7 @@
 
 import React from "react";
 import { Button, Popover, Spin, Typography } from "antd";
+import { BarChartOutlined } from "@ant-design/icons";
 import type { SessionUsageData } from "../services/chat";
 import { formatDuration, formatTps } from "../utils/formatMetrics";
 
@@ -16,12 +17,15 @@ export interface SessionStatsButtonProps {
   usage?: SessionUsageData;
   isLoading: boolean;
   isError: boolean;
+  /** Issue #573 — icon-only rendering for the single-line phone toolbar. */
+  compact?: boolean;
 }
 
 export const SessionStatsButton = React.memo(function SessionStatsButton({
   usage,
   isLoading,
   isError,
+  compact = false,
 }: SessionStatsButtonProps) {
   // Loading state
   if (isLoading) {
@@ -96,9 +100,12 @@ export const SessionStatsButton = React.memo(function SessionStatsButton({
         data-testid="session-stats-button"
         type="text"
         size="small"
-        style={{ fontSize: 12 }}
+        icon={compact ? <BarChartOutlined /> : undefined}
+        aria-label={compact ? `Session statistics: ${buttonLabel}` : undefined}
+        title={compact ? buttonLabel : undefined}
+        style={{ fontSize: 12, ...(compact ? { paddingInline: 6 } : null) }}
       >
-        {buttonLabel}
+        {compact ? null : buttonLabel}
       </Button>
     </Popover>
   );

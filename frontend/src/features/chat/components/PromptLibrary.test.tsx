@@ -91,9 +91,7 @@ describe("PromptLibrary reserved placeholders", () => {
 
 describe("PromptLibrary save error handling", () => {
   it("shows an error and keeps the modal open when saving fails", async () => {
-    const errorSpy = vi.spyOn(message, "error").mockImplementation(() => {
-      return undefined as unknown as void;
-    });
+    const errorSpy = vi.spyOn(message, "error");
 
     mockApi.mockReset();
     mockApi.mockImplementation(

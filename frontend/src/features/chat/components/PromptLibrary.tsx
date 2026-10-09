@@ -107,6 +107,9 @@ export function PromptLibrary({
       queryClient.invalidateQueries({ queryKey: ["prompts"] });
       message.success("Prompt created");
     },
+    onError: (err: Error) => {
+      message.error(`Failed to save prompt: ${err.message}`);
+    },
   });
 
   const updateMutation = useMutation({
@@ -121,6 +124,9 @@ export function PromptLibrary({
       queryClient.invalidateQueries({ queryKey: ["prompts"] });
       message.success("Prompt updated");
     },
+    onError: (err: Error) => {
+      message.error(`Failed to save prompt: ${err.message}`);
+    },
   });
 
   const deleteMutation = useMutation({
@@ -130,14 +136,23 @@ export function PromptLibrary({
       queryClient.invalidateQueries({ queryKey: ["prompts"] });
       message.success("Prompt deleted");
     },
+    onError: (err: Error) => {
+      message.error(`Failed to delete prompt: ${err.message}`);
+    },
   });
 
   const handleSave = async () => {
     const values = await form.validateFields();
-    if (editingPrompt?.id) {
-      await updateMutation.mutateAsync({ id: editingPrompt.id, data: values });
-    } else {
-      await createMutation.mutateAsync(values);
+    try {
+      if (editingPrompt?.id) {
+        await updateMutation.mutateAsync({ id: editingPrompt.id, data: values });
+      } else {
+        await createMutation.mutateAsync(values);
+      }
+    } catch {
+      // The mutation's onError handler already surfaced the failure; keep the
+      // modal open so the user can retry without losing their input.
+      return;
     }
     setEditingPrompt(null);
     form.resetFields();
@@ -149,7 +164,11 @@ export function PromptLibrary({
   };
 
   const handleDelete = async (id: string) => {
-    await deleteMutation.mutateAsync(id);
+    try {
+      await deleteMutation.mutateAsync(id);
+    } catch {
+      // onError already surfaced the failure.
+    }
   };
 
   const handleNew = () => {

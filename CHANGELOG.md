@@ -70,6 +70,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Workflow definition identity and edit policy** — `WorkflowDefinition.key` must match the module's `MAF_KEY` and is immutable (renaming is a create, not an edit); step `id` must be a non-empty, whitespace-free executor identity; and a new derived classification (`unchanged` / `config_only` / `topology`) states which edits leave paused runs resumable and which cannot be resumed. ([#551])
 
 ### Fixed
+- **Saved prompts with large content** — the Prompt Library failed silently when
+  saving a prompt larger than ~64 KB: `prompts.content` was a MariaDB `TEXT`
+  column (65,535-byte limit), so the insert raised a database error that the UI
+  never surfaced. The column is now `LONGTEXT`, and a failed save shows an error
+  toast and keeps the editor open instead of silently doing nothing. Existing
+  prompts are unaffected.
 - **Mobile chat header and usage row** — on phones the chat header now keeps
   Tasks, Scheduled and the new Options trigger on the same row as the
   notification bell (icon-only with tooltips; desktop keeps its text labels),

@@ -5,7 +5,7 @@
 from datetime import datetime
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.dependencies import get_current_user, get_db
@@ -22,18 +22,23 @@ from ..services.prompt_service import (
 
 router = APIRouter(prefix="/prompts", tags=["prompts"])
 
+# Sanity ceiling for a saved prompt's content, in characters. The backing
+# column is LONGTEXT (~1B chars); this bound exists only so an accidentally
+# enormous payload is rejected with a clean 422 instead of a raw DB error.
+PROMPT_CONTENT_MAX_LENGTH = 5_000_000
+
 
 class PromptCreate(BaseModel):
     title: str
     description: str
-    content: str
+    content: str = Field(max_length=PROMPT_CONTENT_MAX_LENGTH)
     template_id: str | None = None
 
 
 class PromptUpdate(BaseModel):
     title: str | None = None
     description: str | None = None
-    content: str | None = None
+    content: str | None = Field(default=None, max_length=PROMPT_CONTENT_MAX_LENGTH)
     template_id: str | None = None
 
 

@@ -10,6 +10,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { message } from "antd";
 
 const mockApi = vi.fn();
 
@@ -85,5 +86,48 @@ describe("PromptLibrary reserved placeholders", () => {
     const resolved = onUse.mock.calls[0][0] as string;
     expect(resolved).toContain("AAPL");
     expect(resolved).toContain("{{SESSION_URL}}");
+  });
+});
+
+describe("PromptLibrary save error handling", () => {
+  it("shows an error and keeps the modal open when saving fails", async () => {
+    const errorSpy = vi.spyOn(message, "error").mockImplementation(() => {
+      return undefined as unknown as void;
+    });
+
+    mockApi.mockReset();
+    mockApi.mockImplementation(
+      (_path: string, options?: { method?: string }) =>
+        options?.method === "POST"
+          ? Promise.reject(new Error("Prompt too large"))
+          : Promise.resolve([]),
+    );
+
+    renderLibrary();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Prompts" }));
+    await user.click(
+      await screen.findByRole("button", { name: /New Prompt/ }),
+    );
+
+    await user.type(screen.getByRole("textbox", { name: "Title" }), "Big");
+    await user.type(
+      screen.getByRole("textbox", { name: "Description" }),
+      "desc",
+    );
+    await user.type(screen.getByRole("textbox", { name: "Content" }), "body");
+    await user.click(screen.getByRole("button", { name: "OK" }));
+
+    await waitFor(() =>
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Failed to save prompt"),
+      ),
+    );
+    // Modal remains open so the user can retry without losing input.
+    expect(
+      screen.getByRole("textbox", { name: "Title" }),
+    ).toBeInTheDocument();
+
+    errorSpy.mockRestore();
   });
 });

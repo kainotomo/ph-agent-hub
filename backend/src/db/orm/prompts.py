@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import String, Text, DateTime, ForeignKey, func
-from sqlalchemy.dialects.mysql import CHAR
+from sqlalchemy.dialects.mysql import CHAR, LONGTEXT
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base
@@ -32,7 +32,9 @@ class Prompt(Base):
     )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str] = mapped_column(String(1024), nullable=False)
-    content: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[str] = mapped_column(
+        LONGTEXT().with_variant(Text, "sqlite"), nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

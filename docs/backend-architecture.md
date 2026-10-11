@@ -46,6 +46,20 @@ Streaming SSE events include a `batch_id` field so the frontend can display
 parallel execution indicators. Parallel batches count as a single step toward
 `AGENT_MAX_STEPS`, preventing premature termination.
 
+**Runaway-guard hardening (Issue #579):** Two defects let a tool-heavy turn
+run away. First, the `AGENT_MAX_STEPS` guard in `_run_agent_stream` was nested
+inside the per-content loop, so it over-counted steps and its `break` never
+exited the stream (the run continued to MAF's own `max_iterations=40`). Second,
+MAF's limit then fired a *final request with tools disabled*; DeepSeek answered
+with native DSML tool-call markup (`｜｜DSML｜｜`, `<｜tool_calls｜>`) which leaked
+into the response as text. The guard now runs once per update and genuinely
+terminates the stream; `get_chat_client` binds MAF's
+`function_invocation_configuration["max_iterations"]` to `AGENT_MAX_STEPS + 1`;
+`strip_dsml_markers` removes leaked markup from live deltas and persisted text;
+and repeated identical tool calls end the turn early
+(`AGENT_LOOP_DETECTION_ENABLED` / `AGENT_LOOP_REPEAT_THRESHOLD`). Early stops
+emit a synthetic final message so the turn never ends on an empty bubble.
+
 **Auto Tool Selection (Issues #287, #439):** Instead of requiring users to
 manually activate tools per session, the agent can automatically select
 relevant tools from the available pool. The LLM receives tool definitions

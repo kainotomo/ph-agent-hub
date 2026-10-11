@@ -77,3 +77,95 @@ def extract_json_block(text: str) -> str:
         return text[start:end]
 
     return text
+
+
+# ---------------------------------------------------------------------------
+# DSML / leaked tool-call markup sanitising (Issue #579)
+# ---------------------------------------------------------------------------
+# DeepSeek's thinking models emit tool calls using native DSML special tokens.
+# When the OpenAI-compatible endpoint fails to parse them, the markup leaks
+# into the model's *text* output -- either as the bare sentinel ``|DSML|`` or
+# as tags like ``<|tool_calls|>`` / ``<invoke ...>`` where the delimiter is the
+# FULLWIDTH VERTICAL LINE (U+FF5C), not ASCII ``<``.
+#
+# The old ``_strip_raw_tool_xml`` helper in the runner only matched ASCII
+# ``<...tool_calls...>`` tags, so these variants reached the UI and the
+# database.  These helpers are the single source of truth for that cleanup.
+
+# Fullwidth vertical line (｜) and ASCII pipe, both used as DSML delimiters.
+_PIPE = r"[\uff5c|]"
+# A tag whose name denotes tool-call markup (optionally pipe-wrapped).
+_TOOL_TAG_NAME = (
+    r"[\w_-]*(?:tool_calls|function_calls|tool_call|function_call|invoke|parameter|DSML)[\w_-]*"
+)
+
+# A whole ``<...tool_calls...> ... </...tool_calls...>`` container.  Nested
+# markup left behind is mopped up by the tag pattern below.
+_RE_TOOLCALL_BLOCK = re.compile(
+    r"<\s*" + _PIPE + r"?\s*" + _TOOL_TAG_NAME + r"\s*" + _PIPE + r"?\s*[^>]*>"
+    r".*?"
+    r"</\s*" + _PIPE + r"?\s*" + _TOOL_TAG_NAME + r"\s*" + _PIPE + r"?\s*[^>]*>",
+    re.DOTALL | re.IGNORECASE,
+)
+
+# Any single opening/closing tool-call tag, including ``<invoke name="...">``,
+# ``<parameter ...>`` and pipe-wrapped closers like ``</｜tool_calls｜>``.
+_RE_TOOLCALL_TAG = re.compile(
+    r"</?\s*" + _PIPE + r"?\s*" + _TOOL_TAG_NAME + r"\s*" + _PIPE + r"?\s*[^>]*>",
+    re.IGNORECASE,
+)
+
+# Container open/close used to detect an unclosed (truncated) block.
+_RE_CONTAINER_OPEN = re.compile(
+    r"<\s*" + _PIPE + r"?\s*[\w_-]*(?:tool_calls|function_calls)[\w_-]*\s*"
+    + _PIPE + r"?\s*[^>]*>",
+    re.IGNORECASE,
+)
+_RE_CONTAINER_CLOSE = re.compile(
+    r"</\s*" + _PIPE + r"?\s*[\w_-]*(?:tool_calls|function_calls)[\w_-]*\s*"
+    + _PIPE + r"?\s*[^>]*>",
+    re.IGNORECASE,
+)
+
+# The bare DSML sentinel, e.g. ``|｜DSML｜|`` (1-2 pipes per side).
+_RE_DSML_SENTINEL = re.compile(
+    r"[\uff5c|]{1,2}\s*DSML\s*[\uff5c|]{1,2}",
+    re.IGNORECASE,
+)
+
+
+def contains_dsml(text: str) -> bool:
+    """Return True if *text* contains leaked DeepSeek tool-call markup."""
+    if not text:
+        return False
+    return bool(
+        _RE_TOOLCALL_BLOCK.search(text)
+        or _RE_TOOLCALL_TAG.search(text)
+        or _RE_DSML_SENTINEL.search(text)
+    )
+
+
+def strip_dsml_markers(text: str) -> str:
+    """Remove leaked DeepSeek DSML / tool-call markup from *text*.
+
+    Handles fullwidth-pipe variants (``|｜DSML｜|``, ``<｜tool_calls｜>``),
+    ASCII tag variants (``<function_calls>``, ``<tool_calls>``, ``<invoke ...>``)
+    and unclosed/truncated blocks.  Surrounding whitespace is trimmed only when
+    a marker was actually removed, so plain text passes through unchanged.
+    """
+    if not text:
+        return text
+
+    # 1. Drop an unclosed container (truncated stream) from its open tag onward.
+    open_match = _RE_CONTAINER_OPEN.search(text)
+    if open_match is not None and not _RE_CONTAINER_CLOSE.search(text, open_match.end()):
+        text = text[: open_match.start()]
+
+    # 2. Remove complete blocks, then any residual individual tags.
+    text = _RE_TOOLCALL_BLOCK.sub("", text)
+    text = _RE_TOOLCALL_TAG.sub("", text)
+
+    # 3. Remove the bare sentinel.
+    text = _RE_DSML_SENTINEL.sub("", text)
+
+    return text.strip()

@@ -106,9 +106,27 @@ class Settings(BaseSettings):
     AUTO_SELECT_TOOLS_TOP_K: int = 8
 
     # --- Agent execution (Issue #317) ---
-    AGENT_MAX_STEPS: int = 15
-    """Maximum number of tool-call steps before the agent loop terminates.
-    Prevents runaway agents that loop indefinitely on tool results."""
+    AGENT_MAX_STEPS: int = 25
+    """Maximum number of tool-call rounds before the agent loop terminates.
+    A parallel batch of tool calls counts as ONE round.  Prevents runaway
+    agents that loop indefinitely on tool results.  MAF's own
+    ``function_invocation_configuration['max_iterations']`` is aligned to this
+    value (+1 for the final wrap-up call) in ``get_chat_client`` so the app cap
+    is authoritative (Issue #579)."""
+
+    AGENT_MAX_CONSECUTIVE_ERRORS_PER_REQUEST: int = 3
+    """MAF function-invocation: consecutive tool errors before the request is
+    aborted.  Set explicitly (MAF's default is also 3) so it is a first-class
+    knob rather than an implicit library default (Issue #579)."""
+
+    AGENT_LOOP_DETECTION_ENABLED: bool = True
+    """When True, terminate a turn early if the agent repeats the *same* tool
+    call (identical name and arguments) ``AGENT_LOOP_REPEAT_THRESHOLD`` times
+    consecutively.  This is the primary runaway guard; AGENT_MAX_STEPS is the
+    hard backstop (Issue #579)."""
+
+    AGENT_LOOP_REPEAT_THRESHOLD: int = 4
+    """Number of consecutive identical tool calls that triggers loop detection."""
 
     # --- Sub-agent delegation (Issue #574) ---
     SUBAGENT_TIMEOUT: int = 300

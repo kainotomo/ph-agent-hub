@@ -561,7 +561,7 @@ class TestAccumulateStreamState:
 
 
 class TestStripRawToolXml:
-    """Tests for ``_strip_raw_tool_xml``."""
+    """Tests for ``_strip_raw_tool_xml`` (Issue #579)."""
 
     @pytest.fixture(autouse=True)
     def _setup(self):
@@ -582,6 +582,52 @@ class TestStripRawToolXml:
     def test_preserves_normal_text(self):
         text = "Just a normal response without tool calls."
         assert self.fn(text) == text
+
+    def test_removes_fullwidth_dsml_tags(self):
+        """Issue #579 — the original bug: fullwidth-pipe DSML tags leaked."""
+        text = "Answer<｜tool_calls｜>payload</｜tool_calls｜>more"
+        result = self.fn(text)
+        assert "tool_calls" not in result
+        assert "payload" not in result
+        assert "Answer" in result and "more" in result
+
+    def test_removes_bare_dsml_sentinel(self):
+        text = "Tool output ｜｜DSML｜｜ calls followed by text"
+        result = self.fn(text)
+        assert "DSML" not in result
+        assert "Tool output" in result
+
+    def test_removes_unclosed_block(self):
+        text = "Here<function_calls>partial junk to the end"
+        assert self.fn(text) == "Here"
+
+
+class TestToolCallKey:
+    """Tests for ``_tool_call_key`` (Issue #579 loop detection)."""
+
+    def test_same_dict_different_order_same_key(self):
+        from src.agents.runner import _tool_call_key
+        assert _tool_call_key("t", {"a": 1, "b": 2}) == _tool_call_key("t", {"b": 2, "a": 1})
+
+    def test_different_name_different_key(self):
+        from src.agents.runner import _tool_call_key
+        assert _tool_call_key("a", {}) != _tool_call_key("b", {})
+
+    def test_none_args_stable(self):
+        from src.agents.runner import _tool_call_key
+        assert _tool_call_key("t", None) == _tool_call_key("t", None)
+
+
+class TestTerminationMessage:
+    """Tests for ``_termination_message`` (Issue #579)."""
+
+    def test_step_limit_message_mentions_steps(self):
+        from src.agents.runner import _termination_message
+        assert "7" in _termination_message("step_limit", 7)
+
+    def test_loop_message(self):
+        from src.agents.runner import _termination_message
+        assert "repeating" in _termination_message("loop", 3)
 
 
 class TestMaybeAccumulateToolEvents:
@@ -1201,6 +1247,9 @@ class TestRunAgentStream:
     @patch("agent_framework.Agent")
     async def test_enforces_step_limit(self, mock_agent_class, mock_settings):
         mock_settings.AGENT_MAX_STEPS = 2
+        # Issue #579 — explicit loop settings so the guard is deterministic.
+        mock_settings.AGENT_LOOP_DETECTION_ENABLED = False
+        mock_settings.AGENT_LOOP_REPEAT_THRESHOLD = 4
         mock_instance = MagicMock()
         # Produce more steps than the max
         updates = []

@@ -106,13 +106,16 @@ class Settings(BaseSettings):
     AUTO_SELECT_TOOLS_TOP_K: int = 8
 
     # --- Agent execution (Issue #317) ---
-    AGENT_MAX_STEPS: int = 25
+    AGENT_MAX_STEPS: int = 50
     """Maximum number of tool-call rounds before the agent loop terminates.
     A parallel batch of tool calls counts as ONE round.  Prevents runaway
     agents that loop indefinitely on tool results.  MAF's own
     ``function_invocation_configuration['max_iterations']`` is aligned to this
     value (+1 for the final wrap-up call) in ``get_chat_client`` so the app cap
-    is authoritative (Issue #579)."""
+    is authoritative (Issue #579).  This is the *last-resort* backstop:
+    ``AGENT_LOOP_DETECTION_ENABLED`` catches genuine repeat loops much earlier,
+    and on early stop the agent is asked for a short tool-less wrap-up so the
+    turn still finishes cleanly."""
 
     AGENT_MAX_CONSECUTIVE_ERRORS_PER_REQUEST: int = 3
     """MAF function-invocation: consecutive tool errors before the request is

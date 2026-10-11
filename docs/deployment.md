@@ -190,7 +190,7 @@ Key variables:
 | `AUTOPILOT_MAX_TOKENS` | Max cumulative tokens for autopilot; `0` = unlimited (default: `0`) |
 | `MAX_CONCURRENT_BACKGROUND_TASKS_PER_USER` | Max concurrent background tasks per user (default: `3`) |
 | `BACKGROUND_TASK_TIMEOUT_SECONDS` | Max wall-clock time for a background task in seconds (default: `3600`) |
-| `AGENT_MAX_STEPS` | Max tool-call rounds before the agent loop terminates; a parallel batch counts as one round (default: `25`). MAF's own tool loop is aligned to this + 1 (Issue #579) |
+| `AGENT_MAX_STEPS` | Max tool-call rounds before the agent loop terminates; a parallel batch counts as one round (default: `50`). MAF's own tool loop is aligned to this + 1 (Issue #579) |
 | `AGENT_MAX_CONSECUTIVE_ERRORS_PER_REQUEST` | MAF function-invocation: consecutive tool errors before the request aborts (default: `3`) |
 | `AGENT_LOOP_DETECTION_ENABLED` | Terminate a turn early when the same tool call repeats (default: `True`) |
 | `AGENT_LOOP_REPEAT_THRESHOLD` | Consecutive identical tool calls that trigger loop detection (default: `4`) |

@@ -3916,6 +3916,9 @@ async def _run_agent_stream(
     pending_calls: dict[str, dict] = {}
     # Issue #579 — keys of recent tool calls, for runaway-loop detection.
     recent_call_keys: list[str] = []
+    # Issue #579 — human-readable notes of the tool calls taken this turn,
+    # used to build a model-authored wrap-up when the loop stops early.
+    turn_notes: list[str] = []
     # Set when the stream is terminated early (step cap / detected loop).
     stop_reason: str | None = None
 
@@ -4016,8 +4019,18 @@ async def _run_agent_stream(
                         pending.get("args_str", ""), output
                     )
 
-                # Issue #579 — record the call for runaway-loop detection.
+                # Issue #579 — record the call for runaway-loop detection and
+                # for the early-stop wrap-up prompt.
                 recent_call_keys.append(_tool_call_key(tool_name, resolved_args))
+                try:
+                    _args_preview = (
+                        json.dumps(resolved_args, default=str)[:200]
+                        if resolved_args is not None
+                        else ""
+                    )
+                except (TypeError, ValueError):
+                    _args_preview = ""
+                turn_notes.append(f"{tool_name}({_args_preview})")
 
                 # Build the tool event payloads with batch_id for Issue #447
                 tool_start_payload: dict = {
@@ -4135,15 +4148,23 @@ async def _run_agent_stream(
                 stop_reason = "loop"
                 break
 
-    # ---- Graceful early-termination message (Issue #579) ------------------
-    # When we stop early, emit a synthetic final message so the turn ends with
-    # a clear explanation instead of an empty or truncated bubble.  It flows
-    # through the normal ``token`` path, so it is both streamed and persisted.
+    # ---- Graceful early-termination wrap-up (Issue #579) ------------------
+    # When we stop early, ask the model for a short, tool-less conclusion so a
+    # capped turn still reads as "finished" (mirroring MAF's own final no-tools
+    # response).  Falls back to a canned line if that call fails.  Either way it
+    # flows through the normal ``token`` path, so it is streamed AND persisted.
     if stop_reason is not None:
         if first_token_at_s is None:
             first_token_at_s = time.monotonic()
         yield _sse_event("token", {
-            "delta": _termination_message(stop_reason, step_index),
+            "delta": await _generate_stop_wrapup(
+                model_client=model_client,
+                system_prompt=system_prompt,
+                user_message=user_message,
+                turn_notes=turn_notes,
+                stop_reason=stop_reason,
+                steps=step_index,
+            ),
         }, session_id=session_id, message_id=message_id)
 
     # ---- Token extraction -------------------------------------------------
@@ -4538,6 +4559,61 @@ def _termination_message(stop_reason: str, steps: int) -> str:
         f"\n\nI stopped after {steps} tool steps to avoid running away. "
         "Send another message if you'd like me to continue."
     )
+
+
+async def _generate_stop_wrapup(
+    *,
+    model_client: Any,
+    system_prompt: str,
+    user_message: str,
+    turn_notes: list[str],
+    stop_reason: str,
+    steps: int,
+) -> str:
+    """Issue #579 — model-authored conclusion when the loop stops early.
+
+    Makes a single tool-less model call so a capped or loop-stopped turn still
+    ends with a coherent summary instead of an abrupt cut.  Returns text that
+    begins with a blank-line separator, or the canned ``_termination_message``
+    fallback when the model call fails or returns nothing.
+    """
+    from agent_framework import Message as _MafMessage
+
+    if stop_reason == "loop":
+        reason = "because it was repeating the same tool call without progress"
+        nudge = "Point out that progress stalled and suggest how to proceed differently."
+    else:
+        reason = f"after reaching the {steps}-step tool budget for this turn"
+        nudge = "Summarise what was accomplished and state the single next step to continue."
+
+    notes = "\n".join(f"- {n}" for n in turn_notes[-20:]) or "(no tool calls recorded)"
+    instruction = (
+        "You were working on a long, tool-using task that has now been stopped "
+        f"{reason}. Do NOT call any tools. In at most 6 sentences, {nudge}\n\n"
+        f"Original request:\n{user_message[:2000]}\n\n"
+        f"Tool calls attempted:\n{notes[:2000]}"
+    )
+
+    try:
+        response = await model_client.get_response(
+            messages=[
+                _MafMessage(
+                    "system",
+                    [system_prompt or "You are a helpful assistant."],
+                ),
+                _MafMessage("user", [instruction]),
+            ],
+            options={"temperature": 0.3, "max_tokens": 512},
+        )
+        text = (response.messages[-1].text or "").strip()
+        if text:
+            return "\n\n" + text
+    except Exception:
+        logger.warning(
+            "Stop wrap-up model call failed; using canned fallback", exc_info=True
+        )
+
+    return _termination_message(stop_reason, steps)
 
 
 def _estimate_tool_definitions(tools: list | None) -> int:

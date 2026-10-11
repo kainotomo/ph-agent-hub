@@ -8,7 +8,7 @@
 # =============================================================================
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -107,7 +107,7 @@ def _make_mock_model():
     return model
 
 
-async def _collect_events(model, updates):
+async def _collect_events(model, updates, model_client=None):
     from src.agents.runner import _run_agent_stream
 
     mock_instance = MagicMock()
@@ -116,7 +116,7 @@ async def _collect_events(model, updates):
         events = []
         async for event in _run_agent_stream(
             model=model,
-            model_client=MagicMock(),
+            model_client=model_client if model_client is not None else MagicMock(),
             system_prompt="test",
             tools=[MagicMock()],
             user_message="test",
@@ -174,6 +174,37 @@ class TestStepLimitGuard:
             if isinstance(e, dict) and e.get("event") == "token"
         )
         assert "stopped after 2" in token_text
+
+    @pytest.mark.asyncio
+    async def test_cap_uses_model_wrapup_when_available(self, monkeypatch):
+        """Issue #579 — the model should author the conclusion, not a canned line."""
+        from src.core import config
+        monkeypatch.setattr(config.settings, "AGENT_MAX_STEPS", 2)
+        monkeypatch.setattr(config.settings, "AGENT_LOOP_DETECTION_ENABLED", False)
+
+        updates = [
+            _make_stream_update(
+                [_make_func_result_content(call_id=f"c{i}", name=f"t{i}")]
+            )
+            for i in range(5)
+        ]
+
+        response = MagicMock()
+        response.messages = [MagicMock()]
+        response.messages[-1].text = "Here is a wrap-up of the work so far."
+        client = MagicMock()
+        client.get_response = AsyncMock(return_value=response)
+
+        events = await _collect_events(
+            _make_mock_model(), updates, model_client=client
+        )
+        token_text = "".join(
+            json.loads(e["data"])["delta"]
+            for e in events
+            if isinstance(e, dict) and e.get("event") == "token"
+        )
+        assert "Here is a wrap-up" in token_text
+        assert "stopped after" not in token_text
 
 
 class TestLoopDetection:

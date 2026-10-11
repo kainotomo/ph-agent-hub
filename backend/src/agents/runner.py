@@ -39,6 +39,7 @@ from agent_framework import (
 from ..core.config import settings
 from ..core.exceptions import ValidationError, NotFoundError
 from .subagent_bus import SubagentBus, register_bus, remove_bus
+from .deepseek_patch import contains_dsml, strip_dsml_markers
 from .subagent_events import (
     accumulate_subagent_event,
     get_payload_for_call,
@@ -3913,6 +3914,10 @@ async def _run_agent_stream(
     tool_durations_s: list[float] = []
     # Aggregate streaming tool calls: call_id -> {name, args_str}
     pending_calls: dict[str, dict] = {}
+    # Issue #579 — keys of recent tool calls, for runaway-loop detection.
+    recent_call_keys: list[str] = []
+    # Set when the stream is terminated early (step cap / detected loop).
+    stop_reason: str | None = None
 
     inner_event_count = 0
     last_update = None
@@ -3925,9 +3930,19 @@ async def _run_agent_stream(
             )
         except StopAsyncIteration:
             break
-        except (asyncio.TimeoutError, Exception):
-            # Stream exhausted or error — break so post-loop code
-            # (token extraction, final yields) can still run.
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Agent stream idle timeout (%ss) for session %s after %d events",
+                MAF_STREAM_IDLE_TIMEOUT, session_id, inner_event_count,
+            )
+            break
+        except Exception:
+            # Stream exhausted or error — log it (Issue #579: this used to be
+            # swallowed silently) then break so post-loop code can run.
+            logger.exception(
+                "Agent stream raised for session %s after %d events",
+                session_id, inner_event_count,
+            )
             break
         last_update = update
         inner_event_count += 1
@@ -3953,6 +3968,15 @@ async def _run_agent_stream(
             if content_type == "text":
                 delta = getattr(content, "text", "")
                 if delta:
+                    # Issue #579 — strip leaked DeepSeek DSML special-token
+                    # markup so it never reaches the UI or the database.
+                    if contains_dsml(delta):
+                        logger.warning(
+                            "Stripped leaked tool-call markup from agent text "
+                            "(session %s)", session_id,
+                        )
+                        delta = strip_dsml_markers(delta)
+                if delta:
                     if first_token_at_s is None:
                         first_token_at_s = time.monotonic()
                     yield _sse_event("token", {
@@ -3960,6 +3984,9 @@ async def _run_agent_stream(
                     }, session_id=session_id, message_id=message_id)
             elif content_type == "text_reasoning":
                 delta = getattr(content, "text", "")
+                if delta:
+                    # Issue #579 — same sanitising for the reasoning stream.
+                    delta = strip_dsml_markers(delta)
                 if delta:
                     yield _sse_event("reasoning_token", {
                         "delta": delta,
@@ -3988,6 +4015,9 @@ async def _run_agent_stream(
                     resolved_args = _resolve_tool_arguments(
                         pending.get("args_str", ""), output
                     )
+
+                # Issue #579 — record the call for runaway-loop detection.
+                recent_call_keys.append(_tool_call_key(tool_name, resolved_args))
 
                 # Build the tool event payloads with batch_id for Issue #447
                 tool_start_payload: dict = {
@@ -4049,32 +4079,72 @@ async def _run_agent_stream(
                         "success": success,
                     }, session_id=session_id, message_id=message_id)
 
-            # ── Step completion (Issue #447 — parallel batches count as 1) ──
-            if func_results_in_update:
-                step_index += 1
-                step_payload: dict = {
-                    "step_index": step_index,
-                    "total_steps_so_far": step_index,
-                }
-                if batch_id:
-                    step_payload["batch_id"] = batch_id
-                    step_payload["batch_size"] = len(func_results_in_update)
-                yield _sse_event("step_complete", step_payload,
-                                 session_id=session_id, message_id=message_id)
+        # ── Step completion (Issue #447 — parallel batches count as 1) ──
+        # Issue #579 — this block MUST sit outside the per-content loop so it
+        # runs once per update (not once per content item) and so the ``break``
+        # below actually terminates the stream loop.  Previously it was nested
+        # inside ``for content in update.contents`` and the guard silently did
+        # nothing: steps were double-counted and the run continued to MAF's own
+        # 40-iteration limit.
+        if func_results_in_update:
+            step_index += 1
+            step_payload: dict = {
+                "step_index": step_index,
+                "total_steps_so_far": step_index,
+            }
+            if batch_id:
+                step_payload["batch_id"] = batch_id
+                step_payload["batch_size"] = len(func_results_in_update)
+            yield _sse_event("step_complete", step_payload,
+                             session_id=session_id, message_id=message_id)
 
-                # ── Step limit guard ────────────────────────────────────
-                if step_index >= settings.AGENT_MAX_STEPS:
-                    logger.warning(
-                        "Agent step limit reached (%d) for session %s — terminating stream",
-                        settings.AGENT_MAX_STEPS, session_id,
-                    )
-                    yield _sse_event("step_limit_reached", {
-                        "step_index": step_index,
-                        "max_steps": settings.AGENT_MAX_STEPS,
-                    }, session_id=session_id, message_id=message_id)
-                    # Drain any remaining partial tool calls from pending
-                    pending_calls.clear()
-                    break
+            # ── Step limit guard ────────────────────────────────────
+            if step_index >= settings.AGENT_MAX_STEPS:
+                logger.warning(
+                    "Agent step limit reached (%d) for session %s — terminating stream",
+                    settings.AGENT_MAX_STEPS, session_id,
+                )
+                yield _sse_event("step_limit_reached", {
+                    "step_index": step_index,
+                    "max_steps": settings.AGENT_MAX_STEPS,
+                }, session_id=session_id, message_id=message_id)
+                pending_calls.clear()
+                stop_reason = "step_limit"
+                break
+
+        # ── Runaway tool-loop detection (Issue #579) ────────────────────
+        # The same tool call repeated N times in a row means the model is
+        # stuck; stop early instead of grinding to the step cap (and burning
+        # tokens) like the PowerShell loop in the original report.
+        if (
+            settings.AGENT_LOOP_DETECTION_ENABLED
+            and len(recent_call_keys) >= settings.AGENT_LOOP_REPEAT_THRESHOLD
+        ):
+            tail = recent_call_keys[-settings.AGENT_LOOP_REPEAT_THRESHOLD:]
+            if len(set(tail)) == 1:
+                logger.warning(
+                    "Agent loop detected for session %s: identical tool call "
+                    "repeated %d times — terminating stream",
+                    session_id, settings.AGENT_LOOP_REPEAT_THRESHOLD,
+                )
+                yield _sse_event("loop_detected", {
+                    "repeat_count": settings.AGENT_LOOP_REPEAT_THRESHOLD,
+                    "step_index": step_index,
+                }, session_id=session_id, message_id=message_id)
+                pending_calls.clear()
+                stop_reason = "loop"
+                break
+
+    # ---- Graceful early-termination message (Issue #579) ------------------
+    # When we stop early, emit a synthetic final message so the turn ends with
+    # a clear explanation instead of an empty or truncated bubble.  It flows
+    # through the normal ``token`` path, so it is both streamed and persisted.
+    if stop_reason is not None:
+        if first_token_at_s is None:
+            first_token_at_s = time.monotonic()
+        yield _sse_event("token", {
+            "delta": _termination_message(stop_reason, step_index),
+        }, session_id=session_id, message_id=message_id)
 
     # ---- Token extraction -------------------------------------------------
     # After the stream is exhausted, attempt to collect usage metadata.
@@ -4422,20 +4492,52 @@ def _accumulate_stream_state(
 
 
 def _strip_raw_tool_xml(text: str) -> str:
-    """Strip raw tool-call XML from text.
+    """Strip leaked DeepSeek tool-call markup from text.
 
-    DeepSeek thinking mode occasionally leaks tool-call XML into the
-    regular text output when the consecutive-error limit is hit.  This
-    strips both ``<function_calls>`` (MAF) and ``<*tool_calls*>`` (DSML)
-    patterns so they don't render as visible garbage in the UI.
+    Handles two families of markup:
+
+    * MAF ``<function_calls>`` / ``<...tool_calls...>`` ASCII tags.
+    * Native DSML special-token markup using the fullwidth vertical line
+      (U+FF5C), e.g. ``<｜tool_calls｜>`` or the bare ``｜｜DSML｜｜`` sentinel.
+
+    Issue #579 — delegate to the shared :func:`strip_dsml_markers` so every
+    variant (and unclosed blocks) is removed, not just ASCII ``tool_calls``
+    tags as before.
     """
-    import re
-    return re.sub(
-        r"<[\w_-]*tool_calls[\w_-]*>.*?</[\w_-]*tool_calls[\w_-]*>",
-        "",
-        text,
-        flags=re.DOTALL | re.IGNORECASE,
-    ).strip()
+    return strip_dsml_markers(text)
+
+
+def _tool_call_key(name: str, args: Any) -> str:
+    """Build a stable key for runaway-loop detection (Issue #579).
+
+    Normalises *args* (dict key order, JSON string vs dict) so that
+    semantically identical calls produce the same key.
+    """
+    try:
+        if isinstance(args, dict):
+            args_norm = json.dumps(args, sort_keys=True, default=str)
+        elif isinstance(args, str):
+            args_norm = args.strip()
+        else:
+            args_norm = json.dumps(args, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        args_norm = str(args)
+    return f"{name}\x00{args_norm}"
+
+
+def _termination_message(stop_reason: str, steps: int) -> str:
+    """Synthesize the final assistant text when the loop stops early
+    (Issue #579).  Keeps the turn from ending on an empty/truncated bubble."""
+    if stop_reason == "loop":
+        return (
+            "\n\nI stopped because I noticed I was repeating the same tool call "
+            "without making progress. Please give me more direction, or rephrase "
+            "the request, and I'll continue."
+        )
+    return (
+        f"\n\nI stopped after {steps} tool steps to avoid running away. "
+        "Send another message if you'd like me to continue."
+    )
 
 
 def _estimate_tool_definitions(tools: list | None) -> int:

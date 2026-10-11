@@ -237,6 +237,9 @@ class TestParallelStepCounting:
     @patch("agent_framework.Agent")
     async def test_step_limit_respected(self, mock_agent_class, mock_settings, monkeypatch):
         mock_settings.AGENT_MAX_STEPS = 1
+        # Issue #579 — explicit loop settings so the guard is deterministic.
+        mock_settings.AGENT_LOOP_DETECTION_ENABLED = False
+        mock_settings.AGENT_LOOP_REPEAT_THRESHOLD = 4
         from src.agents.runner import _run_agent_stream
 
         mock_instance = MagicMock()

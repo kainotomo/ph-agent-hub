@@ -12,9 +12,17 @@
 # write was silently discarded and the model would then deny knowing something
 # it had just claimed to remember.
 #
+# They also share the runner's single ``AsyncSession`` with each other, and
+# MAF invokes a parallel tool batch concurrently.  AsyncSession is not
+# concurrency-safe, so every tool is wrapped in a per-builder asyncio.Lock
+# (Issue #583): without it, the second save_memory call in one batch failed
+# with "Session is already flushing".
+#
 # ``list_memory`` stays read-only and never commits.
 # =============================================================================
 
+import asyncio
+import functools
 import logging
 from typing import Any
 
@@ -35,6 +43,21 @@ from ..services.memory_service import (
 logger = logging.getLogger(__name__)
 
 
+def _serialized_by(lock: asyncio.Lock):
+    """Run a tool while holding ``lock``.
+
+    ``functools.wraps`` keeps the signature, annotations and docstring, so MAF
+    still derives the same tool schema from the wrapper.
+    """
+    def _decorator(fn):
+        @functools.wraps(fn)
+        async def _locked(*args, **kwargs):
+            async with lock:
+                return await fn(*args, **kwargs)
+        return _locked
+    return _decorator
+
+
 def build_memory_tools(
     db: AsyncSession,
     user_id: str,
@@ -53,6 +76,12 @@ def build_memory_tools(
         tenant_id: The current tenant's ID.
     """
 
+    # Issue #583 — the three tools share the runner's single AsyncSession.
+    # MAF runs a parallel tool batch with asyncio.gather, and AsyncSession is
+    # not safe for concurrent use, so serialize every DB access from these
+    # tools.  One lock per builder keeps separate requests/users independent.
+    db_lock = asyncio.Lock()
+
     async def _enforce_limits():
         """Run prune_memories so the agent save path honours the growth policy."""
         try:
@@ -64,6 +93,7 @@ def build_memory_tools(
             )
 
     @tool
+    @_serialized_by(db_lock)
     async def save_memory(key: str, value: str, overwrite: bool = False) -> dict[str, Any]:
         """Save a piece of information to persistent user memory.
 
@@ -198,6 +228,7 @@ def build_memory_tools(
             }
 
     @tool
+    @_serialized_by(db_lock)
     async def delete_memory(key: str, force: bool = False) -> dict[str, Any]:
         """Delete a memory entry by its key.
 
@@ -262,6 +293,7 @@ def build_memory_tools(
             }
 
     @tool
+    @_serialized_by(db_lock)
     async def list_memory() -> dict[str, Any]:
         """List all memory entries for the current user.
 

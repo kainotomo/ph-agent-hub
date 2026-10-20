@@ -5,7 +5,7 @@
 #   1. save_memory creates new entries (source="automatic")
 #   2. save_memory updates existing entries
 #   3. save_memory skips user-created (manual) entries
-#   4. save_memory uses SELECT...FOR UPDATE (no concurrent duplicates)
+#   4. parallel save_memory calls are serialized on one AsyncSession (Issue #583)
 #   5. delete_memory only deletes agent-created entries
 #   6. list_memory returns both automatic and manual entries
 #   7. Memory persists and is retrievable via list_memory
@@ -14,6 +14,7 @@
 #   10. _build_system_prompt injects persistent user memories
 # =============================================================================
 
+import asyncio
 import pytest
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -28,28 +29,107 @@ pytestmark = [pytest.mark.integration]
 
 
 # ===========================================================================
-# Helper
+# Parallel memory tool batches (Issue #583)
 # ===========================================================================
-def _patch_db_execute(db, side_effect=None, return_value=None):
-    """Patch ``db.execute`` with a custom side effect or return value.
 
-    Works around the fact that ``build_memory_tools`` accepts a raw
-    :class:`AsyncSession` instance and the SELECT ... FOR UPDATE syntax
-    produces a ``sqlalchemy.exc.StatementError`` on a mock session when
-    ``.with_for_update()`` is called.
+class TestConcurrentMemoryWrites:
+    """A parallel tool batch shares one AsyncSession (Issue #583).
+
+    MAF executes the calls from one model response concurrently with
+    ``asyncio.gather``.  AsyncSession is not concurrency-safe, so the memory
+    tools must serialize their DB access: without the per-builder lock the
+    second call fails with "Session is already flushing".
     """
-    async def _execute(*args, **kwargs):
-        # The first arg is the SQL statement; the mock returns the prepared
-        # result so the caller can chain .scalars().one_or_none() etc.
-        if return_value is not None:
-            return return_value
-        if side_effect:
-            raise side_effect
-        # Default: not-found
-        rm = MagicMock()
-        rm.scalar_one_or_none.return_value = None
-        return rm
-    db.execute = _execute
+
+    @pytest.mark.regression
+    async def test_parallel_saves_all_create(
+        self, db_session, test_tenant, test_user
+    ):
+        tools = build_memory_tools(
+            db=db_session,
+            user_id=test_user.id,
+            tenant_id=test_tenant.id,
+        )
+        save = tools[0]
+        facts = {
+            "beer": "Μου αρέσει η μπύρα",
+            "nuts": "Μου αρέσουν οι ξηροί καρποί",
+            "team": "Η ομάδα μου είναι ο Παναθηναϊκός",
+            "singer": "Μου αρέσει ο τραγουδιστής Βασίλης Παπακωνσταντίνου",
+        }
+
+        results = await asyncio.gather(
+            *(save(key=key, value=value) for key, value in facts.items())
+        )
+
+        assert [r["action"] for r in results] == ["created"] * len(facts)
+        rows = (await db_session.execute(
+            select(Memory).where(
+                Memory.user_id == test_user.id,
+                Memory.tenant_id == test_tenant.id,
+                Memory.session_id.is_(None),
+            )
+        )).scalars().all()
+        assert {row.key for row in rows} == set(facts)
+
+    @pytest.mark.regression
+    async def test_parallel_updates_all_apply(
+        self, db_session, test_tenant, test_user
+    ):
+        keys = ("beer", "nuts", "team")
+        for key in keys:
+            await create_memory(
+                db_session,
+                tenant_id=test_tenant.id,
+                user_id=test_user.id,
+                key=key,
+                value="old",
+                source="automatic",
+            )
+
+        tools = build_memory_tools(
+            db=db_session,
+            user_id=test_user.id,
+            tenant_id=test_tenant.id,
+        )
+        save = tools[0]
+
+        results = await asyncio.gather(
+            *(save(key=key, value=f"new-{key}") for key in keys)
+        )
+
+        assert [r["action"] for r in results] == ["updated"] * len(keys)
+        rows = (await db_session.execute(
+            select(Memory).where(
+                Memory.user_id == test_user.id,
+                Memory.tenant_id == test_tenant.id,
+                Memory.key.in_(keys),
+            )
+        )).scalars().all()
+        assert {row.key: row.value for row in rows} == {
+            key: f"new-{key}" for key in keys
+        }
+
+    @pytest.mark.regression
+    async def test_parallel_save_and_list_do_not_race(
+        self, db_session, test_tenant, test_user
+    ):
+        tools = build_memory_tools(
+            db=db_session,
+            user_id=test_user.id,
+            tenant_id=test_tenant.id,
+        )
+        save, _delete, list_memory = tools
+
+        first, listed, second = await asyncio.gather(
+            save(key="beer", value="lager"),
+            list_memory(),
+            save(key="nuts", value="almonds"),
+        )
+
+        assert first["action"] == "created"
+        assert second["action"] == "created"
+        assert "error" not in listed
 
 
 # ===========================================================================

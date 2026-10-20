@@ -13,8 +13,11 @@ FROM node:20-alpine AS build
 
 WORKDIR /app
 
-COPY package.json ./
-RUN npm install
+# Copy the lockfile so the exact dependency tree is installed.
+# `npm install` without it crashes npm 10.8.2 (bundled in node:20-alpine)
+# while resolving vitest's nested vite dependency.
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund
 
 COPY . .
 RUN npm run build

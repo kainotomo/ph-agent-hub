@@ -71,6 +71,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Workflow definition identity and edit policy** — `WorkflowDefinition.key` must match the module's `MAF_KEY` and is immutable (renaming is a create, not an edit); step `id` must be a non-empty, whitespace-free executor identity; and a new derived classification (`unchanged` / `config_only` / `topology`) states which edits leave paused runs resumable and which cannot be resumed. ([#551])
 
 ### Fixed
+- **Multiple memories saved in one turn** — when the model emitted more than one
+  `save_memory` call in a single parallel tool batch, only the first succeeded:
+  the memory tools share the runner's single `AsyncSession`, and MAF executes a
+  parallel batch concurrently, so later calls failed with
+  `InvalidRequestError: Session is already flushing`. The memory tools now
+  serialize their database access with a per-run `asyncio.Lock`, so every fact
+  in a multi-fact request is persisted. ([#583])
 - **Saved prompts with large content** — the Prompt Library failed silently when
   saving a prompt larger than ~64 KB: `prompts.content` was a MariaDB `TEXT`
   column (65,535-byte limit), so the insert raised a database error that the UI
@@ -272,3 +279,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#541]: https://github.com/kainotomo/ph-agent-hub/issues/541
 [#573]: https://github.com/kainotomo/ph-agent-hub/issues/573
 [#574]: https://github.com/kainotomo/ph-agent-hub/issues/574
+[#583]: https://github.com/kainotomo/ph-agent-hub/issues/583

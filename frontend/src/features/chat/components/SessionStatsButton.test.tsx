@@ -44,7 +44,10 @@ describe("SessionStatsButton", () => {
     expect(screen.getByText("Session statistics")).toBeInTheDocument();
     expect(screen.getByText("LLM time")).toBeInTheDocument();
     expect(screen.getByText("Tool time")).toBeInTheDocument();
-    expect(screen.getByText("Avg time to first token (TTFT)")).toBeInTheDocument();
+    expect(screen.getByText("Avg time to first text (TTFT)")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Avg time to first token (TTFT)"),
+    ).not.toBeInTheDocument();
     expect(screen.getByText("Tokens per second (TPS)")).toBeInTheDocument();
 
     // Verify the formatted values

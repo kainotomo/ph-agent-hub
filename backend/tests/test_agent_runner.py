@@ -2712,3 +2712,30 @@ class TestComputeTurnMetrics:
         assert metrics["tool_ms"] == 30
         assert metrics["ttft_ms"] == 30
 
+    def test_ttft_is_time_to_first_text_and_includes_tool_time(self):
+        """Issue #588: ttft_ms counts tool time before the first text.
+
+        That is why it can exceed llm_ms, which excludes tool time.  This test
+        pins the chosen semantics so a future change is deliberate.
+        """
+        from src.agents.runner import _compute_turn_metrics
+
+        # The first text arrives after the 200 ms tool call; the remaining
+        # 100 ms of wall time is model time.
+        metrics = _compute_turn_metrics(
+            turn_start_s=0.0,
+            turn_end_s=0.3,
+            first_token_at_s=0.25,
+            tool_durations_s=[0.2],
+            steps=1,
+            cache_hit_tokens=0,
+            system_prompt_tokens=0,
+            tool_definition_tokens=0,
+            tokens_in=100,
+        )
+
+        assert metrics["tool_ms"] == 200
+        assert metrics["llm_ms"] == 100
+        assert metrics["ttft_ms"] == 250  # includes the 200 ms tool call
+        assert metrics["ttft_ms"] > metrics["llm_ms"]
+

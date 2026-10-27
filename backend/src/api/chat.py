@@ -3531,6 +3531,9 @@ class SessionUsageResponse(BaseModel):
 
     Counts turns, sums token and timing metrics across all non-deleted
     messages, and derives derived fields (cache_hit_percent, tps, avg_ttft_ms).
+
+    ``avg_ttft_ms`` is the mean time from turn start to the first streamed
+    text; it includes tool time before that text and is not model latency.
     """
     turns: int = 0
     steps: int = 0
@@ -3630,7 +3633,8 @@ async def get_session_usage(
     if metrics_seen and tokens_in > 0:
         cache_hit_percent = round(cached_input_tokens / tokens_in * 100, 1)
 
-    # avg_ttft_ms: mean of ttft_ms values, None if none
+    # avg_ttft_ms: mean of ttft_ms values (time to first text, which includes
+    # tool time before the first visible delta), None if none
     avg_ttft_ms: int | None = None
     if ttft_values:
         avg_ttft_ms = round(sum(ttft_values) / len(ttft_values))

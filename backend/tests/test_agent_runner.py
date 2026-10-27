@@ -22,6 +22,11 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
+from src.agents.runner import (
+    HISTORY_TOOL_RESULT_MAX_CHARS,
+    STORAGE_TOOL_OUTPUT_MAX_CHARS,
+)
+
 # ---------------------------------------------------------------------------
 # Module markers — most tests are unit; integration tests override at class
 # ---------------------------------------------------------------------------
@@ -162,11 +167,34 @@ class TestExtractMessageText:
         assert self.fn(content) == "[Tool result from calculator: 42]"
 
     def test_function_result_truncated(self):
-        long_output = "x" * 500
+        cap = HISTORY_TOOL_RESULT_MAX_CHARS
+        long_output = "x" * (cap + 3000)
         content = [{"type": "function_result", "name": "calc", "output": long_output}]
+
         result = self.fn(content)
-        assert len(result) < 400  # truncated to 300 + "..."
-        assert "..." in result
+
+        assert f"{cap:,} of {len(long_output):,} chars shown" in result
+        assert "head+tail" in result
+        assert len(result) < len(long_output)
+
+    def test_function_result_under_cap_kept_whole(self):
+        # Boundary: an ordinary result is no longer clipped away at 300 (#584).
+        output = "y" * 900
+        content = [{"type": "function_result", "name": "calc", "output": output}]
+
+        result = self.fn(content)
+
+        assert f"[Tool result from calc: {output}]" == result
+
+    def test_function_result_keeps_head_and_tail(self):
+        head, tail = "H" * 5000, "T" * 5000
+        content = [{"type": "function_result", "name": "calc", "output": head + tail}]
+
+        result = self.fn(content)
+
+        assert "H" * 100 in result      # head survives
+        assert "T" * 100 in result      # tail survives
+        assert "HHHH" in result and "TTTT" in result
 
     def test_mixed_content(self):
         content = [
@@ -689,11 +717,43 @@ class TestFormatToolOutputForStorage:
         assert self.fn("hello") == "hello"
 
     def test_long_string_truncated(self):
-        long_str = "x" * 5000
+        cap = STORAGE_TOOL_OUTPUT_MAX_CHARS
+        long_str = "x" * (cap + 1000)
         result = self.fn(long_str)
-        # Returns 4000 chars + "\n...(truncated)"
-        assert "(truncated)" in result
-        assert len(result) < 5000
+        # Returns `cap` chars + a notice stating what was dropped (#584)
+        assert "truncated" in result
+        assert f"{cap:,} of {len(long_str):,} chars shown" in result
+        assert result.startswith("x" * cap)
+        assert len(result) < len(long_str)
+
+    def test_long_string_reports_line_count(self):
+        # The Issue #584 failure shape: a table that arrives partly cut.
+        # 49-char lines, chosen so the cut lands mid-line whichever the cap.
+        lines = [f"row-{i:03d}: {'v' * 39}" for i in range(500)]
+        long_str = "\n".join(lines)
+        assert len(long_str) > STORAGE_TOOL_OUTPUT_MAX_CHARS  # guard the fixture
+        assert STORAGE_TOOL_OUTPUT_MAX_CHARS % 49 != 0
+
+        result = self.fn(long_str)
+
+        assert "of 500 lines" in result
+        assert "cut mid-line" in result
+        assert f"{len(long_str):,} chars shown" in result
+
+    def test_long_list_reports_record_count(self):
+        rows = [{"ticker": f"T{i}", "value": "v" * 400} for i in range(80)]
+        assert len(json.dumps(rows)) > STORAGE_TOOL_OUTPUT_MAX_CHARS
+
+        result = self.fn(rows)
+
+        assert "of 80 records" in result
+        assert "chars shown" in result
+        shown = int(result.split("chars shown, ")[1].split(" of ")[0].replace(",", ""))
+        assert 0 < shown < len(rows)
+
+    def test_short_list_not_truncated(self):
+        rows = [{"ticker": "AAPL"}]
+        assert self.fn(rows) == json.dumps(rows)
 
     def test_dict_output(self):
         result = self.fn({"key": "value"})

@@ -415,6 +415,35 @@ def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // CHARS_PER_TOKEN_ESTIMATE)
 
 
+# Cap on a stored tool result replayed into the prompt as history text
+# (Issue #584).  The storage cap is larger; replay stays lean, so it keeps the
+# head *and* the tail of the payload — for JSON dumps the leading fields and the
+# trailing records are the informative ends, and a bare prefix described the
+# payload as if it were complete.
+# Raised 300 -> 2,000 on production evidence: 74% of stored tool results are
+# longer than 300 chars, while at 2,000 the replayed history still uses only
+# ~11% of the 60%-of-context history budget (worst case on a 1M-context model
+# was 1.3M of 2.4M chars) and never engages the oldest-first history truncation.
+HISTORY_TOOL_RESULT_MAX_CHARS = 2000
+
+
+def _clip_for_history(text: str) -> str:
+    """Clip a replayed tool result to ``HISTORY_TOOL_RESULT_MAX_CHARS``.
+
+    Keeps the first half and the last half and states the real total, so a
+    replayed payload cannot masquerade as a short one (Issue #584).
+    """
+    cap = HISTORY_TOOL_RESULT_MAX_CHARS
+    if len(text) <= cap:
+        return text
+    half = cap // 2
+    return (
+        text[:half]
+        + f"\n... [truncated: {cap:,} of {len(text):,} chars shown (head+tail)]\n"
+        + text[-half:]
+    )
+
+
 def _extract_message_text(content: list | None) -> str:
     """Extract readable text from a message's JSON content array.
 
@@ -439,9 +468,9 @@ def _extract_message_text(content: list | None) -> str:
             name = item.get("name", "unknown")
             output = item.get("output", "")
             if isinstance(output, str) and output:
-                # Truncate tool output in history
-                truncated = output[:300] + "..." if len(output) > 300 else output
-                parts.append(f"[Tool result from {name}: {truncated}]")
+                parts.append(
+                    f"[Tool result from {name}: {_clip_for_history(output)}]"
+                )
 
     return "\n".join(parts)
 
@@ -4716,25 +4745,103 @@ def _maybe_accumulate_tool_events(
         }]
 
 
+# Cap on the tool output text stored inside a persisted message (Issue #584).
+# This is a *storage* budget, not a model-context budget: it entered with #33
+# (web search) so one large dump could not bloat the stored assistant
+# message.  The model-context caps are TOOL_OUTPUT_CAP_* above; the two are
+# separate on purpose, and this one is the one that must stay legible.
+#
+# Raised 4,000 -> 16,000 (Issue #584) on production evidence: 31% of tool
+# results were clipped in a 30-day window, hitting the data tools hardest
+# (get_financials 95%, get_stock_snapshot 82%, extract_pdf 82%,
+# get_filing_text 80%), and ~90% of the clipped payloads were single-line JSON
+# objects, not page text.  16,000 holds a full quarterly statement (8 periods
+# x ~50 line items, ~14-16 KB) and is 4x the observed p99 of 3,859 chars while
+# staying at ~1/6 of the live TOOL_OUTPUT_CAP.  Revisit once the legibility
+# marker has reported true sizes for a couple of weeks.
+STORAGE_TOOL_OUTPUT_MAX_CHARS = 16_000
+
+
+def _records_fitting(items: list, budget: int) -> int:
+    """Count the leading whole records of *items* that fit in *budget* chars.
+
+    Accumulates per-record ``json.dumps`` sizes (array brackets plus ", "
+    separators) so the count uses the same unit the clip uses — serialized
+    characters — and stays cheap on very long lists.
+    """
+    used = 1  # the opening "["
+    shown = 0
+    for item in items:
+        try:
+            size = len(json.dumps(item, default=str))
+        except (TypeError, ValueError):
+            size = len(json.dumps(str(item)))
+        cost = size + (2 if shown else 0)  # ", " between records
+        if used + cost > budget:
+            break
+        used += cost
+        shown += 1
+    return shown
+
+
+def _storage_clip_notice(
+    text: str,
+    cap: int,
+    records: tuple[int, int] | None = None,
+    line_oriented: bool = False,
+) -> str:
+    """Build the marker stating exactly what the storage clip dropped.
+
+    Issue #584 — the old ``...(truncated)`` was indistinguishable from a
+    complete payload, so the first 5 rows of a 12-row table read as
+    "this list has 5 entries" instead of "this list was cut".
+    """
+    kept = text[:cap]
+    parts = [f"{cap:,} of {len(text):,} chars shown"]
+    if records is not None:
+        shown, total = records
+        parts.append(f"{shown:,} of {total:,} records")
+    elif line_oriented and text.count("\n") >= 1:
+        # Line-oriented payloads (e.g. PowerShell Format-List): what matters
+        # is how many rows arrived, not just how many bytes.
+        parts.append(f"{kept.count(chr(10)):,} of {text.count(chr(10)) + 1:,} lines")
+    if line_oriented and kept and text[cap - 1] != "\n":
+        parts.append("cut mid-line")
+    return "\n... [truncated: " + ", ".join(parts) + "]"
+
+
 def _format_tool_output_for_storage(output: Any) -> str | None:
     """Format a tool output value for JSON storage in message content.
 
-    Returns a string representation suitable for display.  Limits the
-    size of very large outputs to avoid bloated message content.
+    Returns a string representation suitable for display.  Limits the size of
+    very large outputs to avoid bloated message content, and (Issue #584)
+    reports what the limit dropped: characters, and lines for line-oriented
+    text or records for list payloads.
     """
     if output is None:
         return None
-    if isinstance(output, str):
-        if len(output) > 4000:
-            return output[:4000] + "\n...(truncated)"
-        return output
-    try:
-        serialized = json.dumps(output, default=str)
-    except (TypeError, ValueError):
-        serialized = str(output)
-    if len(serialized) > 4000:
-        serialized = serialized[:4000] + "\n...(truncated)"
-    return serialized
+    cap = STORAGE_TOOL_OUTPUT_MAX_CHARS
+
+    records: tuple[int, int] | None = None
+    line_oriented = isinstance(output, str)
+
+    if line_oriented:
+        text = output
+    else:
+        try:
+            text = json.dumps(output, default=str)
+            serialized_ok = True
+        except (TypeError, ValueError):
+            text = str(output)
+            serialized_ok = False
+        if serialized_ok and isinstance(output, list):
+            records = (_records_fitting(output, cap), len(output))
+
+    if len(text) <= cap:
+        return text
+    return text[:cap] + _storage_clip_notice(
+        text, cap, records=records, line_oriented=line_oriented,
+    )
 
 
 # ---------------------------------------------------------------------------

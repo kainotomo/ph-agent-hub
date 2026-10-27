@@ -71,6 +71,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Workflow definition identity and edit policy** — `WorkflowDefinition.key` must match the module's `MAF_KEY` and is immutable (renaming is a create, not an edit); step `id` must be a non-empty, whitespace-free executor identity; and a new derived classification (`unchanged` / `config_only` / `topology`) states which edits leave paused runs resumable and which cannot be resumed. ([#551])
 
 ### Fixed
+- **Tool results were clipped silently in stored messages (Issue #584)** — every
+  tool result was hard-clipped at 4,000 characters with a bare `...(truncated)`
+  before being stored on the persisted assistant message, so a five-row prefix of
+  a twelve-row table read — to the model and to anyone replaying the transcript —
+  as a complete five-row table. The model had no way to tell a cut list from a
+  short one and reported the missing facts as sourced. The clip now states what
+  it dropped: characters, plus lines for line-oriented output (the `Format-List`
+  case) or records for list payloads, e.g.
+  `... [truncated: 4,000 of 7,079 chars shown, 67 of 120 lines, cut mid-line]`.
+  The budget itself was also raised `4,000` → `16,000` on production evidence: in
+  a 30-day window 31% of all tool results were clipped, concentrated on the data
+  tools (`get_financials` 95%, `get_stock_snapshot` 82%, `extract_pdf` 82%,
+  `get_filing_text` 80%) rather than on page text, and 16,000 holds a full
+  quarterly statement (8 periods × ~50 line items, ~14–16 KB) at ~1/6 of the live
+  context cap. The 300-character history replay cap got the same treatment
+  (`_extract_message_text` → `HISTORY_TOOL_RESULT_MAX_CHARS = 2,000`, head+tail
+  with an explicit total): 74% of stored results are longer than 300 chars, and a
+  simulation over 30 days of traffic showed 2,000 chars keeps the replayed history
+  at ~11% of its 60%-of-context budget with the oldest-first truncation still never
+  engaging. Clipping by records instead of characters and offering a continuation
+  path remain as follow-ups. ([#584])
 - **Multiple memories saved in one turn** — when the model emitted more than one
   `save_memory` call in a single parallel tool batch, only the first succeeded:
   the memory tools share the runner's single `AsyncSession`, and MAF executes a
@@ -280,3 +301,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#573]: https://github.com/kainotomo/ph-agent-hub/issues/573
 [#574]: https://github.com/kainotomo/ph-agent-hub/issues/574
 [#583]: https://github.com/kainotomo/ph-agent-hub/issues/583
+[#584]: https://github.com/kainotomo/ph-agent-hub/issues/584

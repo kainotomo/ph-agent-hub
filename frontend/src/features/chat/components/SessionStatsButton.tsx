@@ -71,7 +71,9 @@ export const SessionStatsButton = React.memo(function SessionStatsButton({
           </Text>
         </div>
         <div style={{ display: "flex", justifyContent: "space-between" }}>
-          <Text style={{ fontSize: 12 }}>Avg time to first token (TTFT)</Text>
+          {/* Issue #588 — time from turn start to the first streamed *text*,
+              so it includes tool time before that text and is not model latency. */}
+          <Text style={{ fontSize: 12 }}>Avg time to first text (TTFT)</Text>
           <Text style={{ fontSize: 12 }}>
             {usage!.has_timing_data
               ? formatDuration(usage!.avg_ttft_ms)

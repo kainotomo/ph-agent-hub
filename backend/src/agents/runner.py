@@ -4682,10 +4682,18 @@ def _compute_turn_metrics(
         ``llm_ms``, ``tool_ms``, ``ttft_ms``, ``steps``,
         ``cache_hit_tokens``, ``system_prompt_tokens``,
         ``tool_definition_tokens``, ``messages_tokens``.
+
+    ``ttft_ms`` measures from the start of the turn to the first streamed
+    **text** delta, not to the first model token.  It therefore includes any
+    tool execution and reasoning that happened before that text, so it is not
+    model latency and may legitimately be larger than ``llm_ms`` (which
+    excludes tool time).  The key keeps its historical name so stored metrics
+    stay compatible; the UI labels it "time to first text".
     """
     tool_ms = int(round(sum(tool_durations_s) * 1000))
     turn_wall_ms = int(round((turn_end_s - turn_start_s) * 1000))
     llm_ms = max(0, turn_wall_ms - tool_ms)
+    # Time to first *text*: tool time before the first visible delta counts.
     ttft_ms = None if first_token_at_s is None else int(round((first_token_at_s - turn_start_s) * 1000))
 
     if tokens_in == 0:

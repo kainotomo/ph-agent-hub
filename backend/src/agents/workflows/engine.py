@@ -1098,7 +1098,8 @@ async def iter_workflow_sse(
                         text = str(data["content"])
 
                     if text:
-                        # Track first token for TTFT calculation
+                        # Track first text for TTFT (time to first text, not
+                        # model latency — see runner._compute_turn_metrics).
                         if first_token_at_s is None:
                             first_token_at_s = time.monotonic()
                         # Look up step name from current streaming step
@@ -1294,6 +1295,7 @@ def _emit_workflow_metrics(
     # and llm_ms ≈ wall time.
     llm_ms = turn_wall_ms
     tool_ms = 0
+    # Time to first streamed text (same meaning as the agent path).
     ttft_ms = None if first_token_at_s is None else int(round((first_token_at_s - turn_start_s) * 1000))
 
     system_prompt_tokens = _estimate_tokens(token_counts.get("_system_prompt", ""))

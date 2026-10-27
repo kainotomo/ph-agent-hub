@@ -84,6 +84,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Workflow definition identity and edit policy** — `WorkflowDefinition.key` must match the module's `MAF_KEY` and is immutable (renaming is a create, not an edit); step `id` must be a non-empty, whitespace-free executor identity; and a new derived classification (`unchanged` / `config_only` / `topology`) states which edits leave paused runs resumable and which cannot be resumed. ([#551])
 
 ### Fixed
+- **Session TTFT is labelled as time to first text (Issue #588)** — `ttft_ms`
+  measures from turn start to the first streamed **text** delta, so it includes
+  any tool execution (and reasoning) that ran before that text and can
+  legitimately exceed `llm_ms`, which excludes tool time. The session statistics
+  popover presented it as "Avg time to first token", which read as model latency
+  and appeared to contradict LLM time. It is now labelled "Avg time to first
+  text (TTFT)", and the metric's meaning is documented at the calculation and
+  API aggregation sites. Stored values are unchanged, so existing sessions keep
+  a consistent metric. ([#588])
 - **An unanswered news feed is no longer reported as "no news" (Issue #587)** —
   `get_company_news` returned the same 71-character empty payload whether Yahoo
   had nothing to report, had changed the endpoint, or had failed outright, so a
@@ -331,3 +340,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#583]: https://github.com/kainotomo/ph-agent-hub/issues/583
 [#584]: https://github.com/kainotomo/ph-agent-hub/issues/584
 [#587]: https://github.com/kainotomo/ph-agent-hub/issues/587
+[#588]: https://github.com/kainotomo/ph-agent-hub/issues/588

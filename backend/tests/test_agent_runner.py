@@ -691,9 +691,37 @@ class TestFormatToolOutputForStorage:
     def test_long_string_truncated(self):
         long_str = "x" * 5000
         result = self.fn(long_str)
-        # Returns 4000 chars + "\n...(truncated)"
-        assert "(truncated)" in result
+        # Returns 4000 chars + a notice stating what was dropped (#584)
+        assert "truncated" in result
+        assert "4,000 of 5,000 chars shown" in result
+        assert result.startswith("x" * 4000)
         assert len(result) < 5000
+
+    def test_long_string_reports_line_count(self):
+        # The Issue #584 failure shape: a table that arrives partly cut.
+        # 49-char lines: 4000 % 49 != 0, so the cut lands mid-line.
+        lines = [f"row-{i:03d}: {'v' * 39}" for i in range(200)]
+        long_str = "\n".join(lines)
+
+        result = self.fn(long_str)
+
+        assert "of 200 lines" in result
+        assert "cut mid-line" in result
+        assert f"{len(long_str):,} chars shown" in result
+
+    def test_long_list_reports_record_count(self):
+        rows = [{"ticker": f"T{i}", "value": "v" * 400} for i in range(40)]
+
+        result = self.fn(rows)
+
+        assert "of 40 records" in result
+        assert "chars shown" in result
+        shown = int(result.split("chars shown, ")[1].split(" of ")[0].replace(",", ""))
+        assert 0 < shown < len(rows)
+
+    def test_short_list_not_truncated(self):
+        rows = [{"ticker": "AAPL"}]
+        assert self.fn(rows) == json.dumps(rows)
 
     def test_dict_output(self):
         result = self.fn({"key": "value"})

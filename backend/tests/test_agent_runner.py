@@ -22,6 +22,8 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
+from src.agents.runner import STORAGE_TOOL_OUTPUT_MAX_CHARS
+
 # ---------------------------------------------------------------------------
 # Module markers — most tests are unit; integration tests override at class
 # ---------------------------------------------------------------------------
@@ -689,32 +691,36 @@ class TestFormatToolOutputForStorage:
         assert self.fn("hello") == "hello"
 
     def test_long_string_truncated(self):
-        long_str = "x" * 5000
+        cap = STORAGE_TOOL_OUTPUT_MAX_CHARS
+        long_str = "x" * (cap + 1000)
         result = self.fn(long_str)
-        # Returns 4000 chars + a notice stating what was dropped (#584)
+        # Returns `cap` chars + a notice stating what was dropped (#584)
         assert "truncated" in result
-        assert "4,000 of 5,000 chars shown" in result
-        assert result.startswith("x" * 4000)
-        assert len(result) < 5000
+        assert f"{cap:,} of {len(long_str):,} chars shown" in result
+        assert result.startswith("x" * cap)
+        assert len(result) < len(long_str)
 
     def test_long_string_reports_line_count(self):
         # The Issue #584 failure shape: a table that arrives partly cut.
-        # 49-char lines: 4000 % 49 != 0, so the cut lands mid-line.
-        lines = [f"row-{i:03d}: {'v' * 39}" for i in range(200)]
+        # 49-char lines, chosen so the cut lands mid-line whichever the cap.
+        lines = [f"row-{i:03d}: {'v' * 39}" for i in range(500)]
         long_str = "\n".join(lines)
+        assert len(long_str) > STORAGE_TOOL_OUTPUT_MAX_CHARS  # guard the fixture
+        assert STORAGE_TOOL_OUTPUT_MAX_CHARS % 49 != 0
 
         result = self.fn(long_str)
 
-        assert "of 200 lines" in result
+        assert "of 500 lines" in result
         assert "cut mid-line" in result
         assert f"{len(long_str):,} chars shown" in result
 
     def test_long_list_reports_record_count(self):
-        rows = [{"ticker": f"T{i}", "value": "v" * 400} for i in range(40)]
+        rows = [{"ticker": f"T{i}", "value": "v" * 400} for i in range(80)]
+        assert len(json.dumps(rows)) > STORAGE_TOOL_OUTPUT_MAX_CHARS
 
         result = self.fn(rows)
 
-        assert "of 40 records" in result
+        assert "of 80 records" in result
         assert "chars shown" in result
         shown = int(result.split("chars shown, ")[1].split(" of ")[0].replace(",", ""))
         assert 0 < shown < len(rows)

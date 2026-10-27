@@ -4721,7 +4721,16 @@ def _maybe_accumulate_tool_events(
 # (web search) so one large dump could not bloat the stored assistant
 # message.  The model-context caps are TOOL_OUTPUT_CAP_* above; the two are
 # separate on purpose, and this one is the one that must stay legible.
-STORAGE_TOOL_OUTPUT_MAX_CHARS = 4000
+#
+# Raised 4,000 -> 16,000 (Issue #584) on production evidence: 31% of tool
+# results were clipped in a 30-day window, hitting the data tools hardest
+# (get_financials 95%, get_stock_snapshot 82%, extract_pdf 82%,
+# get_filing_text 80%), and ~90% of the clipped payloads were single-line JSON
+# objects, not page text.  16,000 holds a full quarterly statement (8 periods
+# x ~50 line items, ~14-16 KB) and is 4x the observed p99 of 3,859 chars while
+# staying at ~1/6 of the live TOOL_OUTPUT_CAP.  Revisit once the legibility
+# marker has reported true sizes for a couple of weeks.
+STORAGE_TOOL_OUTPUT_MAX_CHARS = 16_000
 
 
 def _records_fitting(items: list, budget: int) -> int:

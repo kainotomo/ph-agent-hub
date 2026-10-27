@@ -80,11 +80,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it dropped: characters, plus lines for line-oriented output (the `Format-List`
   case) or records for list payloads, e.g.
   `... [truncated: 4,000 of 7,079 chars shown, 67 of 120 lines, cut mid-line]`.
-  The 4,000-character storage budget itself is unchanged — it is a storage guard
-  introduced with the web-search tool (#33), separate from the model-context cap
-  computed by `_compute_tool_output_cap`; deciding that number, clipping by
-  records instead of characters, and offering a continuation path remain as
-  follow-ups. ([#584])
+  The budget itself was also raised `4,000` → `16,000` on production evidence: in
+  a 30-day window 31% of all tool results were clipped, concentrated on the data
+  tools (`get_financials` 95%, `get_stock_snapshot` 82%, `extract_pdf` 82%,
+  `get_filing_text` 80%) rather than on page text, and 16,000 holds a full
+  quarterly statement (8 periods × ~50 line items, ~14–16 KB) at ~1/6 of the live
+  context cap. Clipping by records instead of characters, offering a continuation
+  path, and revisiting the 300-character history replay cap (§`_extract_message_text`)
+  remain as follow-ups. ([#584])
 - **Multiple memories saved in one turn** — when the model emitted more than one
   `save_memory` call in a single parallel tool batch, only the first succeeded:
   the memory tools share the runner's single `AsyncSession`, and MAF executes a

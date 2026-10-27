@@ -9,10 +9,28 @@
 import asyncio
 import logging
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 
+import feedparser
+import httpx
 from agent_framework import tool
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+# Routes behind ``get_company_news``.  These names are part of the tool's
+# response contract: a caller must be able to tell which endpoint answered.
+_NEWS_ROUTE_XHR = "news_xhr"
+_NEWS_ROUTE_RSS = "rss_headline"
+
+# Yahoo's RSS headline feed — the fallback route.  It carries no publisher
+# names and cannot filter by tab, so the route name is what discloses that.
+_RSS_HEADLINE_URL = "https://feeds.finance.yahoo.com/rss/2.0/headline"
+_RSS_TIMEOUT_SECONDS = 10.0
+
+_MAX_NEWS_SUMMARY_CHARS = 300
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -55,6 +73,148 @@ def _df_to_dicts(df, date_key: str = "date") -> list[dict]:
     return clean
 
 
+class _HTMLTextExtractor(HTMLParser):
+    """Collect visible text from an HTML fragment (RSS summaries)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._chunks: list[str] = []
+        self._skip = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style"):
+            self._skip = True
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style"):
+            self._skip = False
+
+    def handle_data(self, data):
+        if not self._skip:
+            self._chunks.append(data)
+
+    def text(self) -> str:
+        return " ".join("".join(self._chunks).split())
+
+
+def _strip_html(raw: str, limit: int) -> str:
+    """Return ``raw`` with tags removed, whitespace collapsed and truncated."""
+    if not raw:
+        return ""
+    parser = _HTMLTextExtractor()
+    try:
+        parser.feed(raw)
+        text = parser.text()
+    except Exception:
+        text = raw
+    return text[:limit]
+
+
+def _rss_published_iso(entry: dict) -> str:
+    """Convert an RSS ``published_parsed`` struct into an ISO 8601 string."""
+    struct = entry.get("published_parsed") or entry.get("updated_parsed")
+    if not struct:
+        return ""
+    try:
+        return datetime(*struct[:6], tzinfo=timezone.utc).isoformat()
+    except (TypeError, ValueError):
+        return ""
+
+
+def _articles_from_xhr(raw_news) -> tuple[list[dict], int]:
+    """Map ``Ticker.get_news()`` items to article dicts.
+
+    Returns the parsed articles and the number of items the provider
+    handed back, so a changed payload shape can be told apart from a
+    genuinely empty answer.
+    """
+    if not isinstance(raw_news, list):
+        return [], 0
+
+    articles: list[dict] = []
+    for item in raw_news:
+        content = item.get("content") if isinstance(item, dict) else {}
+        if not content:
+            continue
+        provider_obj = (
+            content.get("provider")
+            if isinstance(content.get("provider"), dict)
+            else {}
+        )
+        click_obj = (
+            content.get("clickThroughUrl")
+            if isinstance(content.get("clickThroughUrl"), dict)
+            else {}
+        )
+        articles.append({
+            "title": str(content.get("title") or ""),
+            "published": str(content.get("pubDate") or ""),
+            "url": str(click_obj.get("url", "")),
+            "provider": str(provider_obj.get("displayName", "")),
+            "summary": str(content.get("summary") or "")[:_MAX_NEWS_SUMMARY_CHARS],
+        })
+    return articles, len(raw_news)
+
+
+def _articles_from_rss(entries: list, limit: int) -> list[dict]:
+    """Map RSS headline entries to the same article shape as the XHR route.
+
+    The RSS feed names no publisher and cannot filter by tab; both are
+    disclosed by the response's ``route`` / ``tab`` fields.
+    """
+    articles: list[dict] = []
+    for entry in entries[:limit]:
+        if not isinstance(entry, dict):
+            continue
+        summary = entry.get("summary") or entry.get("description") or ""
+        articles.append({
+            "title": str(entry.get("title") or ""),
+            "published": _rss_published_iso(entry),
+            "url": str(entry.get("link") or ""),
+            "provider": "",
+            "summary": _strip_html(str(summary), _MAX_NEWS_SUMMARY_CHARS),
+        })
+    return articles
+
+
+def _attempt_status(articles: list[dict], returned: int) -> str:
+    """Classify one route attempt: ``ok``, ``unparsed`` or ``empty``."""
+    if articles:
+        return "ok"
+    if returned:
+        return "unparsed"
+    return "empty"
+
+
+async def _fetch_rss_news(sym: str, limit: int) -> tuple[list[dict], int]:
+    """Fetch Yahoo's RSS headline feed once and map its entries.
+
+    Raises on transport/HTTP/parse failures so the caller can report the
+    route as ``failed`` instead of turning it into an empty answer.
+    """
+    async with httpx.AsyncClient(
+        timeout=_RSS_TIMEOUT_SECONDS,
+        follow_redirects=True,
+        headers={"User-Agent": "Mozilla/5.0"},
+    ) as client:
+        response = await client.get(
+            _RSS_HEADLINE_URL,
+            params={"s": sym, "region": "US", "lang": "en-US"},
+        )
+        response.raise_for_status()
+        parsed = await asyncio.to_thread(feedparser.parse, response.text)
+
+    entries = parsed.get("entries") or []
+    if not entries and (parsed.get("bozo") or not parsed.get("version")):
+        # An HTML error page (or an empty body) parses to zero entries
+        # without raising; a genuinely empty RSS channel still carries a
+        # feed version.  Report the former as a parse failure, never as
+        # "no news".
+        detail = parsed.get("bozo_exception") or "response was not a feed"
+        raise ValueError(f"RSS parse failed: {detail}")
+    return _articles_from_rss(entries, limit), len(entries)
+
+
 def _strip_null_fields(rows: list[dict]) -> tuple[list[dict], int]:
     """Drop line items whose value is ``None`` and count them.
 
@@ -94,7 +254,8 @@ def build_stock_data_tools(tool_config: dict | None = None) -> list:
       EPS, upcoming dates, and trailing/forward EPS
     - ``get_historical_prices``: OHLCV historical data
     - ``get_dividends``: dividend history and yield
-    - ``get_company_news``: recent news articles from Yahoo Finance
+    - ``get_company_news``: recent news articles from Yahoo Finance, with
+      the provider state and the route that answered
 
     Args:
         tool_config: Optional ``Tool.config`` JSON dict. Currently unused.
@@ -719,7 +880,7 @@ def build_stock_data_tools(tool_config: dict | None = None) -> list:
             return {"symbol": sym, "error": str(exc)}
 
     # =========================================================================
-    # 6. get_company_news — new tool wrapping ticker.get_news()
+    # 6. get_company_news — XHR news feed + RSS headline fallback
     # =========================================================================
     @tool
     async def get_company_news(
@@ -729,24 +890,52 @@ def build_stock_data_tools(tool_config: dict | None = None) -> list:
     ) -> dict:
         """Get recent news articles for a company from Yahoo Finance.
 
-        Uses yfinance — free, no API key required.  Pulls from Yahoo
-        Finance's news feed via an XHR endpoint.
+        Uses two Yahoo Finance endpoints — free, no API key required — and
+        reports which one answered, so an empty result cannot be mistaken
+        for a failed one.
+
+        Routes:
+            ``news_xhr``
+                ``yfinance.Ticker.get_news()`` (Yahoo's ``xhr/ncp`` news
+                endpoint).  Honours ``tab`` and carries publisher names
+                and article summaries.
+            ``rss_headline``
+                Yahoo's RSS headline feed, tried once when ``news_xhr``
+                produced no articles.  It is symbol-scoped general news
+                only: it does **not** honour ``tab`` and its articles
+                carry no publisher name (``provider`` is ``""``).
 
         Args:
             symbol: Stock ticker symbol (e.g. "AAPL", "0700.HK").
             count: Number of articles to return (1-25, default 10).
-            tab: News category — "news" (latest news, default),
-                "press releases" (press releases only), or "all"
-                (everything). Default "news".
+            tab: News category for the ``news_xhr`` route — "news"
+                (latest news, default), "press releases" (press
+                releases only), or "all" (everything).
 
         Returns:
             A dict with:
             - ``symbol``: the stock ticker
+            - ``tab``: the tab requested (see the ``rss_headline`` caveat)
+            - ``requested_count``: the capped ``count`` that was requested
             - ``count``: number of articles returned
-            - ``articles``: list of article dicts, each with:
-              ``title``, ``published`` (ISO 8601), ``url``,
-              ``provider`` (display name), ``summary`` (first
-              300 characters of the article body)
+            - ``articles``: list of article dicts, each with ``title``,
+              ``published`` (ISO 8601), ``url``, ``provider`` (display
+              name; empty for ``rss_headline``), ``summary`` (first 300
+              characters of the article body)
+            - ``provider_status``: one of ``ok`` (articles came back),
+              ``empty`` (every attempted route answered and had no
+              articles — the only value that may support a "no news"
+              finding), ``unparsed`` (a route returned items that
+              yielded no articles, i.e. the payload shape changed — not
+              "no news"), or ``failed`` (a route raised and no articles
+              came back — not "no news"; see ``error``)
+            - ``route``: the route whose articles are in ``articles``;
+              when ``count`` is 0, the last route attempted
+            - ``attempts``: one dict per route tried, with ``route``,
+              ``status`` (same enum), ``returned`` (items the provider
+              handed back) and, when failed, ``error``
+            - ``error``: only when ``provider_status`` is ``failed``,
+              combining the failed routes' messages
             - ``source``: "yfinance"
         """
         import yfinance as yf
@@ -767,48 +956,97 @@ def build_stock_data_tools(tool_config: dict | None = None) -> list:
             "get_company_news: %s count=%d tab=%s", sym, resolved_count, resolved_tab
         )
 
+        attempts: list[dict] = []
+        articles: list[dict] = []
+        used_route: str | None = None
+
+        # ---- route 1: Yahoo's XHR news endpoint via yfinance ----
         try:
             t = await asyncio.to_thread(yf.Ticker, sym)
             raw_news = await asyncio.to_thread(
                 t.get_news, count=resolved_count, tab=resolved_tab
             )
-
-            articles = []
-            if isinstance(raw_news, list):
-                for item in raw_news:
-                    content = item.get("content") if isinstance(item, dict) else {}
-                    if not content:
-                        continue
-                    title = content.get("title") or ""
-                    pub_date = content.get("pubDate") or ""
-                    provider = ""
-                    provider_obj = content.get("provider") if isinstance(content.get("provider"), dict) else {}
-                    if isinstance(provider_obj, dict):
-                        provider = provider_obj.get("displayName", "")
-                    url = ""
-                    ctu = content.get("clickThroughUrl") if isinstance(content.get("clickThroughUrl"), dict) else {}
-                    if isinstance(ctu, dict):
-                        url = ctu.get("url", "")
-                    summary = (content.get("summary") or "")[:300]
-
-                    articles.append({
-                        "title": str(title),
-                        "published": str(pub_date),
-                        "url": str(url),
-                        "provider": str(provider),
-                        "summary": str(summary),
-                    })
-
-            return {
-                "symbol": sym,
-                "count": len(articles),
-                "articles": articles,
-                "source": "yfinance",
-            }
-
+            xhr_articles, xhr_returned = _articles_from_xhr(raw_news)
+            attempts.append({
+                "route": _NEWS_ROUTE_XHR,
+                "status": _attempt_status(xhr_articles, xhr_returned),
+                "returned": xhr_returned,
+            })
+            if xhr_articles:
+                articles = xhr_articles
+                used_route = _NEWS_ROUTE_XHR
         except Exception as exc:
-            logger.exception("get_company_news failed for %s", sym)
-            return {"symbol": sym, "error": str(exc)}
+            # Never swallowed: the error is recorded and surfaced below.
+            logger.warning("get_company_news: news_xhr failed for %s: %s", sym, exc)
+            attempts.append({
+                "route": _NEWS_ROUTE_XHR,
+                "status": "failed",
+                "returned": 0,
+                "error": str(exc),
+            })
+
+        # ---- route 2: RSS headline feed, tried once ----
+        if not articles:
+            try:
+                rss_articles, rss_returned = await _fetch_rss_news(
+                    sym, resolved_count
+                )
+                attempts.append({
+                    "route": _NEWS_ROUTE_RSS,
+                    "status": _attempt_status(rss_articles, rss_returned),
+                    "returned": rss_returned,
+                })
+                if rss_articles:
+                    articles = rss_articles
+                    used_route = _NEWS_ROUTE_RSS
+            except Exception as exc:
+                logger.warning(
+                    "get_company_news: rss_headline failed for %s: %s", sym, exc
+                )
+                attempts.append({
+                    "route": _NEWS_ROUTE_RSS,
+                    "status": "failed",
+                    "returned": 0,
+                    "error": str(exc),
+                })
+
+        if used_route is not None:
+            provider_status = "ok"
+        elif any(a["status"] == "failed" for a in attempts):
+            provider_status = "failed"
+        elif any(a["status"] == "unparsed" for a in attempts):
+            provider_status = "unparsed"
+        else:
+            provider_status = "empty"
+
+        route = used_route or attempts[-1]["route"]
+
+        payload = {
+            "symbol": sym,
+            "tab": resolved_tab,
+            "requested_count": resolved_count,
+            "count": len(articles),
+            "articles": articles,
+            "provider_status": provider_status,
+            "route": route,
+            "attempts": attempts,
+            "source": "yfinance",
+        }
+        if provider_status == "failed":
+            payload["error"] = "; ".join(
+                f"{a['route']}: {a['error']}"
+                for a in attempts
+                if a["status"] == "failed"
+            )
+
+        logger.info(
+            "get_company_news: %s status=%s route=%s count=%d",
+            sym,
+            provider_status,
+            route,
+            len(articles),
+        )
+        return payload
 
     return [
         get_stock_snapshot,

@@ -761,12 +761,51 @@ class TestDividends:
 
 
 class TestCompanyNews:
-    """Tests for ``get_company_news``."""
+    """Tests for ``get_company_news``.
+
+    Every test stubs the RSS fallback transport: the primary ``news_xhr``
+    feed currently answers HTTP 404 for every symbol, so an empty or
+    raised primary result always reaches the fallback, and without the
+    stub these unit tests would make real network calls.
+    """
+
+    RSS_EMPTY = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<rss version="2.0"><channel><title>Empty</title></channel></rss>'
+    )
+
+    RSS_TWO_ITEMS = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<rss version="2.0"><channel><title>Yahoo! Finance: AAPL News</title>'
+        "<item>"
+        "<title>Apple Reports Record Q3 Earnings</title>"
+        "<link>https://finance.yahoo.com/news/apple-earnings</link>"
+        "<pubDate>Mon, 26 Oct 2026 08:57:00 +0000</pubDate>"
+        "<description><![CDATA[<p>Apple <b>announced</b> record earnings.</p>]]>"
+        "</description>"
+        "</item>"
+        "<item>"
+        "<title>Second headline without a date</title>"
+        "<link>https://finance.yahoo.com/news/second</link>"
+        "<description>Plain summary text.</description>"
+        "</item>"
+        "</channel></rss>"
+    )
 
     @pytest.fixture
     def tool(self):
         mod = __import__("src.tools.stock_data", fromlist=["build_stock_data_tools"])
         return mod.build_stock_data_tools()[5]
+
+    @pytest.fixture(autouse=True)
+    def rss_transport(self):
+        """Stub the RSS fallback transport; yields ``(client, response)``."""
+        response = _make_mock_httpx_response(text=self.RSS_EMPTY)
+        client = _make_mock_httpx_client(response)
+        with patch(
+            "src.tools.stock_data.httpx.AsyncClient", return_value=client
+        ):
+            yield client, response
 
     FAKE_ARTICLES = [
         {
@@ -789,7 +828,8 @@ class TestCompanyNews:
         },
     ]
 
-    async def test_success_default_count(self, tool):
+    async def test_success_default_count(self, tool, rss_transport):
+        client, _ = rss_transport
         mock_ticker = _make_mock_yf_ticker()
         mock_ticker.get_news = Mock(return_value=self.FAKE_ARTICLES)
 
@@ -802,9 +842,17 @@ class TestCompanyNews:
         assert len(result["articles"]) == 2
         assert result["articles"][0]["title"] == "Apple Reports Record Q3 Earnings"
         assert result["articles"][0]["provider"] == "Bloomberg"
+        assert result["provider_status"] == "ok"
+        assert result["route"] == "news_xhr"
+        assert result["attempts"] == [
+            {"route": "news_xhr", "status": "ok", "returned": 2}
+        ]
+        assert result["requested_count"] == 10
+        assert result["tab"] == "news"
         mock_ticker.get_news.assert_called_with(count=10, tab="news")
+        client.get.assert_not_called()
 
-    async def test_custom_count_and_tab(self, tool):
+    async def test_custom_count_and_tab(self, tool, rss_transport):
         mock_ticker = _make_mock_yf_ticker()
         mock_ticker.get_news = Mock(return_value=self.FAKE_ARTICLES)
 
@@ -813,18 +861,43 @@ class TestCompanyNews:
 
         mock_ticker.get_news.assert_called_with(count=5, tab="press releases")
         assert result["count"] == 2
+        assert result["requested_count"] == 5
+        assert result["tab"] == "press releases"
 
-    async def test_empty_news_returns_empty_articles(self, tool):
+    async def test_empty_news_reports_empty_status(self, tool, rss_transport):
         mock_ticker = _make_mock_yf_ticker()
         mock_ticker.get_news = Mock(return_value=[])
 
         with patch("yfinance.Ticker", return_value=mock_ticker):
-            result = await tool(symbol="AAPL")
+            result = await tool(symbol="0700.HK")
 
         assert result["articles"] == []
         assert result["count"] == 0
+        assert result["provider_status"] == "empty"
+        assert result["route"] == "rss_headline"
+        assert [a["route"] for a in result["attempts"]] == [
+            "news_xhr",
+            "rss_headline",
+        ]
+        assert [a["status"] for a in result["attempts"]] == ["empty", "empty"]
+        assert "error" not in result
 
-    async def test_article_missing_optional_fields(self, tool):
+    async def test_unparsed_primary_reports_unparsed(self, tool, rss_transport):
+        mock_ticker = _make_mock_yf_ticker()
+        mock_ticker.get_news = Mock(return_value=[{"unexpected": "shape"}])
+
+        with patch("yfinance.Ticker", return_value=mock_ticker):
+            result = await tool(symbol="0700.HK")
+
+        assert result["count"] == 0
+        assert result["provider_status"] == "unparsed"
+        assert result["attempts"][0] == {
+            "route": "news_xhr",
+            "status": "unparsed",
+            "returned": 1,
+        }
+
+    async def test_article_missing_optional_fields(self, tool, rss_transport):
         articles = [
             {
                 "content": {
@@ -843,14 +916,132 @@ class TestCompanyNews:
         assert result["articles"][0]["provider"] == ""
         assert result["articles"][0]["summary"] == ""
 
-    async def test_exception_returns_error(self, tool):
+    async def test_empty_primary_falls_back_to_rss(self, tool, rss_transport):
+        _, response = rss_transport
+        response.text = self.RSS_TWO_ITEMS
+        mock_ticker = _make_mock_yf_ticker()
+        mock_ticker.get_news = Mock(return_value=[])
+
+        with patch("yfinance.Ticker", return_value=mock_ticker):
+            result = await tool(symbol="0700.HK")
+
+        assert result["provider_status"] == "ok"
+        assert result["route"] == "rss_headline"
+        assert result["count"] == 2
+        article = result["articles"][0]
+        assert article["title"] == "Apple Reports Record Q3 Earnings"
+        assert article["url"] == "https://finance.yahoo.com/news/apple-earnings"
+        assert article["provider"] == ""
+        assert article["summary"] == "Apple announced record earnings."
+        assert article["published"] == "2026-10-26T08:57:00+00:00"
+        assert result["articles"][1]["published"] == ""
+        assert result["attempts"][0]["status"] == "empty"
+        assert result["attempts"][1] == {
+            "route": "rss_headline",
+            "status": "ok",
+            "returned": 2,
+        }
+        assert "error" not in result
+
+    async def test_primary_exception_falls_back_to_rss(self, tool, rss_transport):
+        _, response = rss_transport
+        response.text = self.RSS_TWO_ITEMS
+
         with patch(
             "yfinance.Ticker",
             side_effect=Exception("News fetch failed"),
         ):
             result = await tool(symbol="AAPL")
 
+        assert result["provider_status"] == "ok"
+        assert result["route"] == "rss_headline"
+        assert result["attempts"][0]["status"] == "failed"
+        assert "News fetch failed" in result["attempts"][0]["error"]
+        # The primary error is surfaced in attempts, not as the outcome.
+        assert "error" not in result
+
+    async def test_primary_exception_with_empty_fallback_reports_failed(
+        self, tool, rss_transport
+    ):
+        with patch(
+            "yfinance.Ticker",
+            side_effect=Exception("News fetch failed"),
+        ):
+            result = await tool(symbol="AAPL")
+
+        assert result["provider_status"] == "failed"
         assert "error" in result
+        assert "news_xhr" in result["error"]
+        assert "News fetch failed" in result["error"]
+        assert [a["status"] for a in result["attempts"]] == ["failed", "empty"]
+
+    async def test_both_routes_failing_reports_failed(self, tool, rss_transport):
+        client, _ = rss_transport
+        client.get = AsyncMock(side_effect=RuntimeError("connection refused"))
+
+        with patch(
+            "yfinance.Ticker",
+            side_effect=Exception("News fetch failed"),
+        ):
+            result = await tool(symbol="AAPL")
+
+        assert result["provider_status"] == "failed"
+        assert "news_xhr" in result["error"]
+        assert "rss_headline" in result["error"]
+        assert "connection refused" in result["error"]
+        assert [a["status"] for a in result["attempts"]] == ["failed", "failed"]
+
+    async def test_rss_http_error_reports_failed(self, tool, rss_transport):
+        _, response = rss_transport
+        response.raise_for_status = Mock(
+            side_effect=RuntimeError("500 Server Error")
+        )
+        mock_ticker = _make_mock_yf_ticker()
+        mock_ticker.get_news = Mock(return_value=[])
+
+        with patch("yfinance.Ticker", return_value=mock_ticker):
+            result = await tool(symbol="AAPL")
+
+        assert result["provider_status"] == "failed"
+        assert "500 Server Error" in result["error"]
+
+    async def test_rss_non_feed_response_reports_failed(self, tool, rss_transport):
+        _, response = rss_transport
+        response.text = "<html><body>error</body></html>"
+        mock_ticker = _make_mock_yf_ticker()
+        mock_ticker.get_news = Mock(return_value=[])
+
+        with patch("yfinance.Ticker", return_value=mock_ticker):
+            result = await tool(symbol="AAPL")
+
+        assert result["provider_status"] == "failed"
+        assert "rss_headline" in result["error"]
+
+    async def test_rss_articles_are_sliced_to_requested_count(
+        self, tool, rss_transport
+    ):
+        _, response = rss_transport
+        response.text = self.RSS_TWO_ITEMS
+        mock_ticker = _make_mock_yf_ticker()
+        mock_ticker.get_news = Mock(return_value=[])
+
+        with patch("yfinance.Ticker", return_value=mock_ticker):
+            result = await tool(symbol="AAPL", count=1)
+
+        assert result["requested_count"] == 1
+        assert result["count"] == 1
+        assert len(result["articles"]) == 1
+
+    async def test_invalid_tab_returns_error_without_status(
+        self, tool, rss_transport
+    ):
+        client, _ = rss_transport
+
+        result = await tool(symbol="AAPL", tab="sports")
+
+        assert "error" in result
+        assert "provider_status" not in result
+        client.get.assert_not_called()
 
 
 # ===========================================================================

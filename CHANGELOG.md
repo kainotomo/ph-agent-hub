@@ -84,6 +84,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Workflow definition identity and edit policy** — `WorkflowDefinition.key` must match the module's `MAF_KEY` and is immutable (renaming is a create, not an edit); step `id` must be a non-empty, whitespace-free executor identity; and a new derived classification (`unchanged` / `config_only` / `topology`) states which edits leave paused runs resumable and which cannot be resumed. ([#551])
 
 ### Fixed
+- **An unanswered news feed is no longer reported as "no news" (Issue #587)** —
+  `get_company_news` returned the same 71-character empty payload whether Yahoo
+  had nothing to report, had changed the endpoint, or had failed outright, so a
+  downstream report closed a material-events check on the strength of a feed
+  that may not have answered. It now reports `provider_status` (`ok` | `empty` |
+  `unparsed` | `failed`), the `route` that served the articles, the
+  `requested_count`, and one `attempts` entry per route tried, so a caller can
+  tell "the feed answered with nothing" from "the feed did not answer". A probe
+  found the `ticker.get_news()` XHR endpoint answering HTTP 404
+  `{"message":"Not Found"}` for every symbol — AAPL included — which `yfinance`
+  silently turns into `[]`; the tool now falls back once to Yahoo's RSS headline
+  feed (`rss_headline`), so `0700.HK` returns its 13 articles again. RSS
+  articles carry no publisher name and no `tab` filtering, and a route that
+  raised is reported as `failed` with the error instead of as an empty result.
+  ([#587])
 - **Tool results were clipped silently in stored messages (Issue #584)** — every
   tool result was hard-clipped at 4,000 characters with a bare `...(truncated)`
   before being stored on the persisted assistant message, so a five-row prefix of
@@ -315,3 +330,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#574]: https://github.com/kainotomo/ph-agent-hub/issues/574
 [#583]: https://github.com/kainotomo/ph-agent-hub/issues/583
 [#584]: https://github.com/kainotomo/ph-agent-hub/issues/584
+[#587]: https://github.com/kainotomo/ph-agent-hub/issues/587

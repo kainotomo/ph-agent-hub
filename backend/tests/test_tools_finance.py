@@ -452,6 +452,41 @@ class TestFinancials:
 
         assert "error" in result
 
+    async def test_null_fields_are_omitted_and_counted(self, tool):
+        """Provider gaps cost characters but carry no value (Issue #584 follow-up)."""
+        import math
+
+        import pandas as pd
+
+        df = pd.DataFrame(
+            {
+                "2025-09-30": [100000, math.nan, 20000],
+                "2024-09-30": [95000, math.nan, math.nan],
+            },
+            index=pd.Index(
+                [
+                    "Total Revenue",
+                    "Allowance For Doubtful Accounts",
+                    "Net Income",
+                ],
+                name="line_item",
+            ),
+        )
+        mock_ticker = _make_mock_yf_ticker()
+        mock_ticker.balance_sheet = df
+
+        with patch("yfinance.Ticker", return_value=mock_ticker):
+            result = await tool(
+                symbol="AAPL", statement_type="balance", period="annual",
+            )
+
+        rows = result["statements"]
+        assert result["count"] == 2
+        assert result["null_fields_omitted"] == 3  # 2x allowance + 1x net income
+        assert all(None not in row.values() for row in rows)
+        assert "Allowance For Doubtful Accounts" not in rows[0]
+        assert rows[0]["Total Revenue"] == 100000
+
 
 class TestEarnings:
     """Tests for ``get_earnings``."""
@@ -614,6 +649,31 @@ class TestHistoricalPrices:
             result = await tool(symbol="AAPL")
 
         assert "error" in result
+
+    async def test_fields_close_returns_only_date_and_close(self, tool):
+        """A valuation series should not ship OHLCV volume noise (#584 follow-up)."""
+        mock_ticker = _make_mock_yf_ticker()
+        mock_ticker.history = Mock(return_value=self._make_history_df())
+
+        with patch("yfinance.Ticker", return_value=mock_ticker):
+            result = await tool(symbol="AAPL", period="2y", interval="1wk", fields="close")
+
+        assert result["fields"] == "close"
+        assert set(result["prices"][0]) == {"Date", "Close"}
+
+    async def test_fields_ohlc_drops_volume_and_corporate_actions(self, tool):
+        mock_ticker = _make_mock_yf_ticker()
+        mock_ticker.history = Mock(return_value=self._make_history_df())
+
+        with patch("yfinance.Ticker", return_value=mock_ticker):
+            result = await tool(symbol="AAPL", fields="ohlc")
+
+        assert set(result["prices"][0]) == {"Date", "Open", "High", "Low", "Close"}
+
+    async def test_invalid_fields_returns_error(self, tool):
+        result = await tool(symbol="AAPL", fields="everything")
+        assert "error" in result
+        assert "Invalid fields" in result["error"]
 
 
 class TestDividends:

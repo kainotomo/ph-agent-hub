@@ -55,6 +55,29 @@ def _df_to_dicts(df, date_key: str = "date") -> list[dict]:
     return clean
 
 
+def _strip_null_fields(rows: list[dict]) -> tuple[list[dict], int]:
+    """Drop line items whose value is ``None`` and count them.
+
+    yfinance materialises every line item for every period, so a balance
+    sheet is roughly a fifth ``null`` — keys that carry no value but still
+    cost characters, which is what pushed ``get_financials`` past the
+    stored-output cap in production.  The caller reports the dropped count
+    so the model does not read an omitted key as "this field does not
+    exist".
+    """
+    cleaned: list[dict] = []
+    omitted = 0
+    for row in rows:
+        kept = {}
+        for key, value in row.items():
+            if value is None:
+                omitted += 1
+            else:
+                kept[key] = value
+        cleaned.append(kept)
+    return cleaned, omitted
+
+
 # ---------------------------------------------------------------------------
 # Tool factory
 # ---------------------------------------------------------------------------
@@ -314,8 +337,12 @@ def build_stock_data_tools(tool_config: dict | None = None) -> list:
             - ``statement_type``: the type of statement
             - ``period``: annual or quarterly
             - ``statements``: list of statement dicts, each with ``date``
-              and financial line items (transposed so dates are rows)
+              and financial line items (transposed so dates are rows).
+              Line items the provider has no value for are omitted rather
+              than sent as ``null`` — see ``null_fields_omitted``.
             - ``count``: number of statement periods
+            - ``null_fields_omitted``: how many line items were dropped
+              because the provider reported no value for that period
             - ``source``: "yfinance"
         """
         import yfinance as yf
@@ -353,6 +380,8 @@ def build_stock_data_tools(tool_config: dict | None = None) -> list:
                     "statement_type": stype,
                     "period": period,
                     "statements": [],
+                    "count": 0,
+                    "null_fields_omitted": 0,
                     "source": "yfinance",
                 }
 
@@ -361,8 +390,10 @@ def build_stock_data_tools(tool_config: dict | None = None) -> list:
             if isinstance(df, pd.DataFrame):
                 df_t = df.transpose()
                 statements = _df_to_dicts(df_t)
+                statements, null_fields_omitted = _strip_null_fields(statements)
             else:
                 statements = []
+                null_fields_omitted = 0
 
             return {
                 "symbol": sym,
@@ -370,6 +401,7 @@ def build_stock_data_tools(tool_config: dict | None = None) -> list:
                 "period": period,
                 "statements": statements,
                 "count": len(statements),
+                "null_fields_omitted": null_fields_omitted,
                 "source": "yfinance",
             }
 
@@ -527,6 +559,7 @@ def build_stock_data_tools(tool_config: dict | None = None) -> list:
         symbol: str,
         period: str = "1mo",
         interval: str = "1d",
+        fields: str = "all",
     ) -> dict:
         """Get historical OHLCV price data for a stock.
 
@@ -539,6 +572,11 @@ def build_stock_data_tools(tool_config: dict | None = None) -> list:
             interval: Data interval — "1m", "5m", "15m", "30m", "1h",
                 "1d", "1wk", "1mo". Default "1d".
                 Note: minute-level intervals only available for recent periods.
+            fields: Which columns to return — "all" (default), "ohlc" or
+                "close". Use "close" when you only need the series for
+                valuation multiples: a long period such as "2y" at "1wk"
+                stays well under the tool output cap instead of being
+                clipped.
 
         Returns:
             A dict with:
@@ -546,14 +584,34 @@ def build_stock_data_tools(tool_config: dict | None = None) -> list:
             - ``period``, ``interval``: as requested
             - ``prices``: list of OHLCV dicts with ``date``, ``open``,
               ``high``, ``low``, ``close``, ``volume``, ``dividends``,
-              ``stock_splits``
+              ``stock_splits`` — narrowed to ``date`` + ``close`` for
+              ``fields="close"``
             - ``count``: number of data points
             - ``source``: "yfinance"
         """
         import yfinance as yf
 
         sym = symbol.upper().strip()
-        logger.info("get_historical_prices: %s period=%s interval=%s", sym, period, interval)
+        logger.info(
+            "get_historical_prices: %s period=%s interval=%s fields=%s",
+            sym, period, interval, fields,
+        )
+
+        wanted_fields = {
+            "all": None,
+            "close": {"date", "close"},
+            "ohlc": {"date", "open", "high", "low", "close"},
+        }
+        selection = fields.strip().lower()
+        if selection not in wanted_fields:
+            return {
+                "symbol": sym,
+                "error": (
+                    f"Invalid fields '{fields}'. "
+                    "Must be one of: all, close, ohlc"
+                ),
+            }
+        keep = wanted_fields[selection]
 
         try:
             t = await asyncio.to_thread(yf.Ticker, sym)
@@ -561,10 +619,16 @@ def build_stock_data_tools(tool_config: dict | None = None) -> list:
                 t.history, period=period, interval=interval
             )
             prices = _df_to_dicts(df)
+            if keep is not None:
+                prices = [
+                    {k: v for k, v in row.items() if k.lower() in keep}
+                    for row in prices
+                ]
             return {
                 "symbol": sym,
                 "period": period,
                 "interval": interval,
+                "fields": selection,
                 "prices": prices,
                 "count": len(prices),
                 "source": "yfinance",

@@ -4761,6 +4761,11 @@ def _maybe_accumulate_tool_events(
 # marker has reported true sizes for a couple of weeks.
 STORAGE_TOOL_OUTPUT_MAX_CHARS = 16_000
 
+# Don't clip unless doing so actually saves space.  A payload barely over the
+# cap (16,108 chars in production) loses a key for a handful of characters and
+# gains nothing; anything up to this multiple of the cap is stored whole.
+STORAGE_TOOL_OUTPUT_SLACK_RATIO = 1.1
+
 
 def _records_fitting(items: list, budget: int) -> int:
     """Count the leading whole records of *items* that fit in *budget* chars.
@@ -4816,7 +4821,9 @@ def _format_tool_output_for_storage(output: Any) -> str | None:
     Returns a string representation suitable for display.  Limits the size of
     very large outputs to avoid bloated message content, and (Issue #584)
     reports what the limit dropped: characters, and lines for line-oriented
-    text or records for list payloads.
+    text or records for list payloads.  A payload within
+    ``STORAGE_TOOL_OUTPUT_SLACK_RATIO`` of the cap is stored whole: clipping
+    has to save something to be worth losing a key.
     """
     if output is None:
         return None
@@ -4837,7 +4844,7 @@ def _format_tool_output_for_storage(output: Any) -> str | None:
         if serialized_ok and isinstance(output, list):
             records = (_records_fitting(output, cap), len(output))
 
-    if len(text) <= cap:
+    if len(text) <= cap * STORAGE_TOOL_OUTPUT_SLACK_RATIO:
         return text
     return text[:cap] + _storage_clip_notice(
         text, cap, records=records, line_oriented=line_oriented,

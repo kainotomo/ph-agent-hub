@@ -22,7 +22,10 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
-from src.agents.runner import STORAGE_TOOL_OUTPUT_MAX_CHARS
+from src.agents.runner import (
+    HISTORY_TOOL_RESULT_MAX_CHARS,
+    STORAGE_TOOL_OUTPUT_MAX_CHARS,
+)
 
 # ---------------------------------------------------------------------------
 # Module markers — most tests are unit; integration tests override at class
@@ -164,11 +167,34 @@ class TestExtractMessageText:
         assert self.fn(content) == "[Tool result from calculator: 42]"
 
     def test_function_result_truncated(self):
-        long_output = "x" * 500
+        cap = HISTORY_TOOL_RESULT_MAX_CHARS
+        long_output = "x" * (cap + 3000)
         content = [{"type": "function_result", "name": "calc", "output": long_output}]
+
         result = self.fn(content)
-        assert len(result) < 400  # truncated to 300 + "..."
-        assert "..." in result
+
+        assert f"{cap:,} of {len(long_output):,} chars shown" in result
+        assert "head+tail" in result
+        assert len(result) < len(long_output)
+
+    def test_function_result_under_cap_kept_whole(self):
+        # Boundary: an ordinary result is no longer clipped away at 300 (#584).
+        output = "y" * 900
+        content = [{"type": "function_result", "name": "calc", "output": output}]
+
+        result = self.fn(content)
+
+        assert f"[Tool result from calc: {output}]" == result
+
+    def test_function_result_keeps_head_and_tail(self):
+        head, tail = "H" * 5000, "T" * 5000
+        content = [{"type": "function_result", "name": "calc", "output": head + tail}]
+
+        result = self.fn(content)
+
+        assert "H" * 100 in result      # head survives
+        assert "T" * 100 in result      # tail survives
+        assert "HHHH" in result and "TTTT" in result
 
     def test_mixed_content(self):
         content = [

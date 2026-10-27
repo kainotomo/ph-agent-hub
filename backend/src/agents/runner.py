@@ -415,6 +415,35 @@ def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // CHARS_PER_TOKEN_ESTIMATE)
 
 
+# Cap on a stored tool result replayed into the prompt as history text
+# (Issue #584).  The storage cap is larger; replay stays lean, so it keeps the
+# head *and* the tail of the payload — for JSON dumps the leading fields and the
+# trailing records are the informative ends, and a bare prefix described the
+# payload as if it were complete.
+# Raised 300 -> 2,000 on production evidence: 74% of stored tool results are
+# longer than 300 chars, while at 2,000 the replayed history still uses only
+# ~11% of the 60%-of-context history budget (worst case on a 1M-context model
+# was 1.3M of 2.4M chars) and never engages the oldest-first history truncation.
+HISTORY_TOOL_RESULT_MAX_CHARS = 2000
+
+
+def _clip_for_history(text: str) -> str:
+    """Clip a replayed tool result to ``HISTORY_TOOL_RESULT_MAX_CHARS``.
+
+    Keeps the first half and the last half and states the real total, so a
+    replayed payload cannot masquerade as a short one (Issue #584).
+    """
+    cap = HISTORY_TOOL_RESULT_MAX_CHARS
+    if len(text) <= cap:
+        return text
+    half = cap // 2
+    return (
+        text[:half]
+        + f"\n... [truncated: {cap:,} of {len(text):,} chars shown (head+tail)]\n"
+        + text[-half:]
+    )
+
+
 def _extract_message_text(content: list | None) -> str:
     """Extract readable text from a message's JSON content array.
 
@@ -439,9 +468,9 @@ def _extract_message_text(content: list | None) -> str:
             name = item.get("name", "unknown")
             output = item.get("output", "")
             if isinstance(output, str) and output:
-                # Truncate tool output in history
-                truncated = output[:300] + "..." if len(output) > 300 else output
-                parts.append(f"[Tool result from {name}: {truncated}]")
+                parts.append(
+                    f"[Tool result from {name}: {_clip_for_history(output)}]"
+                )
 
     return "\n".join(parts)
 

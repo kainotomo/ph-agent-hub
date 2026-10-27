@@ -85,9 +85,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tools (`get_financials` 95%, `get_stock_snapshot` 82%, `extract_pdf` 82%,
   `get_filing_text` 80%) rather than on page text, and 16,000 holds a full
   quarterly statement (8 periods × ~50 line items, ~14–16 KB) at ~1/6 of the live
-  context cap. Clipping by records instead of characters, offering a continuation
-  path, and revisiting the 300-character history replay cap (§`_extract_message_text`)
-  remain as follow-ups. ([#584])
+  context cap. The 300-character history replay cap got the same treatment
+  (`_extract_message_text` → `HISTORY_TOOL_RESULT_MAX_CHARS = 2,000`, head+tail
+  with an explicit total): 74% of stored results are longer than 300 chars, and a
+  simulation over 30 days of traffic showed 2,000 chars keeps the replayed history
+  at ~11% of its 60%-of-context budget with the oldest-first truncation still never
+  engaging. Clipping by records instead of characters and offering a continuation
+  path remain as follow-ups. ([#584])
 - **Multiple memories saved in one turn** — when the model emitted more than one
   `save_memory` call in a single parallel tool batch, only the first succeeded:
   the memory tools share the runner's single `AsyncSession`, and MAF executes a

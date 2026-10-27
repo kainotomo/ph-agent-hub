@@ -49,6 +49,43 @@ def _is_safe_url(url: str) -> bool:
     return True
 
 
+def _parse_page_selection(spec: str) -> tuple[set[int] | None, str | None]:
+    """Parse a 1-based, inclusive page selection.
+
+    Accepts ``"12"``, ``"150-160"`` or ``"12,14,150-160"``.
+
+    Returns:
+        ``(pages, error)`` — exactly one of the two is None.
+    """
+    pages: set[int] = set()
+    for chunk in spec.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if "-" in chunk:
+            start_s, _, end_s = chunk.partition("-")
+            try:
+                start, end = int(start_s), int(end_s)
+            except ValueError:
+                return None, f"Invalid page range '{chunk}'."
+            if start < 1 or end < start:
+                return None, f"Invalid page range '{chunk}'."
+            if end - start >= 500:
+                return None, f"Page range '{chunk}' is too large (max 500 pages)."
+            pages.update(range(start, end + 1))
+        else:
+            try:
+                number = int(chunk)
+            except ValueError:
+                return None, f"Invalid page '{chunk}'."
+            if number < 1:
+                return None, f"Invalid page '{chunk}'."
+            pages.add(number)
+    if not pages:
+        return None, "No pages selected."
+    return pages, None
+
+
 # ---------------------------------------------------------------------------
 # Tool factory
 # ---------------------------------------------------------------------------
@@ -71,16 +108,21 @@ def build_pdf_extractor_tools(tool_config: dict | None = None) -> list:
     max_chars: int = int(config.get("max_chars", DEFAULT_MAX_CHARS))
 
     @tool
-    async def extract_pdf(url: str) -> dict:
+    async def extract_pdf(url: str, pages: str | None = None) -> dict:
         """Download a PDF from a URL and extract its readable text content.
 
-        Uses pdfplumber to extract text from all pages of the PDF.
+        Uses pdfplumber to extract text from the pages of the PDF.
         Useful for reading financial reports, regulatory filings,
         earnings press releases, and other PDF-format documents.
 
         Args:
             url: The URL of the PDF file (must start with http:// or
                 https://).
+            pages: Optional 1-based page selection — "12", "150-160" or
+                "12,14,150-160". Omit to extract every page. On a long
+                filing the full text is hundreds of KB and gets clipped, so
+                select the pages you need (a statement of financial position
+                usually sits around page 150-200 of an annual report).
 
         Returns:
             A dict with:
@@ -104,6 +146,12 @@ def build_pdf_extractor_tools(tool_config: dict | None = None) -> list:
                 "url": url,
                 "error": "URL blocked — internal/private hosts are not allowed.",
             }
+
+        selected: set[int] | None = None
+        if pages:
+            selected, page_error = _parse_page_selection(pages)
+            if page_error:
+                return {"url": url, "error": page_error}
 
         logger.info("extract_pdf: %s", url)
 
@@ -151,31 +199,39 @@ def build_pdf_extractor_tools(tool_config: dict | None = None) -> list:
                     ),
                 }
 
-            # Extract text from all pages
-            full_text_parts: list[str] = []
+            # Extract text from the requested pages
+            extracted: list[tuple[int, str]] = []
             page_count = 0
 
             with pdfplumber.open(io.BytesIO(raw_bytes)) as pdf:
-                for page in pdf.pages:
+                for index, page in enumerate(pdf.pages, start=1):
+                    page_count += 1
+                    if selected is not None and index not in selected:
+                        continue
                     page_text = page.extract_text()
                     if page_text:
-                        full_text_parts.append(page_text)
-                    page_count += 1
+                        extracted.append((index, page_text))
 
-            full_text = "\n\n--- Page {n} ---\n\n".join(
-                full_text_parts
-            ) if len(full_text_parts) > 1 else (
-                full_text_parts[0] if full_text_parts else ""
-            )
+            if len(extracted) > 1:
+                full_text = "\n\n".join(
+                    f"--- Page {number} ---\n\n{text}"
+                    for number, text in extracted
+                )
+            elif extracted:
+                full_text = extracted[0][1]
+            else:
+                full_text = ""
 
             # If pdfplumber extracted nothing, try pages one-by-one
             if not full_text.strip() and page_count > 0:
                 retry_parts = []
                 with pdfplumber.open(io.BytesIO(raw_bytes)) as pdf:
-                    for i, page in enumerate(pdf.pages):
+                    for i, page in enumerate(pdf.pages, start=1):
+                        if selected is not None and i not in selected:
+                            continue
                         pt = page.extract_text() or ""
                         if pt.strip():
-                            retry_parts.append(f"[Page {i+1}]\n{pt}")
+                            retry_parts.append(f"[Page {i}]\n{pt}")
                 full_text = "\n\n".join(retry_parts) if retry_parts else ""
 
             text_length = len(full_text)
@@ -190,7 +246,7 @@ def build_pdf_extractor_tools(tool_config: dict | None = None) -> list:
                     + full_text[-half:]
                 )
 
-            return {
+            result = {
                 "url": url,
                 "status_code": resp.status_code,
                 "content_type": content_type,
@@ -200,6 +256,10 @@ def build_pdf_extractor_tools(tool_config: dict | None = None) -> list:
                 "truncated": truncated,
                 "source": "pdfplumber",
             }
+            if selected is not None:
+                result["pages_requested"] = pages
+                result["pages_extracted"] = len(extracted)
+            return result
 
         except httpx.HTTPStatusError as exc:
             logger.warning("extract_pdf HTTP error for %s: %s", url, exc)

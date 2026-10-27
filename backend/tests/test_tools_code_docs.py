@@ -558,9 +558,47 @@ class TestPdfExtractor:
             result = await tool(url="https://example.com/report.pdf")
 
         assert result["pages"] == 2
-        # Source code uses literal "--- Page {n} ---" (not f-string), so check for that
+        # Page separators carry the real page numbers.
+        assert "--- Page 1 ---" in result["text"]
+        assert "--- Page 2 ---" in result["text"]
         assert "Page one" in result["text"]
         assert "Page two" in result["text"]
+
+    async def test_pages_selection_extracts_only_requested(self, tool):
+        """A long filing can be paged instead of shipping every page (#584 follow-up)."""
+        pdf_bytes = b"%PDF-1.4 long report"
+        mock_resp = _make_mock_httpx_response(
+            status_code=200,
+            headers={"content-type": "application/pdf"},
+            content=pdf_bytes,
+        )
+        mock_client = _make_mock_httpx_client(mock_resp)
+
+        pages = []
+        for i in range(1, 5):
+            page = MagicMock()
+            page.extract_text.return_value = f"content of page {i}"
+            pages.append(page)
+        mock_pdf = MagicMock()
+        mock_pdf.__enter__.return_value = mock_pdf
+        mock_pdf.pages = pages
+
+        with patch("src.tools.pdf_extractor.httpx.AsyncClient", return_value=mock_client), \
+             patch("pdfplumber.open", return_value=mock_pdf):
+            result = await tool(url="https://example.com/report.pdf", pages="2-3")
+
+        assert result["pages"] == 4
+        assert result["pages_requested"] == "2-3"
+        assert result["pages_extracted"] == 2
+        assert "content of page 2" in result["text"]
+        assert "content of page 3" in result["text"]
+        assert "content of page 1" not in result["text"]
+        assert "content of page 4" not in result["text"]
+
+    async def test_invalid_pages_returns_error(self, tool):
+        result = await tool(url="https://example.com/report.pdf", pages="0-5")
+        assert "error" in result
+        assert "Invalid page" in result["error"]
 
     # ------------------------------------------------------------------
     # Tool — error / edge cases

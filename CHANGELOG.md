@@ -45,6 +45,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   admin actions. Payloads never include the stored value. ([#569])
 
 ### Changed
+- **Tool outputs are shaped at the source (Issue #584 follow-up)** — the output caps
+  were clipping payloads that never needed to be that large, and a production run
+  showed all three causes. `get_financials` now omits line items the provider has no
+  value for instead of sending them as `null` (a balance sheet was ~20% null and
+  16,108 characters — 108 over the stored cap) and reports `null_fields_omitted`, so
+  an omitted key is not read as "no such field". `get_historical_prices` takes
+  `fields` (`all` | `ohlc` | `close`), so a two-year weekly series for valuation
+  multiples is ~7 KB instead of ~21.5 KB. `extract_pdf` takes a 1-based `pages`
+  selection (`"150-160"`), so a 282-page annual report can be read by section instead
+  of returning 211 KB of text that is then clipped — and its page separators now
+  carry real page numbers instead of the literal `{n}`. On the storage side, a
+  payload within 10% of the cap is stored whole: clipping has to save something to
+  be worth losing a key. ([#584])
 - **In-Sidebar Session Search** — session search now filters the left sidebar in place
   instead of opening a separate results drawer. The magnifier icon toggles an inline
   search field (scope: All / Title / Content / Tag, plus the `#tag` exact-tag form).

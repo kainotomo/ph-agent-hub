@@ -25,6 +25,7 @@ import pytest
 from src.agents.runner import (
     HISTORY_TOOL_RESULT_MAX_CHARS,
     STORAGE_TOOL_OUTPUT_MAX_CHARS,
+    STORAGE_TOOL_OUTPUT_SLACK_RATIO,
 )
 
 # ---------------------------------------------------------------------------
@@ -718,13 +719,32 @@ class TestFormatToolOutputForStorage:
 
     def test_long_string_truncated(self):
         cap = STORAGE_TOOL_OUTPUT_MAX_CHARS
-        long_str = "x" * (cap + 1000)
+        long_str = "x" * int(cap * 1.5)
         result = self.fn(long_str)
         # Returns `cap` chars + a notice stating what was dropped (#584)
         assert "truncated" in result
         assert f"{cap:,} of {len(long_str):,} chars shown" in result
         assert result.startswith("x" * cap)
         assert len(result) < len(long_str)
+
+    def test_barely_over_cap_is_stored_whole(self):
+        """Don't lose a key to save a handful of characters (production: 16,108)."""
+        cap = STORAGE_TOOL_OUTPUT_MAX_CHARS
+        payload = "x" * (cap + 108)
+
+        result = self.fn(payload)
+
+        assert result == payload
+        assert "truncated" not in result
+
+    def test_clearly_over_cap_is_clipped(self):
+        cap = STORAGE_TOOL_OUTPUT_MAX_CHARS
+        payload = "x" * int(cap * STORAGE_TOOL_OUTPUT_SLACK_RATIO + 1)
+
+        result = self.fn(payload)
+
+        assert "[truncated:" in result
+        assert len(result) < len(payload)
 
     def test_long_string_reports_line_count(self):
         # The Issue #584 failure shape: a table that arrives partly cut.

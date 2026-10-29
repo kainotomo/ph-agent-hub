@@ -97,6 +97,38 @@ describe("ProcessSteps", () => {
     expect(button.textContent).toContain("1 tool call");
   });
 
+  it("uses the turn summary for a single reasoning step instead of its text (Issue #591)", () => {
+    const steps = [
+      {
+        kind: "reasoning" as const,
+        key: "reasoning:0",
+        index: 0,
+        text: "Secret chain of thought",
+        summary: "Secret chain of thought",
+      },
+    ];
+    renderProcessSteps({ steps });
+    const button = screen.getByRole("button");
+    expect(button).toHaveTextContent("Thought for a while");
+    expect(button).not.toHaveTextContent("Secret chain of thought");
+  });
+
+  it("uses the step count for a single non-reasoning step", () => {
+    const steps = [
+      {
+        kind: "text" as const,
+        key: "text:0",
+        index: 0,
+        text: "Interim note",
+        summary: "Interim note",
+      },
+    ];
+    renderProcessSteps({ steps });
+    const button = screen.getByRole("button");
+    expect(button).toHaveTextContent("1 step");
+    expect(button).not.toHaveTextContent("Interim note");
+  });
+
   it("opens and closes the fold on click", async () => {
     const user = userEvent.setup();
     const steps = [

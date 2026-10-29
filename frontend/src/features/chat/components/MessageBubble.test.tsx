@@ -144,15 +144,18 @@ describe("MessageBubble", () => {
       </QueryClientProvider>,
     );
 
-    // Process fold header should be visible (shows reasoning summary for single step)
-    expect(screen.getByRole("button", { name: /Let me think/i })).toBeInTheDocument();
+    // Process fold header shows the turn summary, not the raw thinking (Issue #591)
+    const foldHeader = screen.getByRole("button", { name: /thought for a while/i });
+    expect(foldHeader).toBeInTheDocument();
+    expect(screen.queryByText("Let me think about this...")).not.toBeInTheDocument();
     // Fold is collapsed (aria-expanded=false)
     expect(screen.getByRole("button", { expanded: false })).toHaveAttribute("aria-expanded", "false");
     // Answer text should be visible
     expect(screen.getByText("Hello, how can I help?")).toBeInTheDocument();
   });
 
-  it("shows the fold for a message with only summary-only reasoning (Issue #539)", () => {
+  it("shows the fold for a message with only summary-only reasoning (Issue #539)", async () => {
+    const user = userEvent.setup();
     render(
       <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
         <MessageBubble
@@ -181,8 +184,14 @@ describe("MessageBubble", () => {
       </QueryClientProvider>,
     );
 
-    // The dropdown button must exist even without any tool call.
-    expect(screen.getByRole("button", { name: /Thinking preview/i })).toBeInTheDocument();
+    // The dropdown button must exist even without any tool call, and show the
+    // turn summary rather than the raw thinking preview (Issue #591).
+    const foldHeader = screen.getByRole("button", { name: /thought for a while/i });
+    expect(foldHeader).toBeInTheDocument();
+    expect(screen.queryByText("Thinking preview")).not.toBeInTheDocument();
+
+    await user.click(foldHeader);
+    expect(screen.getByText("Thinking preview")).toBeInTheDocument();
     expect(screen.getByText("Answer text")).toBeInTheDocument();
   });
 
@@ -266,18 +275,54 @@ describe("MessageBubble", () => {
     );
 
     // Fold is closed by default (even while streaming)
-    expect(screen.getByRole("button", { expanded: false })).toHaveAttribute("aria-expanded", "false");
-    // Reasoning summary visible in header
-    expect(screen.getByText("Thinking...")).toBeInTheDocument();
+    const foldHeader = screen.getByRole("button", { expanded: false });
+    expect(foldHeader).toHaveAttribute("aria-expanded", "false");
+    // The header shows the turn summary, not the raw thinking (Issue #591)
+    expect(foldHeader).toHaveTextContent("Thought for a while");
+    expect(screen.queryByText("Thinking...")).not.toBeInTheDocument();
     // Answer text visible
     expect(screen.getByText("Hello")).toBeInTheDocument();
-    // Body is not visible (fold collapsed)
-    expect(screen.queryByText("Thinking...")).toBeInTheDocument(); // only in header
     // Click to open
-    await user.click(screen.getByRole("button", { expanded: false }));
-    // Now body is visible
+    await user.click(foldHeader);
+    // Now the step row is visible and its preview shows the thinking text
     expect(screen.getByRole("button", { expanded: true })).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getAllByText("Thinking...").length).toBe(2);
+    expect(screen.getAllByText("Thinking...").length).toBe(1);
+  });
+
+  it("shows the settled summary, not the raw thinking, during the first reasoning (Issue #591)", async () => {
+    const user = userEvent.setup();
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MessageBubble
+          message={{
+            id: "msg-first-reasoning",
+            session_id: "session-1",
+            sender: "assistant",
+            content: [{ type: "reasoning", text: "The user wants to know the answer" }],
+            model_id: "deepseek-r1",
+            model_name: "DeepSeek R1",
+            model_provider: "DeepSeek",
+            tool_calls: null,
+            tokens_in: 0,
+            tokens_out: 0,
+            is_deleted: false,
+            created_at: "2024-01-01T00:00:00Z",
+            updated_at: "2024-01-01T00:00:00Z",
+          } as any}
+          sessionId="session-1"
+          streaming={true}
+        />
+      </QueryClientProvider>,
+    );
+
+    // The collapsed fold header already shows the normal summary (Issue #591).
+    const foldHeader = screen.getByRole("button", { expanded: false });
+    expect(foldHeader).toHaveTextContent("Thought for a while");
+    expect(screen.queryByText("The user wants to know the answer")).not.toBeInTheDocument();
+
+    // The raw thinking is still reachable inside the expandable step row.
+    await user.click(foldHeader);
+    expect(screen.getByText("The user wants to know the answer")).toBeInTheDocument();
   });
 
   it("expands process fold on header click when collapsed", async () => {
@@ -309,16 +354,17 @@ describe("MessageBubble", () => {
       </QueryClientProvider>,
     );
 
-    // Should be collapsed initially (only in header, not in body)
-    expect(screen.getByRole("button", { expanded: false })).toHaveAttribute("aria-expanded", "false");
-    expect(screen.getAllByText("Let me think...").length).toBe(1);
+    // Should be collapsed initially; raw thinking is not mounted (Issue #591)
+    const headerBtn = screen.getByRole("button", { expanded: false });
+    expect(headerBtn).toHaveAttribute("aria-expanded", "false");
+    expect(headerBtn).toHaveTextContent("Thought for a while");
+    expect(screen.queryByText("Let me think...")).not.toBeInTheDocument();
 
     // Click the fold header to expand
-    const headerBtn = screen.getByRole("button", { name: /Let me think/i });
     await user.click(headerBtn);
 
-    // Content should now be visible in body (appears twice: header + body)
-    expect(screen.getAllByText("Let me think...").length).toBe(2);
+    // The step row preview is now visible inside the fold (exactly once)
+    expect(screen.getAllByText("Let me think...").length).toBe(1);
     expect(screen.getByText("Answer text")).toBeInTheDocument();
   });
 

@@ -3,7 +3,9 @@
 // =============================================================================
 // Renders a single process fold per assistant turn.
 //
-// Fold header: summarizeProcess(steps) with chevron.
+// Fold header: summarizeProcess(steps) — a stable turn summary.  It never
+// renders a step body (Issue #591); raw reasoning stays in the expandable
+// Thinking row.
 // Body: ordered step rows (reasoning, tool_call, tool_result, text).
 //
 // Lazy-fetch (Issue #539):
@@ -541,11 +543,7 @@ export function ProcessSteps({
         }}
       >
         {open ? <CaretDownOutlined style={{ fontSize: 10 }} /> : <CaretRightOutlined style={{ fontSize: 10 }} />}
-        <span>
-        {rows.length === 1 && rows[0].type === "step"
-          ? reasoningSummary(rows[0].step.text || rows[0].step.summary || "", false)
-          : summarizeProcess(steps)}
-      </span>
+        <span>{summarizeProcess(steps)}</span>
         {rows.length > 1 && (
           <span style={{ marginLeft: 4, color: "#aaa" }}>
             {rows.length} step{rows.length === 1 ? "" : "s"}

@@ -84,6 +84,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Workflow definition identity and edit policy** — `WorkflowDefinition.key` must match the module's `MAF_KEY` and is immutable (renaming is a create, not an edit); step `id` must be a non-empty, whitespace-free executor identity; and a new derived classification (`unchanged` / `config_only` / `topology`) states which edits leave paused runs resumable and which cannot be resumed. ([#551])
 
 ### Fixed
+- **First-thinking process header no longer shows raw reasoning (Issue #591)** —
+  while a turn's first reasoning was the only process step, the collapsed fold
+  header rendered the first line of the raw thinking, then switched to
+  "Thought for a while" once a tool step joined the turn. The header now always
+  uses `summarizeProcess()` from the first reasoning token, so it reads
+  "Thought for a while" / "Thought for a while - N tool calls" for the whole
+  turn; the reasoning preview and body stay in the expandable Thinking row.
+  Persisted reasoning-only messages get the same header. No API, schema, or
+  stored-content change.
 - **Session TTFT is labelled as time to first text (Issue #588)** — `ttft_ms`
   measures from turn start to the first streamed **text** delta, so it includes
   any tool execution (and reasoning) that ran before that text and can

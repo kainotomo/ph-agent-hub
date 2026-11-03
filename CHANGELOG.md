@@ -84,6 +84,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Workflow definition identity and edit policy** — `WorkflowDefinition.key` must match the module's `MAF_KEY` and is immutable (renaming is a create, not an edit); step `id` must be a non-empty, whitespace-free executor identity; and a new derived classification (`unchanged` / `config_only` / `topology`) states which edits leave paused runs resumable and which cannot be resumed. ([#551])
 
 ### Fixed
+- **`get_filing_text` returns the exhibit named in the URL (Issue #593)** —
+  for a URL naming a specific document (an 8-K Ex. 99.1, an earnings release),
+  the tool resolved the accession and returned `filing.text`, which is the
+  filing's primary document — the 8-K cover. The result echoed the requested
+  URL, so a caller asking for the earnings release received a plausible-looking
+  document with no financial statements. A named document that differs from
+  the filing's `primary_document` is now fetched from that exact URL and
+  returned; index/viewer URLs and the primary document itself still use
+  edgartools' cleaned text, so 10-K/10-Q output is unchanged. A failed exhibit
+  fetch now returns an error instead of falling back to the cover, and the
+  tool docstring states which document it returns. `get_filing_section` keeps
+  its existing behaviour and is documented as extracting from the filing's
+  primary/structured document. Verified on Realty Income's 2026 Q3 8-K: the
+  Ex. 99.1 URL returns 56,837 characters of the release instead of the
+  5,804-character cover. ([#593])
 - **First-thinking process header no longer shows raw reasoning (Issue #591)** —
   while a turn's first reasoning was the only process step, the collapsed fold
   header rendered the first line of the raw thinking, then switched to
@@ -350,3 +365,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#584]: https://github.com/kainotomo/ph-agent-hub/issues/584
 [#587]: https://github.com/kainotomo/ph-agent-hub/issues/587
 [#588]: https://github.com/kainotomo/ph-agent-hub/issues/588
+[#593]: https://github.com/kainotomo/ph-agent-hub/issues/593

@@ -11,6 +11,7 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
+import httpx
 import pytest
 
 # ---------------------------------------------------------------------------
@@ -47,6 +48,21 @@ def _make_mock_httpx_client(mock_response):
     client = AsyncMock()
     client.__aenter__.return_value = client
     client.get = AsyncMock(return_value=mock_response)
+    return client
+
+
+def _make_mock_httpx_router(routes: dict[str, str]):
+    """Return an AsyncMock httpx client that serves *routes* by URL and
+    raises AssertionError for any unexpected URL."""
+    client = AsyncMock()
+    client.__aenter__.return_value = client
+
+    async def fake_get(url, **kwargs):
+        if url not in routes:
+            raise AssertionError(f"unexpected URL fetched: {url}")
+        return _make_mock_httpx_response(status_code=200, text=routes[url])
+
+    client.get = AsyncMock(side_effect=fake_get)
     return client
 
 
@@ -1453,6 +1469,33 @@ class TestGetFilingSection:
 
         assert "error" in result
 
+    async def test_exhibit_url_uses_primary_filing_sections(self, tool):
+        sections = {
+            "Item 2.02": (
+                "Item 2.02 Results of Operations and Financial Condition."
+            )
+        }
+        filing = _make_mock_edgar_filing(
+            form="8-K",
+            accession_number=EIGHT_K_ACC,
+            primary_document="o-20261102.htm",
+            sections=sections,
+        )
+        company = _make_mock_edgar_company(cik=EIGHT_K_CIK)
+        company.get_filings = Mock(return_value=[filing])
+
+        with (
+            patch("src.tools.sec_filings.Company", return_value=company),
+            patch("src.tools.sec_filings.set_identity"),
+            patch("src.tools.sec_filings.httpx.AsyncClient") as mock_client_cls,
+        ):
+            result = await tool(url=EIGHT_K_EXHIBIT_URL, section="Item 2.02")
+
+        assert result["section"] == "Item 2.02"
+        assert "Results of Operations" in result["text"]
+        assert result["source"] == "SEC EDGAR (edgartools)"
+        mock_client_cls.assert_not_called()
+
 
 # ===========================================================================
 # Extra coverage: SEC URL parsing patterns & filing text edge cases
@@ -1584,6 +1627,251 @@ class TestSECFilingsEdgeCases:
 
         # Even without valid access number parsing, the tool still tries
         assert "error" not in result or "text" in result
+
+
+# ===========================================================================
+# Document selection regression tests (Issue #593)
+# ===========================================================================
+
+
+EIGHT_K_CIK = "726728"
+EIGHT_K_ACC = "0000726728-26-000056"
+EIGHT_K_DATA_DIR = (
+    f"https://www.sec.gov/Archives/edgar/data/{EIGHT_K_CIK}/"
+    f"{EIGHT_K_ACC.replace('-', '')}"
+)
+EIGHT_K_COVER_URL = f"{EIGHT_K_DATA_DIR}/o-20261102.htm"
+EIGHT_K_EXHIBIT_URL = f"{EIGHT_K_DATA_DIR}/o-991q32026.htm"
+EIGHT_K_INDEX_URL = f"{EIGHT_K_DATA_DIR}/{EIGHT_K_ACC}-index.htm"
+EIGHT_K_IX_URL = (
+    "https://www.sec.gov/ix?doc=/Archives/edgar/data/"
+    f"{EIGHT_K_CIK}/{EIGHT_K_ACC.replace('-', '')}/o-991q32026.htm"
+)
+
+EIGHT_K_EXHIBIT_HTML = """
+<html><body>
+<p>Exhibit 99.1</p>
+<h1>REALTY INCOME ANNOUNCES OPERATING RESULTS</h1>
+<p>FOR THE THREE AND NINE MONTHS ENDED SEPTEMBER 30, 2026</p>
+<table>
+<tr><td>Revenue</td><td>$1,234</td></tr>
+<tr><td>Net income available to common stockholders</td><td>$567</td></tr>
+</table>
+</body></html>
+"""
+
+
+class TestGetFilingTextDocumentSelection:
+    """Tests for document selection when a URL names an exhibit."""
+
+    @pytest.fixture
+    def tool(self):
+        mod = __import__("src.tools.sec_filings", fromlist=["build_sec_filings_tools"])
+        return mod.build_sec_filings_tools()[1]
+
+    def _company(
+        self,
+        text_content="8-K COVER TEXT",
+        primary_document="o-20261102.htm",
+    ):
+        filing = _make_mock_edgar_filing(
+            form="8-K",
+            accession_number=EIGHT_K_ACC,
+            text_content=text_content,
+            primary_document=primary_document,
+        )
+        company = _make_mock_edgar_company(cik=EIGHT_K_CIK)
+        company.get_filings = Mock(return_value=[filing])
+        return company
+
+    async def test_exhibit_url_returns_exhibit_not_cover(self, tool):
+        company = self._company(
+            text_content=(
+                "UNITED STATES SECURITIES AND EXCHANGE COMMISSION\n"
+                "FORM 8-K"
+            )
+        )
+        router = _make_mock_httpx_router({EIGHT_K_EXHIBIT_URL: EIGHT_K_EXHIBIT_HTML})
+
+        with (
+            patch("src.tools.sec_filings.Company", return_value=company),
+            patch("src.tools.sec_filings.set_identity"),
+            patch("src.tools.sec_filings.httpx.AsyncClient", return_value=router),
+        ):
+            result = await tool(url=EIGHT_K_EXHIBIT_URL)
+
+        assert "error" not in result
+        assert "REALTY INCOME ANNOUNCES" in result["text"]
+        assert "UNITED STATES SECURITIES" not in result["text"]
+        assert result["source"] == "SEC EDGAR"
+        assert result["url"] == EIGHT_K_EXHIBIT_URL
+        assert result["text_length"] == len(result["text"])
+        assert router.get.await_args.args[0] == EIGHT_K_EXHIBIT_URL
+
+    async def test_primary_document_url_still_uses_edgartools(self, tool):
+        company = self._company(
+            text_content="8-K COVER TEXT", primary_document="o-20261102.htm"
+        )
+
+        with (
+            patch("src.tools.sec_filings.Company", return_value=company),
+            patch("src.tools.sec_filings.set_identity"),
+            patch("src.tools.sec_filings.httpx.AsyncClient") as mock_client_cls,
+        ):
+            result = await tool(url=EIGHT_K_COVER_URL)
+
+        assert result["text"] == "8-K COVER TEXT"
+        assert result["source"] == "SEC EDGAR (edgartools)"
+        mock_client_cls.assert_not_called()
+
+    async def test_10q_primary_document_url_returns_primary_text(self, tool):
+        url = (
+            "https://www.sec.gov/Archives/edgar/data/320193/"
+            "000032019326000020/aapl-20260627.htm"
+        )
+        filing = _make_mock_edgar_filing(
+            form="10-Q",
+            accession_number="0000320193-26-000020",
+            text_content="10-Q PRIMARY TEXT",
+            primary_document="aapl-20260627.htm",
+        )
+        company = _make_mock_edgar_company(cik="320193")
+        company.get_filings = Mock(return_value=[filing])
+
+        with (
+            patch("src.tools.sec_filings.Company", return_value=company),
+            patch("src.tools.sec_filings.set_identity"),
+            patch("src.tools.sec_filings.httpx.AsyncClient") as mock_client_cls,
+        ):
+            result = await tool(url=url)
+
+        assert result["text"] == "10-Q PRIMARY TEXT"
+        assert result["source"] == "SEC EDGAR (edgartools)"
+        mock_client_cls.assert_not_called()
+
+    async def test_ixbrl_exhibit_url_resolves_to_document(self, tool):
+        company = self._company()
+        router = _make_mock_httpx_router({EIGHT_K_EXHIBIT_URL: EIGHT_K_EXHIBIT_HTML})
+
+        with (
+            patch("src.tools.sec_filings.Company", return_value=company),
+            patch("src.tools.sec_filings.set_identity"),
+            patch("src.tools.sec_filings.httpx.AsyncClient", return_value=router),
+        ):
+            result = await tool(url=EIGHT_K_IX_URL)
+
+        assert "REALTY INCOME ANNOUNCES" in result["text"]
+        assert router.get.await_args.args[0] == EIGHT_K_EXHIBIT_URL
+        assert result["source"] == "SEC EDGAR"
+
+    async def test_exhibit_truncation_respects_max_chars(self, tool):
+        company = self._company()
+        router = _make_mock_httpx_router({EIGHT_K_EXHIBIT_URL: EIGHT_K_EXHIBIT_HTML})
+
+        with (
+            patch("src.tools.sec_filings.Company", return_value=company),
+            patch("src.tools.sec_filings.set_identity"),
+            patch("src.tools.sec_filings.httpx.AsyncClient", return_value=router),
+        ):
+            result = await tool(url=EIGHT_K_EXHIBIT_URL, max_chars=120)
+
+        assert result["truncated"] is True
+        assert result["text_length"] == 120
+        assert len(result["text"]) == 120
+
+    async def test_exhibit_no_truncation_with_zero_max_chars(self, tool):
+        company = self._company()
+        router = _make_mock_httpx_router({EIGHT_K_EXHIBIT_URL: EIGHT_K_EXHIBIT_HTML})
+
+        with (
+            patch("src.tools.sec_filings.Company", return_value=company),
+            patch("src.tools.sec_filings.set_identity"),
+            patch("src.tools.sec_filings.httpx.AsyncClient", return_value=router),
+        ):
+            result = await tool(url=EIGHT_K_EXHIBIT_URL, max_chars=0)
+
+        assert result["truncated"] is False
+        assert result["text_length"] == len(result["text"])
+        assert "REALTY INCOME ANNOUNCES" in result["text"]
+
+    async def test_exhibit_fetch_error_is_not_masked_by_cover(self, tool):
+        company = self._company()
+        mock_resp = _make_mock_httpx_response(status_code=404, text="Not Found")
+        client = _make_mock_httpx_client(mock_resp)
+        client.get.side_effect = httpx.HTTPStatusError(
+            "Not Found", request=Mock(), response=mock_resp
+        )
+
+        with (
+            patch("src.tools.sec_filings.Company", return_value=company),
+            patch("src.tools.sec_filings.set_identity"),
+            patch("src.tools.sec_filings.httpx.AsyncClient", return_value=client),
+        ):
+            result = await tool(url=EIGHT_K_EXHIBIT_URL)
+
+        assert "text" not in result
+        assert "404" in result["error"]
+        assert result["url"] == EIGHT_K_EXHIBIT_URL
+
+    async def test_exhibit_url_with_edgartools_failure_fetches_direct(self, tool):
+        router = _make_mock_httpx_router({EIGHT_K_EXHIBIT_URL: EIGHT_K_EXHIBIT_HTML})
+
+        with (
+            patch(
+                "src.tools.sec_filings.Company",
+                side_effect=Exception("edgar failed"),
+            ),
+            patch("src.tools.sec_filings.set_identity"),
+            patch("src.tools.sec_filings.httpx.AsyncClient", return_value=router),
+        ):
+            result = await tool(url=EIGHT_K_EXHIBIT_URL)
+
+        assert "REALTY INCOME ANNOUNCES" in result["text"]
+        assert result["source"] == "SEC EDGAR"
+
+    async def test_docstring_states_document_selection(self, tool):
+        description = (tool.description or "").lower()
+        assert "exhibit" in description
+        assert "primary document" in description
+
+
+class TestDocumentUrlHelper:
+    """Tests for the SEC document-url helper (Issue #593)."""
+
+    @pytest.fixture
+    def mod(self):
+        return __import__(
+            "src.tools.sec_filings", fromlist=["_document_url"]
+        )
+
+    def test_index_urls_are_not_documents(self, mod):
+        assert mod._document_url(EIGHT_K_INDEX_URL) is None
+        assert (
+            mod._document_url(
+                f"{EIGHT_K_DATA_DIR}/0000726728-26-000056-index-headers.html"
+            )
+            is None
+        )
+        assert mod._document_url(f"{EIGHT_K_DATA_DIR}/index.htm") is None
+
+    def test_document_urls_are_returned(self, mod):
+        assert mod._document_url(EIGHT_K_COVER_URL) == EIGHT_K_COVER_URL
+        assert mod._document_url(EIGHT_K_EXHIBIT_URL) == EIGHT_K_EXHIBIT_URL
+
+    def test_ix_doc_url_is_resolved(self, mod):
+        assert mod._document_url(EIGHT_K_IX_URL) == EIGHT_K_EXHIBIT_URL
+
+    def test_directory_viewer_and_non_html_are_not_documents(self, mod):
+        assert mod._document_url(f"{EIGHT_K_DATA_DIR}/") is None
+        assert (
+            mod._document_url(
+                "https://www.sec.gov/cgi-bin/viewer?action=view&cik=726728"
+                "&accession_number=0000726728-26-000056"
+            )
+            is None
+        )
+        assert mod._document_url(f"{EIGHT_K_DATA_DIR}/filing.pdf") is None
+        assert mod._document_url(f"{EIGHT_K_DATA_DIR}/FilingSummary.xml") is None
 
 
 # ===========================================================================

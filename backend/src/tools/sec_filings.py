@@ -13,6 +13,7 @@ import logging
 import re
 import time
 from datetime import datetime
+from urllib.parse import unquote
 
 import httpx
 from agent_framework import tool
@@ -99,6 +100,53 @@ def _parse_acc_num_and_cik(url: str) -> tuple[str, str]:
         cik = m.group(1).lstrip("0")
 
     return acc, cik
+
+
+def _document_url(url: str) -> str | None:
+    """Return the exact EDGAR document URL named by *url*, or ``None``.
+
+    Index pages (``-index.htm`` / ``-index.html`` / ``index.htm``),
+    directory URLs, and viewer/query URLs do not name a document.  An
+    iXBRL viewer URL (``ix?doc=…``) is resolved to the underlying
+    document URL.
+    """
+    if "ix?doc=" in url:
+        match = re.search(r"ix\?doc=(/Archives/edgar/data/[^&\s]+)", url)
+        if not match:
+            return None
+        url = f"{SEC_BASE}{match.group(1)}"
+
+    cleaned = url.split("#", 1)[0]
+    path = cleaned.split("?", 1)[0]
+    filename = unquote(path.rsplit("/", 1)[-1]).lower()
+    if not filename.endswith((".htm", ".html")):
+        return None
+    if filename in {"index.htm", "index.html"} or "-index" in filename:
+        return None
+    return cleaned
+
+
+def _basename(value: str) -> str:
+    """Return the unquoted, lowercased basename of a URL or filename."""
+    return unquote(
+        value.split("#", 1)[0].split("?", 1)[0].rsplit("/", 1)[-1]
+    ).lower()
+
+
+def _shape_text_result(
+    text: str, url: str, limit: int, source: str
+) -> dict:
+    """Apply the shared ``max_chars`` shaping to a tool result."""
+    truncated = limit > 0 and len(text) > limit
+    if truncated:
+        text = text[:limit]
+    return {
+        "url": url,
+        "text": text,
+        "text_length": len(text),
+        "truncated": truncated,
+        "source": source,
+    }
 
 
 async def _fetch_url_direct(
@@ -230,7 +278,8 @@ def build_sec_filings_tools(tool_config: dict | None = None) -> list:
 
     Provides:
     - ``list_sec_filings``: list SEC filings for a company (full history)
-    - ``get_filing_text``: extract readable text from a filing URL
+    - ``get_filing_text``: extract readable text from a filing URL or the
+      specific document it names
     - ``get_filing_section``: extract a named section from a filing
 
     Args:
@@ -391,7 +440,13 @@ def build_sec_filings_tools(tool_config: dict | None = None) -> list:
     async def get_filing_text(
         url: str, max_chars: int | None = None
     ) -> dict:
-        """Extract readable text from an SEC filing.
+        """Extract readable text from an SEC filing or a specific document.
+
+        When the URL names a document other than the filing's primary
+        document (for example an 8-K exhibit such as ``ex-99.1.htm`` or an
+        earnings release), that exact document is fetched and returned.
+        Index pages, viewer pages, and the filing's own primary document
+        return the primary document.
 
         For the full text of large filings (10-K, 10-Q) consider using
         ``get_filing_section`` instead to retrieve only the sections
@@ -404,11 +459,16 @@ def build_sec_filings_tools(tool_config: dict | None = None) -> list:
 
         Returns:
             A dict with:
-            - ``url``: the URL fetched
-            - ``text``: cleaned plain text of the filing
-            - ``text_length``: character count
+            - ``url``: the URL fetched (resolved for viewer/iXBRL URLs)
+            - ``text``: cleaned plain text of the requested document
+            - ``text_length``: character count of the returned text
             - ``truncated``: whether the text was truncated
-            - ``source``: "SEC EDGAR"
+            - ``source``: "SEC EDGAR (edgartools)" when the filing's
+              primary document was returned; "SEC EDGAR" when a specific
+              document was fetched directly
+
+            If a specifically requested document cannot be fetched, an
+            error is returned instead of the filing's primary document.
         """
         logger.info("get_filing_text: %s", url)
         limit = max_chars_cfg if max_chars is None else max_chars
@@ -426,6 +486,45 @@ def build_sec_filings_tools(tool_config: dict | None = None) -> list:
             "User-Agent": user_agent,
             "Accept": "text/html, application/xhtml+xml, */*",
         }
+        doc_url = _document_url(url)
+        requested_doc = _basename(doc_url) if doc_url else ""
+
+        async def _direct_text_result(fetch_url: str) -> dict:
+            """Fetch *fetch_url* directly and shape the result.
+
+            Errors are returned as error dicts so a requested document is
+            never silently replaced by the filing's primary document.
+            """
+            try:
+                text, resolved_url = await _fetch_url_direct(
+                    fetch_url, headers, timeout
+                )
+            except httpx.HTTPStatusError as exc:
+                logger.warning(
+                    "get_filing_text HTTP %s for %s headers=%s "
+                    "body_preview=%s",
+                    exc.response.status_code,
+                    fetch_url,
+                    dict(exc.response.headers),
+                    (exc.response.text or "")[:500],
+                )
+                return {
+                    "url": fetch_url,
+                    "error": (
+                        "SEC EDGAR returned HTTP "
+                        f"{exc.response.status_code}"
+                    ),
+                }
+            except httpx.TimeoutException:
+                return {"url": fetch_url, "error": "Request timed out"}
+            except Exception as exc:
+                logger.exception(
+                    "get_filing_text failed for %s", fetch_url
+                )
+                return {"url": fetch_url, "error": str(exc)}
+            return _shape_text_result(
+                text, resolved_url, limit, "SEC EDGAR"
+            )
 
         # Try edgartools first (resolves by accession number)
         acc, cik = _parse_acc_num_and_cik(url)
@@ -445,20 +544,27 @@ def build_sec_filings_tools(tool_config: dict | None = None) -> list:
                 filing_list = list(filings) if filings else []
                 if filing_list:
                     filing = filing_list[0]
+                    primary_doc = _basename(
+                        str(getattr(filing, "primary_document", "") or "")
+                    )
+                    if doc_url and requested_doc != primary_doc:
+                        logger.info(
+                            "get_filing_text: %s names non-primary "
+                            "document %r (primary=%r) — fetching it "
+                            "directly",
+                            url,
+                            requested_doc,
+                            primary_doc,
+                        )
+                        return await _direct_text_result(doc_url)
+
                     text = await asyncio.wait_for(
                         asyncio.to_thread(filing.text),
                         timeout=EDGAR_TIMEOUT,
                     )
-                    truncated = limit > 0 and len(text) > limit
-                    if truncated:
-                        text = text[:limit]
-                    return {
-                        "url": url,
-                        "text": text,
-                        "text_length": len(text),
-                        "truncated": truncated,
-                        "source": "SEC EDGAR (edgartools)",
-                    }
+                    return _shape_text_result(
+                        text, url, limit, "SEC EDGAR (edgartools)"
+                    )
             except asyncio.TimeoutError:
                 logger.warning("get_filing_text timed out for %s", url)
                 # Fall through to HTTP fallback
@@ -469,38 +575,9 @@ def build_sec_filings_tools(tool_config: dict | None = None) -> list:
                     url, exc,
                 )
 
-        # Fallback: direct HTTP fetch + clean
-        try:
-            text, resolved_url = await _fetch_url_direct(
-                url, headers, timeout
-            )
-            truncated = limit > 0 and len(text) > limit
-            if truncated:
-                text = text[:limit]
-            return {
-                "url": resolved_url,
-                "text": text,
-                "text_length": len(text),
-                "truncated": truncated,
-                "source": "SEC EDGAR",
-            }
-        except httpx.HTTPStatusError as exc:
-            logger.warning(
-                "get_filing_text HTTP %s for %s headers=%s body_preview=%s",
-                exc.response.status_code,
-                url,
-                dict(exc.response.headers),
-                (exc.response.text or "")[:500],
-            )
-            return {
-                "url": url,
-                "error": f"SEC EDGAR returned HTTP {exc.response.status_code}",
-            }
-        except httpx.TimeoutException:
-            return {"url": url, "error": "Request timed out"}
-        except Exception as exc:
-            logger.exception("get_filing_text failed for %s", url)
-            return {"url": url, "error": str(exc)}
+        # Fallback: direct HTTP fetch + clean.  A document URL is fetched
+        # exactly; an index URL is still resolved to its first document.
+        return await _direct_text_result(url)
 
     # ---------------------------------------------------------------
     # get_filing_section
@@ -508,6 +585,11 @@ def build_sec_filings_tools(tool_config: dict | None = None) -> list:
     @tool
     async def get_filing_section(url: str, section: str) -> dict:
         """Extract a specific named section from an SEC filing.
+
+        Sections are taken from the filing's structured primary document,
+        resolved from the accession number in ``url``.  A URL naming an
+        exhibit still extracts from the filing's primary document; use
+        ``get_filing_text`` to read the exhibit's own text.
 
         Uses edgartools' built-in section extraction which recognises
         standard SEC headings (Risk Factors, MD&A, etc.).

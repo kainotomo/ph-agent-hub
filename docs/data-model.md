@@ -299,6 +299,7 @@ Templates can be:
 - assigned_user_id (UUID, FK → users.id, nullable)
 - created_at (timestamp)
 - updated_at (timestamp)
+- agent_config (JSON, nullable — run budget: {max_steps, max_input_tokens})
 
 Allowed tools are normalized through a join table rather than stored as a JSON array.
 

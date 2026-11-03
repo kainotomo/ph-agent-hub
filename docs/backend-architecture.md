@@ -60,6 +60,8 @@ and repeated identical tool calls end the turn early
 (`AGENT_LOOP_DETECTION_ENABLED` / `AGENT_LOOP_REPEAT_THRESHOLD`). Early stops
 emit a synthetic final message so the turn never ends on an empty bubble.
 
+**Run budgets (Issue #595):** Each skill (via its existing `agent_config` JSON column) and template (via the new nullable `agent_config` JSON column, migration `t7u8v9w0x1y2`) can carry per-run budget keys `max_steps` (integer 1..500) and `max_input_tokens` (integer >= 0, `0` = unlimited). Budgets are per agent invocation: the autopilot's internal turns each get the budget, the autopilot run-level `AUTOPILOT_MAX_TOKENS` is unchanged, sub-agent tokens are billed to the parent turn but not counted in its mid-run budget, and workflows are unchanged. Precedence per dimension is skill → template → global fallback (`AGENT_MAX_STEPS` for `max_steps`, `AGENT_MAX_INPUT_TOKENS` for `max_input_tokens`); `AGENT_BUDGET_WARN_RATIO` sets the warning fraction and `AGENT_MAX_STEPS_CEILING` bounds admin-supplied per-skill/template step values. `max_steps` counts model round-trips that executed at least one tool — a parallel batch counts as ONE step (Issue #447) — while `max_input_tokens` counts cumulative provider-reported input tokens (cache hits included) for one agent invocation/turn. At `ceil(budget * AGENT_BUDGET_WARN_RATIO)` the stream emits a `budget_warning` event (once per dimension); at 100% it stops and emits a `budget_exceeded` event with `kind` = `"steps"` or `"input_tokens"`, then makes one tool-less wrap-up call and appends a deterministic footer to the final text (`_Budget: 70 steps / 12,000,000 input tokens · Used: 70 steps, 78 tool calls, 12,345,678 input tokens_`). Non-streaming runs bind MAF's `max_iterations` to the effective `max_steps + 1`; a token-budget overage cannot interrupt the run mid-loop, so it is reported after the fact (`budget_exceeded=true` in metrics plus a short notice appended to the response). If the provider never reports usage mid-stream, the token budget cannot bind, so `budget_enforced=false` is recorded and a warning is logged. `steps` (model rounds) and `tool_calls` (individual tool executions) are now reported so a run is never ambiguous.
+
 **Auto Tool Selection (Issues #287, #439):** Instead of requiring users to
 manually activate tools per session, the agent can automatically select
 relevant tools from the available pool. The LLM receives tool definitions
@@ -1032,7 +1034,10 @@ The response is `text/event-stream`. The connection stays open until the agent f
 | `tool_start` | `{ tool_call_id, tool_name, arguments }` | Agent begins executing a tool call |
 | `tool_result` | `{ tool_call_id, tool_name, success, result_summary }` | Tool call completes |
 | `step_complete` | `{ step_index, total_steps_so_far }` | End of each MAF agent step |
-| `message_complete` | `{ branch_index, total_tokens, model_id }` | Agent finishes; message persisted |
+| `step_limit_reached` | `{ step_index, max_steps, budget_source, steps, tool_calls, input_tokens, output_tokens, cache_hits }` | MAF step limit reached (Issue #579); emitted with the budget counters (Issue #595) |
+| `budget_warning` | `{ kind, consumed, budget, percent, steps, tool_calls, input_tokens, output_tokens, cache_hits, budget_config }` | Emitted at `ceil(budget * AGENT_BUDGET_WARN_RATIO)` of a run budget (once per dimension) |
+| `budget_exceeded` | `{ kind, consumed, budget, percent, steps, tool_calls, input_tokens, output_tokens, cache_hits, budget_config }` | Emitted at 100% of a run budget; the run stops, makes one tool-less wrap-up call, and appends a deterministic budget footer |
+| `message_complete` | `{ total_tokens, tokens_in, tokens_out, input_tokens, output_tokens, cache_hits, steps, tool_calls, budget_exceeded, budget, model_id }` | Agent finishes; message persisted |
 | `follow_up_questions` | `{ questions: [...] }` | After `message_complete` if follow-up questions are enabled |
 | `summarized` | `{ summary, summarized_message_count, tokens_saved }` | Conversation history was auto-summarized |
 | `error` | `{ code, message }` | Non-recoverable error; connection closes after |

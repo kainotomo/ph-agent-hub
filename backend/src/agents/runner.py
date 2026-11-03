@@ -18,6 +18,7 @@
 import asyncio
 import json
 import logging
+import math
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -38,6 +39,7 @@ from agent_framework import (
 
 from ..core.config import settings
 from ..core.exceptions import ValidationError, NotFoundError
+from .budget import RunBudget, budget_from_settings, resolve_run_budget
 from .subagent_bus import SubagentBus, register_bus, remove_bus
 from .deepseek_patch import contains_dsml, strip_dsml_markers
 from .subagent_events import (
@@ -139,6 +141,9 @@ class SessionConfig:
     temperature: float = 0.7
     tenant_name: str = ""
     cleanup_clients: list = field(default_factory=list)
+    # Issue #595 — effective per-run step/token budget (skill → template → global).
+    run_budget: RunBudget | None = None
+
 
 async def _resolve_session_config(
     db: AsyncSession,
@@ -203,6 +208,31 @@ async def _resolve_session_config(
         execution_type = "agent"
     agent_name = skill.title if skill else "assistant"
 
+    # 5b. Resolve the effective run budget (Issue #595): skill → template →
+    #     global.  The template is resolved with the same chain as the system
+    #     prompt, so a skill's template can carry a budget even when the
+    #     session has no explicit template selected.
+    template = await _resolve_config_template(db, session_data, skill)
+    run_budget = resolve_run_budget(
+        getattr(skill, "agent_config", None) if skill is not None else None,
+        getattr(template, "agent_config", None) if template is not None else None,
+        global_max_steps=getattr(settings, "AGENT_MAX_STEPS", 50),
+        global_max_input_tokens=getattr(settings, "AGENT_MAX_INPUT_TOKENS", 0),
+        warn_ratio=getattr(settings, "AGENT_BUDGET_WARN_RATIO", 0.6),
+        step_ceiling=getattr(settings, "AGENT_MAX_STEPS_CEILING", 500),
+    )
+    logger.info(
+        "Resolved run budget: session=%s skill=%s max_steps=%s (source=%s) "
+        "max_input_tokens=%s (source=%s) warn_ratio=%s",
+        session_data.get("id", "?"),
+        getattr(skill, "title", None),
+        run_budget.max_steps,
+        run_budget.max_steps_source,
+        run_budget.max_input_tokens,
+        run_budget.max_input_tokens_source,
+        run_budget.warn_ratio,
+    )
+
     # 6. Resolve thinking_enabled: session override > model default
     thinking_enabled = session_data.get("thinking_enabled")
     if thinking_enabled is None:
@@ -229,11 +259,14 @@ async def _resolve_session_config(
     if temperature is None:
         temperature = getattr(model, "temperature", 0.7)
 
-    # Rebuild model_client with resolved thinking_enabled and reasoning_effort
+    # Rebuild model_client with resolved thinking_enabled and reasoning_effort.
+    # The per-run step budget is bound here so MAF's own function-invocation
+    # loop can never outlive the app guard (Issue #595).
     model_client = get_chat_client(
         model,
         thinking_enabled=thinking_enabled,
         reasoning_effort=reasoning_effort,
+        max_steps=run_budget.max_steps,
     )
 
     # Look up tenant name for denormalized usage logging
@@ -270,6 +303,7 @@ async def _resolve_session_config(
         temperature=temperature,
         tenant_name=tenant_name,
         cleanup_clients=cleanup_clients,
+        run_budget=run_budget,
     )
 
 
@@ -1017,6 +1051,7 @@ async def run_agent(
                     reasoning_effort=cfg.reasoning_effort,
                     function_invocation_kwargs=function_invocation_kwargs,
                     metrics_out=_nonstream_metrics,
+                    budget=cfg.run_budget,
                 )
         except Exception as exc:
             logger.error("Agent run failed: %s", exc)
@@ -1784,6 +1819,24 @@ async def _resolve_skill(
         return None
 
     result = await db.execute(select(Skill).where(Skill.id == skill_id))
+    return result.scalar_one_or_none()
+
+
+async def _resolve_config_template(
+    db: AsyncSession, session_data: dict, skill: Skill | None,
+) -> Template | None:
+    """Load the template that governs this run (Issue #595).
+
+    Uses the same chain as ``_build_system_prompt``: the session's manually
+    selected template wins, then the skill's template.  Only used to resolve
+    per-template run budgets; a missing/invalid template simply yields None.
+    """
+    template_id = session_data.get("selected_template_id")
+    if not template_id and skill is not None:
+        template_id = getattr(skill, "template_id", None)
+    if not template_id:
+        return None
+    result = await db.execute(select(Template).where(Template.id == template_id))
     return result.scalar_one_or_none()
 
 
@@ -2955,6 +3008,7 @@ async def _run_agent(
     reasoning_effort: str | None = None,
     function_invocation_kwargs: dict | None = None,
     metrics_out: dict | None = None,
+    budget: RunBudget | None = None,
 ) -> tuple[str, int, int, int]:
     """Run a simple MAF Agent.
 
@@ -2963,11 +3017,18 @@ async def _run_agent(
             invocation layers (A2A ``ask_user`` tool uses ``task_id``).
         metrics_out: If not None, a dict that will be updated with
             per-turn timing and context-breakdown metrics.
+        budget: Effective per-run step/input-token budget (Issue #595).
+            Step enforcement on this path is delegated to MAF's
+            ``max_iterations`` (bound when the client is built); a token
+            overage is reported after the run because a non-streaming call
+            cannot be interrupted mid-loop.
 
     Returns:
         A tuple of (response_text, tokens_in, tokens_out, cache_hit_tokens).
     """
     from agent_framework import Agent
+
+    budget = budget or budget_from_settings(settings)
 
     default_options: dict = {"temperature": temperature}
     if reasoning_effort:
@@ -3002,6 +3063,20 @@ async def _run_agent(
 
     # Extract token counts (best-effort)
     tokens_in, tokens_out, cache_hit = _extract_token_counts(result)
+    tool_calls = _count_result_tool_calls(result)
+    # Issue #595 — a non-streaming run cannot be stopped mid-loop, so report a
+    # token-budget overage after the fact instead of silently exceeding it.
+    budget_exceeded = bool(
+        budget.max_input_tokens > 0
+        and tokens_in >= budget.max_input_tokens
+    )
+    if budget_exceeded:
+        logger.warning(
+            "Non-streaming run reached input-token budget (%d, source=%s) "
+            "after %d input tokens / %d tool calls",
+            budget.max_input_tokens, budget.max_input_tokens_source,
+            tokens_in, tool_calls,
+        )
 
     # Populate metrics if requested
     if metrics_out is not None:
@@ -3015,19 +3090,33 @@ async def _run_agent(
             system_prompt_tokens=_estimate_tokens(system_prompt or ""),
             tool_definition_tokens=_estimate_tool_definitions(tools),
             tokens_in=tokens_in,
+            tool_calls=tool_calls,
+            budget=budget.to_dict(),
+            budget_exceeded=budget_exceeded,
+            budget_kind="input_tokens" if budget_exceeded else None,
+            budget_enforced=True,
         ))
 
     # result could be a string or a structured object
     if isinstance(result, str):
-        return result, tokens_in, tokens_out, cache_hit
+        response_text, cache_out = result, cache_hit
+    elif hasattr(result, "final_output"):
+        # MAF may return an object with a .final_output attribute
+        response_text, cache_out = str(result.final_output), cache_hit
+    elif hasattr(result, "content"):
+        response_text, cache_out = str(result.content), 0
+    else:
+        response_text, cache_out = str(result), 0
 
-    # MAF may return an object with a .final_output or .content attribute
-    if hasattr(result, "final_output"):
-        return str(result.final_output), tokens_in, tokens_out, cache_hit
-    if hasattr(result, "content"):
-        return str(result.content), tokens_in, tokens_out, 0
+    if budget_exceeded:
+        response_text += _budget_notice(
+            budget,
+            steps=0,
+            tool_calls=tool_calls,
+            input_tokens=tokens_in,
+        )
 
-    return str(result), tokens_in, tokens_out, 0
+    return response_text, tokens_in, tokens_out, cache_out
 
 
 async def _run_workflow(
@@ -3506,6 +3595,16 @@ async def run_agent_stream(
         if extra_tools:
             _stream_tools = list(_stream_tools) + list(extra_tools)
 
+        # Issue #595 — expose the effective budget on every agent turn,
+        # including runs that finish normally without crossing a threshold.
+        # Workflow runs do not enforce the per-skill budget, so do not
+        # advertise one there.
+        if (
+            cfg.run_budget is not None
+            and cfg.execution_type not in ("workflow", "workflow_based")
+        ):
+            _stream_token_info["budget"] = cfg.run_budget.to_dict()
+
         if cfg.execution_type in ("workflow", "workflow_based"):
             stream = _run_workflow_stream(
                 model=cfg.model,
@@ -3538,6 +3637,7 @@ async def run_agent_stream(
                 temperature=cfg.temperature,
                 reasoning_effort=cfg.reasoning_effort,
                 function_invocation_kwargs=function_invocation_kwargs,
+                budget=cfg.run_budget,
             )
         # Issue #574 — side channel for delegated sub-agent progress.  Created
         # before the stream is consumed so delegate tools can find it.
@@ -3722,16 +3822,12 @@ async def run_agent_stream(
         )
         yield {
             "event": "message_complete",
-            "data": json.dumps({
-                "session_id": session_id,
-                "message_id": message_id,
-                "total_tokens": tokens_in + tokens_out,
-                "tokens_in": tokens_in,
-                "tokens_out": tokens_out,
-                "model_id": cfg.model.id if cfg else "unknown",
-                "model_name": cfg.model.name if cfg else None,
-                "model_provider": cfg.model.provider if cfg else None,
-            }),
+            "data": json.dumps(_build_message_complete_payload(
+                session_id=session_id,
+                message_id=message_id,
+                token_info=_stream_token_info,
+                cfg=cfg,
+            )),
         }
 
     if cfg is not None:
@@ -3890,6 +3986,7 @@ async def _run_agent_stream(
     temperature: float = 0.7,
     reasoning_effort: str | None = None,
     function_invocation_kwargs: dict | None = None,
+    budget: RunBudget | None = None,
 ) -> AsyncIterator[dict]:
     """Run a MAF Agent in streaming mode, yielding SSE event dicts.
 
@@ -3899,8 +3996,24 @@ async def _run_agent_stream(
         character).  We aggregate partial *function_call* updates by
         ``call_id`` and only emit a single ``tool_start`` SSE event
         once the call is complete (when *function_result* arrives).
+
+    Issue #595 — *budget* is the effective per-run step/input-token budget
+    (resolved by ``_resolve_session_config``).  When omitted (direct calls and
+    legacy tests) it is derived from the global settings.  Provider-reported
+    usage is accumulated from the streamed ``usage`` contents, so the token
+    budget is enforced during the run and the per-turn totals are available
+    even when ``get_final_response()`` is unavailable.
     """
     from agent_framework import Agent
+
+    budget = budget or budget_from_settings(settings)
+    logger.info(
+        "Agent stream start: session=%s max_steps=%d (source=%s) "
+        "max_input_tokens=%d (source=%s) warn_ratio=%s",
+        session_id, budget.max_steps, budget.max_steps_source,
+        budget.max_input_tokens, budget.max_input_tokens_source,
+        budget.warn_ratio,
+    )
 
     default_options: dict = {"temperature": temperature}
     if reasoning_effort:
@@ -3950,6 +4063,23 @@ async def _run_agent_stream(
     turn_notes: list[str] = []
     # Set when the stream is terminated early (step cap / detected loop).
     stop_reason: str | None = None
+    # Issue #595 — run-budget accounting.  ``tool_calls`` counts individual
+    # executions (a parallel batch is N calls but one step); ``stream_usage_*``
+    # accumulate the provider-reported usage of every model round-trip.
+    tool_calls = 0
+    stream_usage_in = 0
+    stream_usage_out = 0
+    stream_cache_hit = 0
+    usage_seen = False
+    warned_steps = False
+    warned_tokens = False
+    budget_exceeded = False
+    budget_kind: str | None = None
+    step_warn_at = _budget_warn_threshold(budget.max_steps, budget.warn_ratio)
+    token_warn_at = _budget_warn_threshold(
+        budget.max_input_tokens, budget.warn_ratio,
+    )
+    usage_missing_logged = False
 
     inner_event_count = 0
     last_update = None
@@ -3980,6 +4110,35 @@ async def _run_agent_stream(
         inner_event_count += 1
         if inner_event_count <= 5 or inner_event_count % 20 == 0:
             content_types = [getattr(c, "type", "?") for c in (update.contents if hasattr(update, 'contents') else [])]
+
+        # Issue #595 — accumulate provider-reported usage for every model
+        # round-trip so the input-token budget can bind during the run.  The
+        # OpenAI-compatible clients receive ``stream_options={"include_usage":
+        # True}``, so each round's final chunk carries a ``usage`` content.
+        update_usage_seen = False
+        for content in update.contents:
+            if getattr(content, "type", None) != "usage":
+                continue
+            in_tokens, out_tokens, cache_tokens = _usage_token_fields(
+                getattr(content, "usage_details", None)
+            )
+            stream_usage_in += in_tokens
+            stream_usage_out += out_tokens
+            stream_cache_hit += cache_tokens
+            update_usage_seen = True
+        if not update_usage_seen:
+            # Some clients attach usage directly to the update instead of
+            # emitting a usage content.  Never count both shapes.
+            in_tokens, out_tokens, cache_tokens = _usage_token_fields(
+                getattr(update, "usage_details", None)
+            )
+            if in_tokens or out_tokens or cache_tokens:
+                stream_usage_in += in_tokens
+                stream_usage_out += out_tokens
+                stream_cache_hit += cache_tokens
+                update_usage_seen = True
+        if update_usage_seen:
+            usage_seen = True
 
         # Issue #447 — detect parallel tool batches.
         # MAF yields all function_results from an asyncio.gather batch in
@@ -4029,6 +4188,7 @@ async def _run_agent_stream(
                     tool_started_at_s[call_id] = time.monotonic()
                 _handle_streaming_function_call(content, pending_calls)
             elif content_type in ("function_result", "tool_result"):
+                tool_calls += 1
                 tool_call_id = getattr(content, "call_id", None) or ""
                 started = tool_started_at_s.pop(tool_call_id, None)
                 if started is not None:
@@ -4140,19 +4300,118 @@ async def _run_agent_stream(
             yield _sse_event("step_complete", step_payload,
                              session_id=session_id, message_id=message_id)
 
-            # ── Step limit guard ────────────────────────────────────
-            if step_index >= settings.AGENT_MAX_STEPS:
+            # ── Step budget: warn at 60 %, stop at 100 % (Issue #595) ──
+            if not warned_steps and step_index >= step_warn_at:
+                warned_steps = True
+                yield _sse_event("budget_warning", _budget_event_payload(
+                    kind="steps",
+                    consumed=step_index,
+                    limit=budget.max_steps,
+                    step_index=step_index,
+                    tool_calls=tool_calls,
+                    input_tokens=stream_usage_in,
+                    output_tokens=stream_usage_out,
+                    cache_hits=stream_cache_hit,
+                    budget=budget,
+                ), session_id=session_id, message_id=message_id)
+            if step_index >= budget.max_steps:
                 logger.warning(
-                    "Agent step limit reached (%d) for session %s — terminating stream",
-                    settings.AGENT_MAX_STEPS, session_id,
+                    "Agent step budget reached (%d, source=%s) for session %s "
+                    "after %d tool calls and %d input tokens — terminating stream",
+                    budget.max_steps, budget.max_steps_source, session_id,
+                    tool_calls, stream_usage_in,
                 )
+                counters = _budget_usage_counters(
+                    step_index=step_index,
+                    tool_calls=tool_calls,
+                    input_tokens=stream_usage_in,
+                    output_tokens=stream_usage_out,
+                    cache_hits=stream_cache_hit,
+                )
+                # Keep the legacy event name/payload for existing consumers,
+                # then emit the unified budget event (Issue #595).
                 yield _sse_event("step_limit_reached", {
                     "step_index": step_index,
-                    "max_steps": settings.AGENT_MAX_STEPS,
+                    "max_steps": budget.max_steps,
+                    "budget_source": budget.max_steps_source,
+                    **counters,
                 }, session_id=session_id, message_id=message_id)
+                yield _sse_event("budget_exceeded", _budget_event_payload(
+                    kind="steps",
+                    consumed=step_index,
+                    limit=budget.max_steps,
+                    step_index=step_index,
+                    tool_calls=tool_calls,
+                    input_tokens=stream_usage_in,
+                    output_tokens=stream_usage_out,
+                    cache_hits=stream_cache_hit,
+                    budget=budget,
+                ), session_id=session_id, message_id=message_id)
                 pending_calls.clear()
                 stop_reason = "step_limit"
+                budget_exceeded = True
+                budget_kind = "steps"
                 break
+
+        # ── Input-token budget (Issue #595) ─────────────────────────────
+        # Checked after every update (not only tool-result updates) because a
+        # usage content can arrive with or without a batch.  Best-effort: the
+        # round that crosses the budget has already been paid for, so the stop
+        # happens before the next model call.
+        if budget.max_input_tokens > 0:
+            if usage_seen:
+                if not warned_tokens and stream_usage_in >= token_warn_at:
+                    warned_tokens = True
+                    yield _sse_event("budget_warning", _budget_event_payload(
+                        kind="input_tokens",
+                        consumed=stream_usage_in,
+                        limit=budget.max_input_tokens,
+                        step_index=step_index,
+                        tool_calls=tool_calls,
+                        input_tokens=stream_usage_in,
+                        output_tokens=stream_usage_out,
+                        cache_hits=stream_cache_hit,
+                        budget=budget,
+                    ), session_id=session_id, message_id=message_id)
+                if stream_usage_in >= budget.max_input_tokens:
+                    logger.warning(
+                        "Agent input-token budget reached (%d, source=%s) for "
+                        "session %s after %d steps / %d tool calls — "
+                        "terminating stream",
+                        budget.max_input_tokens,
+                        budget.max_input_tokens_source, session_id,
+                        step_index, tool_calls,
+                    )
+                    yield _sse_event("budget_exceeded", _budget_event_payload(
+                        kind="input_tokens",
+                        consumed=stream_usage_in,
+                        limit=budget.max_input_tokens,
+                        step_index=step_index,
+                        tool_calls=tool_calls,
+                        input_tokens=stream_usage_in,
+                        output_tokens=stream_usage_out,
+                        cache_hits=stream_cache_hit,
+                        budget=budget,
+                    ), session_id=session_id, message_id=message_id)
+                    pending_calls.clear()
+                    stop_reason = "input_budget"
+                    budget_exceeded = True
+                    budget_kind = "input_tokens"
+                    break
+            elif (
+                not usage_missing_logged
+                and step_index >= 3
+                and step_index > 0
+            ):
+                # The provider never reported usage mid-stream, so the token
+                # budget cannot bind.  Say so once instead of pretending.
+                usage_missing_logged = True
+                logger.warning(
+                    "Provider reported no streamed usage for session %s after "
+                    "%d steps; max_input_tokens=%d cannot be enforced mid-run "
+                    "(per-turn totals may still be available at the end)",
+                    session_id, step_index, budget.max_input_tokens,
+                )
 
         # ── Runaway tool-loop detection (Issue #579) ────────────────────
         # The same tool call repeated N times in a row means the model is
@@ -4185,25 +4444,52 @@ async def _run_agent_stream(
     if stop_reason is not None:
         if first_token_at_s is None:
             first_token_at_s = time.monotonic()
-        yield _sse_event("token", {
-            "delta": await _generate_stop_wrapup(
-                model_client=model_client,
-                system_prompt=system_prompt,
-                user_message=user_message,
-                turn_notes=turn_notes,
-                stop_reason=stop_reason,
+        wrapup_text = await _generate_stop_wrapup(
+            model_client=model_client,
+            system_prompt=system_prompt,
+            user_message=user_message,
+            turn_notes=turn_notes,
+            stop_reason=stop_reason,
+            steps=step_index,
+            budget=budget if budget_kind is not None else None,
+            tool_calls=tool_calls,
+            input_tokens=stream_usage_in,
+        )
+        # The budget footer is deterministic so the final message always
+        # states the budget and the consumed amount, even when the model
+        # authored the conclusion (Issue #595).
+        if budget_kind is not None:
+            wrapup_text += _budget_footer(
+                budget,
                 steps=step_index,
-            ),
+                tool_calls=tool_calls,
+                input_tokens=stream_usage_in,
+            )
+        yield _sse_event("token", {
+            "delta": wrapup_text,
         }, session_id=session_id, message_id=message_id)
 
     # ---- Token extraction -------------------------------------------------
     # After the stream is exhausted, attempt to collect usage metadata.
     # Approach (defensive):
-    #   1. Try the cached _final_result on the ResponseStream (avoids
+    #   1. Seed the totals from the usage accumulated during the stream so a
+    #      missing final response never loses the per-turn numbers (Issue #595).
+    #   2. Try the cached _final_result on the ResponseStream (avoids
     #      re-awaiting consumed coroutines on wrapped/inner streams).
-    #   2. If unavailable, fall back to get_final_response().
-    #   3. If all else fails, skip token extraction gracefully.
+    #   3. If unavailable, fall back to get_final_response().
+    #   4. If all else fails, keep the streamed totals.
     if token_counts is not None:
+        token_counts["in"] = stream_usage_in
+        token_counts["out"] = stream_usage_out
+        token_counts["cache_hit"] = stream_cache_hit
+        token_counts["tool_calls"] = tool_calls
+        token_counts["budget"] = budget.to_dict()
+        token_counts["budget_exceeded"] = budget_exceeded
+        token_counts["budget_kind"] = budget_kind
+        token_counts["budget_enforced"] = (
+            budget.max_input_tokens <= 0 or usage_seen
+        )
+
         final = getattr(response_stream, "_final_result", None)
         if final is None:
             try:
@@ -4230,20 +4516,9 @@ async def _run_agent_stream(
                 session_id, type(final).__name__, usage,
             )
             if usage and isinstance(usage, dict):
-                token_counts["in"] = usage.get("input_token_count", 0) or 0
-                token_counts["out"] = usage.get("output_token_count", 0) or 0
-                # MAF 1.19.0+: primary key is cache_read_input_token_count
-                cache_hit = usage.get("cache_read_input_token_count", 0) or 0
-                if cache_hit == 0:
-                    cache_hit = usage.get("prompt/cached_tokens", 0) or 0
-                if cache_hit == 0:
-                    cache_hit = usage.get("cache_read_input_tokens", 0) or 0
-                if cache_hit == 0:
-                    details = usage.get("prompt_tokens_details", {})
-                    if isinstance(details, dict):
-                        cache_hit = details.get("cached_tokens", 0) or 0
-                if cache_hit == 0:
-                    cache_hit = usage.get("cached_tokens", 0) or 0
+                in_tokens, out_tokens, cache_hit = _usage_token_fields(usage)
+                token_counts["in"] = in_tokens
+                token_counts["out"] = out_tokens
                 token_counts["cache_hit"] = cache_hit
 
         # Hand off timing/metrics to the caller via token_counts["metrics"].
@@ -4258,6 +4533,11 @@ async def _run_agent_stream(
                 system_prompt_tokens=_estimate_tokens(system_prompt or ""),
                 tool_definition_tokens=_estimate_tool_definitions(tools),
                 tokens_in=token_counts.get("in", 0) or 0,
+                tool_calls=tool_calls,
+                budget=token_counts.get("budget"),
+                budget_exceeded=budget_exceeded,
+                budget_kind=budget_kind,
+                budget_enforced=token_counts.get("budget_enforced", True),
             )
 
 
@@ -4396,6 +4676,222 @@ def _sse_event(
     if message_id is not None and "message_id" not in payload:
         payload["message_id"] = message_id
     return {"event": event, "data": json.dumps(payload)}
+
+
+# ---------------------------------------------------------------------------
+# Run-budget helpers (Issue #595)
+# ---------------------------------------------------------------------------
+
+
+def _usage_token_fields(usage: Any) -> tuple[int, int, int]:
+    """Extract ``(input, output, cache_read)`` from MAF ``usage_details``.
+
+    Returns zeros for anything that is not a mapping so MagicMock stream
+    objects in tests (and providers without usage) never raise.  Cache-hit
+    keys mirror ``_extract_token_counts``: MAF 1.19.0+ uses
+    ``cache_read_input_token_count``; older/provider-specific payloads use
+    ``prompt/cached_tokens``, ``cache_read_input_tokens``,
+    ``prompt_tokens_details.cached_tokens`` or ``cached_tokens``.
+    """
+    if not isinstance(usage, dict):
+        return 0, 0, 0
+
+    def _as_int(value: Any) -> int:
+        try:
+            if isinstance(value, bool):
+                return 0
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    input_tokens = _as_int(usage.get("input_token_count"))
+    output_tokens = _as_int(usage.get("output_token_count"))
+    cache_hit = _as_int(usage.get("cache_read_input_token_count"))
+    if cache_hit == 0:
+        cache_hit = _as_int(usage.get("prompt/cached_tokens"))
+    if cache_hit == 0:
+        cache_hit = _as_int(usage.get("cache_read_input_tokens"))
+    if cache_hit == 0:
+        details = usage.get("prompt_tokens_details", {})
+        if isinstance(details, dict):
+            cache_hit = _as_int(details.get("cached_tokens"))
+    if cache_hit == 0:
+        cache_hit = _as_int(usage.get("cached_tokens"))
+    return input_tokens, output_tokens, cache_hit
+
+
+def _budget_warn_threshold(limit: int, warn_ratio: float) -> int:
+    """Return the consumed amount at which a budget warning is emitted."""
+    if limit <= 0:
+        return 0
+    try:
+        ratio = float(warn_ratio)
+    except (TypeError, ValueError):
+        ratio = 0.6
+    if not 0 < ratio < 1:
+        ratio = 0.6
+    return max(1, math.ceil(limit * ratio))
+
+
+def _budget_usage_counters(
+    *,
+    step_index: int,
+    tool_calls: int,
+    input_tokens: int,
+    output_tokens: int,
+    cache_hits: int,
+) -> dict:
+    """The consumed-side counters shared by budget events and final events."""
+    return {
+        "steps": step_index,
+        "tool_calls": tool_calls,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_hits": cache_hits,
+    }
+
+
+def _budget_event_payload(
+    *,
+    kind: str,
+    consumed: int,
+    limit: int,
+    step_index: int,
+    tool_calls: int,
+    input_tokens: int,
+    output_tokens: int,
+    cache_hits: int,
+    budget: RunBudget,
+) -> dict:
+    """Payload for ``budget_warning`` / ``budget_exceeded`` (Issue #595)."""
+    percent = round(consumed / limit * 100, 1) if limit > 0 else None
+    return {
+        "kind": kind,
+        "consumed": consumed,
+        "budget": limit,
+        "percent": percent,
+        "budget_config": budget.to_dict(),
+        **_budget_usage_counters(
+            step_index=step_index,
+            tool_calls=tool_calls,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_hits=cache_hits,
+        ),
+    }
+
+
+def _format_int(value: int) -> str:
+    """Format an integer with thousands separators (never raises)."""
+    try:
+        return f"{int(value):,}"
+    except (TypeError, ValueError):
+        return "0"
+
+
+def _budget_footer(
+    budget: RunBudget,
+    *,
+    steps: int,
+    tool_calls: int,
+    input_tokens: int,
+) -> str:
+    """Deterministic budget/consumed footer appended to a stop message."""
+    budget_bits = [f"{budget.max_steps} steps"]
+    if budget.max_input_tokens > 0:
+        budget_bits.append(
+            f"{_format_int(budget.max_input_tokens)} input tokens"
+        )
+    used = (
+        f"{steps} steps, {tool_calls} tool calls, "
+        f"{_format_int(input_tokens)} input tokens"
+    )
+    return (
+        "\n\n_Budget: " + " / ".join(budget_bits)
+        + f" · Used: {used}_"
+    )
+
+
+def _budget_notice(
+    budget: RunBudget,
+    *,
+    steps: int,
+    tool_calls: int,
+    input_tokens: int,
+) -> str:
+    """Standalone notice for non-streaming runs that exceeded a budget."""
+    return (
+        "\n\nI stopped because this turn reached its run budget: "
+        f"{_format_int(budget.max_input_tokens)} input tokens "
+        f"(used {_format_int(input_tokens)})."
+        + _budget_footer(
+            budget,
+            steps=steps,
+            tool_calls=tool_calls,
+            input_tokens=input_tokens,
+        )
+    )
+
+
+def _count_result_tool_calls(result: Any) -> int:
+    """Count individual tool executions in a non-streaming MAF result."""
+    total = 0
+    try:
+        messages = getattr(result, "messages", None) or []
+        for message in messages:
+            for content in getattr(message, "contents", None) or []:
+                if getattr(content, "type", None) in (
+                    "function_call", "tool_call",
+                ):
+                    total += 1
+    except Exception:
+        logger.debug("Could not count tool calls from result", exc_info=True)
+    return total
+
+
+def _build_message_complete_payload(
+    *,
+    session_id: str,
+    message_id: str,
+    token_info: dict,
+    cfg: Any,
+) -> dict:
+    """Build the ``message_complete`` payload including Issue #595 telemetry.
+
+    Pure helper so the payload shape is unit-testable without a DB/session.
+    """
+    tokens_in = token_info.get("in", 0) or 0
+    tokens_out = token_info.get("out", 0) or 0
+    metrics = token_info.get("metrics") or {}
+    budget = token_info.get("budget") or (
+        cfg.run_budget.to_dict()
+        if getattr(cfg, "run_budget", None) is not None
+        else None
+    )
+    return {
+        "session_id": session_id,
+        "message_id": message_id,
+        "total_tokens": tokens_in + tokens_out,
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        # Issue #595 — per-turn telemetry (proposal #4) under the requested
+        # names, alongside the historical tokens_in/tokens_out keys.
+        "input_tokens": tokens_in,
+        "output_tokens": tokens_out,
+        "cache_hits": token_info.get("cache_hit", 0) or 0,
+        "steps": metrics.get("steps", 0) or 0,
+        "tool_calls": metrics.get(
+            "tool_calls", token_info.get("tool_calls", 0) or 0
+        ) or 0,
+        "budget_exceeded": bool(
+            token_info.get("budget_exceeded")
+            or metrics.get("budget_exceeded")
+        ),
+        "budget": budget,
+        "model_id": cfg.model.id if cfg else "unknown",
+        "model_name": cfg.model.name if cfg else None,
+        "model_provider": cfg.model.provider if cfg else None,
+    }
 
 
 def _maybe_accumulate_text(event_dict: dict, current: str) -> str:
@@ -4575,14 +5071,30 @@ def _tool_call_key(name: str, args: Any) -> str:
     return f"{name}\x00{args_norm}"
 
 
-def _termination_message(stop_reason: str, steps: int) -> str:
+def _termination_message(
+    stop_reason: str,
+    steps: int,
+    *,
+    budget: RunBudget | None = None,
+    tool_calls: int = 0,
+    input_tokens: int = 0,
+) -> str:
     """Synthesize the final assistant text when the loop stops early
-    (Issue #579).  Keeps the turn from ending on an empty/truncated bubble."""
+    (Issue #579 / #595).  Keeps the turn from ending on an empty bubble and
+    states the budget/consumed amount for budget stops."""
     if stop_reason == "loop":
         return (
             "\n\nI stopped because I noticed I was repeating the same tool call "
             "without making progress. Please give me more direction, or rephrase "
             "the request, and I'll continue."
+        )
+    if stop_reason == "input_budget" and budget is not None:
+        return (
+            f"\n\nI stopped after reaching the "
+            f"{_format_int(budget.max_input_tokens)}-input-token budget for "
+            f"this turn (used {_format_int(input_tokens)} input tokens across "
+            f"{steps} tool steps and {tool_calls} tool calls). "
+            "Send another message if you'd like me to continue."
         )
     return (
         f"\n\nI stopped after {steps} tool steps to avoid running away. "
@@ -4598,6 +5110,9 @@ async def _generate_stop_wrapup(
     turn_notes: list[str],
     stop_reason: str,
     steps: int,
+    budget: RunBudget | None = None,
+    tool_calls: int = 0,
+    input_tokens: int = 0,
 ) -> str:
     """Issue #579 — model-authored conclusion when the loop stops early.
 
@@ -4605,14 +5120,34 @@ async def _generate_stop_wrapup(
     ends with a coherent summary instead of an abrupt cut.  Returns text that
     begins with a blank-line separator, or the canned ``_termination_message``
     fallback when the model call fails or returns nothing.
+
+    Issue #595 — for a budget stop the reason includes the budget and the
+    consumed amount, and the caller appends a deterministic footer so those
+    numbers always reach the final message.
     """
     from agent_framework import Message as _MafMessage
 
     if stop_reason == "loop":
         reason = "because it was repeating the same tool call without progress"
         nudge = "Point out that progress stalled and suggest how to proceed differently."
+    elif stop_reason == "input_budget" and budget is not None:
+        reason = (
+            "because it reached this turn's "
+            f"{_format_int(budget.max_input_tokens)}-input-token budget "
+            f"(used {_format_int(input_tokens)} input tokens across "
+            f"{steps} steps and {tool_calls} tool calls)"
+        )
+        nudge = (
+            "Summarise what was accomplished, state the budget that was "
+            "reached, and state the single next step to continue."
+        )
     else:
-        reason = f"after reaching the {steps}-step tool budget for this turn"
+        reason = (
+            f"after reaching the {steps}-step tool budget for this turn "
+            f"({tool_calls} tool calls, {_format_int(input_tokens)} input tokens used)"
+            if budget is not None
+            else f"after reaching the {steps}-step tool budget for this turn"
+        )
         nudge = "Summarise what was accomplished and state the single next step to continue."
 
     notes = "\n".join(f"- {n}" for n in turn_notes[-20:]) or "(no tool calls recorded)"
@@ -4642,7 +5177,13 @@ async def _generate_stop_wrapup(
             "Stop wrap-up model call failed; using canned fallback", exc_info=True
         )
 
-    return _termination_message(stop_reason, steps)
+    return _termination_message(
+        stop_reason,
+        steps,
+        budget=budget,
+        tool_calls=tool_calls,
+        input_tokens=input_tokens,
+    )
 
 
 def _estimate_tool_definitions(tools: list | None) -> int:
@@ -4675,13 +5216,20 @@ def _compute_turn_metrics(
     system_prompt_tokens: int,
     tool_definition_tokens: int,
     tokens_in: int,
+    tool_calls: int = 0,
+    budget: dict | None = None,
+    budget_exceeded: bool = False,
+    budget_kind: str | None = None,
+    budget_enforced: bool = True,
 ) -> dict:
     """Compute per-turn timing and context-breakdown metrics.
 
     Returns a dict with keys:
         ``llm_ms``, ``tool_ms``, ``ttft_ms``, ``steps``,
         ``cache_hit_tokens``, ``system_prompt_tokens``,
-        ``tool_definition_tokens``, ``messages_tokens``.
+        ``tool_definition_tokens``, ``messages_tokens``, plus the Issue #595
+        telemetry keys ``tool_calls``, ``budget``, ``budget_exceeded``,
+        ``budget_kind`` and ``budget_enforced``.
 
     ``ttft_ms`` measures from the start of the turn to the first streamed
     **text** delta, not to the first model token.  It therefore includes any
@@ -4695,6 +5243,15 @@ def _compute_turn_metrics(
     llm_ms = max(0, turn_wall_ms - tool_ms)
     # Time to first *text*: tool time before the first visible delta counts.
     ttft_ms = None if first_token_at_s is None else int(round((first_token_at_s - turn_start_s) * 1000))
+    budget_meta = {
+        # Issue #595 — per-turn tool/token telemetry persisted with the
+        # message so it is available without exporting the session.
+        "tool_calls": tool_calls,
+        "budget": budget,
+        "budget_exceeded": budget_exceeded,
+        "budget_kind": budget_kind,
+        "budget_enforced": budget_enforced,
+    }
 
     if tokens_in == 0:
         return {
@@ -4706,6 +5263,7 @@ def _compute_turn_metrics(
             "system_prompt_tokens": None,
             "tool_definition_tokens": None,
             "messages_tokens": None,
+            **budget_meta,
         }
 
     messages_tokens = max(0, tokens_in - system_prompt_tokens - tool_definition_tokens)
@@ -4718,6 +5276,7 @@ def _compute_turn_metrics(
         "system_prompt_tokens": system_prompt_tokens,
         "tool_definition_tokens": tool_definition_tokens,
         "messages_tokens": messages_tokens,
+        **budget_meta,
     }
 
 

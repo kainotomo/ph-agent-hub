@@ -82,7 +82,7 @@ class Skill(Base):
     )
     agent_config: Mapped[dict | None] = mapped_column(
         JSON, nullable=True,
-        comment="Agent overrides: {max_turns, model}",
+        comment="Agent overrides: {max_turns, max_steps, max_input_tokens, model}",
     )
 
     created_at: Mapped[datetime] = mapped_column(

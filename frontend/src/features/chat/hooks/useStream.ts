@@ -94,11 +94,49 @@ export interface MessageCompleteEvent {
     model_provider?: string;
     tokens_in?: number;
     tokens_out?: number;
+    /** Issue #595 — per-turn telemetry. */
+    input_tokens?: number;
+    output_tokens?: number;
+    cache_hits?: number;
+    steps?: number;
+    tool_calls?: number;
+    budget_exceeded?: boolean;
+    budget?: {
+      max_steps: number;
+      max_input_tokens: number;
+      warn_ratio: number;
+      max_steps_source: string;
+      max_input_tokens_source: string;
+    } | null;
     /** Workflow: final status of the overall workflow run */
     outcome?: "completed" | "paused";
     /** Workflow: list of pending request IDs when workflow is paused */
     pending_request_ids?: string[];
   };
+}
+
+/** Issue #595 — emitted at the warning threshold of a run budget. */
+export interface BudgetWarningEvent {
+  event: "budget_warning";
+  data: {
+    session_id: string;
+    message_id: string;
+    kind: "steps" | "input_tokens";
+    consumed: number;
+    budget: number;
+    percent: number | null;
+    steps: number;
+    tool_calls: number;
+    input_tokens: number;
+    output_tokens: number;
+    cache_hits: number;
+  };
+}
+
+/** Issue #595 — emitted when a run is stopped at a run budget. */
+export interface BudgetExceededEvent {
+  event: "budget_exceeded";
+  data: BudgetWarningEvent["data"];
 }
 
 export interface ReasoningTokenEvent {
@@ -260,6 +298,8 @@ export type StreamEvent =
   | MemoryUpdatedEvent
   | StepCompleteEvent
   | MessageCompleteEvent
+  | BudgetWarningEvent
+  | BudgetExceededEvent
   | ReasoningTokenEvent
   | FollowUpQuestionsEvent
   | SummarizedEvent

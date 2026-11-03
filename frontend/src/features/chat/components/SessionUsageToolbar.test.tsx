@@ -47,6 +47,8 @@ const mockSessionId = "test-session-123";
 const mockUsageData = {
   turns: 2,
   steps: 39,
+  tool_calls: 51,
+  budget_exceeded_turns: 0,
   tokens_in: 1200,
   tokens_out: 800,
   tokens_total: 1798557,

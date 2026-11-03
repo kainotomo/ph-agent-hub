@@ -6,6 +6,8 @@ import { SessionStatsButton } from "./SessionStatsButton";
 const fullUsage = {
   turns: 42,
   steps: 17,
+  tool_calls: 23,
+  budget_exceeded_turns: 1,
   tokens_in: 12000,
   tokens_out: 8500,
   tokens_total: 20500,
@@ -49,6 +51,10 @@ describe("SessionStatsButton", () => {
       screen.queryByText("Avg time to first token (TTFT)"),
     ).not.toBeInTheDocument();
     expect(screen.getByText("Tokens per second (TPS)")).toBeInTheDocument();
+    // Issue #595 — steps vs. individual tool executions and budget stops.
+    expect(screen.getByText("Steps / tool calls")).toBeInTheDocument();
+    expect(screen.getByText("17 / 23")).toBeInTheDocument();
+    expect(screen.getByText("Budget-exceeded turns")).toBeInTheDocument();
 
     // Verify the formatted values
     expect(screen.getByText("3m18s")).toBeInTheDocument();

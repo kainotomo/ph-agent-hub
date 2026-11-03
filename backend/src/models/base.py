@@ -24,6 +24,7 @@ def get_chat_client(
     model: Model,
     thinking_enabled: bool = False,
     reasoning_effort: str | None = None,
+    max_steps: int | None = None,
 ) -> BaseChatClient:
     """Return the appropriate MAF ChatClient for the given Model.
 
@@ -33,6 +34,9 @@ def get_chat_client(
       - "anthropic"     → AnthropicChatClient
       - "ollama"        → OpenAIChatClient (OpenAI-compatible local API)
       - "customendpoint" → OpenAIChatCompletionClient for full endpoint URLs
+
+    *max_steps* is the effective per-run step budget (Issue #595).  When
+    omitted, the global ``AGENT_MAX_STEPS`` is used.
 
     Raises NotImplementedError for unsupported providers.
     """
@@ -57,12 +61,16 @@ def get_chat_client(
             f"Provider '{model.provider}' is not supported"
         )
 
-    _apply_function_invocation_limits(client)
+    _apply_function_invocation_limits(client, max_steps=max_steps)
     return client
 
 
-def _apply_function_invocation_limits(client: BaseChatClient) -> None:
-    """Bind MAF's tool-invocation loop to the app-wide agent step budget.
+def _apply_function_invocation_limits(
+    client: BaseChatClient,
+    *,
+    max_steps: int | None = None,
+) -> None:
+    """Bind MAF's tool-invocation loop to the app agent step budget.
 
     MAF's ``FunctionInvokingChatClient`` defaults to ``max_iterations=40``.
     Left unchecked this outlives ``AGENT_MAX_STEPS``: the underlying run keeps
@@ -75,6 +83,10 @@ def _apply_function_invocation_limits(client: BaseChatClient) -> None:
     authoritative.  The ``+1`` covers MAF's extra final wrap-up round-trip,
     since MAF counts model round-trips while our step counter counts tool-result
     rounds.
+
+    Issue #595 — ``max_steps`` is the effective per-skill/template budget; it
+    replaces the global value when provided so MAF can never cut a run short
+    of (or outlive) the app guard.
     """
     config = getattr(client, "function_invocation_configuration", None)
     if not isinstance(config, dict):
@@ -85,11 +97,20 @@ def _apply_function_invocation_limits(client: BaseChatClient) -> None:
         return
 
     try:
-        config["max_iterations"] = settings.AGENT_MAX_STEPS + 1
+        try:
+            effective_max_steps = (
+                int(max_steps)
+                if max_steps is not None and int(max_steps) > 0
+                else settings.AGENT_MAX_STEPS
+            )
+        except (TypeError, ValueError):
+            # A malformed budget must never leave the MAF loop unbounded.
+            effective_max_steps = settings.AGENT_MAX_STEPS
+        config["max_iterations"] = effective_max_steps + 1
         config["max_consecutive_errors_per_request"] = (
             settings.AGENT_MAX_CONSECUTIVE_ERRORS_PER_REQUEST
         )
-    except (TypeError, KeyError):
+    except (TypeError, KeyError, ValueError):
         logger.warning(
             "Could not bind function-invocation limits on client %s",
             type(client).__name__,

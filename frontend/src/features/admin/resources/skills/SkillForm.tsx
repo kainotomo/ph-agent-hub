@@ -9,6 +9,7 @@ import {
   Modal,
   Form,
   Input,
+  InputNumber,
   Select,
   Switch,
   message,
@@ -97,7 +98,9 @@ export function SkillForm({ open, skill, duplicateFrom, onClose }: SkillFormProp
           goal: duplicateFrom.goal,
           constraints: duplicateFrom.constraints,
           success_criteria: duplicateFrom.success_criteria,
-          agent_config: duplicateFrom.agent_config ? { max_turns: duplicateFrom.agent_config.max_turns } : undefined,
+          agent_config: duplicateFrom.agent_config
+            ? { ...duplicateFrom.agent_config }
+            : undefined,
         });
       } else if (skill) {
         form.setFieldsValue({
@@ -118,7 +121,9 @@ export function SkillForm({ open, skill, duplicateFrom, onClose }: SkillFormProp
           goal: skill.goal,
           constraints: skill.constraints,
           success_criteria: skill.success_criteria,
-          agent_config: skill.agent_config ? { max_turns: skill.agent_config.max_turns } : undefined,
+          agent_config: skill.agent_config
+            ? { ...skill.agent_config }
+            : undefined,
         });
       } else {
         form.resetFields();
@@ -315,6 +320,24 @@ export function SkillForm({ open, skill, duplicateFrom, onClose }: SkillFormProp
             </Form.Item>
           </>
         )}
+
+        {/* Issue #595 — per-run budgets. They apply to every execution type,
+            with the global AGENT_MAX_STEPS / AGENT_MAX_INPUT_TOKENS as the
+            fallback when left empty. */}
+        <Form.Item
+          name={["agent_config", "max_steps"]}
+          label="Max Steps per Turn"
+          extra="Tool-call rounds before the turn stops (empty = global default 50; max 500)"
+        >
+          <InputNumber min={1} max={500} precision={0} placeholder="50" style={{ width: "100%" }} />
+        </Form.Item>
+        <Form.Item
+          name={["agent_config", "max_input_tokens"]}
+          label="Max Input Tokens per Turn"
+          extra="Cumulative provider-reported input tokens per turn (empty = global default; 0 = unlimited)"
+        >
+          <InputNumber min={0} precision={0} placeholder="unlimited" style={{ width: "100%" }} />
+        </Form.Item>
 
         <Form.Item name="default_model_id" label="Default Model">
           <Select

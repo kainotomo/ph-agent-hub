@@ -265,7 +265,12 @@ export function getSessionContext(
 
 export interface SessionUsageData {
   turns: number;
+  /** Model round-trips that executed at least one tool (parallel batch = 1). */
   steps: number;
+  /** Issue #595 — individual tool executions (a parallel batch counts as several). */
+  tool_calls: number;
+  /** Issue #595 — turns that stopped at a step/input-token budget. */
+  budget_exceeded_turns: number;
   tokens_in: number;
   tokens_out: number;
   tokens_total: number;

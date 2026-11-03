@@ -88,6 +88,17 @@ export const SessionStatsButton = React.memo(function SessionStatsButton({
               : "\u2014"}
           </Text>
         </div>
+        {/* Issue #595 — tool executions vs. model rounds, and budget stops. */}
+        <div style={{ display: "flex", justifyContent: "space-between" }}>
+          <Text style={{ fontSize: 12 }}>Steps / tool calls</Text>
+          <Text style={{ fontSize: 12 }}>
+            {usage!.steps} / {usage!.tool_calls}
+          </Text>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between" }}>
+          <Text style={{ fontSize: 12 }}>Budget-exceeded turns</Text>
+          <Text style={{ fontSize: 12 }}>{usage!.budget_exceeded_turns}</Text>
+        </div>
       </div>
     </div>
   );

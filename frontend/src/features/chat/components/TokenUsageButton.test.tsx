@@ -6,6 +6,8 @@ import { TokenUsageButton } from "./TokenUsageButton";
 const baseUsage = {
   turns: 10,
   steps: 42,
+  tool_calls: 57,
+  budget_exceeded_turns: 0,
   tokens_in: 1755349,
   tokens_out: 36808,
   tokens_total: 1798557,

@@ -280,3 +280,82 @@ class TestSkillsBatchTools:
         data = resp.json()
         assert len(data["items"]) == 1
         assert data["items"][0]["tool_ids"] == []
+
+
+# ---------------------------------------------------------------------------
+# Run budgets (Issue #595)
+# ---------------------------------------------------------------------------
+
+
+class TestSkillRunBudgets:
+    """`agent_config.max_steps` / `max_input_tokens` round-trip and validation."""
+
+    async def test_create_with_budget_round_trips(
+        self, async_client, auth_headers, test_user
+    ):
+        headers = auth_headers(test_user)
+        resp = await async_client.post(
+            "/api/skills",
+            json={
+                "title": f"Budgeted Skill {uuid.uuid4().hex[:6]}",
+                "execution_type": "prompt_based",
+                "agent_config": {
+                    "max_steps": 70,
+                    "max_input_tokens": 12_000_000,
+                    "max_turns": 8,
+                },
+            },
+            headers=headers,
+        )
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["agent_config"] == {
+            "max_steps": 70,
+            "max_input_tokens": 12_000_000,
+            "max_turns": 8,
+        }
+
+        updated = await async_client.put(
+            f"/api/skills/{body['id']}",
+            json={"agent_config": {"max_steps": 40}},
+            headers=headers,
+        )
+        assert updated.status_code == 200, updated.text
+        assert updated.json()["agent_config"] == {"max_steps": 40}
+
+    async def test_invalid_budget_rejected(
+        self, async_client, auth_headers, test_user
+    ):
+        headers = auth_headers(test_user)
+        resp = await async_client.post(
+            "/api/skills",
+            json={
+                "title": f"Bad Budgeted Skill {uuid.uuid4().hex[:6]}",
+                "execution_type": "prompt_based",
+                "agent_config": {"max_steps": 0},
+            },
+            headers=headers,
+        )
+        assert resp.status_code == 422, resp.text
+
+    async def test_string_budget_values_normalised(
+        self, async_client, auth_headers, test_user
+    ):
+        headers = auth_headers(test_user)
+        resp = await async_client.post(
+            "/api/skills",
+            json={
+                "title": f"String Budget {uuid.uuid4().hex[:6]}",
+                "execution_type": "prompt_based",
+                "agent_config": {
+                    "max_steps": "70",
+                    "max_input_tokens": "12000000",
+                },
+            },
+            headers=headers,
+        )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["agent_config"] == {
+            "max_steps": 70,
+            "max_input_tokens": 12_000_000,
+        }

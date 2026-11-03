@@ -115,7 +115,24 @@ class Settings(BaseSettings):
     is authoritative (Issue #579).  This is the *last-resort* backstop:
     ``AGENT_LOOP_DETECTION_ENABLED`` catches genuine repeat loops much earlier,
     and on early stop the agent is asked for a short tool-less wrap-up so the
-    turn still finishes cleanly."""
+    turn still finishes cleanly.  Per-skill/template ``max_steps`` in
+    ``agent_config`` overrides this value (Issue #595)."""
+
+    AGENT_MAX_INPUT_TOKENS: int = 0
+    """Global fallback for the per-skill/template ``max_input_tokens`` budget:
+    the maximum cumulative input tokens (as reported by the provider) for one
+    agent invocation.  ``0`` disables the token budget.  Per-skill/template
+    configuration overrides this (Issue #595)."""
+
+    AGENT_BUDGET_WARN_RATIO: float = 0.6
+    """Fraction of a run budget at which the agent loop emits a
+    ``budget_warning`` stream event (0 < ratio < 1).  Default 0.6 = 60%
+    (Issue #595)."""
+
+    AGENT_MAX_STEPS_CEILING: int = 500
+    """Upper bound accepted for a per-skill/template ``max_steps`` override.
+    The global ``AGENT_MAX_STEPS`` is not clamped by this; it only bounds
+    admin-supplied per-skill/template values (Issue #595)."""
 
     AGENT_MAX_CONSECUTIVE_ERRORS_PER_REQUEST: int = 3
     """MAF function-invocation: consecutive tool errors before the request is

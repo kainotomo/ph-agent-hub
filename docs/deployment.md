@@ -190,7 +190,10 @@ Key variables:
 | `AUTOPILOT_MAX_TOKENS` | Max cumulative tokens for autopilot; `0` = unlimited (default: `0`) |
 | `MAX_CONCURRENT_BACKGROUND_TASKS_PER_USER` | Max concurrent background tasks per user (default: `3`) |
 | `BACKGROUND_TASK_TIMEOUT_SECONDS` | Max wall-clock time for a background task in seconds (default: `3600`) |
-| `AGENT_MAX_STEPS` | Max tool-call rounds before the agent loop terminates; a parallel batch counts as one round (default: `50`). MAF's own tool loop is aligned to this + 1 (Issue #579) |
+| `AGENT_MAX_STEPS` | Max tool-call rounds before the agent loop terminates; a parallel batch counts as one round (default: `50`). This is the fallback for per-skill/template `agent_config.max_steps` budgets — a skill or template `agent_config.max_steps` overrides it (Issue #595). MAF's own tool loop is aligned to this + 1 (Issue #579) |
+| `AGENT_MAX_INPUT_TOKENS` | Global fallback for per-skill/template `max_input_tokens`; cumulative provider-reported input tokens per agent invocation; `0` = unlimited (default: `0`) |
+| `AGENT_BUDGET_WARN_RATIO` | Fraction of a run budget at which a `budget_warning` stream event is emitted (default: `0.6`) |
+| `AGENT_MAX_STEPS_CEILING` | Upper bound accepted for a per-skill/template `max_steps` (default: `500`) |
 | `AGENT_MAX_CONSECUTIVE_ERRORS_PER_REQUEST` | MAF function-invocation: consecutive tool errors before the request aborts (default: `3`) |
 | `AGENT_LOOP_DETECTION_ENABLED` | Terminate a turn early when the same tool call repeats (default: `True`) |
 | `AGENT_LOOP_REPEAT_THRESHOLD` | Consecutive identical tool calls that trigger loop detection (default: `4`) |

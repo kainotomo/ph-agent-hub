@@ -779,7 +779,16 @@ Both types share:
 
 **Tenant skills** (created in Admin Area, `visibility=tenant`) are available to all users in the tenant. **Personal skills** (created by users in the chat area) are owned by the creating user.
 
-### 11.3 MAF Target Keys
+### 11.3 Run budgets
+
+Each skill (Admin → Skills) and template (Admin → Templates) can set per-run budgets for the agent turn via the `agent_config` JSON:
+
+- **Max Steps per Turn** (`agent_config.max_steps`): integer 1..500, default `50`.
+- **Max Input Tokens per Turn** (`agent_config.max_input_tokens`): integer >= 0, default `0` (0 = unlimited).
+
+Defaults are `50` steps and unlimited input tokens. Precedence per dimension is skill → template → global setting: `AGENT_MAX_STEPS` is the global fallback for `max_steps`, and `AGENT_MAX_INPUT_TOKENS` for `max_input_tokens`. At 60% of a run budget the agent emits a `budget_warning` stream event; at 100% it stops, tells the user the budget and the amount consumed, makes one tool-less wrap-up call, and appends a deterministic budget footer to the final text.
+
+### 11.4 MAF Target Keys
 
 The `maf_target_key` is only required for **Workflow Based** skills. It must match a registered workflow module in the backend codebase (`src/agents/workflows/`). If the key doesn't match any registered target, the backend logs a warning on startup but does not crash.
 

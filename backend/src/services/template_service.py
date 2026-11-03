@@ -5,6 +5,8 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..agents.budget import normalize_agent_budget_config
+from ..core.config import settings
 from ..core.exceptions import NotFoundError
 from ..db.orm.templates import Template
 from ..db.orm.users import User
@@ -84,8 +86,13 @@ async def create_template(
     scope: str,
     description: str | None = None,
     assigned_user_id: str | None = None,
+    agent_config: dict | None = None,
 ) -> Template:
     """Create a new template."""
+    agent_config = normalize_agent_budget_config(
+        agent_config,
+        step_ceiling=getattr(settings, "AGENT_MAX_STEPS_CEILING", 500),
+    )
     template = Template(
         tenant_id=tenant_id,
         title=title,
@@ -93,6 +100,7 @@ async def create_template(
         system_prompt=system_prompt,
         scope=scope,
         assigned_user_id=assigned_user_id,
+        agent_config=agent_config,
     )
     db.add(template)
     await db.commit()
@@ -112,6 +120,13 @@ async def update_template(
     template = await get_template_by_id(db, template_id)
     if template is None:
         raise NotFoundError("Template not found")
+
+    # Normalise agent_config before applying scalar fields
+    if "agent_config" in fields and fields["agent_config"] is not None:
+        fields["agent_config"] = normalize_agent_budget_config(
+            fields["agent_config"],
+            step_ceiling=getattr(settings, "AGENT_MAX_STEPS_CEILING", 500),
+        )
 
     # Update scalar fields
     for key, value in fields.items():

@@ -5,7 +5,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import String, Text, DateTime, Enum, ForeignKey, func
+from sqlalchemy import String, Text, DateTime, Enum, ForeignKey, func, JSON
 from sqlalchemy.dialects.mysql import CHAR
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -26,6 +26,10 @@ class Template(Base):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_config: Mapped[dict | None] = mapped_column(
+        JSON, nullable=True,
+        comment="Agent overrides: {max_steps, max_input_tokens}",
+    )
     scope: Mapped[str] = mapped_column(
         Enum("tenant", "role", "user", name="template_scope_enum"), nullable=False
     )

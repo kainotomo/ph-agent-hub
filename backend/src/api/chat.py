@@ -3534,9 +3534,15 @@ class SessionUsageResponse(BaseModel):
 
     ``avg_ttft_ms`` is the mean time from turn start to the first streamed
     text; it includes tool time before that text and is not model latency.
+
+    Issue #595 — ``tool_calls`` (individual tool executions; a parallel batch
+    counts as several) and ``budget_exceeded_turns`` make the per-turn budget
+    telemetry available without exporting the session.
     """
     turns: int = 0
     steps: int = 0
+    tool_calls: int = 0
+    budget_exceeded_turns: int = 0
     tokens_in: int = 0
     tokens_out: int = 0
     tokens_total: int = 0
@@ -3575,6 +3581,9 @@ async def get_session_usage(
 
     turns = 0
     steps = 0
+    # Issue #595 — per-turn budget telemetry aggregated across the session.
+    tool_calls = 0
+    budget_exceeded_turns = 0
     tokens_in = 0
     tokens_out = 0
     cached_input_tokens = 0
@@ -3609,6 +3618,11 @@ async def get_session_usage(
             s = part.get("steps")
             if s is not None:
                 steps += s
+            tc = part.get("tool_calls")
+            if tc is not None:
+                tool_calls += tc
+            if part.get("budget_exceeded"):
+                budget_exceeded_turns += 1
             ch = part.get("cache_hit_tokens")
             if ch is not None:
                 cached_input_tokens += ch
@@ -3647,6 +3661,8 @@ async def get_session_usage(
     return SessionUsageResponse(
         turns=turns,
         steps=steps,
+        tool_calls=tool_calls,
+        budget_exceeded_turns=budget_exceeded_turns,
         tokens_in=tokens_in,
         tokens_out=tokens_out,
         tokens_total=tokens_total,

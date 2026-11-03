@@ -9,6 +9,7 @@ import {
   Modal,
   Form,
   Input,
+  InputNumber,
   Select,
   message,
 } from "antd";
@@ -62,6 +63,9 @@ export function TemplateForm({ open, template, duplicateFrom, onClose }: Templat
           system_prompt: duplicateFrom.system_prompt,
           scope: duplicateFrom.scope,
           assigned_user_id: duplicateFrom.assigned_user_id,
+          agent_config: duplicateFrom.agent_config
+            ? { ...duplicateFrom.agent_config }
+            : undefined,
         });
       } else if (template) {
         form.setFieldsValue({
@@ -71,6 +75,9 @@ export function TemplateForm({ open, template, duplicateFrom, onClose }: Templat
           system_prompt: template.system_prompt,
           scope: template.scope,
           assigned_user_id: template.assigned_user_id,
+          agent_config: template.agent_config
+            ? { ...template.agent_config }
+            : undefined,
         });
       } else {
         form.resetFields();
@@ -188,6 +195,22 @@ export function TemplateForm({ open, template, duplicateFrom, onClose }: Templat
             />
           </Form.Item>
         )}
+        {/* Issue #595 — optional per-run budgets for sessions using this
+            template; the global agent settings remain the fallback. */}
+        <Form.Item
+          name={["agent_config", "max_steps"]}
+          label="Max Steps per Turn"
+          extra="Tool-call rounds before the turn stops (empty = global default 50; max 500)"
+        >
+          <InputNumber min={1} max={500} precision={0} placeholder="50" style={{ width: "100%" }} />
+        </Form.Item>
+        <Form.Item
+          name={["agent_config", "max_input_tokens"]}
+          label="Max Input Tokens per Turn"
+          extra="Cumulative provider-reported input tokens per turn (empty = global default; 0 = unlimited)"
+        >
+          <InputNumber min={0} precision={0} placeholder="unlimited" style={{ width: "100%" }} />
+        </Form.Item>
       </Form>
     </Modal>
   );

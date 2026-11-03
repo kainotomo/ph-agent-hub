@@ -7,6 +7,8 @@ import re
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..agents.budget import normalize_agent_budget_config
+from ..core.config import settings
 from ..core.exceptions import NotFoundError
 from ..db.orm.skills import Skill, SkillAllowedTool
 
@@ -154,6 +156,12 @@ async def create_skill(
     if not maf_target_key:
         maf_target_key = _slugify(title)
 
+    # Issue #595 — validate/normalise per-run budget values before persisting.
+    agent_config = normalize_agent_budget_config(
+        agent_config,
+        step_ceiling=getattr(settings, "AGENT_MAX_STEPS_CEILING", 500),
+    )
+
     skill = Skill(
         tenant_id=tenant_id,
         user_id=user_id,
@@ -201,6 +209,13 @@ async def update_skill(
     skill = await get_skill_by_id(db, skill_id)
     if skill is None:
         raise NotFoundError("Skill not found")
+
+    # Issue #595 — validate/normalise per-run budget values before persisting.
+    if "agent_config" in fields and fields["agent_config"] is not None:
+        fields["agent_config"] = normalize_agent_budget_config(
+            fields["agent_config"],
+            step_ceiling=getattr(settings, "AGENT_MAX_STEPS_CEILING", 500),
+        )
 
     # Update scalar fields
     for key, value in fields.items():

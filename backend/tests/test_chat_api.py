@@ -3732,6 +3732,9 @@ class TestSessionUsage:
         data = resp.json()
         assert data["turns"] == 0
         assert data["steps"] == 0
+        # Issue #595 — per-turn budget telemetry defaults to zero.
+        assert data["tool_calls"] == 0
+        assert data["budget_exceeded_turns"] == 0
         assert data["tokens_in"] == 0
         assert data["tokens_out"] == 0
         assert data["tokens_total"] == 0
@@ -3776,6 +3779,8 @@ class TestSessionUsage:
                     "tool_ms": 60000,
                     "ttft_ms": 1200,
                     "steps": 39,
+                    "tool_calls": 51,
+                    "budget_exceeded": True,
                     "cache_hit_tokens": 1718912,
                     "system_prompt_tokens": 3000,
                     "tool_definition_tokens": 8000,
@@ -3800,6 +3805,8 @@ class TestSessionUsage:
         data = resp.json()
         assert data["turns"] == 1
         assert data["steps"] == 39
+        assert data["tool_calls"] == 51
+        assert data["budget_exceeded_turns"] == 1
         assert data["tokens_in"] == 1761749
         assert data["tokens_out"] == 36808
         assert data["tokens_total"] == 1798557

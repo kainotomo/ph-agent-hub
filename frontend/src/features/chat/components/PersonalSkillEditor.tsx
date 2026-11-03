@@ -9,6 +9,7 @@ import {
   Modal,
   Form,
   Input,
+  InputNumber,
   Select,
   Button,
   List,
@@ -57,7 +58,12 @@ interface SkillData {
   goal?: string;
   constraints?: string[];
   success_criteria?: string;
-  agent_config?: { max_turns?: number };
+  agent_config?: {
+    max_turns?: number;
+    max_steps?: number;
+    max_input_tokens?: number;
+    model?: string;
+  };
 }
 
 interface PersonalSkillEditorProps {
@@ -316,6 +322,21 @@ export function PersonalSkillEditor({
                 </Form.Item>
               </>
             )}
+            {/* Issue #595 — per-run budgets, global settings as fallback. */}
+            <Form.Item
+              name={["agent_config", "max_steps"]}
+              label="Max Steps per Turn"
+              extra="Tool-call rounds before the turn stops (empty = global default 50; max 500)"
+            >
+              <InputNumber min={1} max={500} precision={0} placeholder="50" style={{ width: "100%" }} />
+            </Form.Item>
+            <Form.Item
+              name={["agent_config", "max_input_tokens"]}
+              label="Max Input Tokens per Turn"
+              extra="Cumulative provider-reported input tokens per turn (empty = global default; 0 = unlimited)"
+            >
+              <InputNumber min={0} precision={0} placeholder="unlimited" style={{ width: "100%" }} />
+            </Form.Item>
             <Space>
               <Button onClick={() => setView("list")}>Cancel</Button>
               <Button

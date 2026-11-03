@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import select, update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.exceptions import NotFoundError
+from src.core.exceptions import NotFoundError, ValidationError
 from src.db.orm.templates import Template
 from src.db.orm.sessions import Session as SessionORM
 from src.db.orm.skills import Skill as SkillORM
@@ -229,3 +229,101 @@ class TestDeleteTemplate:
         # Verify the skill ref was nullified
         await db_session.refresh(test_skill)
         assert test_skill.template_id is None
+
+
+class TestTemplateAgentConfig:
+    """Tests for template agent_config (Issue #595)."""
+
+    pytestmark = pytest.mark.unit
+
+    async def test_create_with_agent_config(self, db_session: AsyncSession, test_tenant):
+        template = await create_template(
+            db_session,
+            tenant_id=test_tenant.id,
+            title="Agent Config",
+            system_prompt="You are a helpful assistant.",
+            scope="tenant",
+            agent_config={"max_steps": 70, "max_input_tokens": 12_000_000, "max_turns": 5},
+        )
+        assert template.agent_config == {
+            "max_steps": 70,
+            "max_input_tokens": 12_000_000,
+            "max_turns": 5,
+        }
+
+    async def test_create_normalises_string_values(self, db_session: AsyncSession, test_tenant):
+        template = await create_template(
+            db_session,
+            tenant_id=test_tenant.id,
+            title="Normalised",
+            system_prompt="Prompt",
+            scope="tenant",
+            agent_config={"max_steps": "70", "max_input_tokens": "12000000"},
+        )
+        assert template.agent_config["max_steps"] == 70
+        assert template.agent_config["max_input_tokens"] == 12_000_000
+
+    async def test_create_rejects_invalid_max_steps(self, db_session: AsyncSession, test_tenant):
+        with pytest.raises(ValidationError):
+            await create_template(
+                db_session,
+                tenant_id=test_tenant.id,
+                title="Bad max_steps 0",
+                system_prompt="Prompt",
+                scope="tenant",
+                agent_config={"max_steps": 0},
+            )
+        with pytest.raises(ValidationError):
+            await create_template(
+                db_session,
+                tenant_id=test_tenant.id,
+                title="Bad max_steps 501",
+                system_prompt="Prompt",
+                scope="tenant",
+                agent_config={"max_steps": 501},
+            )
+
+    async def test_create_rejects_invalid_max_input_tokens(self, db_session: AsyncSession, test_tenant):
+        with pytest.raises(ValidationError):
+            await create_template(
+                db_session,
+                tenant_id=test_tenant.id,
+                title="Bad max_input_tokens",
+                system_prompt="Prompt",
+                scope="tenant",
+                agent_config={"max_input_tokens": -1},
+            )
+
+    async def test_update_agent_config(self, db_session: AsyncSession, test_tenant):
+        template = await create_template(
+            db_session,
+            tenant_id=test_tenant.id,
+            title="Update Config",
+            system_prompt="Prompt",
+            scope="tenant",
+        )
+        updated = await update_template(db_session, template.id, agent_config={"max_steps": 40})
+        assert updated.agent_config == {"max_steps": 40}
+
+    async def test_update_rejects_invalid_budget(self, db_session: AsyncSession, test_tenant):
+        template = await create_template(
+            db_session,
+            tenant_id=test_tenant.id,
+            title="Bad update budget",
+            system_prompt="Prompt",
+            scope="tenant",
+        )
+        with pytest.raises(ValidationError):
+            await update_template(db_session, template.id, agent_config={"max_steps": 0})
+
+    async def test_clear_agent_config(self, db_session: AsyncSession, test_tenant):
+        template = await create_template(
+            db_session,
+            tenant_id=test_tenant.id,
+            title="Clear Config",
+            system_prompt="Prompt",
+            scope="tenant",
+            agent_config={"max_steps": 40},
+        )
+        updated = await update_template(db_session, template.id, agent_config=None)
+        assert updated.agent_config is None

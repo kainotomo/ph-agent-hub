@@ -149,6 +149,16 @@ export interface ToolTypeInfo {
   capabilities: string[];
 }
 
+export interface AgentConfigData {
+  /** Goal-based autopilot turns (Issue #448). */
+  max_turns?: number;
+  /** Per-run step budget override (Issue #595). */
+  max_steps?: number;
+  /** Per-run cumulative input-token budget override; 0 = unlimited (Issue #595). */
+  max_input_tokens?: number;
+  model?: string;
+}
+
 export interface TemplateData {
   id: string;
   tenant_id: string;
@@ -157,6 +167,7 @@ export interface TemplateData {
   system_prompt: string;
   scope: string;
   assigned_user_id: string | null;
+  agent_config?: AgentConfigData;
   created_at: string;
   updated_at: string;
 }
@@ -183,7 +194,7 @@ export interface SkillData {
   goal?: string;
   constraints?: string[];
   success_criteria?: string;
-  agent_config?: { max_turns?: number; model?: string };
+  agent_config?: AgentConfigData;
 }
 
 export interface UsageData {

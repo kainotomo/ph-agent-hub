@@ -25,6 +25,8 @@ class TemplateResponse(BaseModel):
     system_prompt: str
     scope: str
     assigned_user_id: str | None
+    # Issue #595 — per-run budget configured on the template (may be None).
+    agent_config: dict | None = None
     created_at: datetime
     updated_at: datetime
 

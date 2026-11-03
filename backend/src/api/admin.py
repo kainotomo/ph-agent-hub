@@ -2298,6 +2298,8 @@ class AdminTemplateCreate(BaseModel):
     system_prompt: str
     scope: str = "tenant"
     assigned_user_id: str | None = None
+    # Issue #595 — per-run budget: {max_steps, max_input_tokens}.
+    agent_config: dict | None = None
 
 
 class AdminTemplateUpdate(BaseModel):
@@ -2307,6 +2309,7 @@ class AdminTemplateUpdate(BaseModel):
     system_prompt: str | None = None
     scope: str | None = None
     assigned_user_id: str | None = None
+    agent_config: dict | None = None
 
 
 class AdminTemplateResponse(BaseModel):
@@ -2317,6 +2320,7 @@ class AdminTemplateResponse(BaseModel):
     system_prompt: str
     scope: str
     assigned_user_id: str | None
+    agent_config: dict | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -2379,6 +2383,7 @@ async def admin_create_template(
         system_prompt=body.system_prompt,
         scope=body.scope,
         assigned_user_id=body.assigned_user_id,
+        agent_config=body.agent_config,
     )
     resp = AdminTemplateResponse.model_validate(template)
     await write_audit_log(
@@ -2419,6 +2424,8 @@ async def admin_update_template(
         update_kwargs["scope"] = body.scope
     if body.assigned_user_id is not None:
         update_kwargs["assigned_user_id"] = body.assigned_user_id
+    if body.agent_config is not None:
+        update_kwargs["agent_config"] = body.agent_config
     if body.tenant_id is not None:
         if current_user.role == "manager" and body.tenant_id != current_user.tenant_id:
             raise ForbiddenError("Managers can only assign templates to their own tenant")

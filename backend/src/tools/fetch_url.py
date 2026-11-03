@@ -7,6 +7,7 @@
 # =============================================================================
 
 import logging
+import re
 from urllib.parse import urlparse
 
 import html2text
@@ -22,6 +23,12 @@ DEFAULT_TIMEOUT: float = 30.0
 DEFAULT_MAX_CONTENT_LENGTH: int = 500_000
 DEFAULT_USER_AGENT: str = (
     "ph-agent-hub/1.0 (fetch-url tool; +https://github.com/kainotomo/ph-agent-hub)"
+)
+DEFAULT_CONTACT_EMAIL: str = "phalouvas@gmail.com"
+# SEC fair-access policy: the User-Agent must declare a contact address and
+# must not contain a URL (SEC answers "403 Undeclared Automated Tool").
+DEFAULT_SEC_USER_AGENT: str = (
+    f"ph-agent-hub/1.0 (fetch-url tool; {DEFAULT_CONTACT_EMAIL})"
 )
 ALLOWED_SCHEMES: frozenset = frozenset({"http", "https"})
 
@@ -53,6 +60,41 @@ def _is_safe_url(url: str) -> bool:
     return True
 
 
+def _is_sec_host(url: str) -> bool:
+    """Return True for sec.gov and its subdomains."""
+    host = (urlparse(url).hostname or "").lower().rstrip(".")
+    return host == "sec.gov" or host.endswith(".sec.gov")
+
+
+def _resolve_user_agent(url: str, user_agent: str, sec_user_agent: str) -> str:
+    """Return the User-Agent to send for *url*.
+
+    Precedence for sec.gov hosts: ``sec_user_agent`` then ``user_agent``
+    then ``DEFAULT_SEC_USER_AGENT``.  Other hosts: ``user_agent`` then
+    ``DEFAULT_USER_AGENT``.
+    """
+    if _is_sec_host(url):
+        return sec_user_agent or user_agent or DEFAULT_SEC_USER_AGENT
+    return user_agent or DEFAULT_USER_AGENT
+
+
+_SEC_USER_AGENT_EMAIL = re.compile(r"[^@\s]+@[^@\s]+\.[A-Za-z]{2,}")
+_SEC_USER_AGENT_URL = re.compile(r"https?://|www\.", re.IGNORECASE)
+
+
+def _warn_if_sec_user_agent_noncompliant(user_agent: str) -> None:
+    """Log a warning when a sec.gov request risks SEC's fair-access 403."""
+    if _SEC_USER_AGENT_EMAIL.search(user_agent) and not _SEC_USER_AGENT_URL.search(
+        user_agent
+    ):
+        return
+    logger.warning(
+        "fetch_url: sec.gov requires a contact email and rejects User-Agents "
+        "containing a URL; %r may be rejected with 403",
+        user_agent,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tool factory
 # ---------------------------------------------------------------------------
@@ -63,7 +105,12 @@ def build_fetch_url_tools(tool_config: dict | None = None) -> list:
 
     Args:
         tool_config: Optional ``Tool.config`` JSON dict.  May include:
-            - ``user_agent`` (str): custom User-Agent header
+            - ``user_agent`` (str): User-Agent header for every host
+              (default: the project UA)
+            - ``sec_user_agent`` (str): User-Agent for ``*.sec.gov`` hosts.
+              Defaults to a SEC-compliant UA with a contact email.  SEC's
+              fair-access policy rejects User-Agents that contain a URL,
+              so keep this in ``Product/Version (contact@example.com)`` form.
             - ``timeout`` (float): request timeout in seconds (default 30)
             - ``max_content_length`` (int): max chars to return (default 500k)
 
@@ -72,13 +119,18 @@ def build_fetch_url_tools(tool_config: dict | None = None) -> list:
     """
     config = tool_config or {}
 
-    user_agent: str = config.get("user_agent", DEFAULT_USER_AGENT)
+    user_agent: str = str(config.get("user_agent") or "").strip()
+    sec_user_agent: str = str(config.get("sec_user_agent") or "").strip()
     timeout: float = float(config.get("timeout", DEFAULT_TIMEOUT))
     max_len: int = int(config.get("max_content_length", DEFAULT_MAX_CONTENT_LENGTH))
 
     @tool
     async def fetch_url(url: str) -> dict:
         """Fetch a web page and return its readable text content.
+
+        SEC EDGAR (sec.gov) requests declare a contact User-Agent to satisfy
+        SEC's fair-access policy.  For EDGAR filings, the ``sec_filings``
+        tools parse the documents and are usually a better choice.
 
         Args:
             url: The full URL to fetch (must start with http:// or https://).
@@ -101,11 +153,15 @@ def build_fetch_url_tools(tool_config: dict | None = None) -> list:
 
         logger.info("fetch_url: %s", url)
 
+        request_user_agent = _resolve_user_agent(url, user_agent, sec_user_agent)
+        if _is_sec_host(url):
+            _warn_if_sec_user_agent_noncompliant(request_user_agent)
+
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.get(
                     url,
-                    headers={"User-Agent": user_agent},
+                    headers={"User-Agent": request_user_agent},
                     follow_redirects=True,
                 )
         except httpx.TimeoutException:

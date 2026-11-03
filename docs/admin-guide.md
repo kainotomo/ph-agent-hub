@@ -347,7 +347,7 @@ Tools extend agent capabilities — they can call external APIs, query ERPNext i
 | **email** | Communication | Send, read, search, and manage emails. Supports SMTP/SendGrid (tenant-level) and per-user connected accounts (IMAP, Gmail API, Microsoft Graph). Users connect their own accounts via Account Settings. | `provider`, `smtp_host`, `smtp_port`, `smtp_username`, `smtp_password`, `api_key`, `from_email`, `from_name`, `allowed_recipients` |
 | **erpnext** | Enterprise | ERPNext full CRUD, file upload, doctype metadata. Supports tenant-level config (admin) **and** per-user connected accounts (users connect their own ERPNext site via Account Settings). | `base_url`, `api_key`, `api_secret` (tenant-level) OR per-user credentials via Account Settings |
 | **etf_data** | Financial | ETF holdings and profiles (yfinance) | None |
-| **fetch_url** | Web | HTTP GET fetching with HTML→text conversion | `timeout`, `user_agent` |
+| **fetch_url** | Web | HTTP GET fetching with HTML→text conversion | `timeout`, `user_agent`, `sec_user_agent` |
 | **github** | DevOps | GitHub/GitLab — search code, list issues/PRs, read files, create issues/PRs, comment on issues/PRs, create/update files, merge PRs, and set issue labels. Supports tenant-level PAT (admin) **and** per-user connected accounts (users connect their own GitHub PAT via Account Settings). | `provider`, `token`, `api_base`, `allowed_repos` (tenant-level) OR per-user PAT via Account Settings |
 | **image_generation** | Creative | DALL·E 3 / Stable Diffusion — text prompt → image (stored in MinIO/S3) | `provider`, `api_key`, `model`, `default_size`, `default_quality` |
 | **market_overview** | Financial | Global index quotes, market movers (yfinance) | None |
@@ -364,6 +364,16 @@ Tools extend agent capabilities — they can call external APIs, query ERPNext i
 | **weather** | Utility | Weather via wttr.in | None |
 | **web_search** | Web | SearXNG-backed web search | `searxng_url` |
 | **wikipedia** | Knowledge | Article lookup and summary | `language` |
+
+> **SEC fair-access User-Agent.** SEC returns `403 Undeclared Automated Tool`
+> when a request's User-Agent has no contact address, and it also rejects
+> User-Agents that contain a URL. `fetch_url` therefore sends
+> `ph-agent-hub/1.0 (fetch-url tool; phalouvas@gmail.com)` to `*.sec.gov`
+> by default. Override it per tool with `sec_user_agent` (SEC hosts only) or
+> `user_agent` (all hosts), keeping the `Product/Version (contact@example.com)`
+> form — for example `{"sec_user_agent": "MyTool/1.0 (me@example.com)"}`. For
+> EDGAR filings prefer the `sec_filings` tools, which parse the filing rather
+> than the index page.
 
 ### 7.2 Add a Tool
 

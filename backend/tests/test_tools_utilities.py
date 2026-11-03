@@ -947,6 +947,151 @@ class TestFetchUrlTool:
 
 
 # ===================================================================
+# 7b. fetch_url SEC User-Agent regression tests (Issue #594)
+# ===================================================================
+SEC_INDEX_URL = (
+    "https://www.sec.gov/Archives/edgar/data/726728/000072672826000056/"
+    "0000726728-26-000056-index.html"
+)
+
+
+class TestFetchUrlSecUserAgent:
+    """Tests for the SEC fair-access User-Agent selection (Issue #594).
+
+    SEC returns 403 for User-Agents that contain a URL or lack a contact
+    email, so ``*.sec.gov`` requests use a conforming default while every
+    other host keeps the legacy User-Agent.
+    """
+
+    @staticmethod
+    def _build(config=None):
+        mod = __import__("src.tools.fetch_url", fromlist=["build_fetch_url_tools"])
+        return mod.build_fetch_url_tools(config)[0]
+
+    @staticmethod
+    def _mock_client():
+        mock_resp = _make_mock_httpx_response(
+            status_code=200,
+            json_data={},
+            text="ok",
+            headers={"content-type": "text/plain"},
+        )
+        return _make_mock_httpx_client(mock_resp)
+
+    @staticmethod
+    def _sent_user_agent(mock_client) -> str:
+        headers = mock_client.get.call_args.kwargs.get("headers", {})
+        return headers.get("User-Agent", "")
+
+    async def test_sec_url_sends_contact_user_agent(self):
+        mod = __import__("src.tools.fetch_url", fromlist=["build_fetch_url_tools"])
+        (tool,) = mod.build_fetch_url_tools()
+        mock_client = self._mock_client()
+
+        with patch("src.tools.fetch_url.httpx.AsyncClient", return_value=mock_client):
+            result = await tool(url=SEC_INDEX_URL)
+
+        sent = self._sent_user_agent(mock_client)
+        assert sent == mod.DEFAULT_SEC_USER_AGENT
+        assert "@" in sent
+        assert "http" not in sent.lower()
+        assert result["status_code"] == 200
+
+    async def test_non_sec_url_keeps_legacy_user_agent(self):
+        mod = __import__("src.tools.fetch_url", fromlist=["build_fetch_url_tools"])
+        (tool,) = mod.build_fetch_url_tools()
+        mock_client = self._mock_client()
+
+        with patch("src.tools.fetch_url.httpx.AsyncClient", return_value=mock_client):
+            await tool(url="https://example.com/page")
+
+        assert self._sent_user_agent(mock_client) == mod.DEFAULT_USER_AGENT
+
+    async def test_sec_user_agent_config_override(self):
+        mock_client = self._mock_client()
+        tool = self._build({"sec_user_agent": "MyBot/1.0 (ops@example.com)"})
+
+        with patch("src.tools.fetch_url.httpx.AsyncClient", return_value=mock_client):
+            await tool(url=SEC_INDEX_URL)
+
+        assert self._sent_user_agent(mock_client) == "MyBot/1.0 (ops@example.com)"
+
+    async def test_user_agent_config_applies_to_all_hosts(self):
+        mock_client = self._mock_client()
+        tool = self._build({"user_agent": "MyBot/2.0 (ops@example.com)"})
+
+        with patch("src.tools.fetch_url.httpx.AsyncClient", return_value=mock_client):
+            await tool(url=SEC_INDEX_URL)
+
+        assert self._sent_user_agent(mock_client) == "MyBot/2.0 (ops@example.com)"
+
+    async def test_sec_user_agent_wins_on_sec_hosts(self):
+        mock_client = self._mock_client()
+        tool = self._build(
+            {
+                "user_agent": "GeneralBot/1.0 (general@example.com)",
+                "sec_user_agent": "SecBot/1.0 (sec@example.com)",
+            }
+        )
+
+        with patch("src.tools.fetch_url.httpx.AsyncClient", return_value=mock_client):
+            await tool(url=SEC_INDEX_URL)
+
+        assert self._sent_user_agent(mock_client) == "SecBot/1.0 (sec@example.com)"
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://sec.gov/",
+            "https://www.sec.gov/Archives/",
+            "https://data.sec.gov/api/xbrl/",
+            "https://efts.sec.gov/LATEST/search-index",
+            "https://WWW.SEC.GOV/Archives/",
+            "https://www.sec.gov:443/Archives/",
+            "https://www.sec.gov./Archives/",
+        ],
+    )
+    async def test_sec_hosts_detected(self, url):
+        mock_client = self._mock_client()
+        tool = self._build({"sec_user_agent": "SecBot/1.0 (sec@example.com)"})
+
+        with patch("src.tools.fetch_url.httpx.AsyncClient", return_value=mock_client):
+            await tool(url=url)
+
+        assert self._sent_user_agent(mock_client) == "SecBot/1.0 (sec@example.com)"
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://sec.gov.example.com/",
+            "https://notsec.gov/",
+            "https://example.com/?next=https://www.sec.gov/",
+        ],
+    )
+    async def test_sec_lookalikes_not_detected(self, url):
+        mod = __import__("src.tools.fetch_url", fromlist=["build_fetch_url_tools"])
+        mock_client = self._mock_client()
+        tool = self._build({"sec_user_agent": "SecBot/1.0 (sec@example.com)"})
+
+        with patch("src.tools.fetch_url.httpx.AsyncClient", return_value=mock_client):
+            await tool(url=url)
+
+        assert self._sent_user_agent(mock_client) == mod.DEFAULT_USER_AGENT
+
+    async def test_warns_when_sec_user_agent_is_noncompliant(self, caplog):
+        mock_client = self._mock_client()
+        tool = self._build({"user_agent": "MyBot (+https://example.com)"})
+
+        with (
+            patch("src.tools.fetch_url.httpx.AsyncClient", return_value=mock_client),
+            caplog.at_level("WARNING", logger="src.tools.fetch_url"),
+        ):
+            await tool(url=SEC_INDEX_URL)
+
+        assert "403" in caplog.text
+
+
+# ===================================================================
 # 8. RSS Feed tool
 # ===================================================================
 class TestRssFeedTool:

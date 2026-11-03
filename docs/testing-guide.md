@@ -125,6 +125,9 @@ docker compose exec backend pytest /app/tests/ -m regression -v
 
 # Concurrency tests (slow)
 docker compose exec backend pytest /app/tests/ -m "integration and slow" -v
+
+# Live external API tests (opt-in; fetch_url SEC regression — Issue #594)
+docker compose exec -e RUN_LIVE_API_TESTS=1 backend pytest /app/tests/test_fetch_url_sec_live.py -v
 ```
 
 ### Run E2E Tests

@@ -84,6 +84,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Workflow definition identity and edit policy** — `WorkflowDefinition.key` must match the module's `MAF_KEY` and is immutable (renaming is a create, not an edit); step `id` must be a non-empty, whitespace-free executor identity; and a new derived classification (`unchanged` / `config_only` / `topology`) states which edits leave paused runs resumable and which cannot be resumed. ([#551])
 
 ### Fixed
+- **`fetch_url` no longer gets SEC 403 on sec.gov URLs (Issue #594)** — SEC's
+  fair-access policy returned `403 Undeclared Automated Tool` for the tool's
+  default User-Agent because it declared no contact address. Probing also
+  showed that SEC rejects User-Agents containing a URL even when an email is
+  present, so appending an address to the old string would not have worked.
+  Requests to `*.sec.gov` now send
+  `ph-agent-hub/1.0 (fetch-url tool; phalouvas@gmail.com)` by default and can
+  be overridden per tool with the new `sec_user_agent` config key (or
+  `user_agent`, which applies to every host); all other hosts keep the
+  previous User-Agent unchanged. A non-compliant SEC User-Agent is logged as a
+  warning, and the tool docstring points EDGAR work at the `sec_filings`
+  tools. Verified against Realty Income's 2026 Q3 8-K index: 200 instead of
+  403. ([#594])
 - **`get_filing_text` returns the exhibit named in the URL (Issue #593)** —
   for a URL naming a specific document (an 8-K Ex. 99.1, an earnings release),
   the tool resolved the accession and returned `filing.text`, which is the

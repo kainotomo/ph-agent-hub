@@ -776,6 +776,38 @@ describe("ChatWindow — stream→persisted handoff (Issue #515)", () => {
     expect(screen.getByTestId("msg-stream-new")).toHaveTextContent("new answer");
     expect(screen.queryByTestId("msg-stream-old")).toBeNull();
   });
+
+  // Issue #600: the live bubble must follow the accumulating streamingContent.
+  // Regression: `streamingContent` was missing from the `displayMessages` memo
+  // deps, so the transcript kept the array built for the first token and the
+  // answer text froze until the message completed.
+  it("renders text appended by later tokens while the answer is still streaming", async () => {
+    const user = userEvent.setup();
+    mockListMessages.mockResolvedValue({
+      items: [msg("a1", "assistant", "First answer")],
+      has_more: false,
+    });
+
+    renderChatWindow({ isPending: false, sessionId: "test-session-1" });
+    await settle();
+
+    const handlers = await sendMessage(user, "Second question");
+
+    // Two deltas, each flushed to its own commit.  One token is not enough:
+    // the first token also sets streamingMessageId, which recomputes the memo
+    // even while the bug is present.
+    await act(async () => {
+      handlers.onToken("Hello", "stream-1");
+    });
+    await settle();
+
+    await act(async () => {
+      handlers.onToken(" world", "stream-1");
+    });
+    await settle();
+
+    expect(screen.getByTestId("msg-stream-1")).toHaveTextContent("Hello world");
+  });
 });
 
 // ---------------------------------------------------------------------------

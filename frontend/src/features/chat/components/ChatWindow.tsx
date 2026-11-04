@@ -1891,6 +1891,10 @@ export const ChatWindow = React.memo(function ChatWindow({
     pendingUserMessage,
     sessionId,
     streamingSegments,
+    // Issue #600: the live bubble reads streamingContent below, so it must be a
+    // dependency.  Without it the memo keeps returning the array it built for
+    // the first token, and the answer text stops updating mid-stream.
+    streamingContent,
     streamingMessageId,
     streamingTokens,
     selectedModelId,

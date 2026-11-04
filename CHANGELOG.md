@@ -86,6 +86,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Workflow definition identity and edit policy** — `WorkflowDefinition.key` must match the module's `MAF_KEY` and is immutable (renaming is a create, not an edit); step `id` must be a non-empty, whitespace-free executor identity; and a new derived classification (`unchanged` / `config_only` / `topology`) states which edits leave paused runs resumable and which cannot be resumed. ([#551])
 
 ### Fixed
+- **Live answer text no longer freezes mid-stream (Issue #600)** — the
+  `displayMessages` memo in the chat view read `streamingContent` without
+  listing it as a dependency, so after the first token it kept returning the
+  array it had already built and the assistant's text stopped updating until
+  `message_complete` refetched the persisted row. It looked intermittent
+  because `streamingSegments` changes while reasoning streams, which happened
+  to recompute the memo. The dependency is now declared, so text updates on
+  every token. ([#600])
 - **`fetch_url` no longer gets SEC 403 on sec.gov URLs (Issue #594)** — SEC's
   fair-access policy returned `403 Undeclared Automated Tool` for the tool's
   default User-Agent because it declared no contact address. Probing also
@@ -381,3 +389,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#587]: https://github.com/kainotomo/ph-agent-hub/issues/587
 [#588]: https://github.com/kainotomo/ph-agent-hub/issues/588
 [#593]: https://github.com/kainotomo/ph-agent-hub/issues/593
+[#600]: https://github.com/kainotomo/ph-agent-hub/issues/600

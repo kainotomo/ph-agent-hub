@@ -22,7 +22,8 @@ export type SidebarRow =
       isUnfiled: boolean;
     }
   | { kind: "session"; session: SessionData; folderId: string | null }
-  | { kind: "placeholder"; folderId: string | null };
+  | { kind: "placeholder"; folderId: string | null }
+  | { kind: "more"; groupId: string; remaining: number };
 
 export interface MoveTarget {
   /** Folder id, or null for "Unfiled". */
@@ -75,6 +76,14 @@ export interface BuildSidebarRowsOptions {
    *  sorting, force-expand all groups, omit empty-group headers and
    *  placeholders. */
   filtering?: boolean;
+  /** Optional server-side session totals keyed by group key (folder id or
+   *  UNFILED_ID) to render a "Show N more sessions" row for. */
+  reveal?: SidebarRevealOptions;
+}
+
+/** Server-side session totals keyed by group key (folder id or UNFILED_ID). */
+export interface SidebarRevealOptions {
+  totals: Record<string, number>;
 }
 
 /**
@@ -89,6 +98,11 @@ export interface BuildSidebarRowsOptions {
  * sessions keep their API relevance order (no pinned-first sort), all groups
  * are treated as expanded, and groups with zero matches / placeholders are
  * omitted so the list shows only matching sessions.
+ *
+ * When `options.reveal` is provided (outside filtering mode), each group
+ * with server-side session totals additionally renders a "Show N more
+ * sessions" row carrying the remaining sessions (`total - members`, clamped
+ * at 0).
  */
 export function buildSidebarRows(
   sessions: SessionData[],
@@ -117,12 +131,17 @@ export function buildSidebarRows(
 
     const isCollapsed = collapsed.has(id);
 
+    // Reveal totals only apply outside filtering mode (filtering keeps the
+    // match count as the header count).
+    const reveal = filtering ? undefined : options.reveal;
+    const total = reveal?.totals[id] ?? members.length;
+
     rows.push({
       kind: "folder",
       id,
       name,
       color,
-      count: members.length,
+      count: reveal ? Math.max(total, members.length) : members.length,
       // In filtering mode every group is force-expanded.
       collapsed: filtering ? false : isCollapsed,
       isUnfiled,
@@ -153,6 +172,14 @@ export function buildSidebarRows(
         session,
         folderId: isUnfiled ? null : id,
       });
+    }
+
+    // "Show N more sessions" row for groups with server-side totals.
+    if (reveal && members.length > 0) {
+      const remaining = Math.max(0, total - members.length);
+      if (remaining > 0) {
+        rows.push({ kind: "more", groupId: id, remaining });
+      }
     }
   };
 
@@ -189,6 +216,7 @@ export function moveTargets(folders: FolderData[]): MoveTarget[] {
 export function rowKey(_index: number, row: SidebarRow): string {
   if (row.kind === "folder") return `f:${row.id}`;
   if (row.kind === "session") return `s:${row.session.id}`;
+  if (row.kind === "more") return `m:${row.groupId}`;
   return `p:${row.folderId ?? UNFILED_ID}`;
 }
 

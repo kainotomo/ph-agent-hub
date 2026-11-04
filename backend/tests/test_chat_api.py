@@ -350,6 +350,203 @@ class TestListSessions:
         assert test_session.id not in session_ids
 
 
+class TestSidebarSessions:
+    """Tests for the paged sidebar session endpoints."""
+
+    async def test_summary_caps_sessions_per_group(
+        self, async_client, auth_headers, db_session, test_user, test_tenant
+    ):
+        """Only per_group sessions are returned, with the full group total."""
+        for i in range(7):
+            db_session.add(
+                Session(
+                    id=str(uuid.uuid4()),
+                    tenant_id=test_tenant.id,
+                    user_id=test_user.id,
+                    title=f"Unfiled {i}",
+                    is_temporary=False,
+                )
+            )
+        await db_session.flush()
+
+        resp = await async_client.get(
+            "/api/chat/sessions/sidebar", headers=auth_headers(test_user)
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["per_group"] == 5
+        assert len(data["groups"]) == 1
+        group = data["groups"][0]
+        assert group["key"] == "unfiled"
+        assert group["folder_id"] is None
+        assert group["total"] == 7
+        assert len(group["sessions"]) == 5
+
+    async def test_summary_groups_by_folder(
+        self, async_client, auth_headers, db_session, test_user, test_tenant
+    ):
+        """Each folder gets its own group, with Unfiled keyed as 'unfiled'."""
+        from src.db.orm.folders import Folder
+
+        folder = Folder(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            name="Work",
+        )
+        db_session.add(folder)
+        await db_session.flush()
+        db_session.add(
+            Session(
+                id=str(uuid.uuid4()),
+                tenant_id=test_tenant.id,
+                user_id=test_user.id,
+                title="Filed",
+                is_temporary=False,
+                folder_id=folder.id,
+            )
+        )
+        db_session.add(
+            Session(
+                id=str(uuid.uuid4()),
+                tenant_id=test_tenant.id,
+                user_id=test_user.id,
+                title="Unfiled",
+                is_temporary=False,
+            )
+        )
+        await db_session.flush()
+
+        resp = await async_client.get(
+            "/api/chat/sessions/sidebar", headers=auth_headers(test_user)
+        )
+        assert resp.status_code == 200, resp.text
+        groups = {g["key"]: g for g in resp.json()["groups"]}
+        assert set(groups) == {"unfiled", folder.id}
+        assert groups[folder.id]["total"] == 1
+        assert groups[folder.id]["sessions"][0]["folder_id"] == folder.id
+        assert groups["unfiled"]["total"] == 1
+        assert groups["unfiled"]["sessions"][0]["folder_id"] is None
+
+    async def test_group_page_offset_and_total(
+        self, async_client, auth_headers, db_session, test_user, test_tenant
+    ):
+        """offset/limit paging returns the next page and the unchanged total."""
+        for i in range(7):
+            db_session.add(
+                Session(
+                    id=str(uuid.uuid4()),
+                    tenant_id=test_tenant.id,
+                    user_id=test_user.id,
+                    title=f"Unfiled {i}",
+                    is_temporary=False,
+                )
+            )
+        await db_session.flush()
+
+        resp = await async_client.get(
+            "/api/chat/sessions/sidebar/group",
+            params={"group": "unfiled", "offset": 5, "limit": 5},
+            headers=auth_headers(test_user),
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["total"] == 7
+        assert data["offset"] == 5
+        assert data["limit"] == 5
+        assert len(data["sessions"]) == 2
+        assert all(s["folder_id"] is None for s in data["sessions"])
+
+    async def test_group_page_unknown_folder_rejected(
+        self, async_client, auth_headers, test_user
+    ):
+        """A folder id that the caller does not own is rejected."""
+        resp = await async_client.get(
+            "/api/chat/sessions/sidebar/group",
+            params={"group": "does-not-exist"},
+            headers=auth_headers(test_user),
+        )
+        # ValidationError maps to 422 across the API (see core/exceptions.py).
+        assert resp.status_code == 422, resp.text
+
+    async def test_group_page_requires_group(
+        self, async_client, auth_headers, test_user
+    ):
+        resp = await async_client.get(
+            "/api/chat/sessions/sidebar/group",
+            headers=auth_headers(test_user),
+        )
+        assert resp.status_code == 422, resp.text
+
+    async def test_summary_per_group_bounds(
+        self, async_client, auth_headers, test_user
+    ):
+        for value in (0, 51):
+            resp = await async_client.get(
+                "/api/chat/sessions/sidebar",
+                params={"per_group": value},
+                headers=auth_headers(test_user),
+            )
+            assert resp.status_code == 422, (value, resp.text)
+
+    async def test_summary_excludes_temporary_sessions(
+        self, async_client, auth_headers, db_session, test_user, test_tenant
+    ):
+        db_session.add(
+            Session(
+                id=str(uuid.uuid4()),
+                tenant_id=test_tenant.id,
+                user_id=test_user.id,
+                title="Permanent",
+                is_temporary=False,
+            )
+        )
+        db_session.add(
+            Session(
+                id=str(uuid.uuid4()),
+                tenant_id=test_tenant.id,
+                user_id=test_user.id,
+                title="Temporary",
+                is_temporary=True,
+            )
+        )
+        await db_session.flush()
+
+        resp = await async_client.get(
+            "/api/chat/sessions/sidebar", headers=auth_headers(test_user)
+        )
+        assert resp.status_code == 200, resp.text
+        groups = resp.json()["groups"]
+        assert len(groups) == 1
+        assert groups[0]["total"] == 1
+        assert [s["title"] for s in groups[0]["sessions"]] == ["Permanent"]
+
+    async def test_group_page_other_user_sessions_not_visible(
+        self, async_client, auth_headers, db_session, test_user, test_tenant, second_user
+    ):
+        """Another user's sessions never appear in the caller's group page."""
+        db_session.add(
+            Session(
+                id=str(uuid.uuid4()),
+                tenant_id=test_tenant.id,
+                user_id=second_user.id,
+                title="Theirs",
+                is_temporary=False,
+            )
+        )
+        await db_session.flush()
+
+        resp = await async_client.get(
+            "/api/chat/sessions/sidebar/group",
+            params={"group": "unfiled"},
+            headers=auth_headers(test_user),
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["total"] == 0
+        assert data["sessions"] == []
+
+
 class TestGetSession:
     """Tests for GET /chat/session/{session_id}."""
 

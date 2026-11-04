@@ -6,7 +6,7 @@ import asyncio
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import delete, exists, select, update
+from sqlalchemy import delete, exists, func, select, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +18,15 @@ from ..db.orm.users import User
 from ..db.orm.autopilot_runs import AutopilotRun
 from ..db.orm.skills import Skill, SkillAllowedTool
 from ..services.model_service import list_models as _svc_list_models
+
+
+# ---------------------------------------------------------------------------
+# Sidebar (grouped, server-paged) data source
+# ---------------------------------------------------------------------------
+
+SIDEBAR_UNFILED_KEY = "unfiled"
+DEFAULT_SIDEBAR_PER_GROUP = 5
+MAX_SIDEBAR_PER_GROUP = 50
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +107,32 @@ async def get_session_by_id(db: AsyncSession, session_id: str) -> Session | None
     return result.scalar_one_or_none()
 
 
+def _visible_sessions_filters(
+    user_id: str, tenant_id: str
+) -> tuple:
+    """Return SQLAlchemy filter conditions for sessions visible to a user.
+
+    Filters to the given user/tenant, excludes temporary sessions, and keeps
+    only sessions that either have a non-deleted message or were created
+    within the last hour (so recently created empty sessions are preserved).
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+    has_messages = exists(
+        select(1)
+        .where(
+            Message.session_id == Session.id,
+            Message.is_deleted == False,  # noqa: E712
+        )
+        .correlate(Session)
+    )
+    return (
+        Session.user_id == user_id,
+        Session.tenant_id == tenant_id,
+        Session.is_temporary == False,  # noqa: E712
+        (has_messages | (Session.created_at >= cutoff)),
+    )
+
+
 async def list_sessions_for_user(
     db: AsyncSession,
     user_id: str,
@@ -113,32 +148,118 @@ async def list_sessions_for_user(
     # Purge abandoned empty sessions older than 1 hour
     await _purge_empty_sessions(db, user_id, tenant_id)
 
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
-    has_messages = exists(
-        select(1)
-        .where(
-            Message.session_id == Session.id,
-            Message.is_deleted == False,  # noqa: E712
-        )
-        .correlate(Session)
-    )
+    visible = _visible_sessions_filters(user_id, tenant_id)
 
     stmt = (
         select(Session)
-        .where(
-            Session.user_id == user_id,
-            Session.tenant_id == tenant_id,
-            Session.is_temporary == False,  # noqa: E712
-            (
-                has_messages
-                | (Session.created_at >= cutoff)
-            ),
-        )
+        .where(*visible)
         .order_by(Session.updated_at.desc())
         .limit(2000)
     )
     result = await db.execute(stmt)
     return list(result.scalars().all())
+
+
+async def list_sidebar_summary(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    tenant_id: str,
+    per_group: int = DEFAULT_SIDEBAR_PER_GROUP,
+) -> tuple[list[Session], dict[str | None, int]]:
+    """Return a grouped sidebar summary for a user.
+
+    Returns up to *per_group* sessions per folder (grouped by ``folder_id``,
+    where ``None`` is the Unfiled group) plus a per-folder total count
+    (``dict[str | None, int]`` keyed by ``folder_id``).  Sessions are ordered
+    by pinned status, then ``updated_at`` desc, then id desc within each
+    group.
+    """
+    await _purge_empty_sessions(db, user_id, tenant_id)
+
+    visible = _visible_sessions_filters(user_id, tenant_id)
+
+    # Windowed row-number per folder, then keep only the ids within the
+    # per-group limit.  The subquery must expose the session id (not the row
+    # number) so it can be used with ``Session.id.in_(...)``.
+    ranked = (
+        select(
+            Session.id.label("id"),
+            func.row_number().over(
+                partition_by=Session.folder_id,
+                order_by=(
+                    Session.is_pinned.desc(),
+                    Session.updated_at.desc(),
+                    Session.id.desc(),
+                ),
+            ).label("rn"),
+        )
+        .where(*visible)
+        .subquery()
+    )
+    top_ids = select(ranked.c.id).where(ranked.c.rn <= per_group)
+
+    result = await db.execute(select(Session).where(Session.id.in_(top_ids)))
+    sessions = list(result.scalars().all())
+
+    # Sort in Python (pinned first, then updated_at desc, then id desc)
+    sessions = sorted(
+        sessions,
+        key=lambda s: (s.is_pinned, s.updated_at, s.id),
+        reverse=True,
+    )
+
+    # Per-folder totals
+    totals_stmt = (
+        select(Session.folder_id, func.count(Session.id))
+        .where(*visible)
+        .group_by(Session.folder_id)
+    )
+    totals_result = await db.execute(totals_stmt)
+    totals = dict(totals_result.all())
+
+    return sessions, totals
+
+
+async def list_sidebar_group_page(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    tenant_id: str,
+    folder_id: str | None,
+    offset: int,
+    limit: int = DEFAULT_SIDEBAR_PER_GROUP,
+) -> tuple[list[Session], int]:
+    """Return one server-paged group of sessions for a user.
+
+    Returns up to *limit* sessions for the given *folder_id* (``None`` =
+    Unfiled) plus the total number of matching sessions.  Sessions are ordered
+    by pinned status, then ``updated_at`` desc, then id desc.
+    """
+    visible = _visible_sessions_filters(user_id, tenant_id)
+    scope = (
+        Session.folder_id.is_(None)
+        if folder_id is None
+        else Session.folder_id == folder_id
+    )
+
+    total = await db.scalar(
+        select(func.count(Session.id)).where(*visible, scope)
+    ) or 0
+
+    stmt = (
+        select(Session)
+        .where(*visible, scope)
+        .order_by(
+            Session.is_pinned.desc(),
+            Session.updated_at.desc(),
+            Session.id.desc(),
+        )
+        .offset(offset)
+        .limit(limit)
+    )
+    result = await db.execute(stmt)
+    return list(result.scalars().all()), total
 
 
 async def _purge_empty_sessions(

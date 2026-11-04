@@ -20,7 +20,8 @@ Element.prototype.scrollIntoView = vi.fn();
 // ---------------------------------------------------------------------------
 
 const {
-  mockListSessions,
+  mockGetSidebarSummary,
+  mockGetSidebarGroupPage,
   mockCreateSession,
   mockDeleteSession,
   mockDeleteSessions,
@@ -35,7 +36,8 @@ const {
   mockSearchSessions,
   mockListSessionsByTag,
 } = vi.hoisted(() => ({
-  mockListSessions: vi.fn(),
+  mockGetSidebarSummary: vi.fn(),
+  mockGetSidebarGroupPage: vi.fn(),
   mockCreateSession: vi.fn(),
   mockDeleteSession: vi.fn(),
   mockDeleteSessions: vi.fn(),
@@ -52,7 +54,9 @@ const {
 }));
 
 vi.mock("../services/chat", () => ({
-  listSessions: mockListSessions,
+  SIDEBAR_PAGE_SIZE: 5,
+  getSidebarSummary: mockGetSidebarSummary,
+  getSidebarGroupPage: mockGetSidebarGroupPage,
   createSession: mockCreateSession,
   deleteSession: mockDeleteSession,
   deleteSessions: mockDeleteSessions,
@@ -211,6 +215,24 @@ const SESSIONS = [
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Build a sidebar summary from a flat fixture list: one group per folder,
+ * capped at five loaded sessions per group (the server's first page).
+ */
+function summaryFrom(sessions: any[]) {
+  const groups = new Map<string, any>();
+  for (const session of sessions) {
+    const key = session.folder_id ?? "unfiled";
+    const group =
+      groups.get(key) ??
+      { key, folder_id: session.folder_id ?? null, total: 0, sessions: [] };
+    group.total += 1;
+    if (group.sessions.length < 5) group.sessions.push(session);
+    groups.set(key, group);
+  }
+  return { per_group: 5, groups: [...groups.values()] };
+}
+
 function renderSidebar() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
@@ -263,7 +285,18 @@ async function openSearch(user: ReturnType<typeof userEvent.setup>) {
 describe("SessionSidebar", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockListSessions.mockResolvedValue(SESSIONS);
+    mockGetSidebarSummary.mockResolvedValue(summaryFrom(SESSIONS));
+    mockGetSidebarGroupPage.mockResolvedValue({
+      key: "unfiled",
+      folder_id: null,
+      total: 0,
+      offset: 5,
+      limit: 5,
+      sessions: [],
+    });
+    // The active-session fallback query must resolve to a value (TanStack v5
+    // rejects `undefined` query data); null means "no detail yet".
+    mockGetSession.mockResolvedValue(null);
     mockCreateSession.mockResolvedValue({ id: "new-session", title: "New Chat" });
     mockDeleteSession.mockResolvedValue(undefined);
     mockMoveSessions.mockResolvedValue({ moved: 0, skipped: [] });
@@ -472,8 +505,8 @@ describe("SessionSidebar", () => {
 
   // ── Error state ───────────────────────────────────────────────────────
 
-  it("shows error alert when listSessions fails", async () => {
-    mockListSessions.mockRejectedValue(new Error("Network error"));
+  it("shows error alert when the sidebar summary fails", async () => {
+    mockGetSidebarSummary.mockRejectedValue(new Error("Network error"));
 
     renderSidebar();
     await settle();
@@ -486,7 +519,7 @@ describe("SessionSidebar", () => {
 
   it("shows loading indicator while sessions are fetching", async () => {
     // Never resolve so it stays in loading
-    mockListSessions.mockImplementation(() => new Promise(() => {}));
+    mockGetSidebarSummary.mockImplementation(() => new Promise(() => {}));
 
     renderSidebar();
     await settle();
@@ -580,7 +613,7 @@ describe("SessionSidebar", () => {
   // ── Batch delete: disabled for streaming sessions ─────────────────────
 
   it("disables the select button when sessions list is empty", async () => {
-    mockListSessions.mockResolvedValue([]);
+    mockGetSidebarSummary.mockResolvedValue(summaryFrom([]));
     renderSidebar();
     await settle();
 
@@ -654,7 +687,7 @@ describe("SessionSidebar", () => {
 
   it("shows grouped filter with only matching folder headers", async () => {
     // Use the folder test fixture
-    mockListSessions.mockResolvedValue(FOLDER_SESSIONS);
+    mockGetSidebarSummary.mockResolvedValue(summaryFrom(FOLDER_SESSIONS));
     mockListFolders.mockResolvedValue(FOLDERS);
     mockSearchSessions.mockResolvedValue([FOLDER_SESSIONS[1]]); // Home chat
     renderSidebar();
@@ -699,22 +732,14 @@ describe("SessionSidebar", () => {
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
   });
 
-  it("row click navigates and prepends the searched session to the cache", async () => {
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    queryClient.setQueryData(["sessions"], SESSIONS);
-
-    // A session that is NOT in the sidebar list yet (e.g. beyond the recent
-    // 2000-row cap) — clicking it must add it to the cache.
+  it("row click navigates to a searched session outside the loaded pages", async () => {
+    // A session that is NOT in the sidebar's first page (e.g. an older chat
+    // found via search). Clicking it must navigate; the active-session
+    // fallback later renders it from the ["session", id] cache.
     const found = { ...SESSIONS[0], id: "session-found", title: "Found" };
     mockSearchSessions.mockResolvedValue([found]);
 
-    render(
-      <QueryClientProvider client={queryClient}>
-        <SessionSidebar />
-      </QueryClientProvider>,
-    );
+    renderSidebar();
     await settle();
 
     const user = userEvent.setup();
@@ -726,8 +751,6 @@ describe("SessionSidebar", () => {
     await user.click(sessionRow!);
 
     expect(mockNavigate).toHaveBeenCalledWith("/chat/session-found");
-    const cached = queryClient.getQueryData<typeof SESSIONS>(["sessions"]);
-    expect(cached?.[0]?.id).toBe("session-found");
   });
 
   it("Select All uses the filtered pool", async () => {
@@ -879,7 +902,7 @@ describe("SessionSidebar — folders (Issue #526)", () => {
     document
       .querySelectorAll(".ant-modal-root")
       .forEach((node) => node.remove());
-    mockListSessions.mockResolvedValue(FOLDER_SESSIONS);
+    mockGetSidebarSummary.mockResolvedValue(summaryFrom(FOLDER_SESSIONS));
     mockListFolders.mockResolvedValue(FOLDERS);
     mockCreateFolder.mockResolvedValue({
       id: "folder-new",
@@ -971,17 +994,19 @@ describe("SessionSidebar — folders (Issue #526)", () => {
     // The mocked useParams() reports sessionId "session-1"; put it in a
     // folder that starts collapsed.
     localStorage.setItem(COLLAPSE_KEY, JSON.stringify(["folder-work"]));
-    mockListSessions.mockResolvedValue([
-      {
-        id: "session-1",
-        title: "Active in Work",
-        is_pinned: false,
-        is_temporary: false,
-        folder_id: "folder-work",
-        updated_at: NOW,
-        tags: [],
-      },
-    ]);
+    mockGetSidebarSummary.mockResolvedValue(
+      summaryFrom([
+        {
+          id: "session-1",
+          title: "Active in Work",
+          is_pinned: false,
+          is_temporary: false,
+          folder_id: "folder-work",
+          updated_at: NOW,
+          tags: [],
+        },
+      ]),
+    );
 
     renderSidebar();
     await settle();
@@ -1273,5 +1298,178 @@ describe("SessionSidebar — folders (Issue #526)", () => {
       ["session-w", "session-h", "session-1"],
       "folder-new",
     );
+  });
+});
+
+// =============================================================================
+// Progressive loading ("Show N more sessions")
+// =============================================================================
+
+const MANY_SESSIONS = Array.from({ length: 8 }, (_, index) => ({
+  id: `many-${index + 1}`,
+  title: `Many chat ${index + 1}`,
+  is_pinned: false,
+  is_temporary: false,
+  updated_at: `2026-01-0${8 - index}T10:00:00Z`,
+  tags: [],
+}));
+
+function pageOf(sessions: any[], offset = 5) {
+  return {
+    key: "unfiled",
+    folder_id: null,
+    total: MANY_SESSIONS.length,
+    offset,
+    limit: 5,
+    sessions,
+  };
+}
+
+describe("SessionSidebar — progressive session loading", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+    mockGetSidebarSummary.mockResolvedValue({
+      per_group: 5,
+      groups: [
+        {
+          key: "unfiled",
+          folder_id: null,
+          total: MANY_SESSIONS.length,
+          sessions: MANY_SESSIONS.slice(0, 5),
+        },
+      ],
+    });
+    mockGetSidebarGroupPage.mockResolvedValue(pageOf(MANY_SESSIONS.slice(5)));
+    mockGetSession.mockResolvedValue(null);
+    mockListFolders.mockResolvedValue([]);
+    mockSearchSessions.mockResolvedValue([]);
+    mockListSessionsByTag.mockResolvedValue([]);
+    mockUpdateSession.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    localStorage.clear();
+  });
+
+  it("renders five sessions per group and a 'Show 3 more sessions' row", async () => {
+    renderSidebar();
+    await settle();
+
+    expect(document.querySelectorAll("[data-session-id]")).toHaveLength(5);
+    expect(screen.getByText("Show 3 more sessions")).toBeInTheDocument();
+  });
+
+  it("loads the next five sessions and removes the row at the end", async () => {
+    renderSidebar();
+    await settle();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("show-more-__unfiled__"));
+    await settle();
+
+    expect(mockGetSidebarGroupPage).toHaveBeenCalledWith("__unfiled__", 5, 5);
+    expect(document.querySelectorAll("[data-session-id]")).toHaveLength(8);
+    expect(
+      screen.queryByText(/Show \d+ more session/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("uses server totals for the folder header and the remaining count", async () => {
+    const workSessions = [
+      {
+        id: "work-1",
+        title: "Work one",
+        is_pinned: false,
+        is_temporary: false,
+        folder_id: "folder-work",
+        updated_at: NOW,
+        tags: [],
+      },
+      {
+        id: "work-2",
+        title: "Work two",
+        is_pinned: false,
+        is_temporary: false,
+        folder_id: "folder-work",
+        updated_at: EARLIER,
+        tags: [],
+      },
+    ];
+    mockGetSidebarSummary.mockResolvedValue({
+      per_group: 5,
+      groups: [
+        {
+          key: "folder-work",
+          folder_id: "folder-work",
+          total: 12,
+          sessions: workSessions,
+        },
+      ],
+    });
+    mockListFolders.mockResolvedValue([
+      { id: "folder-work", name: "Work", color: null, sort_order: 0 },
+    ]);
+
+    renderSidebar();
+    await settle();
+
+    expect(screen.getByText("12")).toBeInTheDocument();
+    expect(screen.getByText("Show 10 more sessions")).toBeInTheDocument();
+  });
+
+  it("does not cap search results", async () => {
+    mockSearchSessions.mockResolvedValue(MANY_SESSIONS);
+
+    renderSidebar();
+    await settle();
+
+    const user = userEvent.setup();
+    await openSearch(user);
+    await typeSearch(user, "Many");
+
+    expect(document.querySelectorAll("[data-session-id]")).toHaveLength(8);
+    expect(
+      screen.queryByTestId("show-more-__unfiled__"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders the active session when it is outside the loaded pages", async () => {
+    mockGetSession.mockResolvedValue({
+      ...MANY_SESSIONS[0],
+      id: "session-1",
+      title: "Active extra",
+    });
+
+    renderSidebar();
+    await settle();
+
+    const activeRow = document.querySelector('[data-session-id="session-1"]');
+    expect(activeRow).toBeInTheDocument();
+    expect(activeRow).toHaveStyle({ background: "#e6f4ff" });
+  });
+
+  it("keeps the loaded rows and retries when a page request fails", async () => {
+    mockGetSidebarGroupPage.mockRejectedValueOnce(new Error("boom"));
+
+    renderSidebar();
+    await settle();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("show-more-__unfiled__"));
+    await settle();
+
+    expect(document.querySelectorAll("[data-session-id]")).toHaveLength(5);
+    expect(
+      screen.getByText(/Retry — Show 3 more sessions/),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByTestId("show-more-__unfiled__"));
+    await settle();
+
+    expect(mockGetSidebarGroupPage).toHaveBeenCalledTimes(2);
+    expect(document.querySelectorAll("[data-session-id]")).toHaveLength(8);
   });
 });

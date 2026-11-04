@@ -182,6 +182,52 @@ export function listSessions(): Promise<SessionData[]> {
   return api<SessionData[]>("/chat/sessions");
 }
 
+// ---------------------------------------------------------------------------
+// Sidebar server-paged groups (5 sessions per folder)
+// ---------------------------------------------------------------------------
+
+export const SIDEBAR_PAGE_SIZE = 5;
+
+export interface SidebarGroupData {
+  key: string;
+  folder_id: string | null;
+  total: number;
+  sessions: SessionData[];
+}
+
+export interface SidebarSummaryData {
+  per_group: number;
+  groups: SidebarGroupData[];
+}
+
+export interface SidebarGroupPageData extends SidebarGroupData {
+  offset: number;
+  limit: number;
+}
+
+export function getSidebarSummary(
+  perGroup: number = SIDEBAR_PAGE_SIZE,
+): Promise<SidebarSummaryData> {
+  return api<SidebarSummaryData>(
+    `/chat/sessions/sidebar?per_group=${perGroup}`,
+  );
+}
+
+export function getSidebarGroupPage(
+  groupKey: string,
+  offset: number,
+  limit: number = SIDEBAR_PAGE_SIZE,
+): Promise<SidebarGroupPageData> {
+  // The API calls the synthetic group "unfiled"; the sidebar's internal key
+  // is "__unfiled__" (sessionRows.UNFILED_ID). Do not import the component
+  // module here — keep this mapping local to avoid a service -> component cycle.
+  const group = groupKey === "__unfiled__" ? "unfiled" : groupKey;
+  return api<SidebarGroupPageData>(
+    `/chat/sessions/sidebar/group?group=${encodeURIComponent(group)}` +
+      `&offset=${offset}&limit=${limit}`,
+  );
+}
+
 export function getSession(id: string): Promise<SessionData> {
   return api<SessionData>(`/chat/session/${id}`);
 }

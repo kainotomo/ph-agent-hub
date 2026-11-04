@@ -182,13 +182,42 @@ class SessionResponse(BaseModel):
     folder_id: str | None = None
     tags: list[TagResponse] = []
     last_message: str | None = None
-    """Preview text of the most recent user or assistant message in the
-    session.  Populated by ``list_sessions()``.  Shown in the sidebar
-    so the user can identify sessions at a glance."""
+    """Deprecated: no longer populated. Kept so existing clients that read
+    the field keep a stable schema. Sidebar previews are fetched through the
+    paged sidebar endpoints instead."""
     created_at: datetime
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class SidebarGroupResponse(BaseModel):
+    """One folder group on the sidebar's first page."""
+
+    key: str
+    """Folder id, or ``"unfiled"`` for sessions with no folder."""
+    folder_id: str | None
+    total: int
+    """Full number of visible sessions in the group, not just this page."""
+    sessions: list[SessionResponse]
+
+
+class SidebarSummaryResponse(BaseModel):
+    """First page of every non-empty folder group plus its total."""
+
+    per_group: int
+    groups: list[SidebarGroupResponse]
+
+
+class SidebarGroupPageResponse(BaseModel):
+    """One requested page within a single folder group."""
+
+    key: str
+    folder_id: str | None
+    total: int
+    offset: int
+    limit: int
+    sessions: list[SessionResponse]
 
 
 class SearchResultResponse(SessionResponse):
@@ -940,70 +969,100 @@ async def list_sessions(
 ):
     """List the current user's permanent sessions (temp sessions excluded).
 
-    The response includes a ``last_message`` preview — the text of the
-    most recent message — so the sidebar can show a snippet at a glance.
+    The sidebar uses the paged ``/sessions/sidebar`` endpoints instead; this
+    endpoint is kept for clients that still request the full list.
     """
     sessions = await session_service.list_sessions_for_user(
         db=db,
         user_id=current_user.id,
         tenant_id=current_user.tenant_id,
     )
+    return [SessionResponse.model_validate(s) for s in sessions]
 
-    # Fetch the last message content for each session using a single
-    # efficient subquery with ROW_NUMBER() window function — fetches
-    # exactly one row per session instead of all messages.
-    if sessions:
-        from ..db.orm.messages import Message as MsgORM
-        from sqlalchemy import func as sa_func, text as sa_text
 
-        session_ids = [s.id for s in sessions]
+@router.get("/sessions/sidebar", response_model=SidebarSummaryResponse)
+async def get_sessions_sidebar(
+    per_group: int = Query(
+        default=session_service.DEFAULT_SIDEBAR_PER_GROUP,
+        ge=1,
+        le=session_service.MAX_SIDEBAR_PER_GROUP,
+    ),
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(get_current_user),
+):
+    """Return the first page of each sidebar folder group, plus totals.
 
-        # Subquery: for each session, pick the latest non-deleted message.
-        subq = (
-            select(
-                MsgORM.session_id,
-                MsgORM.content,
-                sa_func.row_number().over(
-                    partition_by=MsgORM.session_id,
-                    order_by=MsgORM.created_at.desc(),
-                ).label("rn"),
-            )
-            .where(
-                MsgORM.session_id.in_(session_ids),
-                MsgORM.is_deleted == False,  # noqa: E712
-            )
-            .subquery()
+    Only sessions that belong to a group are returned (empty groups are
+    omitted).  Clients use ``total`` to render a "Show N more sessions" row.
+    """
+    sessions, totals = await session_service.list_sidebar_summary(
+        db=db,
+        user_id=current_user.id,
+        tenant_id=current_user.tenant_id,
+        per_group=per_group,
+    )
+
+    by_folder: dict[str | None, list[SessionResponse]] = {}
+    for session in sessions:
+        by_folder.setdefault(session.folder_id, []).append(
+            SessionResponse.model_validate(session)
         )
 
-        latest_msgs_sql = select(
-            subq.c.session_id,
-            subq.c.content,
-        ).where(subq.c.rn == 1)
+    # Folders first (id order), Unfiled last.  Order is not significant to
+    # the client, which renders groups from its folder list.
+    groups = [
+        SidebarGroupResponse(
+            key=folder_id or session_service.SIDEBAR_UNFILED_KEY,
+            folder_id=folder_id,
+            total=total,
+            sessions=by_folder.get(folder_id, []),
+        )
+        for folder_id, total in sorted(
+            totals.items(), key=lambda item: (item[0] is None, item[0] or "")
+        )
+    ]
+    return SidebarSummaryResponse(per_group=per_group, groups=groups)
 
-        latest_msgs = await db.execute(latest_msgs_sql)
 
-        def _extract_preview(content: Any) -> str | None:
-            if isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        preview = block.get("text", "")[:120].strip()
-                        if preview:
-                            return preview
-            return None
+@router.get("/sessions/sidebar/group", response_model=SidebarGroupPageResponse)
+async def get_sessions_sidebar_group(
+    group: str = Query(min_length=1),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(
+        default=session_service.DEFAULT_SIDEBAR_PER_GROUP,
+        ge=1,
+        le=session_service.MAX_SIDEBAR_PER_GROUP,
+    ),
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(get_current_user),
+):
+    """Return one page of a single sidebar folder group.
 
-        last_msg_map: dict[str, str | None] = {
-            row.session_id: _extract_preview(row.content)
-            for row in latest_msgs
-        }
+    ``group`` is ``"unfiled"`` (sessions with no folder) or a folder id owned
+    by the caller.  ``total`` is the group's full visible count, so the client
+    can compute how many rows remain.
+    """
+    if group == session_service.SIDEBAR_UNFILED_KEY:
+        folder_id: str | None = None
+    else:
+        folder_id = await _resolve_folder_id(db, group, current_user)
 
-        result = []
-        for s in sessions:
-            resp = SessionResponse.model_validate(s)
-            resp.last_message = last_msg_map.get(s.id)
-            result.append(resp)
-        return result
-
-    return [SessionResponse.model_validate(s) for s in sessions]
+    sessions, total = await session_service.list_sidebar_group_page(
+        db=db,
+        user_id=current_user.id,
+        tenant_id=current_user.tenant_id,
+        folder_id=folder_id,
+        offset=offset,
+        limit=limit,
+    )
+    return SidebarGroupPageResponse(
+        key=group,
+        folder_id=folder_id,
+        total=total,
+        offset=offset,
+        limit=limit,
+        sessions=[SessionResponse.model_validate(s) for s in sessions],
+    )
 
 
 @router.get("/session/{session_id}", response_model=SessionResponse)

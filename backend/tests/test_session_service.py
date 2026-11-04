@@ -34,6 +34,8 @@ from src.services.session_service import (
     list_sessions_by_tag,
     list_sessions_for_user,
     list_tenant_tags,
+    list_sidebar_group_page,
+    list_sidebar_summary,
     remove_session_tool,
     remove_tag_from_session,
     sync_session_tools_for_skill,
@@ -1257,3 +1259,400 @@ class TestPurgeEmptySessions:
 
         count = await _purge_empty_sessions(db_session, test_user.id, test_tenant.id)
         assert count == 0  # not purged because it has messages
+
+
+class TestSidebarSessions:
+    """Tests for the grouped, server-paged sidebar data source."""
+
+    async def test_sidebar_summary_groups_and_totals(
+        self, db_session: AsyncSession, test_user, test_tenant
+    ):
+        """Top per_group sessions per folder plus per-folder totals."""
+        from src.db.orm.folders import Folder
+
+        folder = Folder(
+            id="2",
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            name="Folder Two",
+        )
+        db_session.add(folder)
+        await db_session.flush()
+
+        for i in range(7):
+            db_session.add(
+                Session(
+                    id=str(uuid.uuid4()),
+                    tenant_id=test_tenant.id,
+                    user_id=test_user.id,
+                    title=f"Unfiled {i}",
+                    is_temporary=False,
+                    folder_id=None,
+                )
+            )
+            await db_session.flush()
+
+        for i in range(2):
+            db_session.add(
+                Session(
+                    id=str(uuid.uuid4()),
+                    tenant_id=test_tenant.id,
+                    user_id=test_user.id,
+                    title=f"Folder {i}",
+                    is_temporary=False,
+                    folder_id="2",
+                )
+            )
+            await db_session.flush()
+
+        sessions, totals = await list_sidebar_summary(
+            db_session, user_id=test_user.id, tenant_id=test_tenant.id,
+        )
+        assert len(sessions) == 7
+        assert totals == {None: 7, "2": 2}
+
+    async def test_sidebar_summary_pinned_first_and_tiebreak(
+        self, db_session: AsyncSession, test_user, test_tenant
+    ):
+        """Pinned sessions come first; equal updated_at ties break by id desc."""
+        from src.db.orm.folders import Folder
+
+        folder = Folder(
+            id="2",
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            name="Folder Two",
+        )
+        db_session.add(folder)
+        await db_session.flush()
+
+        now = datetime.now(timezone.utc)
+        pinned_old = Session(
+            id="pinned-old",
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            title="Pinned Old",
+            is_pinned=True,
+            updated_at=now - timedelta(hours=2),
+            folder_id="2",
+        )
+        db_session.add(pinned_old)
+        await db_session.flush()
+
+        newer = Session(
+            id="newer",
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            title="Newer Unpinned",
+            is_pinned=False,
+            updated_at=now,
+            folder_id="2",
+        )
+        db_session.add(newer)
+        await db_session.flush()
+
+        older_newer_id = Session(
+            id="older-newer-id",
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            title="Older Newer Id",
+            is_pinned=False,
+            updated_at=now,
+            folder_id="2",
+        )
+        db_session.add(older_newer_id)
+        await db_session.flush()
+
+        sessions, _ = await list_sidebar_summary(
+            db_session, user_id=test_user.id, tenant_id=test_tenant.id,
+        )
+        assert [s.id for s in sessions] == [
+            pinned_old.id, older_newer_id.id, newer.id,
+        ]
+
+    async def test_sidebar_summary_excludes_temporary(
+        self, db_session: AsyncSession, test_user, test_tenant
+    ):
+        """Temporary sessions are excluded from sessions and totals."""
+        perm = Session(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            title="Perm",
+            is_temporary=False,
+            folder_id=None,
+        )
+        db_session.add(perm)
+        await db_session.flush()
+
+        temp = Session(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            title="Temp",
+            is_temporary=True,
+            folder_id=None,
+        )
+        db_session.add(temp)
+        await db_session.flush()
+
+        sessions, totals = await list_sidebar_summary(
+            db_session, user_id=test_user.id, tenant_id=test_tenant.id,
+        )
+        session_ids = {s.id for s in sessions}
+        assert perm.id in session_ids
+        assert temp.id not in session_ids
+        assert totals == {None: 1}
+
+    async def test_sidebar_summary_message_and_recency_filter(
+        self, db_session: AsyncSession, test_user, test_tenant
+    ):
+        """Sessions without messages are excluded unless recent; messages keep old sessions."""
+        now = datetime.now(timezone.utc)
+
+        old_no_msg = Session(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            title="Old No Msg",
+            is_temporary=False,
+            created_at=now - timedelta(hours=2),
+        )
+        db_session.add(old_no_msg)
+        await db_session.flush()
+
+        old_with_msg = Session(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            title="Old With Msg",
+            is_temporary=False,
+            created_at=now - timedelta(hours=2),
+        )
+        db_session.add(old_with_msg)
+        await db_session.flush()
+        db_session.add(Message(
+            id=str(uuid.uuid4()),
+            session_id=old_with_msg.id,
+            sender="user",
+            content=[{"type": "text", "text": "hi"}],
+            is_deleted=False,
+        ))
+        await db_session.flush()
+
+        recent_no_msg = Session(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            title="Recent No Msg",
+            is_temporary=False,
+            created_at=now,
+        )
+        db_session.add(recent_no_msg)
+        await db_session.flush()
+
+        recent_with_msg = Session(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            title="Recent With Msg",
+            is_temporary=False,
+            created_at=now,
+        )
+        db_session.add(recent_with_msg)
+        await db_session.flush()
+        db_session.add(Message(
+            id=str(uuid.uuid4()),
+            session_id=recent_with_msg.id,
+            sender="user",
+            content=[{"type": "text", "text": "hi"}],
+            is_deleted=False,
+        ))
+        await db_session.flush()
+
+        sessions, _ = await list_sidebar_summary(
+            db_session, user_id=test_user.id, tenant_id=test_tenant.id,
+        )
+        ids = {s.id for s in sessions}
+        assert old_no_msg.id not in ids
+        assert old_with_msg.id in ids
+        assert recent_no_msg.id in ids
+        assert recent_with_msg.id in ids
+
+    async def test_sidebar_group_page_offset_and_total(
+        self, db_session: AsyncSession, test_user, test_tenant
+    ):
+        """offset/limit pagination with a total count."""
+        for i in range(7):
+            db_session.add(
+                Session(
+                    id=str(uuid.uuid4()),
+                    tenant_id=test_tenant.id,
+                    user_id=test_user.id,
+                    title=f"Unfiled {i}",
+                    is_temporary=False,
+                    folder_id=None,
+                )
+            )
+            await db_session.flush()
+
+        sessions, total = await list_sidebar_group_page(
+            db_session, user_id=test_user.id, tenant_id=test_tenant.id,
+            folder_id=None, offset=5, limit=5,
+        )
+        assert len(sessions) == 2
+        assert total == 7
+
+    async def test_sidebar_group_page_unfiled(
+        self, db_session: AsyncSession, test_user, test_tenant
+    ):
+        """folder_id=None returns only Unfiled sessions."""
+        from src.db.orm.folders import Folder
+
+        folder = Folder(
+            id="2",
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            name="Folder Two",
+        )
+        db_session.add(folder)
+        await db_session.flush()
+
+        for i in range(3):
+            db_session.add(
+                Session(
+                    id=str(uuid.uuid4()),
+                    tenant_id=test_tenant.id,
+                    user_id=test_user.id,
+                    title=f"Unfiled {i}",
+                    is_temporary=False,
+                    folder_id=None,
+                )
+            )
+            await db_session.flush()
+        for i in range(2):
+            db_session.add(
+                Session(
+                    id=str(uuid.uuid4()),
+                    tenant_id=test_tenant.id,
+                    user_id=test_user.id,
+                    title=f"Folder {i}",
+                    is_temporary=False,
+                    folder_id="2",
+                )
+            )
+            await db_session.flush()
+
+        sessions, total = await list_sidebar_group_page(
+            db_session, user_id=test_user.id, tenant_id=test_tenant.id,
+            folder_id=None, offset=0, limit=10,
+        )
+        assert len(sessions) == 3
+        assert total == 3
+        assert all(s.folder_id is None for s in sessions)
+
+    async def test_sidebar_group_page_scopes_by_folder(
+        self, db_session: AsyncSession, test_user, test_tenant
+    ):
+        """Sessions in another folder are not returned."""
+        from src.db.orm.folders import Folder
+
+        folder = Folder(
+            id="2",
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            name="Folder Two",
+        )
+        db_session.add(folder)
+        await db_session.flush()
+
+        for i in range(3):
+            db_session.add(
+                Session(
+                    id=str(uuid.uuid4()),
+                    tenant_id=test_tenant.id,
+                    user_id=test_user.id,
+                    title=f"Unfiled {i}",
+                    is_temporary=False,
+                    folder_id=None,
+                )
+            )
+            await db_session.flush()
+        for i in range(2):
+            db_session.add(
+                Session(
+                    id=str(uuid.uuid4()),
+                    tenant_id=test_tenant.id,
+                    user_id=test_user.id,
+                    title=f"Folder {i}",
+                    is_temporary=False,
+                    folder_id="2",
+                )
+            )
+            await db_session.flush()
+
+        sessions, total = await list_sidebar_group_page(
+            db_session, user_id=test_user.id, tenant_id=test_tenant.id,
+            folder_id="2", offset=0, limit=10,
+        )
+        assert len(sessions) == 2
+        assert total == 2
+        assert all(s.folder_id == "2" for s in sessions)
+
+    async def test_sidebar_group_page_offset_past_end(
+        self, db_session: AsyncSession, test_user, test_tenant
+    ):
+        """offset past the end returns [] with the unchanged total."""
+        for i in range(7):
+            db_session.add(
+                Session(
+                    id=str(uuid.uuid4()),
+                    tenant_id=test_tenant.id,
+                    user_id=test_user.id,
+                    title=f"Unfiled {i}",
+                    is_temporary=False,
+                    folder_id=None,
+                )
+            )
+            await db_session.flush()
+
+        sessions, total = await list_sidebar_group_page(
+            db_session, user_id=test_user.id, tenant_id=test_tenant.id,
+            folder_id=None, offset=100, limit=5,
+        )
+        assert sessions == []
+        assert total == 7
+
+    async def test_sidebar_group_page_excludes_temporary(
+        self, db_session: AsyncSession, test_user, test_tenant
+    ):
+        """Temporary sessions are excluded from the paged group."""
+        perm = Session(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            title="Perm",
+            is_temporary=False,
+            folder_id=None,
+        )
+        db_session.add(perm)
+        await db_session.flush()
+
+        temp = Session(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            title="Temp",
+            is_temporary=True,
+            folder_id=None,
+        )
+        db_session.add(temp)
+        await db_session.flush()
+
+        sessions, total = await list_sidebar_group_page(
+            db_session, user_id=test_user.id, tenant_id=test_tenant.id,
+            folder_id=None, offset=0, limit=10,
+        )
+        assert len(sessions) == 1
+        assert sessions[0].id == perm.id
+        assert total == 1

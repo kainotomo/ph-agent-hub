@@ -356,7 +356,7 @@ It does **not** include any admin functionality.
 
 ### 12.4 Navigation Structure
 
-**Sidebar:** New Chat (with temp/permanent toggle), sessions grouped into collapsible folders (pinned first within each group, "Unfiled" last), in-place filter search (magnifier toggles an inline `SessionSearchBar`), memory manager, user settings, logout
+**Sidebar:** New Chat (with temp/permanent toggle), sessions grouped into collapsible folders (pinned first within each group, "Unfiled" last) and paged five per group with a "Show N more sessions" row, in-place filter search (magnifier toggles an inline `SessionSearchBar`), memory manager, user settings, logout
 
 **Main Area:** Chat window, input box, model/template/prompt/skill selectors, tool activation panel, file upload button
 
@@ -367,7 +367,7 @@ The chat area consumes these backend endpoints:
 | Category | Endpoints |
 |---|---|
 | **Auth** | `POST /auth/login`, `GET /auth/me` |
-| **Sessions** | `POST/GET/PUT/DELETE /chat/session`, `POST /chat/session/:id/finalize`, `GET /chat/sessions/search?q=&scope=` |
+| **Sessions** | `POST/GET/PUT/DELETE /chat/session`, `POST /chat/session/:id/finalize`, `GET /chat/sessions/sidebar?per_group=5`, `GET /chat/sessions/sidebar/group?group=&offset=&limit=`, `GET /chat/sessions/search?q=&scope=` |
 
 > Session search filters the sidebar **in place**: the magnifier icon toggles an inline
 > search field (`SessionSearchBar`) at the top of the sidebar, and matching sessions
@@ -377,6 +377,16 @@ The chat area consumes these backend endpoints:
 > `/chat/sessions/by-tag`. While a filter is active, rows show small badges for the
 > `matched_fields` each session matched. Debouncing, the `#tag` handling and the
 > react-query cache live in `features/chat/hooks/useSessionSearch.ts`.
+
+> The normal (non-filtered) list is **paged**: `useSidebarSessions`
+> (`features/chat/hooks/useSidebarSessions.ts`) loads the grouped first page (five
+> sessions per folder from `GET /chat/sessions/sidebar`) and appends one page per
+> "Show N more sessions" click (`GET /chat/sessions/sidebar/group`).  Row totals come
+> from `buildSidebarRows(..., { reveal: { totals } })`; search results bypass the cap.
+> All cache keys live under `["sessions", …]`, so existing invalidations refetch the
+> summary and every expanded page.  The active session is merged in from the
+> `["session", id]` query when it falls outside the loaded pages (deep links, search,
+> temporary chats).
 | **Messages** | `POST/GET /chat/session/:id/message`, `PUT/DELETE /chat/session/:id/message/:msgId`, `POST .../regenerate`, `POST .../feedback` |
 | **Streaming** | `POST /chat/session/:id/message` (with `Accept: text/event-stream`), `DELETE /chat/session/:id/stream` |
 | **Config** | `GET /models`, `GET /templates` |

@@ -229,12 +229,27 @@ POST   /chat/session/:id/message/:msgId/feedback
 GET    /chat/session/:id/stream
 DELETE /chat/session/:id
 POST   /chat/session/:id/finalize       # Convert temp → permanent (v1.10)
+GET    /chat/sessions                    # Full list (legacy; no preview)
+GET    /chat/sessions/sidebar            # First page per folder group + totals
+GET    /chat/sessions/sidebar/group      # One page of a single group
 GET    /chat/sessions/search
 GET    /chat/folders                    # List folders (Issue #526)
 POST   /chat/folders                    # Create folder
 PUT    /chat/folders/:id                # Rename / recolour / reorder
 DELETE /chat/folders/:id                # Delete folder (sessions move to Unfiled)
 ```
+
+> **`GET /chat/sessions/sidebar?per_group=5`** — paged sidebar source. Returns the first *per_group* sessions (1..50, default 5) of every non-empty folder group, each with the group's full visible count:
+
+```json
+{ "per_group": 5,
+  "groups": [
+    { "key": "<folder-id>", "folder_id": "<folder-id>", "total": 12, "sessions": ["…"] },
+    { "key": "unfiled", "folder_id": null, "total": 80, "sessions": ["…"] }
+  ] }
+```
+
+> **`GET /chat/sessions/sidebar/group?group=<id|unfiled>&offset=0&limit=5`** — one page of a single group, plus its `total`. `group=unfiled` targets sessions with `folder_id IS NULL`; any other value must be a folder owned by the caller (unknown/foreign ids return 422). Sessions are ordered `is_pinned DESC, updated_at DESC, id DESC`. The client deduplicates by id, so offset pagination tolerates reordering between refreshes. The legacy `GET /chat/sessions` remains for full-list clients and no longer computes the unused `last_message` preview.
 
 > **`POST /chat/session/:id/finalize`** — Converts a temporary (Redis) session into a permanent (MariaDB) session. Migrates messages, tool activations, and file uploads. Returns the new permanent session. Requires the session to be in temporary mode.
 

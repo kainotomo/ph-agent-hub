@@ -61,10 +61,10 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../../../providers/AuthProvider";
 import { useStreamingContext } from "../../../providers/StreamingProvider";
 import {
-  listSessions,
   createSession,
   deleteSession,
   deleteSessions,
+  getSession,
   moveSessions,
   updateSession,
   SessionData,
@@ -81,6 +81,7 @@ import {
   SearchScope,
 } from "../services/chat";
 import { MemoryManager } from "./MemoryManager";
+import { useSidebarSessions } from "../hooks/useSidebarSessions";
 import { SessionFolderHeader } from "./SessionFolderHeader";
 import {
   UNFILED_ID,
@@ -573,24 +574,58 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
     }
   };
 
-  const { data: sessions, isLoading, isError, error, refetch } = useQuery({
-    queryKey: ["sessions"],
-    queryFn: listSessions,
+  // Grouped, server-paged session source: 5 per folder group to start with,
+  // more fetched per group on demand (see useSidebarSessions).
+  const {
+    sessions: loadedSessions,
+    totals,
+    isLoading,
+    isError,
+    error,
+    refetch,
+    moreState,
+    showMore,
+    retryMore,
+  } = useSidebarSessions();
+
+  // The active session may live beyond the loaded pages (deep link, search
+  // result, freshly created temporary chat).  ChatPage already fetches this
+  // exact query key, so this shares its cache instead of adding a request.
+  const { data: activeSessionDetail } = useQuery({
+    queryKey: ["session", sessionId],
+    queryFn: () => getSession(sessionId!),
+    enabled: !!sessionId,
+    retry: false,
   });
 
-  // Issue #526 — folders are a separate, small collection; session counts are
-  // derived client-side from `sessions` so they can never drift.
+  const sessions = useMemo(() => {
+    const detail = activeSessionDetail;
+    if (!detail || detail.is_pending) return loadedSessions;
+    if (loadedSessions.some((session) => session.id === detail.id)) {
+      return loadedSessions;
+    }
+    // Appended so it keeps its place in the group's normal sort order.
+    return [...loadedSessions, detail];
+  }, [loadedSessions, activeSessionDetail]);
+
+  // Folders are a separate, small collection; header counts come from the
+  // server totals in `totals` (see buildSidebarRows), not from loaded pages.
   const { data: folders } = useQuery({
     queryKey: ["folders"],
     queryFn: listFolders,
   });
 
-  // Invalidate both the session list and the search cache so mutations
+  // Invalidate the paged session list and the search cache so mutations
   // (delete, pin, rename, move, tag) are reflected in an active filter.
+  // The active session's detail cache is refreshed too: it may be rendered
+  // from the fallback rather than from a loaded sidebar page.
   const invalidateSessionLists = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ["sessions"] });
     queryClient.invalidateQueries({ queryKey: ["session-search"] });
-  }, [queryClient]);
+    if (sessionId) {
+      queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+    }
+  }, [queryClient, sessionId]);
 
   const createMutation = useMutation({
     mutationFn: () =>
@@ -600,9 +635,8 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
         auto_route_enabled: true,
       }),
     onSuccess: (data) => {
-      queryClient.setQueryData(["sessions"], (old: SessionData[] | undefined) =>
-        [data, ...(old || []).filter(s => s.id !== data.id)]
-      );
+      // The new temporary session is rendered through the active-session
+      // fallback once ChatPage fetches its detail; no cache prepend needed.
       navigate(`/chat/${data.id}`);
     },
     onError: (err) => message.error(`Failed to create session: ${err.message}`),
@@ -785,15 +819,11 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
   // Stable callbacks for SessionListItem (avoids re-render when React.memo compares).
   const handleNavigate = useCallback(
     (session: SessionData) => {
-      // Ensure the session is in the sidebar cache (prepends if absent).
-      queryClient.setQueryData<SessionData[]>(["sessions"], (old) => {
-        if (!old) return [session];
-        if (old.some((s) => s.id === session.id)) return old;
-        return [session, ...old];
-      });
+      // Sessions outside the loaded pages are surfaced by the active-session
+      // fallback (the ["session", id] query) after navigation.
       navigate(session.id === sessionId ? "/chat" : `/chat/${session.id}`);
     },
-    [navigate, sessionId, queryClient],
+    [navigate, sessionId],
   );
   const handleEditSession = useCallback(
     (session: SessionData) => {
@@ -833,16 +863,20 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
   // -------------------------------------------------------------------------
 
   // Flatten folders + sessions into the single list Virtuoso renders.
-  const visibleSessions = search.active ? search.results : (sessions ?? []);
+  const visibleSessions = search.active ? search.results : sessions;
   const rows = useMemo(
     () =>
       buildSidebarRows(
         visibleSessions,
         folders || [],
         collapsedFolders,
-        { filtering: search.active },
+        {
+          filtering: search.active,
+          // Search results are complete; only the normal list is paged.
+          reveal: search.active ? undefined : { totals },
+        },
       ),
-    [visibleSessions, folders, collapsedFolders, search.active],
+    [visibleSessions, folders, collapsedFolders, search.active, totals],
   );
 
   function closeFolderModal() {
@@ -982,9 +1016,8 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
 
   const confirmDeleteFolder = useCallback(
     (folder: FolderData) => {
-      const count = (sessions || []).filter(
-        (s) => (s.folder_id ?? null) === folder.id,
-      ).length;
+      // Server total: the folder may hold more sessions than the loaded pages.
+      const count = totals[folder.id] ?? 0;
       Modal.confirm({
         title: `Delete "${folder.name}"?`,
         content:
@@ -997,7 +1030,7 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
         onOk: () => deleteFolderMutation.mutate(folder.id),
       });
     },
-    [sessions, deleteFolderMutation],
+    [totals, deleteFolderMutation],
   );
 
   const handleNewChatInFolder = useCallback(
@@ -1035,6 +1068,41 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
             onDragLeave={handleFolderDragLeave}
             onDrop={handleFolderDrop}
           />
+        );
+      }
+
+      if (row.kind === "more") {
+        const state = moreState[row.groupId];
+        const label = `Show ${row.remaining} more session${
+          row.remaining === 1 ? "" : "s"
+        }`;
+        return (
+          <button
+            type="button"
+            data-testid={`show-more-${row.groupId}`}
+            disabled={state?.loading}
+            onClick={() =>
+              state?.failed ? retryMore(row.groupId) : showMore(row.groupId)
+            }
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              width: "100%",
+              padding: "4px 24px 10px 32px",
+              border: "none",
+              background: "transparent",
+              color: state?.failed ? "#ff4d4f" : "#1677ff",
+              fontSize: 12,
+              textAlign: "left",
+              cursor: state?.loading ? "default" : "pointer",
+            }}
+          >
+            {state?.loading ? <Spin size="small" /> : <DownOutlined />}
+            <span>
+              {state?.failed ? `Retry — ${label}` : `${label}`}
+            </span>
+          </button>
         );
       }
 
@@ -1105,6 +1173,9 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
       handleFolderDragLeave,
       handleFolderDrop,
       search.active,
+      moreState,
+      showMore,
+      retryMore,
     ],
   );
 
@@ -1116,25 +1187,12 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
   // Issue #526: the index is the session's position in the *flattened* row
   // list, and a session inside a collapsed folder is expanded first.
   useEffect(() => {
-    if (!sessionId || !sessions) return;
+    if (!sessionId) return;
 
-    let target = sessions.find((s) => s.id === sessionId);
-
-    if (!target) {
-      // Session might not be in the sidebar list (e.g. beyond the 2000-recent
-      // limit, or navigated from search).  Check if we have the session detail
-      // in the query cache (from ChatPage's fetch) and prepend it.
-      const cached = queryClient.getQueryData<SessionData>(["session", sessionId]);
-      if (cached) {
-        queryClient.setQueryData<SessionData[]>(["sessions"], (old) => {
-          if (!old) return [cached];
-          if (old.some((s) => s.id === sessionId)) return old;
-          return [cached, ...old];
-        });
-        target = cached;
-      }
-      if (!target) return;
-    }
+    const target = sessions.find((s) => s.id === sessionId);
+    // The active-session fallback keeps deep-linked / search-opened sessions
+    // in `sessions`; nothing to scroll to until its detail has loaded.
+    if (!target) return;
 
     // A session hidden inside a collapsed folder is not rendered: expand its
     // group and let the rebuilt rows bring the effect back around.
@@ -1159,7 +1217,7 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
       });
     }, 100);
     return () => clearTimeout(timer);
-  }, [sessionId, sessions, rows, collapsedFolders, queryClient]);
+  }, [sessionId, sessions, rows, collapsedFolders]);
 
   const handleNewChat = (temporary = false) => {
     if (temporary) {
@@ -1169,9 +1227,6 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
       // Lazy persistence (Phase 2): generate a client-side UUID and
       // navigate — the backend session is created on the first message.
       const uuid = crypto.randomUUID();
-      queryClient.setQueryData(["sessions"], (old: SessionData[] | undefined) =>
-        old || []
-      );
       navigate(`/chat/${uuid}`);
     }
   };

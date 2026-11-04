@@ -369,3 +369,137 @@ describe("buildSidebarRows filtering", () => {
     expect(sessionIds(rows)).toEqual(["a"]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Show N more sessions (server-side reveal)
+// ---------------------------------------------------------------------------
+
+describe("buildSidebarRows reveal", () => {
+  it("renders a more row with the remaining sessions when totals exceed members", () => {
+    const folders = [makeFolder({ id: "f1" })];
+    const sessions = Array.from({ length: 5 }, (_, i) =>
+      makeSession({ id: `s${i}`, folder_id: "f1" }),
+    );
+
+    const rows = buildSidebarRows(sessions, folders, NO_COLLAPSE, {
+      reveal: { totals: { f1: 80 } },
+    });
+
+    expect(sessionIds(rows)).toHaveLength(5);
+    const header = folderHeaders(rows)[0];
+    expect(header.count).toBe(80);
+    const more = rows.find((r) => r.kind === "more");
+    expect(more).toBeDefined();
+    expect(more!.groupId).toBe("f1");
+    expect(more!.remaining).toBe(75);
+  });
+
+  it("does not emit a more row when the total equals the member count", () => {
+    const folders = [makeFolder({ id: "f1" })];
+    const sessions = Array.from({ length: 3 }, (_, i) =>
+      makeSession({ id: `s${i}`, folder_id: "f1" }),
+    );
+
+    const rows = buildSidebarRows(sessions, folders, NO_COLLAPSE, {
+      reveal: { totals: { f1: 3 } },
+    });
+
+    expect(rows.filter((r) => r.kind === "more")).toHaveLength(0);
+    expect(folderHeaders(rows)[0].count).toBe(3);
+  });
+
+  it("does not emit a more row when the total is smaller than the member count", () => {
+    const folders = [makeFolder({ id: "f1" })];
+    const sessions = [
+      makeSession({ id: "a", folder_id: "f1" }),
+      makeSession({ id: "b", folder_id: "f1" }),
+    ];
+
+    const rows = buildSidebarRows(sessions, folders, NO_COLLAPSE, {
+      reveal: { totals: { f1: 1 } },
+    });
+
+    expect(rows.filter((r) => r.kind === "more")).toHaveLength(0);
+    expect(folderHeaders(rows)[0].count).toBe(2);
+  });
+
+  it("does not emit a more row for a collapsed group", () => {
+    const folders = [makeFolder({ id: "f1" })];
+    const sessions = [
+      makeSession({ id: "a", folder_id: "f1" }),
+      makeSession({ id: "b", folder_id: "f1" }),
+    ];
+
+    const rows = buildSidebarRows(sessions, folders, new Set(["f1"]), {
+      reveal: { totals: { f1: 10 } },
+    });
+
+    expect(rows.filter((r) => r.kind === "more")).toHaveLength(0);
+    expect(sessionIds(rows)).toEqual([]);
+  });
+
+  it("does not emit a more row in filtering mode and keeps the match count", () => {
+    const folders = [makeFolder({ id: "f1" })];
+    const sessions = [
+      makeSession({ id: "a", folder_id: "f1" }),
+      makeSession({ id: "b", folder_id: "f1" }),
+    ];
+
+    const rows = buildSidebarRows(sessions, folders, NO_COLLAPSE, {
+      filtering: true,
+      reveal: { totals: { f1: 10 } },
+    });
+
+    expect(rows.filter((r) => r.kind === "more")).toHaveLength(0);
+    expect(folderHeaders(rows)[0].count).toBe(2);
+    expect(sessionIds(rows)).toEqual(["a", "b"]);
+  });
+
+  it("keys a more row by group and keeps all keys distinct", () => {
+    const folders = [makeFolder({ id: "f1" })];
+    const sessions = [
+      makeSession({ id: "a", folder_id: "f1" }),
+      makeSession({ id: "u", folder_id: null }),
+    ];
+
+    const rows = buildSidebarRows(sessions, folders, NO_COLLAPSE, {
+      reveal: { totals: { f1: 10, [UNFILED_ID]: 10 } },
+    });
+
+    const more = rows.find((r) => r.kind === "more");
+    expect(more).toBeDefined();
+    expect(more!.groupId).toBe("f1");
+    expect(rowKey(0, more!)).toBe("m:f1");
+
+    // The Unfiled group also gets its own more row keyed by the sentinel.
+    const unfiledMore = rows.find((r) => r.kind === "more" && r.groupId === UNFILED_ID);
+    expect(unfiledMore).toBeDefined();
+    expect(rowKey(0, unfiledMore!)).toBe(`m:${UNFILED_ID}`);
+
+    // No duplicate keys across the whole build.
+    const keys = rows.map((row, i) => rowKey(i, row));
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it("gives each group its own more row with the right remaining value", () => {
+    const folders = [
+      makeFolder({ id: "f1" }),
+      makeFolder({ id: "f2" }),
+    ];
+    const sessions = [
+      makeSession({ id: "a", folder_id: "f1" }),
+      makeSession({ id: "b", folder_id: "f1" }),
+      makeSession({ id: "c", folder_id: "f2" }),
+      makeSession({ id: "d", folder_id: "f2" }),
+    ];
+
+    const rows = buildSidebarRows(sessions, folders, NO_COLLAPSE, {
+      reveal: { totals: { f1: 10, f2: 12 } },
+    });
+
+    const moreRows = rows.filter((r) => r.kind === "more");
+    expect(moreRows).toHaveLength(2);
+    const byGroup = Object.fromEntries(moreRows.map((r) => [r.groupId, r.remaining]));
+    expect(byGroup).toEqual({ f1: 8, f2: 10 });
+  });
+});

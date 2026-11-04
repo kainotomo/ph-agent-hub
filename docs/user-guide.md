@@ -43,7 +43,7 @@ Your login persists across page reloads — you won't need to re-enter your cred
 ### 1.2 The Chat Area
 
 After logging in, you'll see the chat area with:
-- **Left sidebar**: Your session list, search bar, and new session button
+- **Left sidebar**: Your session list (five chats per folder at a time, with a **Show N more sessions** button), search bar, and new session button
 - **Main area**: The active conversation
 - **Top bar**: Model selector, template selector, and session controls
 - **Input area**: Message composer with skill selector, tool manager, file upload, and memory buttons
@@ -104,6 +104,7 @@ Create a folder from the **New Chat** dropdown (**New Folder**), then group your
 - **Rename or recolour**: open the folder's **⋯** menu and choose **Rename** or **Change colour**.
 - **Start a chat in a folder**: click **+** on the folder header. The new chat is filed there as soon as you send your first message.
 - **Delete a folder**: choose **Delete** from the folder menu. The chats inside are kept and move to **Unfiled**.
+- **Reveal older chats**: each folder shows its five most recent chats (pinned first). Click **Show N more sessions** to load the next five; the number counts down as you reveal more.
 - **Unfiled** always sits at the bottom of the list and holds every chat without a folder.
 
 Folders are personal to your account and apply to permanent sessions only.

@@ -47,6 +47,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   admin actions. Payloads never include the stored value. ([#569])
 
 ### Changed
+- **Configurable tool-output caps, with paging hints (Issue #584 follow-up)** — the
+  storage cap is now `STORAGE_TOOL_OUTPUT_MAX_CHARS` (default raised `16,000` →
+  `64,000`, `0` = store the full output) and the history-replay cap is
+  `HISTORY_TOOL_RESULT_MAX_CHARS` (default raised `2,000` → `16,000`, `0` = replay
+  the full stored result). They remain separate controls on purpose: the first
+  bounds the JSON message row (and the Redis cache, exports and the chat API), the
+  second bounds what a later turn replays into the prompt. A 118 KB `Get-Content`
+  dump now keeps 1,084 of 2,000 lines in the transcript instead of 271, and the
+  model sees ~16,000 characters of it on the next turn instead of ~2,000 from each
+  end. The clip marker now ends with a paging instruction (`re-read with an
+  offset/line range for the rest`, or `request the next page (offset/limit)` for
+  list payloads), so a clipped read is a prompt to fetch the remainder rather than
+  a dead end. Both knobs are documented in `infrastructure/env.example`. Note that
+  MCP tools are not wrapped by the live `TOOL_OUTPUT_CAP_*` (they expose no
+  `.func`), so setting the storage cap to `0` is only advisable when large dumps
+  are expected and accepted.
 - **Tool outputs are shaped at the source (Issue #584 follow-up)** — the output caps
   were clipping payloads that never needed to be that large, and a production run
   showed all three causes. `get_financials` now omits line items the provider has no

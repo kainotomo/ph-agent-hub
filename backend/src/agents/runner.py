@@ -450,15 +450,17 @@ def _estimate_tokens(text: str) -> int:
 
 
 # Cap on a stored tool result replayed into the prompt as history text
-# (Issue #584).  The storage cap is larger; replay stays lean, so it keeps the
-# head *and* the tail of the payload — for JSON dumps the leading fields and the
-# trailing records are the informative ends, and a bare prefix described the
-# payload as if it were complete.
-# Raised 300 -> 2,000 on production evidence: 74% of stored tool results are
-# longer than 300 chars, while at 2,000 the replayed history still uses only
-# ~11% of the 60%-of-context history budget (worst case on a 1M-context model
-# was 1.3M of 2.4M chars) and never engages the oldest-first history truncation.
-HISTORY_TOOL_RESULT_MAX_CHARS = 2000
+# (Issue #584).  The storage cap is larger; replay keeps the head *and* the
+# tail of the payload — for JSON dumps the leading fields and the trailing
+# records are the informative ends, and a bare prefix described the payload as
+# if it were complete.
+# Configurable via ``HISTORY_TOOL_RESULT_MAX_CHARS`` (0 = replay the whole
+# stored result, bounded only by the 60%-of-context history budget in
+# ``_build_history_string``).  The old 2,000 default kept replayed history at
+# ~11% of that budget, but it collapsed a file read to the first and last ~17
+# lines on the following turn; the default is 16,000 so the model can still
+# answer questions about the file it just read.
+HISTORY_TOOL_RESULT_MAX_CHARS = settings.HISTORY_TOOL_RESULT_MAX_CHARS
 
 
 def _clip_for_history(text: str) -> str:
@@ -468,7 +470,7 @@ def _clip_for_history(text: str) -> str:
     replayed payload cannot masquerade as a short one (Issue #584).
     """
     cap = HISTORY_TOOL_RESULT_MAX_CHARS
-    if len(text) <= cap:
+    if cap <= 0 or len(text) <= cap:
         return text
     half = cap // 2
     return (
@@ -5318,15 +5320,22 @@ def _maybe_accumulate_tool_events(
 # message.  The model-context caps are TOOL_OUTPUT_CAP_* above; the two are
 # separate on purpose, and this one is the one that must stay legible.
 #
+# Configurable via ``STORAGE_TOOL_OUTPUT_MAX_CHARS`` (0 = store the output in
+# full).  Note that MCP tools are not wrapped by ``_wrap_tool_with_output_cap``
+# (they expose no ``.func``), so disabling this cap lets one unbounded MCP
+# result — e.g. ``Get-Content -Raw`` on a large log — land in the JSON message
+# row, the Redis cache for temporary sessions, exports and the chat API.
+#
 # Raised 4,000 -> 16,000 (Issue #584) on production evidence: 31% of tool
 # results were clipped in a 30-day window, hitting the data tools hardest
 # (get_financials 95%, get_stock_snapshot 82%, extract_pdf 82%,
 # get_filing_text 80%), and ~90% of the clipped payloads were single-line JSON
 # objects, not page text.  16,000 holds a full quarterly statement (8 periods
 # x ~50 line items, ~14-16 KB) and is 4x the observed p99 of 3,859 chars while
-# staying at ~1/6 of the live TOOL_OUTPUT_CAP.  Revisit once the legibility
-# marker has reported true sizes for a couple of weeks.
-STORAGE_TOOL_OUTPUT_MAX_CHARS = 16_000
+# staying at ~1/6 of the live TOOL_OUTPUT_CAP.  The default is now 64,000 so a
+# file read arrives whole or close to it, and the clip marker tells the model
+# how to fetch the rest.
+STORAGE_TOOL_OUTPUT_MAX_CHARS = settings.STORAGE_TOOL_OUTPUT_MAX_CHARS
 
 # Don't clip unless doing so actually saves space.  A payload barely over the
 # cap (16,108 chars in production) loses a key for a handful of characters and
@@ -5366,19 +5375,24 @@ def _storage_clip_notice(
 
     Issue #584 — the old ``...(truncated)`` was indistinguishable from a
     complete payload, so the first 5 rows of a 12-row table read as
-    "this list has 5 entries" instead of "this list was cut".
+    "this list has 5 entries" instead of "this list was cut".  The marker also
+    tells the model how to fetch the remainder, so an oversized read is a
+    paging prompt rather than a dead end.
     """
     kept = text[:cap]
     parts = [f"{cap:,} of {len(text):,} chars shown"]
+    hint = "re-read with an offset/line range for the rest"
     if records is not None:
         shown, total = records
         parts.append(f"{shown:,} of {total:,} records")
+        hint = "request the next page (offset/limit) for the rest"
     elif line_oriented and text.count("\n") >= 1:
         # Line-oriented payloads (e.g. PowerShell Format-List): what matters
         # is how many rows arrived, not just how many bytes.
         parts.append(f"{kept.count(chr(10)):,} of {text.count(chr(10)) + 1:,} lines")
     if line_oriented and kept and text[cap - 1] != "\n":
         parts.append("cut mid-line")
+    parts.append(hint)
     return "\n... [truncated: " + ", ".join(parts) + "]"
 
 
@@ -5391,6 +5405,9 @@ def _format_tool_output_for_storage(output: Any) -> str | None:
     text or records for list payloads.  A payload within
     ``STORAGE_TOOL_OUTPUT_SLACK_RATIO`` of the cap is stored whole: clipping
     has to save something to be worth losing a key.
+
+    The cap comes from ``STORAGE_TOOL_OUTPUT_MAX_CHARS``; ``0`` stores the
+    output in full (no clipping, no marker).
     """
     if output is None:
         return None
@@ -5408,10 +5425,10 @@ def _format_tool_output_for_storage(output: Any) -> str | None:
         except (TypeError, ValueError):
             text = str(output)
             serialized_ok = False
-        if serialized_ok and isinstance(output, list):
+        if serialized_ok and isinstance(output, list) and cap > 0:
             records = (_records_fitting(output, cap), len(output))
 
-    if len(text) <= cap * STORAGE_TOOL_OUTPUT_SLACK_RATIO:
+    if cap <= 0 or len(text) <= cap * STORAGE_TOOL_OUTPUT_SLACK_RATIO:
         return text
     return text[:cap] + _storage_clip_notice(
         text, cap, records=records, line_oriented=line_oriented,

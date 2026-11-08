@@ -148,6 +148,24 @@ class Settings(BaseSettings):
     AGENT_LOOP_REPEAT_THRESHOLD: int = 4
     """Number of consecutive identical tool calls that triggers loop detection."""
 
+    # --- Tool output caps (Issue #584) ---
+    STORAGE_TOOL_OUTPUT_MAX_CHARS: int = 64_000
+    """Character budget for the tool-result text *stored* inside a persisted
+    assistant message.  This is a storage/transcript budget, not the
+    model-context cap (that one is ``_compute_tool_output_cap``).  Outputs over
+    the budget are clipped with a marker that states what was dropped and how
+    to fetch the rest.  ``0`` stores the output in full: only suitable when
+    large dumps are expected and accepted, because MCP tools are not wrapped by
+    the live output cap and one unbounded result then lands in the message row,
+    the Redis cache for temporary sessions, exports and the chat API."""
+
+    HISTORY_TOOL_RESULT_MAX_CHARS: int = 16_000
+    """Character budget for a tool result replayed into the prompt as
+    conversation history on a later turn.  The head and tail are kept and the
+    middle is replaced with a marker.  ``0`` replays the whole stored result,
+    bounded only by the 60%-of-context history budget in
+    ``_build_history_string``."""
+
     # --- Sub-agent delegation (Issue #574) ---
     SUBAGENT_TIMEOUT: int = 300
     """Maximum wall-clock seconds a single delegated sub-agent run may take

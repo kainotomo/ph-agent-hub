@@ -56,14 +56,24 @@ def check(name: str, condition: bool, detail: str = "") -> None:
 
 def big_output() -> str:
     """A single-line JSON payload well past the storage cap."""
+    # Scale with the configured cap (default 64,000) so the fixture keeps
+    # exceeding it even after the cap is raised.
+    row_count = max(STORAGE_TOOL_OUTPUT_MAX_CHARS, 16_000) // 80 + 200
     rows = [
         {"row": i, "revenue": i * 1000, "note": "n" * 60}
-        for i in range(400)
+        for i in range(row_count)
     ]
     return json.dumps({"symbol": "AAPL", "statements": rows, "text": "T" * 6000})
 
 
 async def main() -> int:
+    if STORAGE_TOOL_OUTPUT_MAX_CHARS <= 0:
+        print(
+            "[SKIP] STORAGE_TOOL_OUTPUT_MAX_CHARS=0 disables the storage clip; "
+            "this smoke test checks the capped behaviour."
+        )
+        return 0
+
     output = big_output()
     check(
         "payload exceeds the storage cap",

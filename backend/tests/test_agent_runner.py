@@ -188,7 +188,8 @@ class TestExtractMessageText:
         assert f"[Tool result from calc: {output}]" == result
 
     def test_function_result_keeps_head_and_tail(self):
-        head, tail = "H" * 5000, "T" * 5000
+        cap = HISTORY_TOOL_RESULT_MAX_CHARS
+        head, tail = "H" * cap, "T" * cap
         content = [{"type": "function_result", "name": "calc", "output": head + tail}]
 
         result = self.fn(content)
@@ -196,6 +197,16 @@ class TestExtractMessageText:
         assert "H" * 100 in result      # head survives
         assert "T" * 100 in result      # tail survives
         assert "HHHH" in result and "TTTT" in result
+
+    def test_function_result_unlimited_history_replays_whole(self, monkeypatch):
+        """HISTORY_TOOL_RESULT_MAX_CHARS=0 disables the replay clip."""
+        from src.agents import runner as runner_mod
+
+        monkeypatch.setattr(runner_mod, "HISTORY_TOOL_RESULT_MAX_CHARS", 0)
+        output = "x" * 50_000
+        content = [{"type": "function_result", "name": "calc", "output": output}]
+
+        assert self.fn(content) == f"[Tool result from calc: {output}]"
 
     def test_mixed_content(self):
         content = [
@@ -748,28 +759,50 @@ class TestFormatToolOutputForStorage:
 
     def test_long_string_reports_line_count(self):
         # The Issue #584 failure shape: a table that arrives partly cut.
-        # 49-char lines, chosen so the cut lands mid-line whichever the cap.
-        lines = [f"row-{i:03d}: {'v' * 39}" for i in range(500)]
+        # 49-char lines (48 + newline), chosen so the cut lands mid-line.
+        cap = STORAGE_TOOL_OUTPUT_MAX_CHARS
+        line_count = int(cap * STORAGE_TOOL_OUTPUT_SLACK_RATIO) // 49 + 10
+        lines = [f"row-{i:05d}: {'v' * 37}" for i in range(line_count)]
         long_str = "\n".join(lines)
-        assert len(long_str) > STORAGE_TOOL_OUTPUT_MAX_CHARS  # guard the fixture
-        assert STORAGE_TOOL_OUTPUT_MAX_CHARS % 49 != 0
+        assert len(long_str) > cap * STORAGE_TOOL_OUTPUT_SLACK_RATIO  # guard the fixture
+        assert cap % 49 != 0
 
         result = self.fn(long_str)
 
-        assert "of 500 lines" in result
+        assert f"of {line_count:,} lines" in result
         assert "cut mid-line" in result
         assert f"{len(long_str):,} chars shown" in result
 
     def test_long_list_reports_record_count(self):
-        rows = [{"ticker": f"T{i}", "value": "v" * 400} for i in range(80)]
-        assert len(json.dumps(rows)) > STORAGE_TOOL_OUTPUT_MAX_CHARS
+        cap = STORAGE_TOOL_OUTPUT_MAX_CHARS
+        row_count = int(cap * STORAGE_TOOL_OUTPUT_SLACK_RATIO) // 400 + 50
+        rows = [{"ticker": f"T{i}", "value": "v" * 400} for i in range(row_count)]
+        assert len(json.dumps(rows)) > cap * STORAGE_TOOL_OUTPUT_SLACK_RATIO
 
         result = self.fn(rows)
 
-        assert "of 80 records" in result
+        assert f"of {row_count:,} records" in result
         assert "chars shown" in result
         shown = int(result.split("chars shown, ")[1].split(" of ")[0].replace(",", ""))
         assert 0 < shown < len(rows)
+
+    def test_clip_notice_suggests_paging(self):
+        """A clipped payload must tell the model how to fetch the rest."""
+        cap = STORAGE_TOOL_OUTPUT_MAX_CHARS
+        assert "for the rest" in self.fn("x" * int(cap * 1.5))
+
+        rows = [{"ticker": f"T{i}", "value": "v" * 400} for i in range(cap // 400 + 50)]
+        assert "next page (offset/limit)" in self.fn(rows)
+
+    def test_unlimited_cap_stores_whole_payload(self, monkeypatch):
+        """STORAGE_TOOL_OUTPUT_MAX_CHARS=0 disables the storage clip."""
+        from src.agents import runner as runner_mod
+
+        monkeypatch.setattr(runner_mod, "STORAGE_TOOL_OUTPUT_MAX_CHARS", 0)
+        payload = "z" * 500_000
+
+        assert self.fn(payload) == payload
+        assert "truncated" not in self.fn(payload)
 
     def test_short_list_not_truncated(self):
         rows = [{"ticker": "AAPL"}]

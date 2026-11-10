@@ -96,6 +96,27 @@ class TestRunRegistry:
                     await release_run(lease, OUTCOME_COMPLETED)
             await _cleanup(sid, test_user.id)
 
+    async def test_different_sessions_run_concurrently(self, test_user):
+        sid_a = _session_id()
+        sid_b = _session_id()
+        lease_a, lease_b = await asyncio.gather(
+            acquire_run(sid_a, test_user.id, test_user.tenant_id),
+            acquire_run(sid_b, test_user.id, test_user.tenant_id),
+        )
+        try:
+            assert lease_a is not None
+            assert lease_b is not None
+            assert lease_a.run_id != lease_b.run_id
+            active = await get_active_runs_for_user(test_user.id)
+            active_ids = {run.session_id for run in active}
+            assert {sid_a, sid_b} <= active_ids
+        finally:
+            for lease in (lease_a, lease_b):
+                if lease is not None:
+                    await release_run(lease, OUTCOME_COMPLETED)
+            await _cleanup(sid_a, test_user.id)
+            await _cleanup(sid_b, test_user.id)
+
     async def test_release_by_non_owner_is_noop(self, test_user):
         sid = _session_id()
         lease = await acquire_run(sid, test_user.id, test_user.tenant_id)

@@ -483,11 +483,13 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
     streamingSessionIds,
     removeStreamingSession,
     completedUnreadIds,
+    statusRevision,
     seedFromSessions,
     markSessionViewed,
   } = useStreamingContext();
   const streamingSessionIdsRef = useRef(streamingSessionIds);
   streamingSessionIdsRef.current = streamingSessionIds;
+  const prevStatusRevisionRef = useRef(statusRevision);
 
   // Use matchMedia instead of resize listener — only fires when crossing
   // the 768px boundary, not on every pixel resize (better performance).
@@ -636,10 +638,32 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
 
   // Issue #604 — seed the run-status store from the server snapshot so the
   // spinner is correct on first paint, after a reload, and in a second tab
-  // even before the status SSE connects.
+  // even before the status SSE connects.  The provider ignores seeds once
+  // live status is connected; the signature keeps this effect from running
+  // on every render of an unstable sessions array.
+  const sessionsRef = useRef(sessions);
+  sessionsRef.current = sessions;
+  const seedSignature = useMemo(
+    () =>
+      sessions
+        .map(
+          (session) =>
+            `${session.id}|${session.running ? 1 : 0}|${session.run_id ?? ""}`,
+        )
+        .join("~"),
+    [sessions],
+  );
   useEffect(() => {
-    seedFromSessions(sessions);
-  }, [sessions, seedFromSessions]);
+    seedFromSessions(sessionsRef.current);
+  }, [seedSignature, seedFromSessions]);
+
+  // A start/finish transition means the `running` field cached in the
+  // session list is stale — refetch it so later reloads and seeds are right.
+  useEffect(() => {
+    if (prevStatusRevisionRef.current === statusRevision) return;
+    prevStatusRevisionRef.current = statusRevision;
+    queryClient.invalidateQueries({ queryKey: ["sessions"] });
+  }, [statusRevision, queryClient]);
 
   // Folders are a separate, small collection; header counts come from the
   // server totals in `totals` (see buildSidebarRows), not from loaded pages.

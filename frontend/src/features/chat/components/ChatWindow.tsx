@@ -520,11 +520,45 @@ export const ChatWindow = React.memo(function ChatWindow({
 
   // Issue #604 — tell the status store which conversation is on screen so
   // completion-unread markers clear when the user is actually looking.
-  const { setActiveSession } = useStreamingContext();
+  const {
+    setActiveSession,
+    streamingSessionIds,
+    completionRevisions,
+  } = useStreamingContext();
   useEffect(() => {
     setActiveSession(sessionId ?? null);
     return () => setActiveSession(null);
   }, [sessionId, setActiveSession]);
+
+  // Issue #604 — when a run for this conversation finishes (in this tab,
+  // another tab, or while we were navigated away), refetch its persisted
+  // data. The chat SSE stream's `message_complete` is best-effort and is
+  // lost when this tab is not attached; the authoritative status stream
+  // still reports the finish, so use its per-session revision here. Without
+  // this, React Query could keep serving the pre-answer cache (60 s
+  // staleTime) and the answer only appeared after a reload.
+  const completionRevision = sessionId
+    ? (completionRevisions[sessionId] ?? 0)
+    : 0;
+  const appliedCompletionRevisionsRef = useRef<Record<string, number>>({});
+  useEffect(() => {
+    if (!sessionId) return;
+    const applied = appliedCompletionRevisionsRef.current[sessionId] ?? 0;
+    if (completionRevision <= applied) return;
+    appliedCompletionRevisionsRef.current[sessionId] = completionRevision;
+
+    queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+    queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+    queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
+    queryClient.invalidateQueries({ queryKey: ["sessionUsage", sessionId] });
+    queryClient.invalidateQueries({ queryKey: ["message-step"] });
+  }, [sessionId, completionRevision, queryClient]);
+
+  // Issue #604 — the backend registry can say this conversation is running
+  // even when this tab is not the one streaming it (another tab/device, or
+  // we navigated away and back).  Show that state until the reconnect
+  // attaches and normal streaming progress takes over.
+  const isSessionRunning = !!sessionId && streamingSessionIds.has(sessionId);
 
   // ---- Issue #521: sticky scroll intent (no auto-scroll on finish) --------
   const scrollToBottom = useCallback(() => {
@@ -565,6 +599,11 @@ export const ChatWindow = React.memo(function ChatWindow({
     queryKey: ["messages", sessionId],
     enabled: !!sessionId && (!isPending || demo || widget),
     retry: false,
+    // Chat history can change while this conversation is off-screen (a run
+    // continues in the background / another tab).  Reconcile on mount even
+    // inside the global 60 s staleTime; completionRevisions covers finishes
+    // that happen while this window is already mounted.
+    refetchOnMount: "always",
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) =>
       demo
@@ -894,7 +933,18 @@ export const ChatWindow = React.memo(function ChatWindow({
     return () => {
       cancelled = true;
     };
-  }, [sessionId, demo, widget, pendingFlag, startReconnect, queryClient]);
+    // isSessionRunning is a trigger, not an input: when the status store
+    // learns that a run started in this already-open conversation (another
+    // tab/device), re-check and attach to it as well.
+  }, [
+    sessionId,
+    demo,
+    widget,
+    pendingFlag,
+    startReconnect,
+    queryClient,
+    isSessionRunning,
+  ]);
 
   // Auto-scroll to bottom when messages finish loading (existing session)
   useEffect(() => {
@@ -2198,6 +2248,24 @@ export const ChatWindow = React.memo(function ChatWindow({
           onClose={() => setMemoryOpen(false)}
           sessionId={sessionId}
         />
+      )}
+
+      {isSessionRunning && !streaming && !reconnecting && (
+        <div style={{ padding: "8px 16px 0", flexShrink: 0 }}>
+          <Alert
+            message="Agent is running…"
+            description="You can switch to another chat — this run keeps going in the background. Progress will appear here when it resumes."
+            type="info"
+            showIcon
+            icon={<Spin size="small" />}
+            action={
+              <Button size="small" onClick={handleStop}>
+                Stop
+              </Button>
+            }
+            style={{ borderLeft: "4px solid #1677ff" }}
+          />
+        </div>
       )}
 
       {/* Messages area */}

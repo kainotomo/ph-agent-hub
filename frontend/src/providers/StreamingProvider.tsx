@@ -67,6 +67,12 @@ export interface StreamingContextValue {
   streamingSessionIds: Set<string>;
   /** Session IDs whose last run completed while the user was away. */
   completedUnreadIds: Set<string>;
+  /** Increments on every start/finish event; lets list consumers refetch. */
+  statusRevision: number;
+  /** Per-session finish counter. ChatWindow refetches its data when this
+   * changes, even if the chat SSE stream never delivered `message_complete`
+   * (run finished in another tab / while navigated away). */
+  completionRevisions: Record<string, number>;
   /** Register a run this tab just started/reconnected to. */
   addStreamingSession: (id: string, runId?: string | null) => void;
   /** Unregister a run after this tab's SSE stream ends. */
@@ -86,6 +92,8 @@ export interface StreamingContextValue {
 const StreamingContext = createContext<StreamingContextValue>({
   streamingSessionIds: new Set(),
   completedUnreadIds: new Set(),
+  statusRevision: 0,
+  completionRevisions: {},
   addStreamingSession: () => {},
   removeStreamingSession: () => {},
   clearStreamingSessions: () => {},
@@ -105,10 +113,51 @@ export function StreamingProvider({
   const [completedUnreadIds, setCompletedUnreadIds] = useState<Set<string>>(
     () => loadUnreadIds(),
   );
+  const [statusRevision, setStatusRevision] = useState(0);
+  const [completionRevisions, setCompletionRevisions] = useState<
+    Record<string, number>
+  >({});
 
   const runsRef = useRef(runs);
   runsRef.current = runs;
   const activeSessionRef = useRef<string | null>(null);
+
+  // Once the live status stream has delivered a snapshot it is the single
+  // source of truth.  Session-list seeds are only a first-paint fallback
+  // before that point — otherwise a stale `running: true` from a list
+  // fetched during a run would resurrect a finished spinner forever.
+  const statusStreamReadyRef = useRef(false);
+
+  // Runs that this client has already observed finish.  A stale list seed
+  // must not re-add them (keyed by `sessionId:runId`; `sessionId:*` is a
+  // wildcard tombstone for the poll fallback when no run id is known).
+  const finishedRunsRef = useRef<Set<string>>(new Set());
+
+  const rememberFinished = useCallback((id: string, runId: string | null) => {
+    const key = `${id}:${runId ?? "*"}`;
+    finishedRunsRef.current.add(key);
+    if (finishedRunsRef.current.size > 500) {
+      const oldest = finishedRunsRef.current.values().next().value;
+      if (oldest) finishedRunsRef.current.delete(oldest);
+    }
+  }, []);
+
+  const forgetFinished = useCallback((id: string, runId: string | null) => {
+    finishedRunsRef.current.delete(`${id}:${runId ?? "*"}`);
+    finishedRunsRef.current.delete(`${id}:*`);
+  }, []);
+
+  const isFinished = useCallback((id: string, runId: string | null) => {
+    const set = finishedRunsRef.current;
+    return set.has(`${id}:${runId ?? "*"}`) || set.has(`${id}:*`);
+  }, []);
+
+  const bumpCompletionRevision = useCallback((id: string) => {
+    setCompletionRevisions((prev) => ({
+      ...prev,
+      [id]: (prev[id] ?? 0) + 1,
+    }));
+  }, []);
 
   const streamingSessionIds = useMemo(
     () => deriveStreamingSessionIds(runs),
@@ -117,6 +166,8 @@ export function StreamingProvider({
 
   const addStreamingSession = useCallback(
     (id: string, runId: string | null = null) => {
+      if (runId) forgetFinished(id, runId);
+      forgetFinished(id, null);
       setRuns((prev) => {
         const existing = prev[id];
         return {
@@ -132,11 +183,18 @@ export function StreamingProvider({
         };
       });
     },
-    [],
+    [forgetFinished],
   );
 
   const removeStreamingSession = useCallback(
     (id: string, force: boolean = false) => {
+      if (force) {
+        const entry = runsRef.current[id];
+        if (entry) {
+          rememberFinished(id, entry.runId);
+          bumpCompletionRevision(id);
+        }
+      }
       setRuns((prev) => {
         const entry = prev[id];
         if (!entry) return prev;
@@ -149,16 +207,32 @@ export function StreamingProvider({
         return next;
       });
     },
-    [],
+    [rememberFinished, bumpCompletionRevision],
   );
 
   const clearStreamingSessions = useCallback(() => {
     setRuns({});
   }, []);
 
-  const seedFromSessions = useCallback((sessions: SessionSeed[]) => {
-    setRuns((prev) => seedRunningFromSessions(prev, sessions));
-  }, []);
+  const seedFromSessions = useCallback(
+    (sessions: SessionSeed[]) => {
+      const liveAuthoritative = statusStreamReadyRef.current;
+      // After the live stream's first snapshot it owns removals: a list
+      // response that was already in flight when a run started must not
+      // erase it.  Additions are still welcome — they are how a run
+      // started in another tab is discovered while the SSE is temporarily
+      // down — but a finished-run tombstone blocks resurrection.
+      const usable = sessions
+        .filter((session) => !liveAuthoritative || session.running)
+        .map((session) =>
+          session.running && isFinished(session.id, session.run_id ?? null)
+            ? { ...session, running: false }
+            : session,
+        );
+      setRuns((prev) => seedRunningFromSessions(prev, usable));
+    },
+    [isFinished],
+  );
 
   const getRunId = useCallback(
     (id: string) => runsRef.current[id]?.runId ?? null,
@@ -176,28 +250,68 @@ export function StreamingProvider({
     }
   }, []);
 
-  const handleStatusSnapshot = useCallback((snapshot: RunSnapshotEntry[]) => {
-    setRuns((prev) => applyStatusSnapshot(prev, snapshot));
-  }, []);
+  const handleStatusSnapshot = useCallback(
+    (snapshot: RunSnapshotEntry[]) => {
+      statusStreamReadyRef.current = true;
+      for (const run of snapshot) {
+        // A run present in the authoritative snapshot cannot be finished.
+        forgetFinished(run.session_id, run.run_id);
+      }
 
-  const handleStatusEvent = useCallback((event: RunStatusEvent) => {
-    setRuns((prev) => applyRunStatusEvent(prev, event));
-    setCompletedUnreadIds((prev) =>
-      applyCompletionUnread(prev, event, {
-        activeSessionId: activeSessionRef.current,
-        documentVisible:
-          typeof document === "undefined"
-            ? true
-            : document.visibilityState === "visible",
-      }),
-    );
-  }, []);
+      // A periodic/reconnect snapshot is also how a finish can be
+      // recovered when the individual `run_status` event was missed.
+      const previous = runsRef.current;
+      const next = applyStatusSnapshot(previous, snapshot);
+      const removed = Object.keys(previous).filter((id) => !(id in next));
+      if (removed.length > 0) {
+        setCompletionRevisions((prev) => {
+          const updated = { ...prev };
+          for (const id of removed) updated[id] = (updated[id] ?? 0) + 1;
+          return updated;
+        });
+      }
+      setRuns(next);
+    },
+    [forgetFinished],
+  );
+
+  const handleStatusEvent = useCallback(
+    (event: RunStatusEvent) => {
+      if (event.state === "finished") {
+        rememberFinished(event.session_id, event.run_id);
+        bumpCompletionRevision(event.session_id);
+      } else {
+        forgetFinished(event.session_id, event.run_id);
+      }
+      setRuns((prev) => applyRunStatusEvent(prev, event));
+      setStatusRevision((revision) => revision + 1);
+      setCompletedUnreadIds((prev) =>
+        applyCompletionUnread(prev, event, {
+          activeSessionId: activeSessionRef.current,
+          documentVisible:
+            typeof document === "undefined"
+              ? true
+              : document.visibilityState === "visible",
+        }),
+      );
+    },
+    [forgetFinished, rememberFinished, bumpCompletionRevision],
+  );
 
   useSessionStatusStream({
     enabled: !!user,
     onSnapshot: handleStatusSnapshot,
     onEvent: handleStatusEvent,
   });
+
+  // A different user must not inherit another account's run state.
+  const userId = user?.id ?? null;
+  useEffect(() => {
+    statusStreamReadyRef.current = false;
+    finishedRunsRef.current.clear();
+    setRuns({});
+    setCompletionRevisions({});
+  }, [userId]);
 
   // Persist per-device unread markers so a reload keeps the dot.
   useEffect(() => {
@@ -228,6 +342,8 @@ export function StreamingProvider({
     () => ({
       streamingSessionIds,
       completedUnreadIds,
+      statusRevision,
+      completionRevisions,
       addStreamingSession,
       removeStreamingSession,
       clearStreamingSessions,
@@ -239,6 +355,8 @@ export function StreamingProvider({
     [
       streamingSessionIds,
       completedUnreadIds,
+      statusRevision,
+      completionRevisions,
       addStreamingSession,
       removeStreamingSession,
       clearStreamingSessions,

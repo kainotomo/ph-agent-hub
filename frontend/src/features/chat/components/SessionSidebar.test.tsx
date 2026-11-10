@@ -86,8 +86,10 @@ vi.mock("../../../providers/StreamingProvider", () => ({
   useStreamingContext: () => ({
     streamingSessionIds: mockStreamingState.streamingSessionIds,
     completedUnreadIds: mockStreamingState.completedUnreadIds,
+    statusRevision: 0,
     addStreamingSession: vi.fn(),
-    removeStreamingSession: vi.fn(),    clearStreamingSessions: vi.fn(),
+    removeStreamingSession: vi.fn(),
+    clearStreamingSessions: vi.fn(),
     seedFromSessions: vi.fn(),
     getRunId: () => null,
     markSessionViewed: vi.fn(),

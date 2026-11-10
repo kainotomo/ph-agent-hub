@@ -50,6 +50,12 @@ export interface SessionData {
   /** Which search scopes matched this session (title/content/tag). Only
    * populated on results from the session search endpoint. */
   matched_fields?: string[];
+  /** Server-authoritative run state (Issue #604). True while an agent run
+   * holds a lease for this session; sourced from the backend registry so it
+   * is correct after a reload and in other tabs/devices. */
+  running?: boolean;
+  /** Id of the active run when `running` is true. */
+  run_id?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -783,6 +789,12 @@ export interface StreamStatusResponse {
   max_turns?: number;
   /** Backend AutopilotRun state: COMPLETED, FAILED, CANCELLED, PAUSED, etc. */
   run_state?: string | null;
+  /** Active run lease id (Issue #604), when `active` is true. */
+  run_id?: string | null;
+  /** Run kind: "chat", "autopilot", "edit" or "regenerate". */
+  run_kind?: string | null;
+  /** ISO timestamp when the active run started. */
+  run_started_at?: string | null;
 }
 
 /**

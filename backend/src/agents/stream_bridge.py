@@ -56,11 +56,13 @@ class StreamBridge:
         max_buffer: int = 1000,
         heartbeat_interval: int = 15,
         autopilot: bool = False,
+        run_id: str | None = None,
     ) -> None:
         self._session_id = session_id
         self._max_buffer = max_buffer
         self._heartbeat_interval = heartbeat_interval
         self._autopilot = autopilot
+        self._run_id = run_id
 
         #: Bounded buffer of past events for replay on new subscriptions.
         self._buffer: deque[dict[str, Any]] = deque(maxlen=max_buffer)
@@ -187,9 +189,15 @@ class StreamBridge:
     def is_autopilot(self) -> bool:
         return self._autopilot
 
+    @property
+    def run_id(self) -> str | None:
+        """The run lease this bridge belongs to (Issue #604)."""
+        return self._run_id
+
     def __repr__(self) -> str:
         return (
             f"StreamBridge(session={self._session_id}, "
+            f"run={self._run_id}, "
             f"events={self._event_count}, "
             f"buffered={len(self._buffer)}, "
             f"closed={self._closed})"
@@ -216,12 +224,23 @@ def get_bridge(session_id: str) -> StreamBridge | None:
     return _active_bridges.get(session_id)
 
 
-def remove_bridge(session_id: str) -> None:
-    """Remove and return the registered StreamBridge for *session_id*.
+def remove_bridge(session_id: str, run_id: str | None = None) -> None:
+    """Remove the registered StreamBridge for *session_id*.
+
+    When *run_id* is given, only remove the bridge if it belongs to that
+    run — an older run's cleanup must not evict a newer run's bridge.
 
     Does NOT close the bridge — the agent task's ``finally`` block
     should call ``bridge.close()`` before this.
     """
-    removed = _active_bridges.pop(session_id, None)
-    if removed is not None:
-        logger.debug("Removed StreamBridge for session %s", session_id)
+    existing = _active_bridges.get(session_id)
+    if existing is None:
+        return
+    if run_id is not None and existing.run_id != run_id:
+        logger.debug(
+            "Not removing StreamBridge for session %s — it belongs to run %s, not %s",
+            session_id, existing.run_id, run_id,
+        )
+        return
+    _active_bridges.pop(session_id, None)
+    logger.debug("Removed StreamBridge for session %s", session_id)

@@ -126,6 +126,8 @@ interface SessionListItemProps {
   selectMode: boolean;
   isSelected: boolean;
   isStreaming: boolean;
+  /** Run completed while the user was not viewing this session (#604). */
+  hasCompletionUnread: boolean;
   onNavigate: (session: SessionData) => void;
   onToggleSelect: (id: string) => void;
   onEdit: (session: SessionData) => void;
@@ -152,6 +154,7 @@ const SessionListItem = React.memo(function SessionListItem({
   selectMode,
   isSelected,
   isStreaming,
+  hasCompletionUnread,
   onNavigate,
   onToggleSelect,
   onEdit,
@@ -240,6 +243,21 @@ const SessionListItem = React.memo(function SessionListItem({
               </Text>
             </span>
           </Tooltip>
+          {hasCompletionUnread && !isActive && !collapsed && (
+            <Tooltip title="Completed while you were away">
+              <span
+                data-testid="session-unread-dot"
+                aria-label="Completed while you were away"
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: "50%",
+                  background: "#1677ff",
+                  flexShrink: 0,
+                }}
+              />
+            </Tooltip>
+          )}
         </div>
         {!collapsed && (
           <>
@@ -461,7 +479,13 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const { streamingSessionIds, removeStreamingSession } = useStreamingContext();
+  const {
+    streamingSessionIds,
+    removeStreamingSession,
+    completedUnreadIds,
+    seedFromSessions,
+    markSessionViewed,
+  } = useStreamingContext();
   const streamingSessionIdsRef = useRef(streamingSessionIds);
   streamingSessionIdsRef.current = streamingSessionIds;
 
@@ -531,12 +555,14 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
           const status = await getStreamStatus(sid);
           if (cancelled) return;
           if (!status.active) {
-            removeStreamingSession(sid);
+            // Status polling is a fallback when the SSE stream is down;
+            // it may remove a server-seeded entry too.
+            removeStreamingSession(sid, true);
           }
         } catch {
           // Session may no longer exist — remove from active set
           if (!cancelled) {
-            removeStreamingSession(sid);
+            removeStreamingSession(sid, true);
           }
         }
       }
@@ -607,6 +633,13 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
     // Appended so it keeps its place in the group's normal sort order.
     return [...loadedSessions, detail];
   }, [loadedSessions, activeSessionDetail]);
+
+  // Issue #604 — seed the run-status store from the server snapshot so the
+  // spinner is correct on first paint, after a reload, and in a second tab
+  // even before the status SSE connects.
+  useEffect(() => {
+    seedFromSessions(sessions);
+  }, [sessions, seedFromSessions]);
 
   // Folders are a separate, small collection; header counts come from the
   // server totals in `totals` (see buildSidebarRows), not from loaded pages.
@@ -819,11 +852,13 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
   // Stable callbacks for SessionListItem (avoids re-render when React.memo compares).
   const handleNavigate = useCallback(
     (session: SessionData) => {
+      // Opening the conversation clears its completion-unread marker.
+      markSessionViewed(session.id);
       // Sessions outside the loaded pages are surfaced by the active-session
       // fallback (the ["session", id] query) after navigation.
       navigate(session.id === sessionId ? "/chat" : `/chat/${session.id}`);
     },
-    [navigate, sessionId],
+    [navigate, sessionId, markSessionViewed],
   );
   const handleEditSession = useCallback(
     (session: SessionData) => {
@@ -1129,6 +1164,7 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
           selectMode={selectMode}
           isSelected={selectedIds.has(row.session.id)}
           isStreaming={streamingSessionIds.has(row.session.id)}
+          hasCompletionUnread={completedUnreadIds.has(row.session.id)}
           onNavigate={handleNavigate}
           onToggleSelect={handleToggleSelect}
           onEdit={handleEditSession}
@@ -1154,6 +1190,7 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
       selectMode,
       selectedIds,
       streamingSessionIds,
+      completedUnreadIds,
       handleNavigate,
       handleToggleSelect,
       handleEditSession,

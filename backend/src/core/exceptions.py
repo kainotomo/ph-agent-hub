@@ -10,11 +10,22 @@ from fastapi.responses import JSONResponse
 
 
 class AppException(Exception):
-    """Base class for all application-level exceptions."""
+    """Base class for all application-level exceptions.
 
-    def __init__(self, message: str, status_code: int = 500):
+    ``extra`` is merged into the JSON response body next to ``detail``.
+    It lets clients react to a machine-readable code (for example
+    ``session_busy``) without parsing prose.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        status_code: int = 500,
+        extra: dict | None = None,
+    ):
         self.message = message
         self.status_code = status_code
+        self.extra = extra or {}
 
 
 class NotFoundError(AppException):
@@ -38,8 +49,36 @@ class ValidationError(AppException):
 
 
 class ConflictError(AppException):
-    def __init__(self, message: str = "Conflict"):
-        super().__init__(message, status_code=409)
+    def __init__(self, message: str = "Conflict", extra: dict | None = None):
+        super().__init__(message, status_code=409, extra=extra)
+
+
+class SessionBusyError(ConflictError):
+    """A second run was attempted while one is already active (Issue #604).
+
+    The response body carries ``code="session_busy"`` plus the active
+    ``run_id`` and ``session_id`` so the client can attach to the current
+    run instead of starting a duplicate one.
+    """
+
+    def __init__(
+        self,
+        session_id: str,
+        run_id: str | None = None,
+        kind: str | None = None,
+    ):
+        extra = {
+            "code": "session_busy",
+            "session_id": session_id,
+            "run_id": run_id,
+        }
+        if kind:
+            extra["kind"] = kind
+        super().__init__(
+            "This conversation is already running. "
+            "Wait for it to finish or stop the current run.",
+            extra=extra,
+        )
 
 
 class ServiceUnavailableError(AppException):
@@ -59,5 +98,5 @@ class InsufficientBalanceError(AppException):
 async def app_exception_handler(request: Request, exc: AppException) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status_code,
-        content={"detail": exc.message},
+        content={"detail": exc.message, **getattr(exc, "extra", {})},
     )

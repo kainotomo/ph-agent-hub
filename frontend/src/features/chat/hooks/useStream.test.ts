@@ -372,6 +372,65 @@ describe("useStream", () => {
     expect(onToken).toHaveBeenCalled();
   });
 
+  // ── Session busy (Issue #604) ─────────────────────────────────────────
+
+  it("reports session_busy on HTTP 409 without calling onError", async () => {
+    mockFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          detail: "already running",
+          code: "session_busy",
+          run_id: "run-1",
+        }),
+        {
+          status: 409,
+          headers: { "Content-Type": "application/json" },
+        },
+      ),
+    );
+
+    mockFetchEventSource.mockImplementation(
+      async (_url: string, config: any) => {
+        const response = await config.fetch(
+          "/api/chat/session/session-1/message",
+          {},
+        );
+        expect(response.status).toBe(409);
+        const err = Object.assign(
+          new Error("Request failed with status 409"),
+          { status: 409 },
+        );
+        try {
+          config.onerror(err);
+        } catch {
+          // onerror throws deliberately to prevent a library retry.
+        }
+        throw err;
+      },
+    );
+
+    const onSessionBusy = vi.fn();
+    const onError = vi.fn();
+    const { result } = renderHook(() => useStream());
+
+    await act(async () => {
+      await result.current.startStream(
+        "session-1",
+        "Hello",
+        [],
+        undefined,
+        {},
+        { onSessionBusy, onError },
+      );
+    });
+
+    expect(onSessionBusy).toHaveBeenCalledWith({
+      sessionId: "session-1",
+      runId: "run-1",
+    });
+    expect(onError).not.toHaveBeenCalled();
+  });
+
   // ── Cleanup on unmount ────────────────────────────────────────────────
 
   it("aborts the stream controller on unmount when stream is active", async () => {

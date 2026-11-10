@@ -330,7 +330,8 @@ export function useStream(apiPrefix: string = "chat") {
   // Issue #455 — share streaming state with sidebar via context.
   // addStreamingSession: called when a stream starts (regardless of session).
   // removeStreamingSession: called when a stream ends for this session.
-  const { addStreamingSession, removeStreamingSession } = useStreamingContext();
+  const { addStreamingSession, removeStreamingSession, getRunId } =
+    useStreamingContext();
 
   // Abort any in-flight SSE stream when the hook unmounts. Without this,
   // @microsoft/fetch-event-source reconnects on document visibility change
@@ -386,6 +387,11 @@ export function useStream(apiPrefix: string = "chat") {
           data: Record<string, unknown>,
         ) => void;
         onError?: (error: string, messageId: string) => void;
+        /** A second client tried to send while a run is active (HTTP 409). */
+        onSessionBusy?: (info: {
+          sessionId: string;
+          runId: string | null;
+        }) => void;
         onClose?: () => void;
       },
       autopilot?: boolean,
@@ -397,6 +403,12 @@ export function useStream(apiPrefix: string = "chat") {
       setStreamingSessionId(sessionId);
       addStreamingSession(sessionId);
       handlers.onStreamStart?.();
+
+      // Issue #604 — a second tab/device sending to a busy session gets
+      // HTTP 409 with the active run_id.  Remember that so the error path
+      // can attach to the existing run instead of reporting a failure or
+      // removing the spinner.
+      let sessionBusy = false;
 
       const token = getToken();
 
@@ -471,6 +483,27 @@ export function useStream(apiPrefix: string = "chat") {
               ...(autopilot ? { autopilot: true } : {}),
               ...(background ? { background: true } : {}),
             }),
+            // Issue #604 — inspect 409s before fetch-event-source turns
+            // them into a generic "Request failed with status 409".
+            fetch: async (input, init) => {
+              const response = await fetch(input, init);
+              if (response.status === 409) {
+                let busyRunId: string | null = null;
+                try {
+                  const payload = await response.clone().json();
+                  busyRunId =
+                    typeof payload?.run_id === "string"
+                      ? payload.run_id
+                      : null;
+                } catch {
+                  // Body is optional; the status SSE will reconcile.
+                }
+                sessionBusy = true;
+                addStreamingSession(sessionId, busyRunId);
+                handlers.onSessionBusy?.({ sessionId, runId: busyRunId });
+              }
+              return response;
+            },
             openWhenHidden: true,
             signal: controller.signal,
             async onopen(response) {
@@ -483,6 +516,10 @@ export function useStream(apiPrefix: string = "chat") {
                 // Backend has confirmed the connection — session exists
                 // and message was persisted.  Fire the callback so
                 // callers can invalidate sidebar, etc.
+                addStreamingSession(
+                  sessionId,
+                  response.headers.get("x-run-id"),
+                );
                 handlers.onStreamStart?.();
                 return;
               }
@@ -599,6 +636,13 @@ export function useStream(apiPrefix: string = "chat") {
                 setStreamingSessionId(null);
                 throw _err;
               }
+              if (sessionBusy) {
+                // Another client owns the session — keep the sidebar
+                // spinner and let the status stream report the real run.
+                setStreaming(false);
+                setStreamingSessionId(null);
+                throw _err;
+              }
               // Actual stream error — report it and throw to reject the
               // promise.  The outer catch calls onClose for final cleanup.
               const errMsg =
@@ -618,7 +662,10 @@ export function useStream(apiPrefix: string = "chat") {
         // When onerror threw: onError was already called inside onerror.
         // We still call onClose so the caller can run query invalidation
         // and final cleanup (onError only does state reset + toast).
-        if (!controller.signal.aborted) {
+        if (sessionBusy) {
+          // Keep the busy session's spinner; it is owned by another run.
+          handlers.onClose?.();
+        } else if (!controller.signal.aborted) {
           handlers.onClose?.();
           removeStreamingSession(sessionId);
         } else {
@@ -641,8 +688,11 @@ export function useStream(apiPrefix: string = "chat") {
       //    response, and ends the stream normally.
       try {
         const token = getToken();
+        const runId = getRunId(sessionId);
         const streamUrl = apiPrefix === "chat"
-          ? `${BASE_URL}/chat/session/${sessionId}/stream`
+          ? `${BASE_URL}/chat/session/${sessionId}/stream${
+              runId ? `?run_id=${encodeURIComponent(runId)}` : ""
+            }`
           : `${BASE_URL}/${apiPrefix}/session/stream`;
         await fetch(streamUrl, {
           method: "DELETE",
@@ -671,7 +721,7 @@ export function useStream(apiPrefix: string = "chat") {
         setStreamingSessionId(null);
       }
     },
-    [],
+    [apiPrefix, getRunId],
   );
 
   const startReconnect = useCallback(
@@ -704,6 +754,11 @@ export function useStream(apiPrefix: string = "chat") {
           data: Record<string, unknown>,
         ) => void;
         onError?: (error: string, messageId: string) => void;
+        /** A second client tried to send while a run is active (HTTP 409). */
+        onSessionBusy?: (info: {
+          sessionId: string;
+          runId: string | null;
+        }) => void;
         onClose?: () => void;
       },
     ): Promise<void> => {
@@ -930,6 +985,11 @@ export function useStream(apiPrefix: string = "chat") {
           data: Record<string, unknown>,
         ) => void;
         onError?: (error: string, messageId: string) => void;
+        /** A second client tried to send while a run is active (HTTP 409). */
+        onSessionBusy?: (info: {
+          sessionId: string;
+          runId: string | null;
+        }) => void;
         onClose?: () => void;
       } | undefined,
     ) => {
@@ -1083,6 +1143,11 @@ export function useStream(apiPrefix: string = "chat") {
           data: Record<string, unknown>,
         ) => void;
         onError?: (error: string, messageId: string) => void;
+        /** A second client tried to send while a run is active (HTTP 409). */
+        onSessionBusy?: (info: {
+          sessionId: string;
+          runId: string | null;
+        }) => void;
         onClose?: () => void;
       },
     ) => {

@@ -278,6 +278,17 @@ async def lifespan(app: FastAPI):
     if _scheduler_task is not None:
         _scheduler_task.cancel()
 
+    # Issue #604 — release every run lease this process still owns so a
+    # graceful restart does not leave sessions looking busy for the lease
+    # TTL.  (A hard kill is still covered by the TTL.)
+    try:
+        from .services.run_registry import release_all_local_runs
+        released = await release_all_local_runs()
+        if released:
+            logger.info("Released %d active run lease(s) on shutdown", released)
+    except Exception:
+        logger.warning("Failed to release run leases on shutdown", exc_info=True)
+
 
 app = FastAPI(title="PH Agent Hub", version="3.6.1", lifespan=lifespan)
 
@@ -290,6 +301,9 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Issue #604 — the SSE send response exposes X-Run-Id so the client
+    # can address stop/reconnect to the exact run.
+    expose_headers=["X-Run-Id"],
 )
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 

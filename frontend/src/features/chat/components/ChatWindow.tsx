@@ -24,6 +24,7 @@ import { useQuery, useInfiniteQuery, useQueryClient, type InfiniteData } from "@
 import { MessageBubble } from "./MessageBubble";
 import { useStream } from "../hooks/useStream";
 import { useStickToBottom } from "../hooks/useStickToBottom";
+import { useStreamingContext } from "../../../providers/StreamingProvider";
 import { computeFirstItemIndex, MESSAGES_PER_PAGE } from "../services/messagePaging";
 import {
   listMessages,
@@ -516,6 +517,14 @@ export const ChatWindow = React.memo(function ChatWindow({
   const { streaming, startStream, startRegenerateStream, startEditStream, stopStream, startReconnect, resetStream } = useStream(
     demo ? "demo" : widget ? "widget" : "chat"
   );
+
+  // Issue #604 — tell the status store which conversation is on screen so
+  // completion-unread markers clear when the user is actually looking.
+  const { setActiveSession } = useStreamingContext();
+  useEffect(() => {
+    setActiveSession(sessionId ?? null);
+    return () => setActiveSession(null);
+  }, [sessionId, setActiveSession]);
 
   // ---- Issue #521: sticky scroll intent (no auto-scroll on finish) --------
   const scrollToBottom = useCallback(() => {
@@ -1342,6 +1351,8 @@ export const ChatWindow = React.memo(function ChatWindow({
     setStreamingMessageId(null);
     setHandoffPending(false);
     const content = inputValue.trim();
+    // Keep the attachments so a 409 (session busy) can restore the send.
+    const filesToRestore = pendingFiles;
     setInputValue("");
     setStreamingContent("");
     setStreamingSegments([]);
@@ -1454,6 +1465,22 @@ export const ChatWindow = React.memo(function ChatWindow({
         sessionData,
         {
           ...apHandlers,
+          onSessionBusy: () => {
+            // Another client owns this conversation (Issue #604).  Do not
+            // pretend a run started; restore what the user typed.
+            setInputValue(content);
+            setPendingFiles(filesToRestore);
+            setPendingUserMessage(null);
+            setIsAutopilotMode(false);
+            setAutopilotState(INITIAL_AUTOPILOT_STATE);
+            notification.warning({
+              message: "Chat is already running",
+              description:
+                "This conversation has an active run in another tab or device. Your message was not sent.",
+              placement: "bottomRight",
+            });
+            queryClient.invalidateQueries({ queryKey: ["sessions"] });
+          },
           onStreamStart: () => {
             // Backend confirmed session creation — invalidate sidebar so
             // the new session appears immediately.  Clear pendingFlag so
@@ -1489,6 +1516,20 @@ export const ChatWindow = React.memo(function ChatWindow({
         sessionData,
         {
           ...sendHandlers,
+          onSessionBusy: () => {
+            // Another client owns this conversation (Issue #604).  Do not
+            // pretend a run started; restore what the user typed.
+            setInputValue(content);
+            setPendingFiles(filesToRestore);
+            setPendingUserMessage(null);
+            notification.warning({
+              message: "Chat is already running",
+              description:
+                "This conversation has an active run in another tab or device. Your message was not sent.",
+              placement: "bottomRight",
+            });
+            queryClient.invalidateQueries({ queryKey: ["sessions"] });
+          },
           onStreamStart: () => {
             // Backend confirmed session creation — invalidate sidebar so
             // the new session appears immediately.  Clear pendingFlag so

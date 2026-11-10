@@ -140,17 +140,32 @@ async def get_temp_messages(session_id: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Stream cancellation helpers — used by the SSE streaming endpoint to
 # signal an in-progress agent run that it should abort.
+#
+# Issue #604: the stored value is the targeted ``run_id`` (or ``"1"`` for
+# legacy callers that only address the session).  Runs are serialized per
+# session, so a session-scoped flag is equivalent to a run-scoped flag; the
+# value lets an older run avoid clearing a newer run's cancellation.
 # ---------------------------------------------------------------------------
 STREAM_CANCEL_PREFIX = "stream:cancel:"
 
 
-async def set_stream_cancel(session_id: str, ttl: int = 60) -> None:
+async def set_stream_cancel(
+    session_id: str,
+    ttl: int = 60,
+    run_id: str | None = None,
+) -> None:
     """Set a stream cancellation flag for *session_id*.
 
     The flag auto-expires after *ttl* seconds to prevent stale keys.
     """
     r = await get_redis()
-    await r.setex(f"{STREAM_CANCEL_PREFIX}{session_id}", ttl, "1")
+    await r.setex(f"{STREAM_CANCEL_PREFIX}{session_id}", ttl, run_id or "1")
+
+
+async def get_stream_cancel_run(session_id: str) -> str | None:
+    """Return the ``run_id`` stored in the cancellation flag, if any."""
+    r = await get_redis()
+    return await r.get(f"{STREAM_CANCEL_PREFIX}{session_id}")
 
 
 async def check_stream_cancel(session_id: str) -> bool:
@@ -159,55 +174,38 @@ async def check_stream_cancel(session_id: str) -> bool:
     return await r.exists(f"{STREAM_CANCEL_PREFIX}{session_id}") > 0
 
 
-async def clear_stream_cancel(session_id: str) -> None:
-    """Remove the stream cancellation flag for *session_id*."""
+async def clear_stream_cancel(
+    session_id: str,
+    run_id: str | None = None,
+) -> None:
+    """Remove the stream cancellation flag for *session_id*.
+
+    When *run_id* is given, the flag is only cleared if it still belongs
+    to that run (compare-and-delete via Lua).
+    """
     r = await get_redis()
-    await r.delete(f"{STREAM_CANCEL_PREFIX}{session_id}")
+    key = f"{STREAM_CANCEL_PREFIX}{session_id}"
+    if run_id is None:
+        await r.delete(key)
+        return
+
+    script = (
+        "if redis.call('GET', KEYS[1]) == ARGV[1] then "
+        "return redis.call('DEL', KEYS[1]) end return 0"
+    )
+    # ``eval`` is async but returning the coroutine keeps this helper
+    # cheap; awaiting it inline is clearer.
+    await r.eval(script, 1, key, run_id)
 
 
 # ---------------------------------------------------------------------------
-# Stream active flag helpers — used to indicate that a background agent
-# task is currently running for a given session.  The frontend checks
-# this flag on mount to decide whether to reconnect to a live stream.
-# The TTL acts as a safety net: if the agent process crashes without
-# cleanup, the flag auto-expires.
+# Stream active flag helpers — DEPRECATED (Issue #604).
+#
+# The old ``stream:active:{session_id}`` TTL flag (300 s) has been replaced
+# by the authoritative run registry in ``services/run_registry.py``.  The
+# helpers below are intentionally removed; any status consumer must read
+# the registry so a crashed host is detected in seconds, not minutes.
 # ---------------------------------------------------------------------------
-STREAM_ACTIVE_PREFIX = "stream:active:"
-STREAM_ACTIVE_DEFAULT_TTL = 300  # 5 minutes
-
-
-async def set_stream_active(session_id: str, ttl: int = STREAM_ACTIVE_DEFAULT_TTL) -> None:
-    """Set a "stream active" flag for *session_id*.
-
-    The flag auto-expires after *ttl* seconds (default 5 min) as a
-    safety net in case the agent process crashes.
-    """
-    r = await get_redis()
-    await r.setex(f"{STREAM_ACTIVE_PREFIX}{session_id}", ttl, "1")
-
-
-async def refresh_stream_active(session_id: str, ttl: int = STREAM_ACTIVE_DEFAULT_TTL) -> None:
-    """Renew the TTL on a "stream active" flag.
-
-    Called periodically by the background agent task while it's still
-    running.
-    """
-    r = await get_redis()
-    await r.expire(f"{STREAM_ACTIVE_PREFIX}{session_id}", ttl)
-
-
-async def check_stream_active(session_id: str) -> bool:
-    """Return True if a background agent is running for *session_id*."""
-    r = await get_redis()
-    return await r.exists(f"{STREAM_ACTIVE_PREFIX}{session_id}") > 0
-
-
-async def clear_stream_active(session_id: str) -> None:
-    """Remove the "stream active" flag for *session_id*."""
-    r = await get_redis()
-    await r.delete(f"{STREAM_ACTIVE_PREFIX}{session_id}")
-
-
 # ---------------------------------------------------------------------------
 # A2A task cancellation helpers — bridge A2A task IDs to the existing
 # stream-level cancellation mechanism.

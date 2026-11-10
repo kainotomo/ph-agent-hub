@@ -1041,6 +1041,27 @@ DELETE /widget/session/stream
 
 The response is `text/event-stream`. The connection stays open until the agent finishes or the client aborts. Stop generation cancels the MAF agent run and saves the partially generated message as-is.
 
+**Authoritative run state (Issue #604):**
+```
+GET  /chat/streams                     # multiplexed run-status SSE (all user sessions)
+GET  /chat/session/:id/stream-status   # single-session snapshot
+DELETE /chat/session/:id/stream?run_id=<id>
+```
+
+A session may have at most one live run. Sends, edits, regenerations and
+autopilot resumes acquire a short Redis lease (`run:{session_id}`, 6 s TTL,
+heartbeat every 2 s); a second request gets `409` with
+`code="session_busy"` and the active `run_id` before anything is
+persisted. Session/sidebar/search responses carry `running` and `run_id`,
+so every client (including after a reload or in a second tab) can render
+the running indicator. `GET /chat/streams` seeds clients with a
+`status_snapshot` and then emits `run_status` start/finish deltas, polling
+the Redis registry once per second (no pub/sub, replica-safe). A crashed
+host stops looking busy after the lease TTL instead of the old five-minute
+`stream:active:*` TTL, and graceful shutdown releases local leases.
+`GET /chat/session/:id/stream` still replays the in-process event buffer;
+cross-replica live reconnect remains a follow-up.
+
 ### 11.3 SSE Event Types
 
 | Event | Payload | When |

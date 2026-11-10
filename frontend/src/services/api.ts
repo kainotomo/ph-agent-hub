@@ -19,6 +19,14 @@ export function getToken(): string | null {
   return _token;
 }
 
+/**
+ * Refresh the access token once.  Exposed for long-lived connections (SSE)
+ * that bypass the normal `api()` 401 auto-refresh path.
+ */
+export function refreshAccessToken(): Promise<string | null> {
+  return doRefreshOnce();
+}
+
 export function setSkipAutoRefresh(skip: boolean): void {
   _skipAutoRefresh = skip;
 }

@@ -75,6 +75,28 @@ vi.mock("../services/chat", () => ({
   listSessionsByTag: mockListSessionsByTag,
 }));
 
+// Mock the run-status provider so tests can drive the spinner and the
+// completion-unread dot without a real status stream (Issue #604).
+const mockStreamingState = vi.hoisted(() => ({
+  streamingSessionIds: new Set<string>(),
+  completedUnreadIds: new Set<string>(),
+}));
+
+vi.mock("../../../providers/StreamingProvider", () => ({
+  useStreamingContext: () => ({
+    streamingSessionIds: mockStreamingState.streamingSessionIds,
+    completedUnreadIds: mockStreamingState.completedUnreadIds,
+    statusRevision: 0,
+    addStreamingSession: vi.fn(),
+    removeStreamingSession: vi.fn(),
+    clearStreamingSessions: vi.fn(),
+    seedFromSessions: vi.fn(),
+    getRunId: () => null,
+    markSessionViewed: vi.fn(),
+    setActiveSession: vi.fn(),
+  }),
+}));
+
 // Mock AuthProvider
 const mockLogout = vi.fn();
 vi.mock("../../../providers/AuthProvider", () => ({
@@ -285,6 +307,8 @@ async function openSearch(user: ReturnType<typeof userEvent.setup>) {
 describe("SessionSidebar", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockStreamingState.streamingSessionIds = new Set();
+    mockStreamingState.completedUnreadIds = new Set();
     mockGetSidebarSummary.mockResolvedValue(summaryFrom(SESSIONS));
     mockGetSidebarGroupPage.mockResolvedValue({
       key: "unfiled",
@@ -330,6 +354,30 @@ describe("SessionSidebar", () => {
       "session-1",
       "session-old",
     ]);
+  });
+
+  it("shows the running spinner for a server-reported running session", async () => {
+    mockStreamingState.streamingSessionIds = new Set(["session-1"]);
+
+    renderSidebar();
+    await settle();
+
+    const row = document.querySelector('[data-session-id="session-1"]');
+    expect(row).toBeInTheDocument();
+    expect(row?.querySelector(".ant-spin")).toBeTruthy();
+  });
+
+  it("shows the completion-unread dot for a finished unseen run", async () => {
+    mockStreamingState.completedUnreadIds = new Set(["session-old"]);
+
+    renderSidebar();
+    await settle();
+
+    const row = document.querySelector('[data-session-id="session-old"]');
+    expect(row).toBeInTheDocument();
+    expect(
+      row?.querySelector('[data-testid="session-unread-dot"]'),
+    ).toBeTruthy();
   });
 
   // ── Active session highlighting ───────────────────────────────────────

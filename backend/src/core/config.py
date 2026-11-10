@@ -206,9 +206,26 @@ class Settings(BaseSettings):
     already executes batched calls via asyncio.gather; this flag controls
     whether the agent is prompted to produce batched calls."""
 
-    # --- Scheduled Tasks (Issue #297) ---
-    SCHEDULER_POLL_INTERVAL_SECONDS: int = 30
-    """How often the scheduler polling loop checks for due tasks (seconds)."""
+    # --- Authoritative session run registry (Issue #604) ---
+    RUN_LEASE_TTL_SECONDS: int = 6
+    """TTL of a per-session run lease.  If the owning backend process dies
+    without releasing it, the session looks idle again after this many
+    seconds (seconds, not minutes — the old ``stream:active:*`` flag used
+    300 s).  Must be comfortably larger than the heartbeat interval."""
+    RUN_HEARTBEAT_INTERVAL_SECONDS: float = 2.0
+    """How often a running agent task refreshes its run lease."""
+    RUN_USER_INDEX_TTL_SECONDS: int = 86_400
+    """TTL of the per-user running-session index (1 day, refreshed by
+    every acquire and heartbeat)."""
+    RUN_LAST_MARKER_TTL_SECONDS: int = 90
+    """How long a completed run's outcome marker is kept so the status
+    stream can distinguish a graceful finish from an expired lease."""
+    RUN_STATUS_POLL_INTERVAL_SECONDS: float = 1.0
+    """How often the multiplexed status SSE stream re-reads the registry.
+    Every connected tab sees run transitions within about this interval."""
+    STREAM_CANCEL_TTL_SECONDS: int = 60
+    """TTL of a stream cancellation flag.  Auto-expires so a stale cancel
+    can never outlive the run it was meant for."""
 
     # --- Testing ---
     TESTING: bool = False

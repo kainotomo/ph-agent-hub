@@ -10,6 +10,7 @@ import json
 import logging
 import re
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, AsyncIterator
@@ -39,25 +40,39 @@ from ..agents.stream_bridge import (
     remove_bridge,
 )
 from ..core.config import settings
-from ..core.dependencies import get_current_user, get_db
+from ..core.dependencies import get_current_user, get_db, oauth2_scheme
 from ..core.exceptions import (
     ForbiddenError,
     NotFoundError,
+    SessionBusyError,
+    UnauthorizedError,
     ValidationError,
 )
 from ..core.redis import (
     append_temp_message,
-    check_stream_active,
     check_stream_cancel,
-    clear_stream_active,
     clear_stream_cancel,
     delete_temp_session,
     get_temp_messages,
     get_temp_session,
-    refresh_stream_active,
-    set_stream_active,
-    set_stream_cancel,
     store_temp_session,
+)
+from ..services.run_registry import (
+    OUTCOME_CANCELLED,
+    OUTCOME_COMPLETED,
+    OUTCOME_FAILED,
+    RunLease,
+    acquire_run,
+    clear_run_cancel,
+    clear_run_cancel_marker,
+    get_active_runs_for_user,
+    get_run,
+    get_run_outcome,
+    get_runs,
+    heartbeat_run,
+    is_run_cancel_requested,
+    release_run,
+    request_run_cancel,
 )
 from ..db.orm.messages import Message, MessageFeedback
 from ..db.orm.sessions import Session, SessionActiveTool
@@ -181,6 +196,12 @@ class SessionResponse(BaseModel):
     auto_select_tools: bool = True
     folder_id: str | None = None
     tags: list[TagResponse] = []
+    running: bool = False
+    """True when an agent run currently holds a live lease for this session
+    (Issue #604).  Sourced from the Redis run registry, so it is correct
+    for every client and after a reload."""
+    run_id: str | None = None
+    """The active run's id, when ``running`` is true."""
     last_message: str | None = None
     """Deprecated: no longer populated. Kept so existing clients that read
     the field keep a stable schema. Sidebar previews are fetched through the
@@ -977,7 +998,8 @@ async def list_sessions(
         user_id=current_user.id,
         tenant_id=current_user.tenant_id,
     )
-    return [SessionResponse.model_validate(s) for s in sessions]
+    responses = [SessionResponse.model_validate(s) for s in sessions]
+    return await _annotate_run_state(responses)
 
 
 @router.get("/sessions/sidebar", response_model=SidebarSummaryResponse)
@@ -1003,10 +1025,10 @@ async def get_sessions_sidebar(
     )
 
     by_folder: dict[str | None, list[SessionResponse]] = {}
-    for session in sessions:
-        by_folder.setdefault(session.folder_id, []).append(
-            SessionResponse.model_validate(session)
-        )
+    responses = [SessionResponse.model_validate(s) for s in sessions]
+    await _annotate_run_state(responses)
+    for response in responses:
+        by_folder.setdefault(response.folder_id, []).append(response)
 
     # Folders first (id order), Unfiled last.  Order is not significant to
     # the client, which renders groups from its folder list.
@@ -1055,13 +1077,15 @@ async def get_sessions_sidebar_group(
         offset=offset,
         limit=limit,
     )
+    responses = [SessionResponse.model_validate(s) for s in sessions]
+    await _annotate_run_state(responses)
     return SidebarGroupPageResponse(
         key=group,
         folder_id=folder_id,
         total=total,
         offset=offset,
         limit=limit,
-        sessions=[SessionResponse.model_validate(s) for s in sessions],
+        sessions=responses,
     )
 
 
@@ -1100,10 +1124,13 @@ async def get_session(
             "cross_session_retrieval_enabled": None,
             "tags": [],
             "folder_id": None,
+            "running": False,
+            "run_id": None,
             "created_at": now,
             "updated_at": now,
         }
 
+    lease = await get_run(session_id)
     return {
         "id": data["id"],
         "tenant_id": data["tenant_id"],
@@ -1122,6 +1149,8 @@ async def get_session(
         "cross_session_retrieval_enabled": data.get("cross_session_retrieval_enabled"),
         "tags": data.get("tags", []),
         "folder_id": data.get("folder_id"),
+        "running": lease is not None,
+        "run_id": lease.run_id if lease is not None else None,
         "created_at": _parse_datetime(data.get("created_at")),
         "updated_at": _parse_datetime(data.get("updated_at")),
     }
@@ -1716,223 +1745,227 @@ async def send_message(
             # Clean up the stale Redis temp entry
             await delete_temp_session(session_id)
 
-    # ---- Auto-title: if session still has the default title, use the
-    #      first user message as the title.  Set a raw truncated title
-    #      immediately, then fire a background task that calls a cheap
-    #      LLM to generate a proper concise title. -----------------------
-    if data.get("title") == "New Chat" and body.content.strip():
-        # Defensive: ensure content is a string — Pydantic enforces str, but
-        # this belts-and-suspenders against edge cases like raw list content.
-        raw_content = body.content if isinstance(body.content, str) else str(body.content)
-        logger.info(
-            "Auto-title: content type=%s, length=%d, preview=%r",
-            type(body.content).__name__,
-            len(raw_content),
-            raw_content[:80],
-        )
-
-        # 1. Immediate fallback title: first 60 chars of the message
-        fallback_title = raw_content.strip()[:60]
-        logger.info("Auto-title: fallback title=%r", fallback_title)
-
-        if data.get("is_temporary"):
-            data["title"] = fallback_title
-            await store_temp_session(session_id, data)
-        else:
-            await session_service.update_session(db, session_id, title=fallback_title)
-            await db.flush()
-            data["title"] = fallback_title
-
-        # 2. Background task: generate a smarter LLM title
-        tenant_id = data.get("tenant_id", current_user.tenant_id)
-        _session_id = session_id
-        _is_temp = data.get("is_temporary", False)
-        _user_msg = raw_content.strip()
-        asyncio.ensure_future(
-            _generate_title_async(
-                session_id=_session_id,
-                tenant_id=tenant_id,
-                is_temporary=_is_temp,
-                user_message=_user_msg,
-            )
-        )
-
-    # ---- Auto-routing: if enabled and no model assigned yet, route
-    #      the first user message to the best model in one shot. -------
-    if data.get("auto_route_enabled") and not data.get("selected_model_id"):
-        from ..services.router_service import route_message
-        from ..db.orm.models import Model as ModelORM
-
-        tenant_id = data.get("tenant_id", current_user.tenant_id)
-        user_id = data.get("user_id", current_user.id)
-
-        # 1. Route the message: classifier LLM picks the best model_id
-        selected_id = await route_message(db, body.content, tenant_id, user_id)
-
-        # 2. Fallback if router returned nothing
-        if selected_id is None:
-            user_result = await db.execute(
-                select(UserORM).where(UserORM.id == user_id)
-            )
-            user_row = user_result.scalar_one_or_none()
-            if user_row and user_row.default_model_id:
-                selected_id = user_row.default_model_id
-            else:
-                from ..services.model_service import list_models
-
-                models, _ = await list_models(db, tenant_id=tenant_id, user_id=user_id)
-                enabled = [m for m in models if m.enabled]
-                if enabled:
-                    selected_id = enabled[0].id
-
-        # 3. Lock in the model on the session
-        if selected_id:
-            # Resolve model name for logging
-            model_result = await db.execute(
-                select(ModelORM).where(ModelORM.id == selected_id)
-            )
-            picked_model = model_result.scalar_one_or_none()
-            model_label = f"{picked_model.name} ({picked_model.provider})" if picked_model else selected_id
+    run_kind = "autopilot" if (body.autopilot or body.background) else "chat"
+    async with _session_run(session_id, current_user, kind=run_kind) as lease:
+        # ---- Auto-title: if session still has the default title, use the
+        #      first user message as the title.  Set a raw truncated title
+        #      immediately, then fire a background task that calls a cheap
+        #      LLM to generate a proper concise title. -----------------------
+        if data.get("title") == "New Chat" and body.content.strip():
+            # Defensive: ensure content is a string — Pydantic enforces str, but
+            # this belts-and-suspenders against edge cases like raw list content.
+            raw_content = body.content if isinstance(body.content, str) else str(body.content)
             logger.info(
-                "🧠 Auto-routed session %s to model %s",
-                session_id, model_label,
+                "Auto-title: content type=%s, length=%d, preview=%r",
+                type(body.content).__name__,
+                len(raw_content),
+                raw_content[:80],
             )
 
-            data["selected_model_id"] = selected_id
+            # 1. Immediate fallback title: first 60 chars of the message
+            fallback_title = raw_content.strip()[:60]
+            logger.info("Auto-title: fallback title=%r", fallback_title)
+
             if data.get("is_temporary"):
+                data["title"] = fallback_title
                 await store_temp_session(session_id, data)
             else:
-                await session_service.update_session(
-                    db, session_id, selected_model_id=selected_id
+                await session_service.update_session(db, session_id, title=fallback_title)
+                await db.flush()
+                data["title"] = fallback_title
+
+            # 2. Background task: generate a smarter LLM title
+            tenant_id = data.get("tenant_id", current_user.tenant_id)
+            _session_id = session_id
+            _is_temp = data.get("is_temporary", False)
+            _user_msg = raw_content.strip()
+            asyncio.ensure_future(
+                _generate_title_async(
+                    session_id=_session_id,
+                    tenant_id=tenant_id,
+                    is_temporary=_is_temp,
+                    user_message=_user_msg,
                 )
-
-    # Detect streaming request via Accept header
-    accept = request.headers.get("accept", "")
-    is_streaming = "text/event-stream" in accept.lower()
-
-    # ---- Background task implies autopilot -----------------------------
-    if body.background:
-        body.autopilot = True
-        if data.get("is_temporary", False):
-            raise ValidationError(
-                "Background tasks are not supported for temporary sessions"
-            )
-        # Check concurrent task limit
-        from ..services.autopilot_service import count_active_for_user as _count_active
-
-        active_count = await _count_active(db, current_user.id)
-        max_concurrent = settings.MAX_CONCURRENT_BACKGROUND_TASKS_PER_USER
-        if max_concurrent > 0 and active_count >= max_concurrent:
-            raise ValidationError(
-                f"You already have {active_count} background task(s) running. "
-                f"Maximum concurrent tasks is {max_concurrent}. "
-                "Please wait for one to complete or cancel it before starting another."
             )
 
-    # ---- Goal-Based Skill implies autopilot (Issue #448) -----------------
-    _goal_based_goal: str | None = None
-    _goal_based_max_turns: int | None = None
-    skill_id = data.get("selected_skill_id")
-    if skill_id and not (body.autopilot is False and body.background is False):
-        try:
-            from ..db.orm.skills import Skill as SkillORM
-            from sqlalchemy import select as _sa_select
-            _skill_result = await db.execute(
-                _sa_select(SkillORM).where(SkillORM.id == skill_id)
-            )
-            _skill = _skill_result.scalar_one_or_none()
-            if _skill and _skill.execution_type == "goal_based" and _skill.goal:
-                # Auto-enable autopilot for goal-based skills
-                body.autopilot = True
-                _goal_based_goal = _skill.goal
-                if _skill.agent_config:
-                    _goal_based_max_turns = _skill.agent_config.get("max_turns")
+        # ---- Auto-routing: if enabled and no model assigned yet, route
+        #      the first user message to the best model in one shot. -------
+        if data.get("auto_route_enabled") and not data.get("selected_model_id"):
+            from ..services.router_service import route_message
+            from ..db.orm.models import Model as ModelORM
+
+            tenant_id = data.get("tenant_id", current_user.tenant_id)
+            user_id = data.get("user_id", current_user.id)
+
+            # 1. Route the message: classifier LLM picks the best model_id
+            selected_id = await route_message(db, body.content, tenant_id, user_id)
+
+            # 2. Fallback if router returned nothing
+            if selected_id is None:
+                user_result = await db.execute(
+                    select(UserORM).where(UserORM.id == user_id)
+                )
+                user_row = user_result.scalar_one_or_none()
+                if user_row and user_row.default_model_id:
+                    selected_id = user_row.default_model_id
+                else:
+                    from ..services.model_service import list_models
+
+                    models, _ = await list_models(db, tenant_id=tenant_id, user_id=user_id)
+                    enabled = [m for m in models if m.enabled]
+                    if enabled:
+                        selected_id = enabled[0].id
+
+            # 3. Lock in the model on the session
+            if selected_id:
+                # Resolve model name for logging
+                model_result = await db.execute(
+                    select(ModelORM).where(ModelORM.id == selected_id)
+                )
+                picked_model = model_result.scalar_one_or_none()
+                model_label = f"{picked_model.name} ({picked_model.provider})" if picked_model else selected_id
                 logger.info(
-                    "Goal-based skill '%s' auto-enabled autopilot",
-                    _skill.title,
+                    "🧠 Auto-routed session %s to model %s",
+                    session_id, model_label,
                 )
-        except Exception:
-            logger.warning("Failed to check goal-based skill", exc_info=True)
 
-    # ---- Inject file content into user message --------------------------
-    file_ids = body.file_ids or []
-    modified_message, valid_file_ids = await _inject_file_content(
-        db=db,
-        file_ids=file_ids,
-        user_message=body.content,
-        session_data=data,
-        current_user=current_user,
-    )
+                data["selected_model_id"] = selected_id
+                if data.get("is_temporary"):
+                    await store_temp_session(session_id, data)
+                else:
+                    await session_service.update_session(
+                        db, session_id, selected_model_id=selected_id
+                    )
 
-    if is_streaming:
-        # Inject per-message temperature override into session_data
-        if body.temperature is not None:
-            data["_message_temperature"] = body.temperature
+        # Detect streaming request via Accept header
+        accept = request.headers.get("accept", "")
+        is_streaming = "text/event-stream" in accept.lower()
 
-        # ---- Autopilot mode (Issue #446) — streaming path ----------------
-        if body.autopilot:
+        # ---- Background task implies autopilot -----------------------------
+        if body.background:
+            body.autopilot = True
             if data.get("is_temporary", False):
                 raise ValidationError(
-                    "Autopilot is not supported for temporary sessions"
+                    "Background tasks are not supported for temporary sessions"
                 )
-            return await _handle_streaming_autopilot(
+            # Check concurrent task limit
+            from ..services.autopilot_service import count_active_for_user as _count_active
+
+            active_count = await _count_active(db, current_user.id)
+            max_concurrent = settings.MAX_CONCURRENT_BACKGROUND_TASKS_PER_USER
+            if max_concurrent > 0 and active_count >= max_concurrent:
+                raise ValidationError(
+                    f"You already have {active_count} background task(s) running. "
+                    f"Maximum concurrent tasks is {max_concurrent}. "
+                    "Please wait for one to complete or cancel it before starting another."
+                )
+
+        # ---- Goal-Based Skill implies autopilot (Issue #448) -----------------
+        _goal_based_goal: str | None = None
+        _goal_based_max_turns: int | None = None
+        skill_id = data.get("selected_skill_id")
+        if skill_id and not (body.autopilot is False and body.background is False):
+            try:
+                from ..db.orm.skills import Skill as SkillORM
+                from sqlalchemy import select as _sa_select
+                _skill_result = await db.execute(
+                    _sa_select(SkillORM).where(SkillORM.id == skill_id)
+                )
+                _skill = _skill_result.scalar_one_or_none()
+                if _skill and _skill.execution_type == "goal_based" and _skill.goal:
+                    # Auto-enable autopilot for goal-based skills
+                    body.autopilot = True
+                    _goal_based_goal = _skill.goal
+                    if _skill.agent_config:
+                        _goal_based_max_turns = _skill.agent_config.get("max_turns")
+                    logger.info(
+                        "Goal-based skill '%s' auto-enabled autopilot",
+                        _skill.title,
+                    )
+            except Exception:
+                logger.warning("Failed to check goal-based skill", exc_info=True)
+
+        # ---- Inject file content into user message --------------------------
+        file_ids = body.file_ids or []
+        modified_message, valid_file_ids = await _inject_file_content(
+            db=db,
+            file_ids=file_ids,
+            user_message=body.content,
+            session_data=data,
+            current_user=current_user,
+        )
+
+        if is_streaming:
+            # Inject per-message temperature override into session_data
+            if body.temperature is not None:
+                data["_message_temperature"] = body.temperature
+
+            # ---- Autopilot mode (Issue #446) — streaming path ----------------
+            if body.autopilot:
+                if data.get("is_temporary", False):
+                    raise ValidationError(
+                        "Autopilot is not supported for temporary sessions"
+                    )
+                return await _handle_streaming_autopilot(
+                    session_id=session_id,
+                    body=body,
+                    data=data,
+                    db=db,
+                    current_user=current_user,
+                    modified_message=modified_message,
+                    goal_override=_goal_based_goal,
+                    max_turns_override=_goal_based_max_turns,
+                    lease=lease,
+                )
+
+            return await _handle_streaming_message(
                 session_id=session_id,
                 body=body,
                 data=data,
                 db=db,
                 current_user=current_user,
                 modified_message=modified_message,
-                goal_override=_goal_based_goal,
-                max_turns_override=_goal_based_max_turns,
+                valid_file_ids=valid_file_ids,
+                lease=lease,
             )
 
-        return await _handle_streaming_message(
-            session_id=session_id,
-            body=body,
-            data=data,
-            db=db,
-            current_user=current_user,
-            modified_message=modified_message,
-            valid_file_ids=valid_file_ids,
-        )
+        # ---- Non-streaming path (Phase 6 backward compat) --------------------
+        # Inject per-message temperature override into session_data
+        if body.temperature is not None:
+            data["_message_temperature"] = body.temperature
 
-    # ---- Non-streaming path (Phase 6 backward compat) --------------------
-    # Inject per-message temperature override into session_data
-    if body.temperature is not None:
-        data["_message_temperature"] = body.temperature
+        # ---- Autopilot mode (Issue #446) --------------------------------------
+        if body.autopilot:
+            if data.get("is_temporary", False):
+                raise ValidationError(
+                    "Autopilot is not supported for temporary sessions"
+                )
+            from ..agents.autopilot import run_autopilot
 
-    # ---- Autopilot mode (Issue #446) --------------------------------------
-    if body.autopilot:
-        if data.get("is_temporary", False):
-            raise ValidationError(
-                "Autopilot is not supported for temporary sessions"
+            autopilot_goal = _goal_based_goal or modified_message
+            response_text, assistant_msg_id = await run_autopilot(
+                session_data=data,
+                goal=autopilot_goal,
+                db=db,
+                current_user=current_user,
+                max_turns=_goal_based_max_turns,
             )
-        from ..agents.autopilot import run_autopilot
+        else:
+            response_text, assistant_msg_id = await run_agent(
+                session_data=data,
+                user_message=modified_message,
+                db=db,
+                current_user=current_user,
+                file_ids=valid_file_ids,
+            )
 
-        autopilot_goal = _goal_based_goal or modified_message
-        response_text, assistant_msg_id = await run_autopilot(
-            session_data=data,
-            goal=autopilot_goal,
-            db=db,
-            current_user=current_user,
-            max_turns=_goal_based_max_turns,
+        model_id = data.get("selected_model_id")
+
+        return SendMessageResponse(
+            message_id=assistant_msg_id,
+            content=response_text,
+            model_id=model_id,
         )
-    else:
-        response_text, assistant_msg_id = await run_agent(
-            session_data=data,
-            user_message=modified_message,
-            db=db,
-            current_user=current_user,
-            file_ids=valid_file_ids,
-        )
-
-    model_id = data.get("selected_model_id")
-
-    return SendMessageResponse(
-        message_id=assistant_msg_id,
-        content=response_text,
-        model_id=model_id,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -2196,6 +2229,103 @@ def _synthetic_message_complete(session_id: str, message_id: str) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Authoritative run lifecycle — Issue #604
+# ---------------------------------------------------------------------------
+
+
+async def _annotate_run_state(
+    responses: list[SessionResponse],
+) -> list[SessionResponse]:
+    """Attach ``running`` / ``run_id`` to session responses.
+
+    One Redis pipeline per response set (never per session), so list and
+    sidebar endpoints stay N+1-free.  Mutates and returns *responses*.
+    """
+    if not responses:
+        return responses
+    runs = await get_runs([response.id for response in responses])
+    for response in responses:
+        lease = runs.get(response.id)
+        response.running = lease is not None
+        response.run_id = lease.run_id if lease is not None else None
+    return responses
+
+
+async def _release_lease_safely(lease: RunLease, outcome: str) -> None:
+    """Release a lease without letting cancellation skip the cleanup."""
+    try:
+        await asyncio.shield(release_run(lease, outcome=outcome))
+    except (asyncio.CancelledError, Exception):
+        logger.warning(
+            "Failed to release run %s for session %s (outcome=%s)",
+            lease.run_id, lease.session_id, outcome,
+            exc_info=True,
+        )
+
+
+@asynccontextmanager
+async def _session_run(
+    session_id: str,
+    current_user: UserORM,
+    kind: str = "chat",
+    wait_seconds: float = 0.0,
+) -> AsyncIterator[RunLease]:
+    """Hold the per-session run lease for the duration of a request.
+
+    Raises :class:`SessionBusyError` (409, ``code=session_busy`` with the
+    active ``run_id``) when another run already owns the session.  The
+    lease is released when the block exits unless a background task took
+    ownership by setting ``lease.handed_off``.
+    """
+    lease = await acquire_run(
+        session_id=session_id,
+        user_id=current_user.id,
+        tenant_id=current_user.tenant_id,
+        kind=kind,
+    )
+
+    # Autopilot resume/steer can race the previous task's release; wait
+    # briefly instead of failing immediately.
+    if lease is None and wait_seconds > 0:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + wait_seconds
+        while lease is None and loop.time() < deadline:
+            await asyncio.sleep(0.1)
+            lease = await acquire_run(
+                session_id=session_id,
+                user_id=current_user.id,
+                tenant_id=current_user.tenant_id,
+                kind=kind,
+            )
+
+    if lease is None:
+        active = await get_run(session_id)
+        raise SessionBusyError(
+            session_id=session_id,
+            run_id=active.run_id if active is not None else None,
+            kind=active.kind if active is not None else None,
+        )
+
+    try:
+        yield lease
+    except BaseException:
+        if not lease.handed_off:
+            await _release_lease_safely(lease, OUTCOME_FAILED)
+        raise
+    else:
+        if not lease.handed_off:
+            await _release_lease_safely(lease, OUTCOME_COMPLETED)
+
+
+def _run_headers(lease: RunLease) -> dict[str, str]:
+    """Response headers exposing the run id to the browser client."""
+    return {
+        "X-Run-Id": lease.run_id,
+        "Access-Control-Expose-Headers": "X-Run-Id",
+    }
+
+
 async def _run_agent_background(
     session_id: str,
     data: dict[str, Any],
@@ -2203,6 +2333,7 @@ async def _run_agent_background(
     current_user: UserORM,
     message_id: str,
     bridge: StreamBridge,
+    lease: RunLease,
     file_ids: list[str] | None = None,
 ) -> None:
     """Run the agent in the background, writing events to *bridge*.
@@ -2211,22 +2342,28 @@ async def _run_agent_background(
     instead of yielding it.  This lets the agent survive SSE disconnects.
 
     Cleanup on completion (``finally``):
-      - Persists the assistant message
-      - Writes usage logs and deducts balance
-      - Clears the Redis ``stream:active:`` flag
+      - Releases this run's lease (owner-checked, with a completion marker)
+      - Clears only this run's cancellation flag
       - Closes and removes the bridge
     """
     from ..db.base import AsyncSessionLocal
     from sqlalchemy import select as _sa_select
 
     _file_ids = file_ids or []
+    outcome = OUTCOME_COMPLETED
 
     async with AsyncSessionLocal() as stream_db:
         # Initialise early so finally blocks don't UnboundLocalError if
         # the refresh query below fails (detached current_user).
-        keepalive_task: asyncio.Task | None = None
+        heartbeat_task: asyncio.Task | None = None
         local_user = current_user
         try:
+            # Start heartbeating before any DB work so the lease cannot
+            # expire while the task is still initialising.
+            heartbeat_task = asyncio.ensure_future(
+                _heartbeat_run_loop(lease, bridge)
+            )
+
             # Refresh current_user in this session's context using the
             # user_id from session_data (a plain dict, no ORM access).
             _uid = data.get("user_id") or current_user.id
@@ -2236,11 +2373,6 @@ async def _run_agent_background(
             _row = _user.scalar_one_or_none()
             if _row is not None:
                 local_user = _row
-
-            # Periodic Redis keepalive so the frontend can check status.
-            keepalive_task = asyncio.ensure_future(
-                _keep_stream_active_loop(session_id, bridge)
-            )
 
             async for event_dict in run_agent_stream(
                 session_data=data,
@@ -2273,14 +2405,17 @@ async def _run_agent_background(
                         "Stream cancelled for session %s — agent will stop",
                         session_id,
                     )
+                    outcome = OUTCOME_CANCELLED
                     break
 
         except asyncio.CancelledError:
+            outcome = OUTCOME_CANCELLED
             logger.info(
                 "Background agent task cancelled for session %s",
                 session_id,
             )
         except Exception:
+            outcome = OUTCOME_FAILED
             logger.exception(
                 "Background agent task failed for session %s",
                 session_id,
@@ -2295,25 +2430,32 @@ async def _run_agent_background(
                 }),
             })
         finally:
-            # Stop the keepalive loop.
-            if keepalive_task is not None:
-                keepalive_task.cancel()
+            # Stop the lease heartbeat loop.
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
                 try:
-                    await keepalive_task
+                    await heartbeat_task
                 except (asyncio.CancelledError, Exception):
                     pass
 
-            # Clean up Redis active flag.
-            await clear_stream_active(session_id)
+            # Clean up only this run's cancel flag (a newer run may have
+            # started between release and cleanup in theory).
+            await clear_stream_cancel(session_id, run_id=lease.run_id)
 
-            # Clean up Redis cancel flag if set.
-            await clear_stream_cancel(session_id)
+            # The runner clears the session flag as soon as it notices a
+            # cancel, so consult the run-scoped marker for the outcome.
+            if await is_run_cancel_requested(lease.run_id):
+                outcome = OUTCOME_CANCELLED
+            await clear_run_cancel_marker(lease.run_id)
 
             # Close the bridge — signals all subscribers to stop.
             await bridge.close()
 
             # Remove from registry.
-            remove_bridge(session_id)
+            remove_bridge(session_id, run_id=lease.run_id)
+
+            # Release the run lease and record how it ended.
+            await _release_lease_safely(lease, outcome)
 
             # Ensure DB connection is returned to pool.
             try:
@@ -2326,8 +2468,8 @@ async def _run_agent_background(
                 pass
 
             logger.info(
-                "Background agent task finished for session %s",
-                session_id,
+                "Background agent task finished for session %s (run=%s, outcome=%s)",
+                session_id, lease.run_id, outcome,
             )
 
 
@@ -2337,6 +2479,7 @@ async def _run_autopilot_background(
     user_message: str,
     current_user: UserORM,
     bridge: StreamBridge,
+    lease: RunLease,
     max_turns: int | None = None,
     resume_from_turn: int | None = None,
     background: bool = False,
@@ -2356,16 +2499,25 @@ async def _run_autopilot_background(
     on completion (Issue #449).
 
     Cleanup on completion (``finally``):
-      - Clears the Redis ``stream:active:`` flag
+      - Releases this run's lease (owner-checked, with a completion marker)
+      - Clears only this run's cancellation flag
       - Closes and removes the bridge
     """
     from ..db.base import AsyncSessionLocal
 
+    outcome = OUTCOME_COMPLETED
+
     async with AsyncSessionLocal() as agent_db:
         # Initialise early so finally blocks don't UnboundLocalError.
-        keepalive_task: asyncio.Task | None = None
+        heartbeat_task: asyncio.Task | None = None
         local_user = current_user
         try:
+            # Start heartbeating before any DB work so the lease cannot
+            # expire while the task is still initialising.
+            heartbeat_task = asyncio.ensure_future(
+                _heartbeat_run_loop(lease, bridge)
+            )
+
             # Refresh current_user in this session's context using the
             # user_id from data (a plain dict, no ORM access).
             from sqlalchemy import select as _sa_select
@@ -2404,10 +2556,6 @@ async def _run_autopilot_background(
             except Exception:
                 logger.warning("Failed to create/fetch AutopilotRun — continuing without persistence")
 
-            keepalive_task = asyncio.ensure_future(
-                _keep_stream_active_loop(session_id, bridge)
-            )
-
             from ..agents.autopilot import run_autopilot_stream
 
             await run_autopilot_stream(
@@ -2421,7 +2569,11 @@ async def _run_autopilot_background(
                 start_turn=start_turn,
             )
 
+            if await check_stream_cancel(session_id):
+                outcome = OUTCOME_CANCELLED
+
         except asyncio.CancelledError:
+            outcome = OUTCOME_CANCELLED
             logger.info(
                 "Background autopilot task cancelled for session %s",
                 session_id,
@@ -2456,6 +2608,7 @@ async def _run_autopilot_background(
             except Exception:
                 pass
         except Exception:
+            outcome = OUTCOME_FAILED
             logger.exception(
                 "Background autopilot task failed for session %s",
                 session_id,
@@ -2502,25 +2655,31 @@ async def _run_autopilot_background(
                 }),
             })
         finally:
-            # Stop the keepalive loop (may be None if setup failed).
-            if keepalive_task is not None:
-                keepalive_task.cancel()
+            # Stop the lease heartbeat loop (may be None if setup failed).
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
                 try:
-                    await keepalive_task
+                    await heartbeat_task
                 except (asyncio.CancelledError, Exception):
                     pass
 
-            # Clean up Redis active flag.
-            await clear_stream_active(session_id)
+            # Clean up only this run's cancel flag.
+            await clear_stream_cancel(session_id, run_id=lease.run_id)
 
-            # Clean up Redis cancel flag if set.
-            await clear_stream_cancel(session_id)
+            # The runner clears the session flag as soon as it notices a
+            # cancel, so consult the run-scoped marker for the outcome.
+            if await is_run_cancel_requested(lease.run_id):
+                outcome = OUTCOME_CANCELLED
+            await clear_run_cancel_marker(lease.run_id)
 
             # Close the bridge — signals all subscribers to stop.
             await bridge.close()
 
             # Remove from registry.
-            remove_bridge(session_id)
+            remove_bridge(session_id, run_id=lease.run_id)
+
+            # Release the run lease and record how it ended.
+            await _release_lease_safely(lease, outcome)
 
             # Close the agent DB session (no rollback needed —
             # run_agent_stream() manages its own transactions).
@@ -2530,33 +2689,43 @@ async def _run_autopilot_background(
                 pass
 
             logger.info(
-                "Background autopilot task finished for session %s",
-                session_id,
+                "Background autopilot task finished for session %s (run=%s, outcome=%s)",
+                session_id, lease.run_id, outcome,
             )
 
 
-async def _keep_stream_active_loop(
-    session_id: str,
+async def _heartbeat_run_loop(
+    lease: RunLease,
     bridge: StreamBridge,
-    interval: int = 60,
 ) -> None:
-    """Periodically refresh the Redis ``stream:active:`` flag while the
-    agent is running.
+    """Refresh the run lease while the agent is alive.
 
-    Runs as a background task alongside the agent.  Stops when the
-    bridge is closed.
+    Stops when the bridge closes or the lease is lost.  Losing the lease
+    means another run may now own the session, so heartbeating must stop
+    immediately.
     """
+    interval = max(0.1, float(settings.RUN_HEARTBEAT_INTERVAL_SECONDS))
     while not bridge.is_closed:
-        await refresh_stream_active(session_id)
+        try:
+            if not await heartbeat_run(lease):
+                logger.warning(
+                    "Lost run lease %s for session %s — stopping heartbeat",
+                    lease.run_id, lease.session_id,
+                )
+                return
+        except Exception:
+            logger.warning(
+                "Run lease heartbeat failed for session %s",
+                lease.session_id,
+                exc_info=True,
+            )
         try:
             await asyncio.wait_for(
                 _wait_for_bridge_close(bridge),
                 timeout=interval,
             )
-            # Bridge closed — exit.
             return
         except asyncio.TimeoutError:
-            # Interval elapsed — refresh again.
             continue
 
 
@@ -2573,27 +2742,19 @@ def _spawn_agent_background(
     current_user: UserORM,
     message_id: str,
     bridge: StreamBridge,
+    lease: RunLease,
     file_ids: list[str] | None = None,
 ) -> asyncio.Task:
     """Create and return a background ``asyncio.Task`` for agent execution.
 
-    Sets the Redis ``stream:active:`` flag (fire-and-forget via
-    ``ensure_future``) and registers the bridge before spawning the task.
-    The agent task also has a keepalive loop that periodically refreshes
-    the flag, so even if this initial fire-and-forget is delayed the flag
-    will be set within the first keepalive interval (60 s).
-
-    However, for immediate availability (the frontend checks status right
-    after the SSE response starts), we eagerly await a simple ``ping`` via
-    the keepalive task's first iteration instead.
+    Registers the bridge (tagged with *lease*'s run id) and hands the
+    lease to the background task, which heartbeats it and releases it in
+    its ``finally`` block.  Ownership transfer is atomic from the event
+    loop's perspective: no ``await`` happens between creating the task
+    and setting ``lease.handed_off``.
     """
     # Register the bridge immediately so reconnect subscribers can find it.
     register_bridge(session_id, bridge)
-
-    # Start the Redis active flag asynchronously — it will be set before
-    # the agent produces its first event (the keepalive loop runs
-    # immediately inside _run_agent_background).
-    asyncio.ensure_future(set_stream_active(session_id))
 
     task = asyncio.create_task(
         _run_agent_background(
@@ -2603,9 +2764,11 @@ def _spawn_agent_background(
             current_user=current_user,
             message_id=message_id,
             bridge=bridge,
+            lease=lease,
             file_ids=file_ids,
         )
     )
+    lease.handed_off = True
     return task
 
 
@@ -2615,6 +2778,7 @@ def _spawn_autopilot_background(
     user_message: str,
     current_user: UserORM,
     bridge: StreamBridge,
+    lease: RunLease,
     max_turns: int | None = None,
     resume_from_turn: int | None = None,
     background: bool = False,
@@ -2622,7 +2786,8 @@ def _spawn_autopilot_background(
     """Create and return a background ``asyncio.Task`` for autopilot execution.
 
     Same pattern as ``_spawn_agent_background`` — registers the bridge,
-    sets the Redis active flag, and spawns via ``asyncio.create_task``.
+    hands the run lease to the background task, and spawns via
+    ``asyncio.create_task``.
 
     When *resume_from_turn* is provided, the existing ``AutopilotRun``
     is reused (no new record created).
@@ -2631,7 +2796,6 @@ def _spawn_autopilot_background(
     ``background_task=True`` for persistent tracking (Issue #449).
     """
     register_bridge(session_id, bridge)
-    asyncio.ensure_future(set_stream_active(session_id))
 
     task = asyncio.create_task(
         _run_autopilot_background(
@@ -2640,11 +2804,13 @@ def _spawn_autopilot_background(
             user_message=user_message,
             current_user=current_user,
             bridge=bridge,
+            lease=lease,
             max_turns=max_turns,
             resume_from_turn=resume_from_turn,
             background=background,
         )
     )
+    lease.handed_off = True
     return task
 
 
@@ -2654,6 +2820,7 @@ async def _handle_streaming_message(
     data: dict[str, Any],
     db: AsyncSession,
     current_user: UserORM,
+    lease: RunLease,
     modified_message: str = "",
     valid_file_ids: list[str] | None = None,
 ) -> EventSourceResponse:
@@ -2661,14 +2828,15 @@ async def _handle_streaming_message(
 
     The agent runs as an ``asyncio.create_task``.  The SSE response reads
     events from a ``StreamBridge`` — if the SSE client disconnects, the
-    agent continues uninterrupted.
+    agent continues uninterrupted.  The response exposes the run id in
+    ``X-Run-Id`` so the client can address it for stop/reconnect.
     """
     message_id = str(uuid.uuid4())
     _valid_file_ids = valid_file_ids or []
     _user_message = modified_message or body.content
 
     # Create the bridge and spawn the background agent.
-    bridge = StreamBridge(session_id=session_id)
+    bridge = StreamBridge(session_id=session_id, run_id=lease.run_id)
     _spawn_agent_background(
         session_id=session_id,
         data=data,
@@ -2676,12 +2844,15 @@ async def _handle_streaming_message(
         current_user=current_user,
         message_id=message_id,
         bridge=bridge,
+        lease=lease,
         file_ids=_valid_file_ids,
     )
 
     # Return SSE response that reads from the bridge.
     return EventSourceResponse(
-        bridge.subscribe(), media_type="text/event-stream"
+        bridge.subscribe(),
+        media_type="text/event-stream",
+        headers=_run_headers(lease),
     )
 
 
@@ -2691,6 +2862,7 @@ async def _handle_streaming_autopilot(
     data: dict[str, Any],
     db: AsyncSession,
     current_user: UserORM,
+    lease: RunLease,
     modified_message: str = "",
     goal_override: str | None = None,
     max_turns_override: int | None = None,
@@ -2727,19 +2899,26 @@ async def _handle_streaming_autopilot(
         user_message=_user_message,
     )
 
-    bridge = StreamBridge(session_id=session_id, autopilot=True)
+    bridge = StreamBridge(
+        session_id=session_id,
+        autopilot=True,
+        run_id=lease.run_id,
+    )
     _spawn_autopilot_background(
         session_id=session_id,
         data=data,
         user_message=_autopilot_goal,
         current_user=current_user,
         bridge=bridge,
+        lease=lease,
         max_turns=max_turns_override,
         background=body.background,
     )
 
     return EventSourceResponse(
-        bridge.subscribe(), media_type="text/event-stream"
+        bridge.subscribe(),
+        media_type="text/event-stream",
+        headers=_run_headers(lease),
     )
 
 
@@ -2749,6 +2928,7 @@ async def _handle_streaming_regenerate(
     db: AsyncSession,
     current_user: UserORM,
     user_text: str,
+    lease: RunLease,
     file_ids: list[str] | None = None,
 ) -> EventSourceResponse:
     """Regenerate an assistant response in the background, returning SSE.
@@ -2759,7 +2939,7 @@ async def _handle_streaming_regenerate(
     message_id = str(uuid.uuid4())
     _file_ids = file_ids or []
 
-    bridge = StreamBridge(session_id=session_id)
+    bridge = StreamBridge(session_id=session_id, run_id=lease.run_id)
     _spawn_agent_background(
         session_id=session_id,
         data=data,
@@ -2767,11 +2947,14 @@ async def _handle_streaming_regenerate(
         current_user=current_user,
         message_id=message_id,
         bridge=bridge,
+        lease=lease,
         file_ids=_file_ids,
     )
 
     return EventSourceResponse(
-        bridge.subscribe(), media_type="text/event-stream"
+        bridge.subscribe(),
+        media_type="text/event-stream",
+        headers=_run_headers(lease),
     )
 
 
@@ -2783,6 +2966,7 @@ async def _handle_streaming_regenerate(
 @router.delete("/session/{session_id}/stream", status_code=204)
 async def cancel_stream(
     session_id: str,
+    run_id: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
     current_user: UserORM = Depends(get_current_user),
 ):
@@ -2791,22 +2975,50 @@ async def cancel_stream(
     Sets a cancellation flag in Redis that the streaming agent runner
     checks on each token yield.  The stream will terminate and partial
     output will be persisted.
+
+    ``run_id`` (Issue #604) addresses the cancellation to a specific run:
+    a stale id is a no-op instead of cancelling whatever run is current.
+    Without it the flag targets the active run (legacy behaviour used by
+    widget/demo/background-task callers).
     """
     data = await _load_session(db, session_id)
     await _require_session_owner(data, current_user)
 
-    await set_stream_cancel(session_id, ttl=60)
+    await request_run_cancel(session_id, run_id)
     return Response(status_code=204)
 
 
 # ---------------------------------------------------------------------------
-# Reconnect endpoint — Issue #455
+# Reconnect endpoint — Issue #455 / #604
 # ---------------------------------------------------------------------------
+
+
+async def _inactive_stream_response(
+    db: AsyncSession,
+    session_id: str,
+) -> Response:
+    """JSON body returned when a reconnect cannot attach to a live run."""
+    _autopilot_state = None
+    from ..services.autopilot_service import (
+        get_run_by_session as _ap_get_run,
+    )
+    _run = await _ap_get_run(db, session_id)
+    if _run is not None:
+        _autopilot_state = _run.state
+    return Response(
+        content=json.dumps({
+            "active": False,
+            "session_id": session_id,
+            "autopilot_state": _autopilot_state,
+        }),
+        media_type="application/json",
+    )
 
 
 @router.get("/session/{session_id}/stream")
 async def reconnect_stream(
     session_id: str,
+    run_id: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
     current_user: UserORM = Depends(get_current_user),
 ):
@@ -2814,59 +3026,43 @@ async def reconnect_stream(
 
     If an agent is still running for *session_id*, opens an SSE stream
     that replays buffered events and continues live.  If the agent has
-    already finished, returns a ``message_complete`` event with a
-    regular JSON body fallback.
+    already finished — or *run_id* names a stale run — returns an
+    inactive JSON body.
+
+    Note: the event buffer lives in this process.  On a multi-replica
+    deployment, reconnect only attaches when this replica owns the run;
+    status discovery still works everywhere via the registry.
     """
     data = await _load_session(db, session_id)
     await _require_session_owner(data, current_user)
 
-    # Check if the agent is still running.
-    if not await check_stream_active(session_id):
-        # Agent already finished — return state so the frontend can
-        # update the autopilot panel instead of staying stuck.
-        _autopilot_state = None
-        from ..services.autopilot_service import (
-            get_run_by_session as _ap_get_run,
+    lease = await get_run(session_id)
+    if lease is None:
+        return await _inactive_stream_response(db, session_id)
+    if run_id is not None and lease.run_id != run_id:
+        logger.info(
+            "Reconnect for session %s ignored — stale run_id %s (active %s)",
+            session_id, run_id, lease.run_id,
         )
-        _run = await _ap_get_run(db, session_id)
-        if _run is not None:
-            _autopilot_state = _run.state
-        return Response(
-            content=json.dumps({
-                "active": False,
-                "session_id": session_id,
-                "autopilot_state": _autopilot_state,
-            }),
-            media_type="application/json",
-        )
+        return await _inactive_stream_response(db, session_id)
 
     bridge = get_bridge(session_id)
-    if bridge is None:
-        # Race: agent finished between the Redis check and the bridge
-        # lookup.  Return inactive.
-        _autopilot_state = None
-        from ..services.autopilot_service import (
-            get_run_by_session as _ap_get_run,
-        )
-        _run = await _ap_get_run(db, session_id)
-        if _run is not None:
-            _autopilot_state = _run.state
-        return Response(
-            content=json.dumps({
-                "active": False,
-                "session_id": session_id,
-                "autopilot_state": _autopilot_state,
-            }),
-            media_type="application/json",
-        )
+    if bridge is None or (
+        bridge.run_id is not None and bridge.run_id != lease.run_id
+    ):
+        # Race: the run is still marked active but this replica has no
+        # bridge (just finished, or owned by another replica).
+        return await _inactive_stream_response(db, session_id)
 
     return EventSourceResponse(
-        bridge.subscribe(), media_type="text/event-stream"
+        bridge.subscribe(),
+        media_type="text/event-stream",
+        headers=_run_headers(lease),
     )
 
 
 # ---------------------------------------------------------------------------
-# Stream status endpoint — Issue #455
+# Stream status endpoint — Issue #455 / #604
 # ---------------------------------------------------------------------------
 
 
@@ -2878,7 +3074,8 @@ async def stream_status(
 ):
     """Lightweight check: is a background agent running for *session_id*?
 
-    Returns ``{"active": bool}`` using a Redis lookup — no DB query needed.
+    Reads the authoritative Redis run registry (Issue #604) — no
+    ``stream:active`` TTL flag and no DB query for the active state.
     Used by the frontend on mount to decide whether to reconnect.
 
     Note: Ownership verification is done via a lightweight session load
@@ -2898,18 +3095,22 @@ async def stream_status(
             "current_turn": None,
             "max_turns": None,
             "run_state": None,
+            "run_id": None,
+            "run_kind": None,
+            "run_started_at": None,
         }
 
-    active = await check_stream_active(session_id)
+    lease = await get_run(session_id)
+    active = lease is not None
     autopilot = False
     paused = False
     current_turn: int | None = None
     max_turns: int | None = None
     if active:
         bridge = get_bridge(session_id)
-        if bridge is not None:
-            autopilot = bridge.is_autopilot
-            # If no bridge info available, try the DB for turn info.
+        autopilot = lease.kind == "autopilot" or (
+            bridge is not None and bridge.is_autopilot
+        )
     # Fetch autopilot run details for turn info regardless of active state
     # (on reconnect the frontend needs current_turn/max_turns to restore
     # the autopilot panel accurately).
@@ -2925,9 +3126,6 @@ async def stream_status(
             autopilot = True
         current_turn = run.current_turn
         max_turns = run.max_turns
-    elif not active:
-        # Stream inactive, no autopilot run — normal session, nothing extra.
-        pass
     return {
         "active": active,
         "autopilot": autopilot,
@@ -2935,7 +3133,147 @@ async def stream_status(
         "current_turn": current_turn,
         "max_turns": max_turns,
         "run_state": run.state if run is not None else None,
+        "run_id": lease.run_id if lease is not None else None,
+        "run_kind": lease.kind if lease is not None else None,
+        "run_started_at": lease.started_at if lease is not None else None,
     }
+
+
+# ---------------------------------------------------------------------------
+# Multiplexed run-status stream — Issue #604
+# ---------------------------------------------------------------------------
+
+
+def _lease_event_payload(lease: RunLease) -> dict[str, Any]:
+    return {
+        "session_id": lease.session_id,
+        "run_id": lease.run_id,
+        "kind": lease.kind,
+        "started_at": lease.started_at,
+        "state": "running",
+    }
+
+
+async def _iter_session_status_events(
+    user_id: str,
+    is_disconnected,
+    poll_interval: float = 1.0,
+) -> AsyncIterator[dict[str, str]]:
+    """Yield status snapshots/deltas for one user's running sessions.
+
+    The first event is a ``status_snapshot`` (seed), followed by
+    ``run_status`` events for starts and finishes.  Polling the registry
+    once per interval keeps the stream replica-safe and gives every tab
+    the same view within about *poll_interval* seconds.
+
+    A fresh snapshot is also re-emitted every 15 ticks so a client that
+    drifted (missed event, stale list seed) self-heals without a reload.
+    """
+    previous: dict[str, dict[str, Any]] = {}
+    first = True
+    tick = 0
+    snapshot_every = 15
+
+    while not await is_disconnected():
+        leases = await get_active_runs_for_user(user_id)
+        current = {lease.session_id: lease for lease in leases}
+
+        if first:
+            yield {
+                "event": "status_snapshot",
+                "data": json.dumps({
+                    "runs": [_lease_event_payload(l) for l in current.values()],
+                }),
+            }
+            first = False
+        else:
+            for session_id, lease in current.items():
+                prior = previous.get(session_id)
+                if prior is None or prior.get("run_id") != lease.run_id:
+                    yield {
+                        "event": "run_status",
+                        "data": json.dumps(_lease_event_payload(lease)),
+                    }
+            for session_id, prior in previous.items():
+                if session_id in current:
+                    continue
+                outcome = await get_run_outcome(
+                    session_id, str(prior.get("run_id") or ""),
+                )
+                yield {
+                    "event": "run_status",
+                    "data": json.dumps({
+                        "session_id": session_id,
+                        "run_id": prior.get("run_id"),
+                        "kind": prior.get("kind"),
+                        "started_at": prior.get("started_at"),
+                        "state": "finished",
+                        "outcome": outcome,
+                    }),
+                }
+
+        previous = {
+            session_id: _lease_event_payload(lease)
+            for session_id, lease in current.items()
+        }
+
+        tick += 1
+        if not first and tick % snapshot_every == 0:
+            yield {
+                "event": "status_snapshot",
+                "data": json.dumps({
+                    "runs": list(previous.values()),
+                }),
+            }
+
+        await asyncio.sleep(poll_interval)
+
+
+@router.get("/streams")
+async def stream_session_statuses(
+    request: Request,
+    token: str = Depends(oauth2_scheme),
+):
+    """Multiplexed SSE stream of this user's session run status.
+
+    Every authenticated client receives a ``status_snapshot`` first, then
+    ``run_status`` events when runs start or finish.  This is how a tab
+    that did not start the run (or a reloaded one) shows the sidebar
+    spinner (Issue #604).
+
+    Auth is resolved in a short-lived DB session: this response can stay
+    open for hours, so it must not pin a pooled connection (unlike normal
+    request/response endpoints).
+    """
+    from ..core.jwt import decode_token
+    from ..db.base import AsyncSessionLocal
+    from ..services.user_service import get_user_by_id
+
+    try:
+        payload = decode_token(token)
+    except Exception:
+        raise UnauthorizedError("Invalid or expired token")
+    user_id: str | None = payload.get("sub")
+    if not user_id:
+        raise UnauthorizedError("Token missing subject claim")
+
+    async with AsyncSessionLocal() as auth_db:
+        user = await get_user_by_id(auth_db, user_id)
+        if user is None or not user.is_active:
+            raise UnauthorizedError("User not found or inactive")
+
+    async def _event_generator():
+        async for event in _iter_session_status_events(
+            user_id=user_id,
+            is_disconnected=request.is_disconnected,
+            poll_interval=settings.RUN_STATUS_POLL_INTERVAL_SECONDS,
+        ):
+            yield event
+
+    return EventSourceResponse(
+        _event_generator(),
+        media_type="text/event-stream",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3002,21 +3340,29 @@ async def autopilot_steer(
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="No autopilot run found for this session")
 
-    await _ap_set_steer(db, run.id, body.instruction)
-    # After storing the instruction, set back to EXECUTING so the
-    # controller's next poll sees it should continue.
-    await _ap_set_state(db, run.id, "EXECUTING")
+    async with _session_run(
+        session_id, current_user, kind="autopilot", wait_seconds=5.0,
+    ) as lease:
+        await _ap_set_steer(db, run.id, body.instruction)
+        # After storing the instruction, set back to EXECUTING so the
+        # controller's next poll sees it should continue.
+        await _ap_set_state(db, run.id, "EXECUTING")
 
-    # Spawn a new background task with a new bridge to continue execution.
-    resumed_bridge = StreamBridge(session_id=session_id, autopilot=True)
-    _spawn_autopilot_background(
-        session_id=session_id,
-        data=data,
-        user_message=run.goal,
-        current_user=current_user,
-        bridge=resumed_bridge,
-        resume_from_turn=run.current_turn + 1,
-    )
+        # Spawn a new background task with a new bridge to continue execution.
+        resumed_bridge = StreamBridge(
+            session_id=session_id,
+            autopilot=True,
+            run_id=lease.run_id,
+        )
+        _spawn_autopilot_background(
+            session_id=session_id,
+            data=data,
+            user_message=run.goal,
+            current_user=current_user,
+            bridge=resumed_bridge,
+            lease=lease,
+            resume_from_turn=run.current_turn + 1,
+        )
 
     return {"status": "resumed", "run_id": run.id}
 
@@ -3068,48 +3414,53 @@ async def edit_user_message(
     if original_msg.sender != "user":
         raise ValidationError("Only user messages can be edited")
 
-    # Truncate all messages after this user message, then hard-delete
-    # the original user message itself.
-    await _truncate_after_message(db, session_id, original_msg)
-    await upload_service.delete_uploads_for_message(db, message_id)
-    await db.delete(original_msg)
-    await db.commit()
+    # Serialize the destructive edit + re-run against other runs on this
+    # session.  Acquire before deleting messages so a rejected second
+    # client cannot truncate history under a live run.
+    async with _session_run(session_id, current_user, kind="edit") as lease:
+        # Truncate all messages after this user message, then hard-delete
+        # the original user message itself.
+        await _truncate_after_message(db, session_id, original_msg)
+        await upload_service.delete_uploads_for_message(db, message_id)
+        await db.delete(original_msg)
+        await db.commit()
 
-    # Detect streaming request via Accept header
-    accept = request.headers.get("accept", "")
-    is_streaming = "text/event-stream" in accept.lower()
+        # Detect streaming request via Accept header
+        accept = request.headers.get("accept", "")
+        is_streaming = "text/event-stream" in accept.lower()
 
-    if is_streaming:
+        if is_streaming:
+            # Inject per-message temperature override into session_data
+            if body.temperature is not None:
+                data["_message_temperature"] = body.temperature
+            return await _handle_streaming_message(
+                session_id=session_id,
+                body=body,
+                data=data,
+                db=db,
+                current_user=current_user,
+                modified_message=body.content,
+                valid_file_ids=body.file_ids or [],
+                lease=lease,
+            )
+
+        # ---- Non-streaming path -----------------------------------------
         # Inject per-message temperature override into session_data
         if body.temperature is not None:
             data["_message_temperature"] = body.temperature
-        return await _handle_streaming_message(
-            session_id=session_id,
-            body=body,
-            data=data,
+        response_text, assistant_msg_id = await run_agent(
+            session_data=data,
+            user_message=body.content,
             db=db,
             current_user=current_user,
-            modified_message=body.content,
-            valid_file_ids=body.file_ids or [],
         )
 
-    # ---- Non-streaming path ---------------------------------------------
-    # Inject per-message temperature override into session_data
-    if body.temperature is not None:
-        data["_message_temperature"] = body.temperature
-    response_text, assistant_msg_id = await run_agent(
-        session_data=data,
-        user_message=body.content,
-        db=db,
-        current_user=current_user,
-    )
-
-    model_id = data.get("selected_model_id")
-    return SendMessageResponse(
-        message_id=assistant_msg_id,
-        content=response_text,
-        model_id=model_id,
-    )
+        model_id = data.get("selected_model_id")
+        return SendMessageResponse(
+            message_id=assistant_msg_id,
+            content=response_text,
+            model_id=model_id,
+        )
 
 
 @router.delete(
@@ -3315,53 +3666,56 @@ async def regenerate_assistant_message(
         )
         user_file_ids = [fu.id for fu in fu_result.scalars().all()]
 
-    # Hard-delete the old assistant message and its uploads.
-    # For the user message, preserve the file uploads by unsetting
-    # their message_id so they can be re-linked to the new message.
-    await upload_service.delete_uploads_for_message(db, message_id)
-    await db.delete(assistant_msg)
-    if user_msg_to_delete is not None:
-        if user_file_ids:
-            await db.execute(
-                update(FileUploadORM)
-                .where(FileUploadORM.id.in_(user_file_ids))
-                .values(message_id=None)
+    # Serialize the destructive regenerate + re-run against other runs.
+    async with _session_run(session_id, current_user, kind="regenerate") as lease:
+        # Hard-delete the old assistant message and its uploads.
+        # For the user message, preserve the file uploads by unsetting
+        # their message_id so they can be re-linked to the new message.
+        await upload_service.delete_uploads_for_message(db, message_id)
+        await db.delete(assistant_msg)
+        if user_msg_to_delete is not None:
+            if user_file_ids:
+                await db.execute(
+                    update(FileUploadORM)
+                    .where(FileUploadORM.id.in_(user_file_ids))
+                    .values(message_id=None)
+                )
+            await db.delete(user_msg_to_delete)
+        await db.commit()
+
+        # Detect streaming request via Accept header
+        accept = request.headers.get("accept", "")
+        is_streaming = "text/event-stream" in accept.lower()
+
+        if is_streaming:
+            # Reuse the standard streaming path: the user message already exists,
+            # we just need a new assistant response.  Streaming regenerate works
+            # the same as a normal send — run the agent and stream the response.
+            return await _handle_streaming_regenerate(
+                session_id=session_id,
+                data=data,
+                db=db,
+                current_user=current_user,
+                user_text=user_text,
+                file_ids=user_file_ids,
+                lease=lease,
             )
-        await db.delete(user_msg_to_delete)
-    await db.commit()
 
-    # Detect streaming request via Accept header
-    accept = request.headers.get("accept", "")
-    is_streaming = "text/event-stream" in accept.lower()
-
-    if is_streaming:
-        # Reuse the standard streaming path: the user message already exists,
-        # we just need a new assistant response.  Streaming regenerate works
-        # the same as a normal send — run the agent and stream the response.
-        return await _handle_streaming_regenerate(
-            session_id=session_id,
-            data=data,
+        # ---- Non-streaming path -----------------------------------------
+        response_text, assistant_msg_id = await run_agent(
+            session_data=data,
+            user_message=user_text,
             db=db,
             current_user=current_user,
-            user_text=user_text,
             file_ids=user_file_ids,
         )
 
-    # ---- Non-streaming path ---------------------------------------------
-    response_text, assistant_msg_id = await run_agent(
-        session_data=data,
-        user_message=user_text,
-        db=db,
-        current_user=current_user,
-        file_ids=user_file_ids,
-    )
-
-    model_id = data.get("selected_model_id")
-    return SendMessageResponse(
-        message_id=assistant_msg_id,
-        content=response_text,
-        model_id=model_id,
-    )
+        model_id = data.get("selected_model_id")
+        return SendMessageResponse(
+            message_id=assistant_msg_id,
+            content=response_text,
+            model_id=model_id,
+        )
 
 
 # =============================================================================
@@ -4031,6 +4385,7 @@ async def search_sessions(
             )
         )
 
+    await _annotate_run_state(out)
     return out
 
 

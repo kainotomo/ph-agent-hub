@@ -95,6 +95,19 @@ const mockGetStreamStatus = vi.hoisted(() => vi.fn());
 const mockStartReconnect = vi.hoisted(() => vi.fn());
 const mockResetStream = vi.hoisted(() => vi.fn());
 const mockListMessages = vi.hoisted(() => vi.fn());
+const mockSetActiveSession = vi.hoisted(() => vi.fn());
+const mockRunStatus = vi.hoisted(() => ({
+  streamingSessionIds: new Set<string>(),
+  completionRevisions: {} as Record<string, number>,
+}));
+
+vi.mock("../../../providers/StreamingProvider", () => ({
+  useStreamingContext: () => ({
+    streamingSessionIds: mockRunStatus.streamingSessionIds,
+    completionRevisions: mockRunStatus.completionRevisions,
+    setActiveSession: mockSetActiveSession,
+  }),
+}));
 const lastStreamHandlers = vi.hoisted<{ current: any }>(() => ({ current: null }));
 // Captures the props of the most recent <Virtuoso> render so tests can drive
 // and inspect `followOutput` (Issue #515 handoff window).
@@ -282,6 +295,8 @@ beforeEach(() => {
   virtuosoState.props = null;
   virtuosoState.scrollToIndex.mockReset();
   breakpointMock.md = true;
+  mockRunStatus.streamingSessionIds = new Set();
+  mockRunStatus.completionRevisions = {};
 });
 
 // ---------------------------------------------------------------------------
@@ -384,6 +399,72 @@ describe("ChatWindow — Auto model selection (Issue #400)", () => {
 
     const select = screen.getByRole("combobox");
     expect(select).toHaveValue(AUTO_ROUTE_VALUE);
+  });
+});
+
+describe("ChatWindow — Running status banner (Issue #604)", () => {
+  beforeEach(() => {
+    mockApi.mockReset();
+    mockApi.mockImplementation((url: string) => {
+      if (url === "/models") return Promise.resolve(FAKE_MODELS);
+      return Promise.resolve([]);
+    });
+    mockGetStreamStatus.mockReset();
+    mockGetStreamStatus.mockResolvedValue({ active: false });
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  it("shows the running banner when the session run was started elsewhere", async () => {
+    mockRunStatus.streamingSessionIds = new Set(["test-session-1"]);
+
+    renderChatWindow({ isPending: false, sessionId: "test-session-1" });
+    await settle();
+
+    expect(screen.getByText("Agent is running…")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stop" })).toBeInTheDocument();
+  });
+
+  it("does not show the running banner for an idle session", async () => {
+    renderChatWindow({ isPending: false, sessionId: "test-session-1" });
+    await settle();
+
+    expect(screen.queryByText("Agent is running…")).not.toBeInTheDocument();
+  });
+
+  it("refetches messages when the status store reports a finish", async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    // ChatWindow is React.memo'd; vary a prop so the test forces a re-render
+    // the same way a real context update does.
+    const tree = (temperature: number) => (
+      <QueryClientProvider client={queryClient}>
+        <ChatWindow
+          sessionId="test-session-1"
+          isPending={false}
+          temperature={temperature}
+        />
+      </QueryClientProvider>
+    );
+
+    mockRunStatus.completionRevisions = {};
+    const { rerender } = render(tree(0.1));
+    await settle();
+
+    mockRunStatus.completionRevisions = { "test-session-1": 1 };
+    rerender(tree(0.2));
+    await settle();
+
+    expect(invalidateSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        queryKey: ["messages", "test-session-1"],
+      }),
+    );
   });
 });
 

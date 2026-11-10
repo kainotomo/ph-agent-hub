@@ -7,11 +7,19 @@
 # supported (initial SSE + reconnect SSE), and the bridge replays the last N
 # buffered events to new subscribers.
 #
+# Every event is stamped with a monotonic ``seq`` (1..N, per run) and an SSE
+# ``id`` of the form ``<run_id>:<seq>`` so a reconnecting client can resume
+# exactly where it stopped instead of re-applying events it already saw.
+# Subscribers resume with ``from_seq``; when the requested cursor has already
+# fallen out of the bounded replay buffer the bridge emits ``stream_resync``
+# so the client can reload persisted state instead of silently continuing
+# with a hole in the message.
+#
 # Usage:
-#   bridge = StreamBridge(session_id)
+#   bridge = StreamBridge(session_id, run_id=lease.run_id)
 #   register_bridge(session_id, bridge)
 #   background_task = asyncio.create_task(run_agent(bridge))
-#   sse_response = EventSourceResponse(bridge.subscribe())
+#   sse_response = EventSourceResponse(bridge.subscribe(from_seq=last_seq))
 #
 # Agent writes:
 #   bridge.put({"event": "token", "data": '{"delta":"hello"}'})
@@ -32,6 +40,29 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+#: Default number of events kept for replay.  A run at ~40 tokens/s fills
+#: this in about half a minute; older events are recovered from the persisted
+#: message (``stream_resync``) rather than replayed.
+DEFAULT_MAX_BUFFER = 1000
+
+
+class _Subscriber:
+    """One SSE reader attached to a bridge.
+
+    ``overflowed`` is set by the producer when the reader is too slow to
+    drain its queue.  The reader then emits ``stream_resync`` instead of
+    silently skipping events, so a slow client converges back to the
+    persisted message rather than showing a corrupt partial answer.
+    """
+
+    __slots__ = ("queue", "overflowed")
+
+    def __init__(self, maxsize: int) -> None:
+        self.queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(
+            maxsize=maxsize
+        )
+        self.overflowed = False
+
 
 # ---------------------------------------------------------------------------
 # StreamBridge
@@ -42,9 +73,9 @@ class StreamBridge:
     event consumers (SSE streams).
 
     Events are stored in a deque of last N events for replay on new
-    subscriptions.  Each subscriber gets its own :class:`asyncio.Queue`
-    so all subscribers receive all events (broadcast, not competing
-    consumers).
+    subscriptions.  Each subscriber gets its own bounded
+    :class:`asyncio.Queue` so all subscribers receive all events
+    (broadcast, not competing consumers).
 
     Auto-emits heartbeat events if no events arrive for *heartbeat_interval*
     seconds.
@@ -53,25 +84,34 @@ class StreamBridge:
     def __init__(
         self,
         session_id: str,
-        max_buffer: int = 1000,
+        max_buffer: int = DEFAULT_MAX_BUFFER,
         heartbeat_interval: int = 15,
         autopilot: bool = False,
         run_id: str | None = None,
+        subscriber_queue_size: int = 512,
     ) -> None:
         self._session_id = session_id
         self._max_buffer = max_buffer
         self._heartbeat_interval = heartbeat_interval
         self._autopilot = autopilot
         self._run_id = run_id
+        self._subscriber_queue_size = subscriber_queue_size
 
-        #: Bounded buffer of past events for replay on new subscriptions.
-        self._buffer: deque[dict[str, Any]] = deque(maxlen=max_buffer)
+        #: Bounded buffer of ``(seq, wire_event)`` for replay on new
+        #: subscriptions.  The sequence lives beside the event rather than
+        #: inside it: ``sse_starlette`` builds ``ServerSentEvent(**event)``
+        #: and rejects keys it does not know, so only ``id`` may be added
+        #: to the wire dict.
+        self._buffer: deque[tuple[int, dict[str, Any]]] = deque(maxlen=max_buffer)
 
         #: Per-subscriber queues — each subscriber gets ALL events.
-        self._subscribers: list[asyncio.Queue[dict[str, Any] | None]] = []
+        self._subscribers: list[_Subscriber] = []
 
         #: Total number of events produced (for monitoring / debugging).
         self._event_count: int = 0
+
+        #: Monotonic sequence assigned to each produced event.
+        self._seq: int = 0
 
         #: Set to True when ``close()`` is called — subscribers see ``None``
         #: and stop.
@@ -92,8 +132,9 @@ class StreamBridge:
     async def put(self, event: dict[str, Any]) -> None:
         """Write an event to the bridge.
 
-        The event is appended to the replay buffer and pushed into ALL
-        subscriber queues so every connected SSE client receives it.
+        The event is stamped with its SSE ``id`` (``<run_id>:<seq>``),
+        appended to the replay buffer, and pushed into ALL subscriber
+        queues so every connected SSE client receives it.
         """
         if self._closed:
             logger.warning(
@@ -102,12 +143,32 @@ class StreamBridge:
             )
             return
 
-        self._buffer.append(event)
+        self._seq += 1
+        seq = self._seq
+
+        # Copy so we never mutate the producer's dict and so the same
+        # identity is not shared across subscribers.  The SSE ``id`` is the
+        # client's resume cursor (``<run_id>:<seq>``).
+        wire = dict(event)
+        wire["id"] = f"{self._run_id or self._session_id}:{seq}"
+
+        self._buffer.append((seq, wire))
         self._event_count += 1
 
-        # Broadcast to all subscribers (each gets a copy).
-        for sub in self._subscribers:
-            await sub.put(event)
+        # Broadcast to all subscribers.  A slow subscriber is flagged
+        # instead of blocking the producer (which would stall the agent).
+        for sub in list(self._subscribers):
+            if sub.overflowed:
+                continue
+            try:
+                sub.queue.put_nowait(wire)
+            except asyncio.QueueFull:
+                sub.overflowed = True
+                logger.warning(
+                    "StreamBridge[%s] subscriber overflowed at seq %d — "
+                    "client will be asked to resync",
+                    self._session_id, seq,
+                )
 
     async def close(self) -> None:
         """Close the bridge, signalling all subscribers to stop.
@@ -120,8 +181,12 @@ class StreamBridge:
             self._closed = True
 
         # Push ``None`` sentinel to ALL subscriber queues.
-        for sub in self._subscribers:
-            await sub.put(None)
+        for sub in list(self._subscribers):
+            try:
+                sub.queue.put_nowait(None)
+            except asyncio.QueueFull:
+                # Reader is gone or wedged; it will observe ``_closed``.
+                pass
 
         logger.debug(
             "StreamBridge[%s] closed — %d events produced, %d buffered",
@@ -132,34 +197,76 @@ class StreamBridge:
     # Consumer API (called by SSE readers)
     # ------------------------------------------------------------------
 
-    async def subscribe(self) -> AsyncIterator[dict[str, Any]]:
+    def _resync_event(self, reason: str, from_seq: int) -> dict[str, Any]:
+        return {
+            "event": "stream_resync",
+            "data": json.dumps({
+                "reason": reason,
+                "from_seq": from_seq,
+                "oldest_seq": self.oldest_seq,
+                "last_seq": self._seq,
+                "run_id": self._run_id,
+            }),
+            "id": f"{self._run_id or self._session_id}:{self._seq}",
+        }
+
+    async def subscribe(
+        self,
+        from_seq: int | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
         """Return an async iterator that replays buffered events then yields
         live events from the queue.
+
+        ``from_seq`` is the last sequence the consumer already applied
+        (exclusive); events with ``seq <= from_seq`` are skipped.  When that
+        cursor predates the oldest buffered event a ``stream_resync`` event
+        is emitted first, because replay would otherwise leave a hole.
 
         Each subscriber gets its own private queue, so all subscribers
         receive all events (broadcast).  When the bridge is closed the
         iterator stops (does NOT raise ``StopAsyncIteration``).
         """
-        # Replay buffered events first.
-        for event in self._buffer:
-            yield event
+        # Register the queue BEFORE snapshotting the buffer: otherwise
+        # events produced during the replay would be lost, and iterating a
+        # live deque while the producer appends raises RuntimeError.
+        sub = _Subscriber(self._subscriber_queue_size)
+        self._subscribers.append(sub)
 
-        # Create a per-subscriber queue so this reader doesn't compete
-        # with other readers for events.
-        queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
-        self._subscribers.append(queue)
+        last_seq = from_seq or 0
         try:
+            snapshot = list(self._buffer)
+
+            # Gap repair: the consumer's cursor is older than anything we
+            # can replay, so tell it to reload the persisted message.
+            if snapshot and last_seq and snapshot[0][0] > last_seq + 1:
+                yield self._resync_event("buffer_gap", last_seq)
+                last_seq = snapshot[0][0] - 1
+
+            for seq, event in snapshot:
+                if seq <= last_seq:
+                    continue
+                last_seq = seq
+                yield event
+
             while not self._closed:
+                if sub.overflowed:
+                    sub.overflowed = False
+                    # Drop whatever is stale; the client reloads from REST.
+                    while not sub.queue.empty():
+                        sub.queue.get_nowait()
+                    yield self._resync_event("slow_consumer", last_seq)
+                    continue
+
                 try:
                     # Use wait_for so we can emit heartbeats even if the queue
                     # is idle for a long time (e.g. during a slow tool call).
                     event = await asyncio.wait_for(
-                        queue.get(),
+                        sub.queue.get(),
                         timeout=self._heartbeat_interval,
                     )
                 except asyncio.TimeoutError:
                     # No event arrived — emit heartbeat so the SSE connection
-                    # stays alive.
+                    # stays alive (and the client can detect a dead link).
                     yield {"event": "heartbeat", "data": "{}"}
                     continue
 
@@ -167,11 +274,16 @@ class StreamBridge:
                     # Sentinel — bridge is closed.
                     return
 
+                seq = int(str(event.get("id", "")).rsplit(":", 1)[-1] or 0)
+                if seq <= last_seq:
+                    # Already replayed from the buffer snapshot.
+                    continue
+                last_seq = seq
                 yield event
         finally:
             # Clean up this subscriber's queue on exit (aclose/disconnect).
-            if queue in self._subscribers:
-                self._subscribers.remove(queue)
+            if sub in self._subscribers:
+                self._subscribers.remove(sub)
 
     # ------------------------------------------------------------------
     # Queries
@@ -184,6 +296,18 @@ class StreamBridge:
     @property
     def event_count(self) -> int:
         return self._event_count
+
+    @property
+    def last_seq(self) -> int:
+        """Sequence of the most recently produced event (0 if none)."""
+        return self._seq
+
+    @property
+    def oldest_seq(self) -> int:
+        """Sequence of the oldest event still available for replay."""
+        if not self._buffer:
+            return 0
+        return self._buffer[0][0]
 
     @property
     def is_autopilot(self) -> bool:
@@ -199,6 +323,7 @@ class StreamBridge:
             f"StreamBridge(session={self._session_id}, "
             f"run={self._run_id}, "
             f"events={self._event_count}, "
+            f"seq={self._seq}, "
             f"buffered={len(self._buffer)}, "
             f"closed={self._closed})"
         )

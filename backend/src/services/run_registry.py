@@ -437,6 +437,29 @@ async def get_run_outcome(session_id: str, expected_run_id: str) -> str:
     return OUTCOME_LOST
 
 
+async def get_run_outcome_for_user(
+    session_id: str,
+    expected_run_id: str,
+    user_id: str,
+) -> str | None:
+    """Owner-scoped variant of :func:`get_run_outcome`.
+
+    Returns the recorded outcome only when the completion marker belongs
+    to this caller and to the run the client already knew about.  ``None``
+    means "nothing to report": no marker, another user's session, or a
+    marker for a different run (the lease expired without a graceful
+    release, or a newer run has already replaced it).
+    """
+    marker = await get_last_run_marker(session_id)
+    if not marker:
+        return None
+    if str(marker.get("user_id") or "") != str(user_id):
+        return None
+    if expected_run_id and marker.get("run_id") != expected_run_id:
+        return None
+    return str(marker.get("outcome") or OUTCOME_COMPLETED)
+
+
 # ---------------------------------------------------------------------------
 # Cancellation (per run, addressed by run_id)
 # ---------------------------------------------------------------------------

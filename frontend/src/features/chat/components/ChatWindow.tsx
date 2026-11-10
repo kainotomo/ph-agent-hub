@@ -71,6 +71,13 @@ const DRAFT_PREFIX = "chat-draft:";
 const FILES_PREFIX = "chat-files:";
 const DRAFT_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
+// A silently dead SSE connection (proxy idle timeout, laptop sleep, deploy)
+// never fires onclose, so the chat would spin until a manual refresh.  The
+// stream watchdog reports the stall; we resume from the stored cursor a few
+// times before giving up and asking for a reload.
+const MAX_STALL_RECOVERIES = 3;
+const STALL_RECOVERY_WINDOW_MS = 2 * 60 * 1000;
+
 /** Purge sessionStorage draft entries older than DRAFT_TTL_MS. */
 function purgeStaleDrafts(): void {
   try {
@@ -849,6 +856,8 @@ export const ChatWindow = React.memo(function ChatWindow({
   const [reconnecting, setReconnecting] = useState(false);
   const reconnectAttemptedRef = useRef(false);
   const stoppedSessionsRef = useRef(new Set<string>());
+  // Bounded stall recovery — see MAX_STALL_RECOVERIES.
+  const stallRecoveryRef = useRef({ count: 0, lastAt: 0 });
 
   useEffect(() => {
     // Only for normal chat sessions — not demo or widget.
@@ -1327,6 +1336,39 @@ export const ChatWindow = React.memo(function ChatWindow({
             console.error("Reconnect stream error:", err);
           }
         },
+        // ---- Liveness recovery (Issue #604 follow-up) ---------------------
+        // The watchdog aborted a silent stream.  Reconnect from the stored
+        // cursor: the server replays only what this tab has not applied, so
+        // the answer continues instead of duplicating or requiring a reload.
+        onStall: (stalledSessionId: string) => {
+          const now = Date.now();
+          const state = stallRecoveryRef.current;
+          if (now - state.lastAt > STALL_RECOVERY_WINDOW_MS) state.count = 0;
+          state.lastAt = now;
+
+          if (state.count >= MAX_STALL_RECOVERIES) {
+            message.error(
+              "Lost the live connection to this run. Refresh the page to catch up.",
+            );
+            queryClient.invalidateQueries({
+              queryKey: ["messages", stalledSessionId],
+            });
+            return;
+          }
+          state.count += 1;
+          setTimeout(() => {
+            void startReconnect(
+              stalledSessionId,
+              buildStreamHandlers("reconnect"),
+            );
+          }, 750);
+        },
+        // The resume cursor fell out of the server's replay buffer, so the
+        // in-memory partial answer may have a hole.  Reload the persisted
+        // message rather than showing a corrupt transcript.
+        onResync: () => {
+          queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
+        },
         onClose: () => {
           if (isRegenerate) setRegeneratingMsgId(null);
           if (isEdit) setEditingMsgId(null);
@@ -1391,6 +1433,7 @@ export const ChatWindow = React.memo(function ChatWindow({
       setPendingUserMessage, setRegeneratingMsgId, setEditingMsgId,
       setHandoffPending,
       fetchFollowUpQuestions, refetchLatestPage,
+      startReconnect,
     ],
   );
 

@@ -18,6 +18,46 @@ import { useStreamingContext } from "../../../providers/StreamingProvider";
 const BASE_URL = import.meta.env.VITE_API_URL || "/api";
 
 // ---------------------------------------------------------------------------
+// Liveness + resume (Issue #604 follow-up)
+// ---------------------------------------------------------------------------
+// The backend stamps every event with a per-run monotonic `seq` and an SSE
+// `id` of the form `<run_id>:<seq>`.  Two things depend on it:
+//
+//   * Dedupe — a reconnect replays the in-process buffer, which may include
+//     tokens this tab already rendered.  Applying them again duplicates the
+//     answer, so events at or below the stored cursor are dropped.
+//   * Resume — the reconnect request forwards the cursor so the server
+//     continues after it instead of replaying everything.
+//
+// The watchdog closes the remaining hole: a silently dead SSE connection
+// (proxy, sleep, deploy) produces no onclose/onerror, so the UI would spin
+// forever until a manual refresh.  A run that is alive emits at least a
+// heartbeat every 15 s; 40 s of silence is treated as a dead link.
+
+/** Silence (ms) after which an apparently-live stream is considered dead. */
+const STALL_TIMEOUT_MS = 40_000;
+
+/** How often the watchdog samples the last-event timestamp. */
+const WATCHDOG_INTERVAL_MS = 5_000;
+
+interface StreamCursor {
+  runId: string;
+  seq: number;
+}
+
+/** Extract `{runId, seq}` from an SSE `id`, or `null` for synthetic events. */
+export function parseStreamCursor(
+  id: string | undefined | null,
+): StreamCursor | null {
+  if (!id) return null;
+  const separator = id.lastIndexOf(":");
+  if (separator <= 0) return null;
+  const seq = Number(id.slice(separator + 1));
+  if (!Number.isFinite(seq) || seq <= 0) return null;
+  return { runId: id.slice(0, separator), seq };
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -327,6 +367,73 @@ export function useStream(apiPrefix: string = "chat") {
   );
   const abortRef = useRef<AbortController | null>(null);
 
+  // Issue #604 follow-up — resume + liveness state.
+  // Cursors are per session because one hook instance serves the visible
+  // conversation while runs for other sessions continue in the background.
+  const cursorsRef = useRef<Record<string, StreamCursor>>({});
+  const lastEventAtRef = useRef<number>(0);
+  const watchdogRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const clearWatchdog = useCallback(() => {
+    if (watchdogRef.current !== null) {
+      clearInterval(watchdogRef.current);
+      watchdogRef.current = null;
+    }
+  }, []);
+
+  /**
+   * Abort a stream that has gone silent.  The caller reconnects from the
+   * stored cursor, so recovery is a resume rather than a replay.
+   */
+  const armWatchdog = useCallback(
+    (
+      sessionId: string,
+      controller: AbortController,
+      onStall?: (sessionId: string) => void,
+    ) => {
+      clearWatchdog();
+      lastEventAtRef.current = Date.now();
+      watchdogRef.current = setInterval(() => {
+        if (Date.now() - lastEventAtRef.current < STALL_TIMEOUT_MS) return;
+        clearWatchdog();
+        // Abort first: the abort path already clears streaming state.
+        controller.abort();
+        onStall?.(sessionId);
+      }, WATCHDOG_INTERVAL_MS);
+    },
+    [clearWatchdog],
+  );
+
+  // Stop the watchdog when the component goes away (navigation/unmount).
+  useEffect(() => clearWatchdog, [clearWatchdog]);
+
+  /**
+   * Record an incoming SSE event and report whether it is new.
+   *
+   * Returns `false` for an event the tab has already applied — a replay
+   * after reconnect, or a duplicate delivery — so the message is never
+   * doubled.  Synthetic events without an id (heartbeat, resync) always
+   * pass and still count as liveness.
+   */
+  const acceptEvent = useCallback(
+    (sessionId: string, id: string | undefined | null): boolean => {
+      lastEventAtRef.current = Date.now();
+      const cursor = parseStreamCursor(id);
+      if (!cursor) return true;
+      const previous = cursorsRef.current[sessionId];
+      if (
+        previous &&
+        previous.runId === cursor.runId &&
+        cursor.seq <= previous.seq
+      ) {
+        return false;
+      }
+      cursorsRef.current[sessionId] = cursor;
+      return true;
+    },
+    [],
+  );
+
   // Issue #455 — share streaming state with sidebar via context.
   // addStreamingSession: called when a stream starts (regardless of session).
   // removeStreamingSession: called when a stream ends for this session.
@@ -392,6 +499,13 @@ export function useStream(apiPrefix: string = "chat") {
           sessionId: string;
           runId: string | null;
         }) => void;
+        /** The stream went silent past the stall timeout; the caller should
+         *  resume from the stored cursor. */
+        onStall?: (sessionId: string) => void;
+        /** The server reported that the resume cursor fell outside the
+         *  replay buffer — reload persisted state instead of trusting the
+         *  partial text held in memory. */
+        onResync?: (event: { event?: string; data: string; id?: string }) => void;
         onClose?: () => void;
       },
       autopilot?: boolean,
@@ -520,6 +634,7 @@ export function useStream(apiPrefix: string = "chat") {
                   sessionId,
                   response.headers.get("x-run-id"),
                 );
+                armWatchdog(sessionId, controller, handlers.onStall);
                 handlers.onStreamStart?.();
                 return;
               }
@@ -531,6 +646,18 @@ export function useStream(apiPrefix: string = "chat") {
               handlers.onClose?.();
             },
             onmessage(ev) {
+              // Drop replays of events this tab already rendered and keep
+              // the liveness clock fresh (Issue #604 follow-up).
+              if (!acceptEvent(sessionId, ev.id)) return;
+              if (ev.event === "stream_resync") {
+                // The cursor fell out of the replay buffer: the partial text
+                // in memory may have a hole, so stop and let the caller
+                // reload the persisted message.
+                clearWatchdog();
+                controller.abort();
+                handlers.onResync?.(ev);
+                return;
+              }
               try {
                 const parsed = JSON.parse(ev.data);
                 switch (ev.event) {
@@ -614,12 +741,14 @@ export function useStream(apiPrefix: string = "chat") {
             onclose() {
               // Always remove from active set — the stream has ended
               // regardless of how (natural end, abort, or error).
+              clearWatchdog();
               removeStreamingSession(sessionId);
               setStreaming(false);
               setStreamingSessionId(null);
               handlers.onClose?.();
             },
             onerror(_err) {
+              clearWatchdog();
               // IMPORTANT: must THROW to prevent fetchEventSource from
               // scheduling a retry.  When onerror returns (doesn't throw),
               // the library schedules create() via setTimeout(1000), which
@@ -678,7 +807,7 @@ export function useStream(apiPrefix: string = "chat") {
         setStreamingSessionId(null);
       }
     },
-    [],
+    [acceptEvent, armWatchdog, clearWatchdog],
   );
 
   const stopStream = useCallback(
@@ -759,6 +888,13 @@ export function useStream(apiPrefix: string = "chat") {
           sessionId: string;
           runId: string | null;
         }) => void;
+        /** The stream went silent past the stall timeout; the caller should
+         *  resume from the stored cursor. */
+        onStall?: (sessionId: string) => void;
+        /** The server reported that the resume cursor fell outside the
+         *  replay buffer — reload persisted state instead of trusting the
+         *  partial text held in memory. */
+        onResync?: (event: { event?: string; data: string; id?: string }) => void;
         onClose?: () => void;
       },
     ): Promise<void> => {
@@ -775,9 +911,13 @@ export function useStream(apiPrefix: string = "chat") {
       // streamingSessionId and context are set inside onopen.
       const token = getToken();
 
+      const reconnectCursor = cursorsRef.current[sessionId];
+      const resumeQuery = reconnectCursor
+        ? `?since_seq=${reconnectCursor.seq}&since_run=${encodeURIComponent(reconnectCursor.runId)}`
+        : "";
       try {
         await fetchEventSource(
-          `${BASE_URL}/chat/session/${sessionId}/stream`,
+          `${BASE_URL}/chat/session/${sessionId}/stream${resumeQuery}`,
           {
             method: "GET",
             headers: {
@@ -797,6 +937,7 @@ export function useStream(apiPrefix: string = "chat") {
                 setStreaming(true);
                 setStreamingSessionId(sessionId);
                 addStreamingSession(sessionId);
+                armWatchdog(sessionId, controller, handlers.onStall);
                 return;
               }
               // Agent finished between status check and reconnect request.
@@ -843,6 +984,16 @@ export function useStream(apiPrefix: string = "chat") {
               handlers.onClose?.();
             },
             onmessage(ev) {
+              // The reconnect replays the server buffer; events this tab
+              // already applied must not be re-appended (Issue #604
+              // follow-up).
+              if (!acceptEvent(sessionId, ev.id)) return;
+              if (ev.event === "stream_resync") {
+                clearWatchdog();
+                controller.abort();
+                handlers.onResync?.(ev);
+                return;
+              }
               try {
                 const parsed = JSON.parse(ev.data);
                 switch (ev.event) {
@@ -920,6 +1071,7 @@ export function useStream(apiPrefix: string = "chat") {
               }
             },
             onclose() {
+              clearWatchdog();
               if (!controller.signal.aborted) {
                 removeStreamingSession(sessionId);
               }
@@ -928,6 +1080,7 @@ export function useStream(apiPrefix: string = "chat") {
               handlers.onClose?.();
             },
             onerror(_err) {
+              clearWatchdog();
               if (controller.signal.aborted) {
                 setStreaming(false);
                 setStreamingSessionId(null);
@@ -951,7 +1104,7 @@ export function useStream(apiPrefix: string = "chat") {
         setStreamingSessionId(null);
       }
     },
-    [],
+    [acceptEvent, armWatchdog, clearWatchdog],
   );
 
   const startRegenerateStream = useCallback(
@@ -990,6 +1143,13 @@ export function useStream(apiPrefix: string = "chat") {
           sessionId: string;
           runId: string | null;
         }) => void;
+        /** The stream went silent past the stall timeout; the caller should
+         *  resume from the stored cursor. */
+        onStall?: (sessionId: string) => void;
+        /** The server reported that the resume cursor fell outside the
+         *  replay buffer — reload persisted state instead of trusting the
+         *  partial text held in memory. */
+        onResync?: (event: { event?: string; data: string; id?: string }) => void;
         onClose?: () => void;
       } | undefined,
     ) => {
@@ -1148,6 +1308,13 @@ export function useStream(apiPrefix: string = "chat") {
           sessionId: string;
           runId: string | null;
         }) => void;
+        /** The stream went silent past the stall timeout; the caller should
+         *  resume from the stored cursor. */
+        onStall?: (sessionId: string) => void;
+        /** The server reported that the resume cursor fell outside the
+         *  replay buffer — reload persisted state instead of trusting the
+         *  partial text held in memory. */
+        onResync?: (event: { event?: string; data: string; id?: string }) => void;
         onClose?: () => void;
       },
     ) => {

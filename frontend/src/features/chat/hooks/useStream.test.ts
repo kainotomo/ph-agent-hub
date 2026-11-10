@@ -453,3 +453,140 @@ describe("useStream", () => {
     expect(abortSpy).toHaveBeenCalled();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Stream resume + liveness (Issue #604 follow-up)
+// ---------------------------------------------------------------------------
+// The backend stamps each SSE event with `<run_id>:<seq>`.  A reconnect
+// replays the server buffer, so the hook must drop events it already
+// applied — otherwise the visible answer is duplicated — and it must notice
+// a silently dead link instead of spinning until a manual refresh.
+
+function latestConfig() {
+  const lastCall =
+    mockFetchEventSource.mock.calls[mockFetchEventSource.mock.calls.length - 1];
+  if (!lastCall) throw new Error("fetchEventSource was never called");
+  return lastCall[1] as {
+    onmessage?: (ev: { event: string; data: string; id?: string }) => void;
+    onopen?: (response: Response) => Promise<void>;
+    signal?: AbortSignal;
+  };
+}
+
+function sseEventWithId(
+  event: string,
+  data: Record<string, unknown>,
+  id: string,
+) {
+  latestConfig().onmessage?.({ event, data: JSON.stringify(data), id });
+}
+
+async function openStream() {
+  const config = latestConfig();
+  await config.onopen?.({
+    ok: true,
+    headers: { get: () => "text/event-stream" },
+  } as unknown as Response);
+}
+
+describe("useStream stream resume and liveness", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    mockGetToken.mockReturnValue("test-token");
+    mockFetchEventSource.mockImplementation(() => new Promise(() => {}));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("drops replayed events at or below the cursor", () => {
+    const { result } = renderHook(() => useStream());
+    const onToken = vi.fn();
+
+    act(() => {
+      result.current.startStream("s1", "hi", [], undefined, {}, { onToken });
+    });
+
+    act(() => {
+      sseEventWithId("token", { delta: "Hello", message_id: "m1" }, "run-1:1");
+      sseEventWithId("token", { delta: " world", message_id: "m1" }, "run-1:2");
+      // A reconnect replays both — neither may be applied twice.
+      sseEventWithId("token", { delta: "Hello", message_id: "m1" }, "run-1:1");
+      sseEventWithId("token", { delta: " world", message_id: "m1" }, "run-1:2");
+      sseEventWithId("token", { delta: "!", message_id: "m1" }, "run-1:3");
+    });
+
+    expect(onToken.mock.calls.map((call) => call[0])).toEqual([
+      "Hello",
+      " world",
+      "!",
+    ]);
+  });
+
+  it("accepts a new run when the run id changes", () => {
+    const { result } = renderHook(() => useStream());
+    const onToken = vi.fn();
+
+    act(() => {
+      result.current.startStream("s1", "hi", [], undefined, {}, { onToken });
+    });
+
+    act(() => {
+      sseEventWithId("token", { delta: "first", message_id: "m1" }, "run-1:9");
+      // A different run restarts the sequence at 1.
+      sseEventWithId("token", { delta: "second", message_id: "m2" }, "run-2:1");
+    });
+
+    expect(onToken.mock.calls.map((call) => call[0])).toEqual([
+      "first",
+      "second",
+    ]);
+  });
+
+  it("reports a stall when a live stream goes silent", async () => {
+    const { result } = renderHook(() => useStream());
+    const onStall = vi.fn();
+
+    mockFetchEventSource.mockImplementation(() => new Promise(() => {}));
+    act(() => {
+      result.current.startStream("s1", "hi", [], undefined, {}, { onStall });
+    });
+    await act(async () => {
+      await openStream();
+    });
+
+    // Healthy traffic keeps the watchdog quiet.
+    act(() => {
+      sseEventWithId("token", { delta: "a", message_id: "m1" }, "run-1:1");
+      vi.advanceTimersByTime(20_000);
+    });
+    expect(onStall).not.toHaveBeenCalled();
+
+    // 40 s of silence (no tokens, no heartbeat) means the link is dead.
+    act(() => {
+      vi.advanceTimersByTime(41_000);
+    });
+
+    expect(onStall).toHaveBeenCalledWith("s1");
+  });
+
+  it("treats stream_resync as terminal and notifies the caller", async () => {
+    const { result } = renderHook(() => useStream());
+    const onResync = vi.fn();
+
+    act(() => {
+      result.current.startStream("s1", "hi", [], undefined, {}, { onResync });
+    });
+
+    act(() => {
+      latestConfig().onmessage?.({
+        event: "stream_resync",
+        data: JSON.stringify({ reason: "buffer_gap", oldest_seq: 900 }),
+      });
+    });
+
+    expect(onResync).toHaveBeenCalledTimes(1);
+  });
+});

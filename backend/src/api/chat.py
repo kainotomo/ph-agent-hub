@@ -68,6 +68,7 @@ from ..services.run_registry import (
     get_active_runs_for_user,
     get_run,
     get_run_outcome,
+    get_run_outcome_for_user,
     get_runs,
     heartbeat_run,
     is_run_cancel_requested,
@@ -2326,6 +2327,36 @@ def _run_headers(lease: RunLease) -> dict[str, str]:
     }
 
 
+def _resume_cursor(
+    request: Request,
+    since_seq: int | None,
+    since_run: str | None,
+    lease: RunLease,
+) -> int | None:
+    """Resolve the client's last applied sequence for a resumed stream.
+
+    ``?since_seq=`` wins (the browser reconnect sets it explicitly), then
+    the standard ``Last-Event-ID`` header (``<run_id>:<seq>``).  A cursor
+    from a different run is ignored — sequence numbers are per run, so
+    replaying an earlier run's tail into a new one would corrupt the UI.
+    """
+    if since_seq is not None and since_seq >= 0:
+        if since_run and since_run != lease.run_id:
+            # Cursor belongs to a previous run of this session; start over.
+            return None
+        return since_seq
+
+    raw = request.headers.get("last-event-id")
+    if not raw:
+        return None
+    run_id, _, seq_text = raw.rpartition(":")
+    if not seq_text.isdigit():
+        return None
+    if run_id and run_id != lease.run_id:
+        return None
+    return int(seq_text)
+
+
 async def _run_agent_background(
     session_id: str,
     data: dict[str, Any],
@@ -3017,17 +3048,25 @@ async def _inactive_stream_response(
 
 @router.get("/session/{session_id}/stream")
 async def reconnect_stream(
+    request: Request,
     session_id: str,
     run_id: str | None = Query(default=None),
+    since_seq: int | None = Query(default=None, ge=0),
+    since_run: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
     current_user: UserORM = Depends(get_current_user),
 ):
     """Reconnect to an already-running agent stream.
 
     If an agent is still running for *session_id*, opens an SSE stream
-    that replays buffered events and continues live.  If the agent has
-    already finished — or *run_id* names a stale run — returns an
+    that replays buffered events after the client's cursor
+    (``since_seq`` / ``Last-Event-ID``) and continues live.  If the agent
+    has already finished — or *run_id* names a stale run — returns an
     inactive JSON body.
+
+    Resuming from a cursor makes reconnect idempotent: the browser never
+    re-applies tokens it already rendered, and a cursor that fell out of
+    the replay buffer yields ``stream_resync`` instead of a silent gap.
 
     Note: the event buffer lives in this process.  On a multi-replica
     deployment, reconnect only attaches when this replica owns the run;
@@ -3054,8 +3093,14 @@ async def reconnect_stream(
         # bridge (just finished, or owned by another replica).
         return await _inactive_stream_response(db, session_id)
 
+    cursor = _resume_cursor(request, since_seq, since_run, lease)
+    logger.debug(
+        "Reconnect for session %s (run=%s) resuming after seq=%s",
+        session_id, lease.run_id, cursor,
+    )
+
     return EventSourceResponse(
-        bridge.subscribe(),
+        bridge.subscribe(from_seq=cursor),
         media_type="text/event-stream",
         headers=_run_headers(lease),
     )
@@ -3227,6 +3272,75 @@ async def _iter_session_status_events(
             }
 
         await asyncio.sleep(poll_interval)
+
+
+def _parse_known_runs(raw: str | None, limit: int = 50) -> list[tuple[str, str]]:
+    """Parse ``?sessions=<id>[:<run_id>],...`` into ``(session_id, run_id)``.
+
+    Malformed entries are ignored; duplicate session ids keep the first
+    entry.  The list is capped so a client cannot make the endpoint fan out
+    over an unbounded number of Redis lookups.
+    """
+    if not raw:
+        return []
+    seen: set[str] = set()
+    parsed: list[tuple[str, str]] = []
+    for chunk in raw.split(","):
+        entry = chunk.strip()
+        if not entry:
+            continue
+        session_id, _, run_id = entry.partition(":")
+        session_id = session_id.strip()
+        if not session_id or session_id in seen:
+            continue
+        seen.add(session_id)
+        parsed.append((session_id, run_id.strip()))
+        if len(parsed) >= limit:
+            break
+    return parsed
+
+
+@router.get("/runs")
+async def list_active_runs(
+    sessions: str | None = Query(default=None),
+    current_user: UserORM = Depends(get_current_user),
+):
+    """Authoritative run snapshot for lightweight polling clients.
+
+    Replaces the long-lived ``GET /chat/streams`` SSE connection for the
+    browser: one short request per poll instead of a socket that competes
+    for the browser's per-origin connection budget (six under HTTP/1.1).
+
+    *sessions* names the runs the caller already knows about as
+    ``session_id:run_id`` pairs.  Any that are no longer active are
+    reported in ``finished`` together with the recorded outcome, so the
+    client can clear its spinner and invalidate cached messages in the
+    same round trip.  Ownership is enforced per session: another user's
+    completion marker is never echoed back.
+    """
+    leases = await get_active_runs_for_user(current_user.id)
+    active = {lease.session_id: lease for lease in leases}
+
+    finished: list[dict[str, Any]] = []
+    for session_id, known_run_id in _parse_known_runs(sessions):
+        if session_id in active:
+            continue
+        outcome = await get_run_outcome_for_user(
+            session_id, known_run_id, current_user.id,
+        )
+        if outcome is None:
+            continue
+        finished.append({
+            "session_id": session_id,
+            "run_id": known_run_id or None,
+            "state": "finished",
+            "outcome": outcome,
+        })
+
+    return {
+        "runs": [_lease_event_payload(lease) for lease in active.values()],
+        "finished": finished,
+    }
 
 
 @router.get("/streams")

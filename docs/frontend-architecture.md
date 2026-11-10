@@ -388,7 +388,8 @@ The chat area consumes these backend endpoints:
 > `["session", id]` query when it falls outside the loaded pages (deep links, search,
 > temporary chats).
 | **Messages** | `POST/GET /chat/session/:id/message`, `PUT/DELETE /chat/session/:id/message/:msgId`, `POST .../regenerate`, `POST .../feedback` |
-| **Streaming** | `POST /chat/session/:id/message` (with `Accept: text/event-stream`), `DELETE /chat/session/:id/stream` |
+| **Streaming** | `POST /chat/session/:id/message` (with `Accept: text/event-stream`), `GET /chat/session/:id/stream?since_seq=&since_run=` (resume), `DELETE /chat/session/:id/stream` |
+| **Run status** | `GET /chat/runs?sessions=<id>:<run_id>,...` — polled by `useSessionStatusStream` (3 s visible / 15 s hidden); replaces the per-tab status SSE |
 | **Config** | `GET /models`, `GET /templates` |
 | **Prompts** | `GET/POST/PUT/DELETE /prompts` |
 | **Skills** | `GET/POST/PUT/DELETE /skills` |

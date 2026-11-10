@@ -466,6 +466,91 @@ class TestStatusAndSnapshot:
         resp = await async_client.get("/api/chat/streams")
         assert resp.status_code == 401
 
+    async def test_runs_snapshot_requires_auth(self, async_client):
+        resp = await async_client.get("/api/chat/runs")
+        assert resp.status_code == 401
+
+    async def test_runs_snapshot_lists_active_run(
+        self, async_client, test_user, auth_headers
+    ):
+        sid = _session_id()
+        lease = await acquire_run(sid, test_user.id, test_user.tenant_id)
+        assert lease is not None
+        try:
+            resp = await async_client.get(
+                "/api/chat/runs", headers=auth_headers(test_user),
+            )
+            assert resp.status_code == 200
+            body = resp.json()
+            runs = [r for r in body["runs"] if r["session_id"] == sid]
+            assert len(runs) == 1
+            assert runs[0]["run_id"] == lease.run_id
+            assert runs[0]["state"] == "running"
+        finally:
+            await release_run(lease, OUTCOME_COMPLETED)
+            await _cleanup(sid, test_user.id)
+
+    async def test_runs_snapshot_reports_finished_outcome_for_known_run(
+        self, async_client, test_user, auth_headers
+    ):
+        """A run the client knew about that is no longer active is reported
+        with its outcome, so the spinner clears and cached messages reload
+        in the same poll."""
+        sid = _session_id()
+        lease = await acquire_run(sid, test_user.id, test_user.tenant_id)
+        assert lease is not None
+        run_id = lease.run_id
+        await release_run(lease, OUTCOME_COMPLETED)
+        try:
+            resp = await async_client.get(
+                "/api/chat/runs",
+                params={"sessions": f"{sid}:{run_id}"},
+                headers=auth_headers(test_user),
+            )
+            assert resp.status_code == 200
+            finished = resp.json()["finished"]
+            assert len(finished) == 1
+            assert finished[0]["session_id"] == sid
+            assert finished[0]["run_id"] == run_id
+            assert finished[0]["state"] == "finished"
+            assert finished[0]["outcome"] == "completed"
+        finally:
+            await _cleanup(sid, test_user.id)
+
+    async def test_runs_snapshot_does_not_leak_other_users(
+        self, async_client, test_user, auth_headers, db_session
+    ):
+        """Naming someone else's session must not reveal its outcome."""
+        from src.db.orm.users import User as UserORM
+
+        other = UserORM(
+            id=str(uuid.uuid4()),
+            tenant_id=test_user.tenant_id,
+            email=f"other-{uuid.uuid4().hex[:8]}@example.com",
+            password_hash="pbkdf2:sha256:600000$test-salt$test-hash",
+            display_name="Other User",
+            role="user",
+            is_active=True,
+        )
+        db_session.add(other)
+        await db_session.flush()
+
+        sid = _session_id()
+        lease = await acquire_run(sid, other.id, other.tenant_id)
+        assert lease is not None
+        other_run = lease.run_id
+        await release_run(lease, OUTCOME_COMPLETED)
+        try:
+            resp = await async_client.get(
+                "/api/chat/runs",
+                params={"sessions": f"{sid}:{other_run}"},
+                headers=auth_headers(test_user),
+            )
+            assert resp.status_code == 200
+            assert resp.json()["finished"] == []
+        finally:
+            await _cleanup(sid, other.id)
+
     async def test_status_stream_emits_snapshot_then_finish(
         self, test_user
     ):

@@ -1043,7 +1043,8 @@ The response is `text/event-stream`. The connection stays open until the agent f
 
 **Authoritative run state (Issue #604):**
 ```
-GET  /chat/streams                     # multiplexed run-status SSE (all user sessions)
+GET  /chat/runs? sessions=<id>[:<run_id>],...   # pollable run snapshot + finishes
+GET  /chat/streams                     # multiplexed run-status SSE (kept for compatibility)
 GET  /chat/session/:id/stream-status   # single-session snapshot
 DELETE /chat/session/:id/stream?run_id=<id>
 ```
@@ -1054,13 +1055,36 @@ heartbeat every 2 s); a second request gets `409` with
 `code="session_busy"` and the active `run_id` before anything is
 persisted. Session/sidebar/search responses carry `running` and `run_id`,
 so every client (including after a reload or in a second tab) can render
-the running indicator. `GET /chat/streams` seeds clients with a
-`status_snapshot` and then emits `run_status` start/finish deltas, polling
-the Redis registry once per second (no pub/sub, replica-safe). A crashed
-host stops looking busy after the lease TTL instead of the old five-minute
-`stream:active:*` TTL, and graceful shutdown releases local leases.
-`GET /chat/session/:id/stream` still replays the in-process event buffer;
-cross-replica live reconnect remains a follow-up.
+the running indicator. A crashed host stops looking busy after the lease
+TTL instead of the old five-minute `stream:active:*` TTL, and graceful
+shutdown releases local leases.
+
+`GET /chat/runs` is the browser's status source: it returns the caller's
+active runs plus a `finished` list carrying the recorded `outcome` for any
+run the client named in `?sessions=` that is no longer active. The web
+client polls it (3 s visible, 15 s hidden) instead of holding a second SSE
+connection per tab — under HTTP/1.1 a browser allows six connections per
+origin, so three streaming tabs plus their status streams exhausted the
+budget and every further request queued forever (the "third session hangs,
+refresh fixes it" symptom). `GET /chat/streams` remains for clients that
+prefer a push feed and is replica-safe (it polls the registry, no pub/sub).
+
+**Resumable streams.** Every SSE event the bridge emits is stamped with an
+`id` of the form `<run_id>:<seq>`, where `seq` is monotonic per run. A
+client reconnects with `?since_seq=<n>&since_run=<run_id>` (or the standard
+`Last-Event-ID` header) and receives only the events after its cursor, so a
+resume never replays tokens the page already rendered. A cursor that has
+fallen out of the bounded replay buffer (1000 events) yields a
+`stream_resync` event instead of a silent hole; the client then reloads the
+persisted message. A slow reader whose queue overflows is flagged the same
+way rather than blocking the agent. `GET /chat/session/:id/stream` is the
+resume endpoint; cross-replica live reconnect remains a follow-up because
+the buffer is in-process.
+
+The browser-side counterpart is a stall watchdog: a run that is alive emits
+at least a heartbeat every 15 s, so 40 s of silence aborts the connection
+and the tab resumes from its cursor instead of spinning until a manual
+refresh.
 
 ### 11.3 SSE Event Types
 
@@ -1078,6 +1102,7 @@ cross-replica live reconnect remains a follow-up.
 | `summarized` | `{ summary, summarized_message_count, tokens_saved }` | Conversation history was auto-summarized |
 | `error` | `{ code, message }` | Non-recoverable error; connection closes after |
 | `heartbeat` | `{}` | Every 15s on idle to keep connection alive |
+| `stream_resync` | `{ reason: "buffer_gap" \| "slow_consumer", from_seq, oldest_seq, last_seq, run_id }` | The client's resume cursor predates the replay buffer (or the reader fell behind). Reload the persisted message instead of trusting the partial text. |
 
 **Error codes:** `model_timeout`, `model_error`, `tool_error`, `max_steps_exceeded`, `invalid_output`, `auth_error`, `internal_error`
 

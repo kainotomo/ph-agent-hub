@@ -35,7 +35,7 @@ const BASE_URL = import.meta.env.VITE_API_URL || "/api";
 // heartbeat every 15 s; 40 s of silence is treated as a dead link.
 
 /** Silence (ms) after which an apparently-live stream is considered dead. */
-const STALL_TIMEOUT_MS = 40_000;
+const STALL_TIMEOUT_MS = 25_000;
 
 /** How often the watchdog samples the last-event timestamp. */
 const WATCHDOG_INTERVAL_MS = 5_000;
@@ -529,6 +529,9 @@ export function useStream(apiPrefix: string = "chat") {
           data: Record<string, unknown>,
         ) => void;
         onError?: (error: string, messageId: string) => void;
+        /** A transport failure (network drop, killed backend), as opposed to
+         *  a producer `error` event.  The run is `lost`, not failed (#609). */
+        onTransportError?: (error: string) => void;
         /** A second client tried to send while a run is active (HTTP 409). */
         onSessionBusy?: (info: {
           sessionId: string;
@@ -837,17 +840,22 @@ export function useStream(apiPrefix: string = "chat") {
                 setStreamingSessionId(null);
                 throw _err;
               }
-              // Actual stream error — report it and throw to reject the
+              // Actual transport error — report it and throw to reject the
               // promise.  The outer catch calls onClose for final cleanup.
               const errMsg =
                 _err instanceof Error ? _err.message : String(_err);
               removeStreamingSession(sessionId);
               setStreaming(false);
               setStreamingSessionId(null);
-              // Include the raw error string so the toast shows the
-              // actual error (e.g. "The user aborted a request") rather
-              // than the generic "Request failed" fallback.
-              handlers.onError?.(errMsg, "");
+              // A transport failure is not a producer failure: the client
+              // state machine turns a close-while-running into `lost` and
+              // renders the reason (#609).  Fall back to onError for callers
+              // that have not adopted the state machine yet.
+              if (handlers.onTransportError) {
+                handlers.onTransportError(errMsg);
+              } else {
+                handlers.onError?.(errMsg, "");
+              }
               throw _err;
             },
           },

@@ -810,6 +810,37 @@ export function getStreamStatus(
 }
 
 /**
+ * Durable run state (Issue #608/#609) — the server's terminal record.
+ *
+ * Used instead of transport closure on mount, on reconnect, on tab focus and
+ * after a `stream_resync`: the closing of an SSE response is not evidence
+ * that the run completed.
+ */
+export interface RunStateResponse {
+  run_id: string | null;
+  session_id?: string;
+  /** idle | running | completed | failed | cancelled | lost | unknown */
+  state: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  error_code?: string | null;
+  error_message?: string | null;
+  message_id?: string | null;
+  persisted?: boolean;
+  client_attached?: boolean;
+  last_event_seq?: number;
+  tokens_in?: number;
+  tokens_out?: number;
+  kind?: string | null;
+}
+
+export function getRunState(sessionId: string): Promise<RunStateResponse> {
+  return api<RunStateResponse>(
+    `/chat/session/${sessionId}/run-state`,
+  );
+}
+
+/**
  * Reconnect to an already-running agent stream.
  * Returns the raw Response so the caller can open an EventSource.
  * Throws if the session has no active stream.

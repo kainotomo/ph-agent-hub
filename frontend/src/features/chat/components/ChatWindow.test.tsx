@@ -88,6 +88,7 @@ vi.mock("../services/chat", () => ({
   updateAssistantMessage: vi.fn(),
   listAlwaysOnTools: vi.fn().mockResolvedValue([]),
   getStreamStatus: mockGetStreamStatus,
+  getRunState: mockGetRunState,
 }));
 
 const mockApi = vi.hoisted(() => vi.fn());
@@ -95,6 +96,7 @@ const mockGetStreamStatus = vi.hoisted(() => vi.fn());
 const mockStartReconnect = vi.hoisted(() => vi.fn());
 const mockResetStream = vi.hoisted(() => vi.fn());
 const mockListMessages = vi.hoisted(() => vi.fn());
+const mockGetRunState = vi.hoisted(() => vi.fn());
 const mockSetActiveSession = vi.hoisted(() => vi.fn());
 const mockRunStatus = vi.hoisted(() => ({
   streamingSessionIds: new Set<string>(),
@@ -1300,5 +1302,148 @@ describe("ChatWindow — mobile top bar and controlled options drawer (Issue #57
     await user.click(memoriesButton);
 
     expect(onSettingsOpenChange).toHaveBeenCalledWith(false);
+  });
+});
+
+
+// =============================================================================
+// Issue #609 — client run state machine
+// =============================================================================
+
+describe("ChatWindow — terminal run states (Issue #609)", () => {
+  beforeEach(() => {
+    mockApi.mockReset();
+    mockApi.mockImplementation((url: string) => {
+      if (url === "/models") return Promise.resolve(FAKE_MODELS);
+      return Promise.resolve([]);
+    });
+    mockGetStreamStatus.mockReset();
+    mockGetStreamStatus.mockResolvedValue({ active: false });
+    mockListMessages.mockReset();
+    mockListMessages.mockResolvedValue({ items: [], has_more: false });
+    mockGetRunState.mockReset();
+    mockGetRunState.mockResolvedValue({ run_id: null, state: "idle" });
+    lastStreamHandlers.current = null;
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  async function send(text = "test message") {
+    const user = userEvent.setup();
+    const textarea = screen.getByPlaceholderText(/Type a message/);
+    await user.clear(textarea);
+    await user.type(textarea, text);
+    const sendButton = screen
+      .getAllByRole("button")
+      .find(
+        (btn) =>
+          btn.textContent?.includes("Send") &&
+          !(btn as HTMLButtonElement).disabled,
+      );
+    expect(sendButton).toBeTruthy();
+    await user.click(sendButton!);
+    await settle();
+    return lastStreamHandlers.current;
+  }
+
+  it("renders lost with a reason and Retry when the stream closes while running", async () => {
+    renderChatWindow({ isPending: false, sessionId: "test-session-1" });
+    await settle();
+
+    const handlers = await send();
+    expect(handlers).not.toBeNull();
+
+    await act(async () => {
+      handlers.onClose();
+    });
+
+    expect(
+      await screen.findByText(/Lost connection to the run/i),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
+  });
+
+  it("renders an explicit failure with Retry when the run errors", async () => {
+    renderChatWindow({ isPending: false, sessionId: "test-session-1" });
+    await settle();
+
+    const handlers = await send();
+
+    await act(async () => {
+      handlers.onError("provider exploded");
+    });
+
+    expect(
+      await screen.findByText(/The response failed/i),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText(/provider exploded/i).length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
+  });
+
+  it("names the other window on a 409 instead of silently stopping", async () => {
+    renderChatWindow({ isPending: false, sessionId: "test-session-1" });
+    await settle();
+
+    const handlers = await send();
+
+    await act(async () => {
+      handlers.onSessionBusy({ sessionId: "test-session-1", runId: "other-run" });
+    });
+
+    expect(
+      await screen.findByText(/already running in another window/i),
+    ).toBeInTheDocument();
+  });
+
+  it("reconciles the server record on mount and shows a recorded failure", async () => {
+    mockGetRunState.mockResolvedValue({
+      run_id: "run-old",
+      state: "failed",
+      error_code: "model_timeout",
+      error_message: "provider timed out",
+      persisted: false,
+    });
+    // A failure loaded on mount has no in-memory turn: Retry must fall back
+    // to the last user message in the transcript.
+    const user = userEvent.setup();
+    mockListMessages.mockResolvedValue({
+      items: [
+        {
+          id: "u1",
+          session_id: "test-session-1",
+          sender: "user",
+          content: [{ type: "text", text: "retry this turn" }],
+          model_id: null,
+          model_name: null,
+          model_provider: null,
+          tool_calls: null,
+          tokens_in: null,
+          tokens_out: null,
+          is_deleted: false,
+          created_at: "2026-01-01T00:00:00.000Z",
+          updated_at: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+      has_more: false,
+    });
+
+    renderChatWindow({ isPending: false, sessionId: "test-session-1" });
+    await settle();
+
+    expect(
+      await screen.findByText(/The response failed/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/provider timed out/i)).toBeInTheDocument();
+
+    lastStreamHandlers.current = null;
+    await act(async () => {
+      await user.click(screen.getByRole("button", { name: /retry/i }));
+    });
+    await settle();
+    // Resubmitted to the same session with the transcript's user message.
+    expect(lastStreamHandlers.current).not.toBeNull();
   });
 });

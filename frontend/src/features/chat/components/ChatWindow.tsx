@@ -23,6 +23,8 @@ import {
 import { useQuery, useInfiniteQuery, useQueryClient, type InfiniteData } from "@tanstack/react-query";
 import { MessageBubble } from "./MessageBubble";
 import { useStream } from "../hooks/useStream";
+import { useRunState } from "../hooks/useRunState";
+import { terminalCopy } from "../runStateMachine";
 import { useStickToBottom } from "../hooks/useStickToBottom";
 import { useStreamingContext } from "../../../providers/StreamingProvider";
 import { computeFirstItemIndex, MESSAGES_PER_PAGE } from "../services/messagePaging";
@@ -249,6 +251,15 @@ export const ChatWindow = React.memo(function ChatWindow({
    */
   const [handoffPending, setHandoffPending] = useState(false);
   const [streamError, setStreamError] = useState<string | null>(null);
+  // Issue #609 — the last submitted turn, so a failed/lost run can be
+  // retried into the same session without retyping it.
+  const lastTurnRef = useRef<{
+    content: string;
+    fileIds?: string[];
+    temperature?: number;
+    sessionData?: Record<string, unknown>;
+    autopilot: boolean;
+  } | null>(null);
   const [streamingTokens, setStreamingTokens] = useState<{ tokens_in: number; tokens_out: number } | null>(null);
   // Workflow step progress (MAF 1.19.0 multi-step workflows)
   const [workflowSteps, setWorkflowStep] = useState<Record<string, { stepIndex: number; totalSteps: number; status: string; error?: { message: string; type: string } }>>({});
@@ -525,6 +536,19 @@ export const ChatWindow = React.memo(function ChatWindow({
     demo ? "demo" : widget ? "widget" : "chat"
   );
 
+  // Issue #609 — explicit state machine for the visible conversation.
+  // The transport callbacks below feed it; mount/focus/reconnect reconcile
+  // from the server's durable run record instead of trusting a close.
+  const runState = useRunState({
+    sessionId: demo || widget ? null : (sessionId ?? null),
+    enabled: !demo && !widget && !!sessionId,
+  });
+  const {
+    begin: beginRun,
+    dispatch: dispatchRunState,
+    reconcile: reconcileRunState,
+  } = runState;
+
   // Issue #604 — tell the status store which conversation is on screen so
   // completion-unread markers clear when the user is actually looking.
   const {
@@ -566,6 +590,10 @@ export const ChatWindow = React.memo(function ChatWindow({
   // we navigated away and back).  Show that state until the reconnect
   // attaches and normal streaming progress takes over.
   const isSessionRunning = !!sessionId && streamingSessionIds.has(sessionId);
+
+  // Issue #609 — inline terminal state, rendered outside the message list so
+  // it is visible even when the failed turn produced no assistant bubble.
+  const runTerminalCopy = terminalCopy(runState.snapshot);
 
   // ---- Issue #521: sticky scroll intent (no auto-scroll on finish) --------
   const scrollToBottom = useCallback(() => {
@@ -1247,6 +1275,10 @@ export const ChatWindow = React.memo(function ChatWindow({
           tokens_in?: number;
           tokens_out?: number;
         }) => {
+          dispatchRunState({
+            type: "message_complete",
+            messageId: data.message_id,
+          });
           if (isRegenerate) setRegeneratingMsgId(null);
           if (isSend || isEdit || isAutopilot) setPendingUserMessage(null);
 
@@ -1314,7 +1346,16 @@ export const ChatWindow = React.memo(function ChatWindow({
             markTurnEnded();
           }
         },
+        onTransportError: (err: string) => {
+          // The connection dropped mid-run (backend killed, network loss).
+          // Close-while-running resolves to `lost` in the state machine —
+          // never a silent stop, and never an "agent failed" toast.
+          console.warn("Chat stream transport error:", err);
+          dispatchRunState({ type: "stream_closed" });
+          void reconcileRunState();
+        },
         onError: (err: string) => {
+          dispatchRunState({ type: "error", message: err });
           if (isRegenerate) setRegeneratingMsgId(null);
           if (isEdit) setEditingMsgId(null);
           if (isSend || isEdit) setPendingUserMessage(null);
@@ -1341,12 +1382,16 @@ export const ChatWindow = React.memo(function ChatWindow({
         // cursor: the server replays only what this tab has not applied, so
         // the answer continues instead of duplicating or requiring a reload.
         onStall: (stalledSessionId: string) => {
+          dispatchRunState({ type: "stall" });
           const now = Date.now();
           const state = stallRecoveryRef.current;
           if (now - state.lastAt > STALL_RECOVERY_WINDOW_MS) state.count = 0;
           state.lastAt = now;
 
           if (state.count >= MAX_STALL_RECOVERIES) {
+            // Recovery has given up: the run is `lost` (rendered inline),
+            // not a silent spinner.
+            dispatchRunState({ type: "stream_closed" });
             message.error(
               "Lost the live connection to this run. Refresh the page to catch up.",
             );
@@ -1367,9 +1412,14 @@ export const ChatWindow = React.memo(function ChatWindow({
         // in-memory partial answer may have a hole.  Reload the persisted
         // message rather than showing a corrupt transcript.
         onResync: () => {
+          void reconcileRunState();
           queryClient.invalidateQueries({ queryKey: ["messages", sessionId] });
         },
         onClose: () => {
+          dispatchRunState({ type: "stream_closed" });
+          // The server record is the authority; confirm the outcome when
+          // the transport closes (mount/focus also reconcile).
+          void reconcileRunState();
           if (isRegenerate) setRegeneratingMsgId(null);
           if (isEdit) setEditingMsgId(null);
           if (isSend || isEdit) setPendingUserMessage(null);
@@ -1433,7 +1483,7 @@ export const ChatWindow = React.memo(function ChatWindow({
       setPendingUserMessage, setRegeneratingMsgId, setEditingMsgId,
       setHandoffPending,
       fetchFollowUpQuestions, refetchLatestPage,
-      startReconnect,
+      startReconnect, dispatchRunState, reconcileRunState,
     ],
   );
 
@@ -1452,6 +1502,8 @@ export const ChatWindow = React.memo(function ChatWindow({
     setStreamError(null);
     setFollowUpQuestions([]);
     setStreamingTokens(null);
+    beginRun();
+    dispatchRunState({ type: "stream_open" });
 
     // ---- Edit mode: streaming, like regenerate but on the user message ----
     if (editingMsgId) {
@@ -1529,6 +1581,15 @@ export const ChatWindow = React.memo(function ChatWindow({
         }
       : undefined;
 
+    // Issue #609 — remember this turn so a terminal failure can offer Retry.
+    lastTurnRef.current = {
+      content,
+      fileIds: fileIds.length > 0 ? fileIds : undefined,
+      temperature: sessionTemperature ?? undefined,
+      sessionData,
+      autopilot: isAutopilotMode,
+    };
+
     // Prevent the mount-time reconnect effect from firing after
     // we just sent a message.  Without this guard, the effect re-runs
     // when pendingFlag transitions from true → false (lazy session
@@ -1559,8 +1620,9 @@ export const ChatWindow = React.memo(function ChatWindow({
         {
           ...apHandlers,
           onSessionBusy: () => {
-            // Another client owns this conversation (Issue #604).  Do not
-            // pretend a run started; restore what the user typed.
+            // Another client owns this conversation (Issue #604/#609).
+            dispatchRunState({ type: "busy" });
+            // Do not pretend a run started; restore what the user typed.
             setInputValue(content);
             setPendingFiles(filesToRestore);
             setPendingUserMessage(null);
@@ -1610,8 +1672,9 @@ export const ChatWindow = React.memo(function ChatWindow({
         {
           ...sendHandlers,
           onSessionBusy: () => {
-            // Another client owns this conversation (Issue #604).  Do not
-            // pretend a run started; restore what the user typed.
+            // Another client owns this conversation (Issue #604/#609).
+            dispatchRunState({ type: "busy" });
+            // Do not pretend a run started; restore what the user typed.
             setInputValue(content);
             setPendingFiles(filesToRestore);
             setPendingUserMessage(null);
@@ -1639,9 +1702,63 @@ export const ChatWindow = React.memo(function ChatWindow({
         },
       );
     }
-  }, [inputValue, streaming, sessionId, startStream, queryClient, pendingFiles, editingMsgId, pendingFlag, folderId, pendModelId, pendTemplateId, pendSkillId, pendAutoRoute, pendAutoSelectTools, pendActiveToolIds, thinkingEnabled, reasoningEffort, sessionTemperature, isAutopilotMode, setAutopilotState]);
+  }, [inputValue, streaming, sessionId, startStream, queryClient, pendingFiles, editingMsgId, pendingFlag, folderId, pendModelId, pendTemplateId, pendSkillId, pendAutoRoute, pendAutoSelectTools, pendActiveToolIds, thinkingEnabled, reasoningEffort, sessionTemperature, isAutopilotMode, setAutopilotState, beginRun, dispatchRunState]);
+
+  /**
+   * Issue #609 — retry the last submitted turn after a failed/lost run.
+   * Re-submits to the same session with the same content; the optimistic
+   * bubble is recreated by the stream's token handler.
+   */
+  const handleRetry = useCallback(() => {
+    const last = lastTurnRef.current;
+    if (streaming || !sessionId) return;
+    // A failure loaded from the server record has no in-memory turn; retry
+    // the last user message from the transcript instead.
+    const fallbackUser = [...(messages ?? [])]
+      .reverse()
+      .find((m: any) => m.sender === "user" && !m.is_deleted);
+    const content =
+      last?.content ??
+      (fallbackUser ? parseTextFromContent(fallbackUser.content) : "");
+    if (!content.trim()) return;
+
+    setStreamError(null);
+    setStreamingContent("");
+    setStreamingSegments([]);
+    setStreamingTokens(null);
+    setHandoffPending(false);
+    beginRun();
+    dispatchRunState({ type: "stream_open" });
+    if (last?.autopilot) {
+      setAutopilotState({
+        currentTurn: 1,
+        maxTurns: 20,
+        status: "executing",
+      });
+    }
+    followNow();
+    startStream(
+      sessionId,
+      content,
+      last?.fileIds,
+      last?.temperature,
+      last?.sessionData,
+      {
+        ...buildStreamHandlers(last?.autopilot ? "autopilot" : "send"),
+        onSessionBusy: () => {
+          dispatchRunState({ type: "busy" });
+        },
+      },
+      last?.autopilot ?? false,
+    );
+  }, [
+    streaming, sessionId, messages, beginRun, dispatchRunState, startStream,
+    buildStreamHandlers, followNow,
+  ]);
 
   const handleStop = async () => {
+    // Issue #609 — a manual stop is `cancelled`, not an error.
+    dispatchRunState({ type: "cancel_requested" });
     // Clear the streaming ghost bubble immediately for instant UX.
     // The backend will persist the partial response (stopStream sends
     // the cancel signal first), and when the stream ends naturally the
@@ -1723,6 +1840,8 @@ export const ChatWindow = React.memo(function ChatWindow({
     setStreamError(null);
     setFollowUpQuestions([]);
     setStreamingTokens(null);
+    beginRun();
+    dispatchRunState({ type: "stream_open" });
 
     // Jump to bottom and re-engage following when regenerating.
     followNow();
@@ -1873,6 +1992,7 @@ export const ChatWindow = React.memo(function ChatWindow({
         }));
       },
       onMessageComplete: (data: { message_id: string; tokens_in?: number; tokens_out?: number }) => {
+        dispatchRunState({ type: "message_complete", messageId: data.message_id });
         if (regeneratingMsgId === messageId) setRegeneratingMsgId(null);
         setPendingUserMessage(null);
         if (data.tokens_in || data.tokens_out) {
@@ -1887,11 +2007,13 @@ export const ChatWindow = React.memo(function ChatWindow({
         queryClient.invalidateQueries({ queryKey: ["sessionUsage", sessionId] });
       },
       onError: (err: string) => {
+        dispatchRunState({ type: "error", message: err });
         if (regeneratingMsgId === messageId) setRegeneratingMsgId(null);
         setStreamError(err);
         message.error(err || "Regenerate failed");
       },
       onClose: () => {
+        dispatchRunState({ type: "stream_closed" });
         if (regeneratingMsgId === messageId) setRegeneratingMsgId(null);
         setPendingUserMessage(null);
         setStreamingContent("");
@@ -1907,7 +2029,7 @@ export const ChatWindow = React.memo(function ChatWindow({
       },
     };
     startRegenerateStream(sessionId, messageId, regenerateHandlers);
-  }, [streaming, sessionId, startRegenerateStream, queryClient, regeneratingMsgId, refetchLatestPage]);
+  }, [streaming, sessionId, startRegenerateStream, queryClient, regeneratingMsgId, refetchLatestPage, beginRun, dispatchRunState]);
 
   // File upload handlers
   const handleFileUpload = useCallback(
@@ -2639,6 +2761,43 @@ export const ChatWindow = React.memo(function ChatWindow({
         </div>
       )}
       </div>
+
+      {/* Issue #609 — terminal run state, always visible outside the list.
+          A closed stream is never enough: the user is told what happened and
+          can retry the same turn. */}
+      {!demo && !widget && (runTerminalCopy || runState.snapshot.otherClient) && (
+        <div style={{ padding: "0 16px 8px" }}>
+          {runTerminalCopy && !streaming ? (
+            <Alert
+              message={runTerminalCopy.title}
+              description={runTerminalCopy.description}
+              type={
+                runState.snapshot.phase === "cancelled" ? "info" : "error"
+              }
+              showIcon
+              closable
+              onClose={() => runState.reset()}
+              action={
+                runTerminalCopy.retryable ? (
+                  <Button size="small" onClick={handleRetry}>
+                    Retry
+                  </Button>
+                ) : undefined
+              }
+              style={{ marginBottom: 8 }}
+            />
+          ) : null}
+          {runState.snapshot.otherClient ? (
+            <Alert
+              message="Running in another window"
+              description={runState.snapshot.reason}
+              type="info"
+              showIcon
+              style={{ marginBottom: 8 }}
+            />
+          ) : null}
+        </div>
+      )}
 
       {/* Autopilot progress panel — outside Virtuoso so it's always visible (Issue #446) */}
       <AutopilotPanel

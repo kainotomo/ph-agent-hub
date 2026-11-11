@@ -8,6 +8,8 @@
 import asyncio
 import logging
 import os
+import re
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -222,10 +224,15 @@ async def lifespan(app: FastAPI):
     logger.setLevel(level)
     if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
         handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter(
+        # Issue #608 — run-scoped lines are correlated by UTC timestamps, so
+        # emit them explicitly in UTC with a trailing Z (the container may
+        # not always run with TZ=UTC).
+        formatter = logging.Formatter(
             "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        ))
+            datefmt="%Y-%m-%dT%H:%M:%SZ",
+        )
+        formatter.converter = time.gmtime
+        handler.setFormatter(formatter)
         logger.addHandler(handler)
 
     from .agents.registry import startup_scan
@@ -249,6 +256,23 @@ async def lifespan(app: FastAPI):
                 )
     except Exception:
         logger.warning("Failed to clean up stale autopilot runs on startup")
+
+    # Issue #608 — the missing `lost` path.  A run row left without
+    # `finished_at` by a killed process becomes `lost` on the next startup
+    # (live runs on other replicas keep a fresh lease heartbeat and are
+    # skipped).
+    try:
+        from .services.run_record import mark_orphan_runs_lost
+        async with AsyncSessionLocal() as run_db:
+            lost = await mark_orphan_runs_lost(run_db)
+            if lost:
+                logger.info(
+                    "Marked %d orphaned chat run(s) as lost on startup", lost,
+                )
+    except Exception:
+        logger.warning(
+            "Failed to sweep orphaned chat runs on startup", exc_info=True,
+        )
 
     # Start background cleanup for orphaned temp uploads
     orphan_cleanup_task = asyncio.create_task(_cleanup_orphaned_temp_uploads())
@@ -291,6 +315,50 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="PH Agent Hub", version="3.7.1", lifespan=lifespan)
+
+
+# ---------------------------------------------------------------------------
+# Run admission logging (Issue #608)
+# ---------------------------------------------------------------------------
+# A rejected send used to leave no trace at all (#607): the request died in
+# auth/validation/lease handling before the handler logged anything.  The
+# accepted path logs `PH-RUN-ADMIT` from the handler with the run id; this
+# middleware records every rejection with its reason.
+# ---------------------------------------------------------------------------
+
+_ADMISSION_LOGGER = logging.getLogger(__name__)
+_CHAT_MESSAGE_PATH = re.compile(
+    r"^/api/chat/session/(?P<session_id>[^/]+)/message$"
+)
+
+
+def _rejection_reason(status_code: int) -> str:
+    if status_code in (401, 403):
+        return "auth"
+    if status_code == 409:
+        return "busy"
+    if status_code in (400, 422):
+        return "validation"
+    if status_code == 429:
+        return "limit"
+    if status_code >= 500:
+        return "provider"
+    return "rejected"
+
+
+@app.middleware("http")
+async def _log_rejected_run_admissions(request, call_next):
+    response = await call_next(request)
+    if request.method == "POST":
+        match = _CHAT_MESSAGE_PATH.match(request.url.path)
+        if match and response.status_code >= 400:
+            _ADMISSION_LOGGER.info(
+                "PH-RUN-REJECT session_id=%s reason=%s status=%s",
+                match.group("session_id"),
+                _rejection_reason(response.status_code),
+                response.status_code,
+            )
+    return response
 
 # ---------------------------------------------------------------------------
 # Middleware

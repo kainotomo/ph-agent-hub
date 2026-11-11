@@ -322,7 +322,7 @@ class TestMigrationDAG:
         # 1 drop-fulltext, 1 model-role-bindings, 1 workflow-checkpoints,
         # 1 tools-approval-required, 1 workflow-definitions, 1 memory,
         # 1 prompts-content-longtext)
-        assert count == 76, (
+        assert count == 78, (
             f"Expected 76 migration files, found {count}. "
             "Update this assertion after adding/removing migrations."
         )

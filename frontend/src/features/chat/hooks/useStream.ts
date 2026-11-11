@@ -12,7 +12,7 @@ import {
   fetchEventSource,
   EventStreamContentType,
 } from "@microsoft/fetch-event-source";
-import { getToken } from "../../../services/api";
+import { getToken, refreshAccessToken } from "../../../services/api";
 import { useStreamingContext } from "../../../providers/StreamingProvider";
 
 const BASE_URL = import.meta.env.VITE_API_URL || "/api";
@@ -35,10 +35,45 @@ const BASE_URL = import.meta.env.VITE_API_URL || "/api";
 // heartbeat every 15 s; 40 s of silence is treated as a dead link.
 
 /** Silence (ms) after which an apparently-live stream is considered dead. */
-const STALL_TIMEOUT_MS = 40_000;
+const STALL_TIMEOUT_MS = 25_000;
 
 /** How often the watchdog samples the last-event timestamp. */
 const WATCHDOG_INTERVAL_MS = 5_000;
+
+/**
+ * Explicit terminal message for a rejected/expired credential (Issue #610).
+ * The chat stream must never end a turn silently because the access token
+ * was stale — the user needs to know that signing in again is the fix.
+ */
+export const AUTH_EXPIRED_MESSAGE =
+  "Your session expired. Please sign in again.";
+
+/**
+ * Retry a request once with a freshly refreshed access token.
+ *
+ * The refresh itself is single-flight in `services/api`, so two streams
+ * (or two tabs) that both hit 401 share one `/auth/refresh` call and one
+ * rotated refresh token.  Only 401 is retried: a re-POST of anything else
+ * could create a second message.
+ *
+ * Returns `{response, authExpired}` where `authExpired` is true when the
+ * retried request was still unauthorised or no token could be obtained.
+ */
+async function fetchWithAuthRetry(
+  input: RequestInfo | URL,
+  init: RequestInit | undefined,
+): Promise<{ response: Response; authExpired: boolean }> {
+  let response = await fetch(input, init);
+  if (response.status !== 401) return { response, authExpired: false };
+
+  const fresh = await refreshAccessToken();
+  if (!fresh) return { response, authExpired: true };
+
+  const headers = new Headers(init?.headers);
+  headers.set("Authorization", `Bearer ${fresh}`);
+  response = await fetch(input, { ...init, headers });
+  return { response, authExpired: response.status === 401 };
+}
 
 interface StreamCursor {
   runId: string;
@@ -494,6 +529,9 @@ export function useStream(apiPrefix: string = "chat") {
           data: Record<string, unknown>,
         ) => void;
         onError?: (error: string, messageId: string) => void;
+        /** A transport failure (network drop, killed backend), as opposed to
+         *  a producer `error` event.  The run is `lost`, not failed (#609). */
+        onTransportError?: (error: string) => void;
         /** A second client tried to send while a run is active (HTTP 409). */
         onSessionBusy?: (info: {
           sessionId: string;
@@ -523,6 +561,9 @@ export function useStream(apiPrefix: string = "chat") {
       // can attach to the existing run instead of reporting a failure or
       // removing the spinner.
       let sessionBusy = false;
+      // Issue #610 — true when a 401 survived the single refresh/retry.
+      // The stream must surface it instead of closing silently.
+      let authExpired = false;
 
       const token = getToken();
 
@@ -597,10 +638,13 @@ export function useStream(apiPrefix: string = "chat") {
               ...(autopilot ? { autopilot: true } : {}),
               ...(background ? { background: true } : {}),
             }),
+            // Issue #610 — refresh once on 401 and retry the same POST.
             // Issue #604 — inspect 409s before fetch-event-source turns
             // them into a generic "Request failed with status 409".
             fetch: async (input, init) => {
-              const response = await fetch(input, init);
+              const { response, authExpired: expired } =
+                await fetchWithAuthRetry(input, init);
+              authExpired = expired;
               if (response.status === 409) {
                 let busyRunId: string | null = null;
                 try {
@@ -638,11 +682,35 @@ export function useStream(apiPrefix: string = "chat") {
                 handlers.onStreamStart?.();
                 return;
               }
-              // Not an SSE response (e.g. 404 for lazy session) — close
-              // gracefully instead of throwing, which would trigger a
-              // fetchEventSource retry loop that floods the console.
-              // The agent is still running in the background; results
-              // will be persisted and visible on next page load.
+              // Not an SSE response — #609/#610 require an explicit terminal
+              // state instead of a silent close.  The agent may still be
+              // running in the background; onClose still runs so the caller
+              // can refetch, but the user is told what happened.
+              if (authExpired || response.status === 401) {
+                handlers.onError?.(AUTH_EXPIRED_MESSAGE, "");
+                handlers.onClose?.();
+                return;
+              }
+              if (sessionBusy) {
+                // Another client owns the session (Issue #604): keep its
+                // spinner and let the status poll reconcile.
+                handlers.onClose?.();
+                return;
+              }
+              if (response.status === 404) {
+                handlers.onError?.(
+                  "This conversation no longer exists. Refresh the page to continue.",
+                  "",
+                );
+                handlers.onClose?.();
+                return;
+              }
+              handlers.onError?.(
+                response.ok
+                  ? "The server did not start a response stream. Please try again."
+                  : `The server could not start the response (HTTP ${response.status}). Please try again.`,
+                "",
+              );
               handlers.onClose?.();
             },
             onmessage(ev) {
@@ -772,17 +840,22 @@ export function useStream(apiPrefix: string = "chat") {
                 setStreamingSessionId(null);
                 throw _err;
               }
-              // Actual stream error — report it and throw to reject the
+              // Actual transport error — report it and throw to reject the
               // promise.  The outer catch calls onClose for final cleanup.
               const errMsg =
                 _err instanceof Error ? _err.message : String(_err);
               removeStreamingSession(sessionId);
               setStreaming(false);
               setStreamingSessionId(null);
-              // Include the raw error string so the toast shows the
-              // actual error (e.g. "The user aborted a request") rather
-              // than the generic "Request failed" fallback.
-              handlers.onError?.(errMsg, "");
+              // A transport failure is not a producer failure: the client
+              // state machine turns a close-while-running into `lost` and
+              // renders the reason (#609).  Fall back to onError for callers
+              // that have not adopted the state machine yet.
+              if (handlers.onTransportError) {
+                handlers.onTransportError(errMsg);
+              } else {
+                handlers.onError?.(errMsg, "");
+              }
               throw _err;
             },
           },
@@ -900,6 +973,8 @@ export function useStream(apiPrefix: string = "chat") {
     ): Promise<void> => {
       const controller = new AbortController();
       abortRef.current = controller;
+      // Issue #610 — a stale token must not end the reconnect silently.
+      let reconnectAuthExpired = false;
 
       // IMPORTANT: Do NOT set streaming=true yet — wait until onopen
       // confirms the SSE connection is live.  This prevents a race where
@@ -926,6 +1001,13 @@ export function useStream(apiPrefix: string = "chat") {
             },
             openWhenHidden: true,
             signal: controller.signal,
+            // Issue #610 — 401 on the idempotent events GET: refresh once
+            // and reopen with the same cursor.
+            fetch: async (input, init) => {
+              const result = await fetchWithAuthRetry(input, init);
+              reconnectAuthExpired = result.authExpired;
+              return result.response;
+            },
             async onopen(response) {
               if (
                 response.ok &&
@@ -975,12 +1057,27 @@ export function useStream(apiPrefix: string = "chat") {
                 handlers.onClose?.();
                 return;
               }
-              // If the stream is not available (agent already finished),
-              // treat it as a normal close.
-              if (response.status === 404 || response.status === 400) {
+              // Issue #610 — a stale token is an explicit failure, never a
+              // silent close.
+              if (reconnectAuthExpired || response.status === 401) {
+                handlers.onError?.(AUTH_EXPIRED_MESSAGE, "");
                 handlers.onClose?.();
                 return;
               }
+              // If the stream is not available (agent already finished),
+              // treat it as a normal close.
+              if (response.status === 404 || response.status === 400) {
+                handlers.onError?.(
+                  "This conversation no longer exists. Refresh the page to continue.",
+                  "",
+                );
+                handlers.onClose?.();
+                return;
+              }
+              handlers.onError?.(
+                `Could not resume the response (HTTP ${response.status}). Please try again.`,
+                "",
+              );
               handlers.onClose?.();
             },
             onmessage(ev) {

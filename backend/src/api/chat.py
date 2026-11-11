@@ -81,6 +81,7 @@ from ..db.orm.tools import Tool
 from ..db.orm.user_tool_preferences import UserToolPreference
 from ..db.orm.users import User as UserORM
 from ..services import audit_service, folder_service, session_service, upload_service
+from ..services import run_record
 from ..storage import s3
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -1748,6 +1749,13 @@ async def send_message(
 
     run_kind = "autopilot" if (body.autopilot or body.background) else "chat"
     async with _session_run(session_id, current_user, kind=run_kind) as lease:
+        # Issue #608 — every accepted send leaves an admission line with the
+        # run id.  Rejections (auth/busy/validation) are logged by the
+        # middleware in main.py.
+        logger.info(
+            "PH-RUN-ADMIT run_id=%s session_id=%s kind=%s user_id=%s",
+            lease.run_id, session_id, run_kind, current_user.id,
+        )
         # ---- Auto-title: if session still has the default title, use the
         #      first user message as the title.  Set a raw truncated title
         #      immediately, then fire a background task that calls a cheap
@@ -2357,6 +2365,58 @@ def _resume_cursor(
     return int(seq_text)
 
 
+# ---------------------------------------------------------------------------
+# Durable run record helpers (Issue #608)
+# ---------------------------------------------------------------------------
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    """Parse a registry timestamp; naive values are assumed UTC."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return (
+        parsed if parsed.tzinfo is not None
+        else parsed.replace(tzinfo=timezone.utc)
+    )
+
+
+def _duration_ms(started_at: str | None) -> int:
+    """Wall-clock duration of a run in milliseconds (0 when unparseable)."""
+    started = _parse_iso_datetime(started_at)
+    if started is None:
+        return 0
+    return max(0, int((datetime.now(timezone.utc) - started).total_seconds() * 1000))
+
+
+def _decode_event_payload(event_dict: dict[str, Any]) -> dict[str, Any]:
+    """Decode the JSON string carried in an SSE event's ``data`` field."""
+    raw = event_dict.get("data")
+    if isinstance(raw, dict):
+        return raw
+    try:
+        decoded = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+async def _safe_finalize_run(**kwargs: Any) -> bool:
+    """Write the terminal run record without letting a DB failure crash the run."""
+    try:
+        await run_record.finalize_run(**kwargs)
+        return True
+    except Exception:
+        logger.exception(
+            "Failed to write run terminal record run_id=%s session_id=%s",
+            kwargs.get("run_id"), kwargs.get("session_id"),
+        )
+        return False
+
+
 async def _run_agent_background(
     session_id: str,
     data: dict[str, Any],
@@ -2381,7 +2441,19 @@ async def _run_agent_background(
     from sqlalchemy import select as _sa_select
 
     _file_ids = file_ids or []
-    outcome = OUTCOME_COMPLETED
+    # Issue #608 — the outcome is reported by the producer (the single
+    # `run_terminal` frame), never inferred from "the generator ended".
+    # `None` means "not known yet"; the finally always resolves it, and
+    # never to `completed` unless the producer said an answer was persisted.
+    outcome: str | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    persisted = False
+    terminal_message_id: str | None = None
+    terminal_seen = False
+    record_written = False
+    tokens_in = 0
+    tokens_out = 0
 
     async with AsyncSessionLocal() as stream_db:
         # Initialise early so finally blocks don't UnboundLocalError if
@@ -2395,9 +2467,32 @@ async def _run_agent_background(
                 _heartbeat_run_loop(lease, bridge)
             )
 
+            # Durable start row.  A SIGKILL before the terminal frame leaves
+            # evidence that the startup sweep turns into `lost` (#608).
+            _user_id = data.get("user_id") or current_user.id
+            _tenant_id = data.get("tenant_id") or current_user.tenant_id
+            try:
+                await run_record.start_run(
+                    run_id=lease.run_id,
+                    session_id=session_id,
+                    user_id=_user_id,
+                    tenant_id=_tenant_id,
+                    kind=lease.kind,
+                    started_at=_parse_iso_datetime(lease.started_at),
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to write run start record run_id=%s session_id=%s",
+                    lease.run_id, session_id,
+                )
+            logger.info(
+                "PH-RUN-START run_id=%s session_id=%s kind=%s user_id=%s",
+                lease.run_id, session_id, lease.kind, _user_id,
+            )
+
             # Refresh current_user in this session's context using the
             # user_id from session_data (a plain dict, no ORM access).
-            _uid = data.get("user_id") or current_user.id
+            _uid = _user_id
             _user = await stream_db.execute(
                 _sa_select(UserORM).where(UserORM.id == _uid)
             )
@@ -2413,10 +2508,27 @@ async def _run_agent_background(
                 message_id=message_id,
                 file_ids=_file_ids,
             ):
-                logger.info("PH-BG-STREAM event=%s data_keys=%s", event_dict.get("event"), list(event_dict.get("data", {}).keys()) if isinstance(event_dict.get("data"), dict) else type(event_dict.get("data")).__name__)
+                event_type = event_dict.get("event")
+                # Per-token logging is DEBUG (#608): at INFO it drowned the
+                # start/finish/admission signals.  Errors stay at INFO and
+                # carry the code/message, not `type(data).__name__`.
+                if event_type == "error":
+                    _err = _decode_event_payload(event_dict)
+                    logger.info(
+                        "PH-BG-STREAM run_id=%s session_id=%s event=error "
+                        "error_code=%s error_message=%s",
+                        lease.run_id, session_id,
+                        _err.get("code"), str(_err.get("message") or "")[:500],
+                    )
+                else:
+                    logger.debug(
+                        "PH-BG-STREAM run_id=%s session_id=%s event=%s",
+                        lease.run_id, session_id, event_type,
+                    )
+
                 # Swallow httpx ContextVar cleanup errors at stream end.
                 if (
-                    event_dict.get("event") == "error"
+                    event_type == "error"
                     and "inner_response_telemetry_captured_fields"
                     in str(event_dict.get("data", ""))
                 ):
@@ -2427,6 +2539,35 @@ async def _run_agent_background(
                         _synthetic_message_complete(session_id, message_id)
                     )
                     return
+
+                if event_type == "run_terminal":
+                    payload = _decode_event_payload(event_dict)
+                    outcome = str(payload.get("outcome") or OUTCOME_FAILED)
+                    error_code = payload.get("error_code")
+                    error_message = payload.get("message")
+                    persisted = bool(payload.get("persisted"))
+                    terminal_message_id = payload.get("message_id")
+                    tokens_in = int(payload.get("tokens_in") or 0)
+                    tokens_out = int(payload.get("tokens_out") or 0)
+                    if outcome == OUTCOME_COMPLETED and not persisted:
+                        outcome = OUTCOME_FAILED
+                        error_code = error_code or "not_persisted"
+                    # Write before announcing: subscribers only see this
+                    # frame after the durable row is committed.
+                    record_written = await _safe_finalize_run(
+                        run_id=lease.run_id,
+                        session_id=session_id,
+                        outcome=outcome,
+                        error_code=error_code,
+                        error_message=error_message,
+                        message_id=terminal_message_id,
+                        persisted=persisted,
+                        client_attached=bridge.ever_attached,
+                        last_event_seq=bridge.last_seq + 1,
+                        tokens_in=tokens_in,
+                        tokens_out=tokens_out,
+                    )
+                    terminal_seen = True
 
                 await bridge.put(event_dict)
 
@@ -2445,8 +2586,10 @@ async def _run_agent_background(
                 "Background agent task cancelled for session %s",
                 session_id,
             )
-        except Exception:
+        except Exception as exc:
             outcome = OUTCOME_FAILED
+            error_code = "agent_error"
+            error_message = str(exc)[:1000]
             logger.exception(
                 "Background agent task failed for session %s",
                 session_id,
@@ -2479,6 +2622,31 @@ async def _run_agent_background(
                 outcome = OUTCOME_CANCELLED
             await clear_run_cancel_marker(lease.run_id)
 
+            # Every path must end with a resolved outcome.  A generator that
+            # ended without a `run_terminal` frame is a failure, never a
+            # silent completion (#607/#608).
+            if outcome is None:
+                outcome = OUTCOME_FAILED
+                error_code = error_code or "missing_terminal"
+                error_message = error_message or (
+                    "The run ended without reporting a terminal event."
+                )
+
+            if not record_written:
+                record_written = await _safe_finalize_run(
+                    run_id=lease.run_id,
+                    session_id=session_id,
+                    outcome=outcome,
+                    error_code=error_code,
+                    error_message=error_message,
+                    message_id=terminal_message_id,
+                    persisted=persisted,
+                    client_attached=bridge.ever_attached,
+                    last_event_seq=bridge.last_seq,
+                    tokens_in=tokens_in,
+                    tokens_out=tokens_out,
+                )
+
             # Close the bridge — signals all subscribers to stop.
             await bridge.close()
 
@@ -2498,6 +2666,16 @@ async def _run_agent_background(
             except (asyncio.CancelledError, Exception):
                 pass
 
+            logger.info(
+                "PH-RUN-FINISH run_id=%s session_id=%s outcome=%s "
+                "duration_ms=%s message_id=%s persisted=%s "
+                "client_attached=%s last_event_seq=%s tokens_in=%s tokens_out=%s",
+                lease.run_id, session_id, outcome,
+                _duration_ms(lease.started_at),
+                terminal_message_id if persisted else None,
+                persisted, bridge.ever_attached, bridge.last_seq,
+                tokens_in, tokens_out,
+            )
             logger.info(
                 "Background agent task finished for session %s (run=%s, outcome=%s)",
                 session_id, lease.run_id, outcome,
@@ -3182,6 +3360,48 @@ async def stream_status(
         "run_kind": lease.kind if lease is not None else None,
         "run_started_at": lease.started_at if lease is not None else None,
     }
+
+
+# ---------------------------------------------------------------------------
+# Durable run state — Issue #608
+# ---------------------------------------------------------------------------
+
+
+@router.get("/session/{session_id}/run-state")
+async def get_session_run_state(
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(get_current_user),
+):
+    """Return the most recent durable run record for *session_id*.
+
+    This is the client's authority for "how did the last run end" on mount,
+    on reconnect, on tab focus, and after a `stream_resync` — the transport
+    closing is not evidence of success.  Owner-scoped and cheap (one indexed
+    row lookup).
+    """
+    data = await _load_session(db, session_id)
+    await _require_session_owner(data, current_user)
+
+    state = await run_record.get_run_state(db, session_id)
+    if state is None:
+        return {
+            "run_id": None,
+            "session_id": session_id,
+            "state": "idle",
+            "started_at": None,
+            "finished_at": None,
+            "error_code": None,
+            "error_message": None,
+            "message_id": None,
+            "persisted": False,
+            "client_attached": False,
+            "last_event_seq": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "kind": None,
+        }
+    return state
 
 
 # ---------------------------------------------------------------------------

@@ -117,6 +117,11 @@ class StreamBridge:
         #: and stop.
         self._closed: bool = False
 
+        #: Set to True once any SSE subscriber has attached (Issue #608:
+        #: `client_attached` distinguishes "answer produced but no browser
+        #: ever saw it" from a delivered answer).
+        self._ever_attached: bool = False
+
         #: Guard to ensure :meth:`close` is idempotent.
         self._close_lock: asyncio.Lock = asyncio.Lock()
 
@@ -231,6 +236,7 @@ class StreamBridge:
         # live deque while the producer appends raises RuntimeError.
         sub = _Subscriber(self._subscriber_queue_size)
         self._subscribers.append(sub)
+        self._ever_attached = True
 
         last_seq = from_seq or 0
         try:
@@ -308,6 +314,16 @@ class StreamBridge:
         if not self._buffer:
             return 0
         return self._buffer[0][0]
+
+    @property
+    def ever_attached(self) -> bool:
+        """Whether any SSE subscriber has ever attached to this run."""
+        return self._ever_attached
+
+    @property
+    def subscriber_count(self) -> int:
+        """Number of currently attached SSE subscribers (Issue #608)."""
+        return len(self._subscribers)
 
     @property
     def is_autopilot(self) -> bool:

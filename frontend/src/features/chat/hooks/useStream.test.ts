@@ -590,3 +590,45 @@ describe("useStream stream resume and liveness", () => {
     expect(onResync).toHaveBeenCalledTimes(1);
   });
 });
+
+
+// =============================================================================
+// Issue #609 — transport failures are not producer failures
+// =============================================================================
+
+describe("useStream — transport failure routing (Issue #609)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetToken.mockReturnValue("test-token");
+  });
+
+  it("routes an SSE transport failure to onTransportError, not onError", async () => {
+    mockFetchEventSource.mockImplementation(
+      async (
+        _url: string,
+        config: { onerror?: (err: Error) => void },
+      ) => {
+        // The real library throws from onerror to reject its promise.
+        config.onerror?.(new Error("network drop"));
+      },
+    );
+    const onError = vi.fn();
+    const onTransportError = vi.fn();
+
+    const { result } = renderHook(() => useStream());
+    await act(async () => {
+      await result.current.startStream(
+        "session-1",
+        "Hello",
+        [],
+        undefined,
+        undefined,
+        { onError, onTransportError },
+      );
+    });
+
+    expect(onTransportError).toHaveBeenCalledTimes(1);
+    expect(onTransportError.mock.calls[0][0]).toMatch(/network drop/);
+    expect(onError).not.toHaveBeenCalled();
+  });
+});

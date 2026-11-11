@@ -35,6 +35,7 @@ from .a2a_call_logs import A2aCallLog
 from .a2a_tasks import A2aTask
 from .embed_configs import EmbedConfig
 from .autopilot_runs import AutopilotRun
+from .chat_runs import ChatRun
 from .scheduled_tasks import ScheduledTask
 from .notifications import Notification
 from .workflow_checkpoints import WorkflowCheckpointRecord
@@ -75,6 +76,7 @@ __all__ = [
     "AppSetting",
     "EmbedConfig",
     "AutopilotRun",
+    "ChatRun",
     "ScheduledTask",
     "Notification",
     "WorkflowCheckpointRecord",

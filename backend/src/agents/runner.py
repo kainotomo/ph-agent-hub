@@ -3497,6 +3497,17 @@ async def run_agent_stream(
     _stream_token_info: dict = {}  # mutated by _run_agent_stream to propagate token counts
     cfg = None
 
+    # Issue #608 — the producer reports how the run ended.  These are set by
+    # the paths below and turned into exactly one `run_terminal` frame after
+    # the persistence `finally`, so `_run_agent_background` never has to
+    # infer "completed" from "the generator ended normally".
+    terminal_outcome: str | None = None
+    terminal_error_code: str | None = None
+    terminal_error_message: str | None = None
+    cancelled_by_flag = False
+    assistant_persisted = False
+    persisted_message_id: str | None = None
+
     # Persist the user message immediately so it's always visible,
     # even if the agent run fails.
     # Can be skipped when the caller already persisted it (autopilot
@@ -3659,6 +3670,7 @@ async def run_agent_stream(
             # Check for cancellation before each yield
             if await check_stream_cancel(session_id):
                 await clear_stream_cancel(session_id)
+                cancelled_by_flag = True
                 logger.warning(
                     "Stream cancelled for session %s — partial content will be persisted",
                     session_id,
@@ -3692,16 +3704,27 @@ async def run_agent_stream(
         if "inner_response_telemetry_captured_fields" in err_str:
             logger.debug("Ignoring httpx ContextVar error at stream end")
         else:
+            # Issue #608 — the cause must survive even when no client is
+            # attached.  Previously it existed only inside the SSE frame, so
+            # the silent production failure (#607) left no trace anywhere.
+            logger.exception(
+                "run_agent_stream failed session_id=%s message_id=%s",
+                session_id, message_id,
+            )
+            terminal_outcome = "failed"
+            terminal_error_code = _exc_to_error_code(exc)
+            terminal_error_message = err_str[:1000]
             yield {
                 "event": "error",
                 "data": json.dumps({
                     "session_id": session_id,
                     "message_id": message_id,
-                    "code": _exc_to_error_code(exc),
-                    "message": str(exc),
+                    "code": terminal_error_code,
+                    "message": err_str,
                 }),
             }
-            return  # Don't proceed to message_complete on error
+            # Do NOT return: the finally must still persist partial output,
+            # and the producer must still emit its single terminal frame.
 
     finally:
         # ---- Ensure partial results are ALWAYS persisted, even when the
@@ -3738,7 +3761,7 @@ async def run_agent_stream(
                 segments_to_persist = _flush_reasoning_segment(accumulated_segments, accumulated_reasoning)
 
                 if accumulated_text or segments_to_persist:
-                    await _persist_assistant_message(
+                    persisted_message_id = await _persist_assistant_message(
                         db=_persist_db,
                         session_id=session_id,
                         is_temporary=is_temporary,
@@ -3752,6 +3775,7 @@ async def run_agent_stream(
                         message_id=message_id,
                         metrics=metrics_payload,
                     )
+                    assistant_persisted = True
 
                 if cfg is not None and current_user is not None:
                     usage_log = None
@@ -3814,8 +3838,26 @@ async def run_agent_stream(
                 except Exception:
                     logger.debug("Failed to close client %s", type(client).__name__, exc_info=True)
 
+    # ---- Issue #608: exactly one producer-reported terminal state -------
+    # Reached on every path that is not a GeneratorExit.  `completed` is
+    # only claimable when an assistant message was actually persisted;
+    # otherwise the run is a failure that the durable record can explain.
+    if terminal_outcome is None:
+        if cancelled_by_flag:
+            terminal_outcome = "cancelled"
+        elif assistant_persisted:
+            terminal_outcome = "completed"
+        else:
+            terminal_outcome = "failed"
+            terminal_error_code = "empty_output"
+            terminal_error_message = (
+                "The run ended without producing or persisting an answer."
+            )
+
     # ---- Only reached on normal completion (no GeneratorExit) ----------
-    if accumulated_text or segments_to_persist:
+    if terminal_outcome != "failed" and (
+        accumulated_text or segments_to_persist
+    ):
         tokens_in = _stream_token_info.get("in", 0) or 0
         tokens_out = _stream_token_info.get("out", 0) or 0
         logger.info(
@@ -3832,7 +3874,24 @@ async def run_agent_stream(
             )),
         }
 
-    if cfg is not None:
+    # The terminal frame is always last and carries everything the durable
+    # run record and the client state machine need.
+    yield {
+        "event": "run_terminal",
+        "data": json.dumps({
+            "session_id": session_id,
+            "outcome": terminal_outcome,
+            "error_code": terminal_error_code,
+            "message": terminal_error_message,
+            "message_id": persisted_message_id if assistant_persisted else None,
+            "persisted": assistant_persisted,
+            "tokens_in": _stream_token_info.get("in", 0) or 0,
+            "tokens_out": _stream_token_info.get("out", 0) or 0,
+            "cache_hit_tokens": _stream_token_info.get("cache_hit", 0) or 0,
+        }),
+    }
+
+    if cfg is not None and terminal_outcome != "failed":
         # Snapshot model attributes before passing to background task,
         # since the ORM Model instance may become detached from its
         # session by the time the background task runs.

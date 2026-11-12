@@ -104,6 +104,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Workflow definition identity and edit policy** — `WorkflowDefinition.key` must match the module's `MAF_KEY` and is immutable (renaming is a create, not an edit); step `id` must be a non-empty, whitespace-free executor identity; and a new derived classification (`unchanged` / `config_only` / `topology`) states which edits leave paused runs resumable and which cannot be resumed. ([#551])
 
 ### Fixed
+- **Parallel sessions no longer contend on MCP tool rows (Issue #613)** —
+  session tool resolution used to inject `_allowed_tool_names` into the shared
+  `Tool.config` in memory to pass the active-tool filter to the MCP builder.
+  SQLAlchemy's autoflush then wrote that internal key to the `tools` row on the
+  builder's next query, and because an agent run holds one long-lived session,
+  the row lock survived for the rest of the run; a second session resolving the
+  same MCP server waited for `innodb_lock_wait_timeout` and failed with
+  `(1205, 'Lock wait timeout exceeded')`. The filter is now passed as an explicit
+  `allowed_tool_names` argument through `_build_tool_callables` and
+  `build_mcp_tool_callables`, so resolving tools is read-only; the internal
+  config key is neither written nor read. ([#613])
 - **Live answer text no longer freezes mid-stream (Issue #600)** — the
   `displayMessages` memo in the chat view read `streamingContent` without
   listing it as a dependency, so after the first token it kept returning the

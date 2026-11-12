@@ -28,6 +28,7 @@ async def build_mcp_tool_callables(
     tenant_id: str,
     session_id: str = "",
     cleanup_clients: list | None = None,
+    allowed_tool_names: list[str] | None = None,
 ) -> list:
     """Build MAF callables for an MCP tool.
 
@@ -42,6 +43,9 @@ async def build_mcp_tool_callables(
     NOTE: Connection is NOT established here — the caller (runner.py)
     is responsible for calling .connect() before the agent run and
     .close() after, via the cleanup_clients mechanism.
+
+    The session's active MCP tool names are passed explicitly by the caller;
+    ``tool.config`` is read-only input for this function.
     """
     if cleanup_clients is None:
         cleanup_clients = []
@@ -83,13 +87,13 @@ async def build_mcp_tool_callables(
 
     mcp_tool_name = config.get("tool_name", tool.name)
 
-    # If the runner passed a list of allowed tool names (from deduplication),
-    # use it to restrict which tools from this server are exposed.
-    session_allowed_names: list[str] | None = config.get("_allowed_tool_names")
-
+    # Restrict this server connection to the tools active in the session.
+    # The list is passed explicitly so resolving tools never mutates the
+    # shared Tool row (Issue #613). Empty/None falls back to the server's
+    # own allow-list.
     common_kwargs = {
         "name": server.name,
-        "allowed_tools": session_allowed_names or server.allowed_tools,
+        "allowed_tools": allowed_tool_names or server.allowed_tools,
         "approval_mode": "never_require",
     }
 

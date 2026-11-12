@@ -314,7 +314,7 @@ async def lifespan(app: FastAPI):
         logger.warning("Failed to release run leases on shutdown", exc_info=True)
 
 
-app = FastAPI(title="PH Agent Hub", version="3.7.2", lifespan=lifespan)
+app = FastAPI(title="PH Agent Hub", version="3.7.3", lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------

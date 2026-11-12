@@ -2030,6 +2030,84 @@ class TestResolveToolCallables:
         # Built-in file tools are added; check that at least some callables are returned
         assert len(callables) > 0
 
+    @pytest.mark.regression
+    async def test_mcp_resolution_does_not_write_tool_config(
+        self, db_session, test_tenant, test_session
+    ):
+        """Resolving MCP tools must not flush a transient Tool.config change.
+
+        Regression for Issue #613: injecting ``_allowed_tool_names`` into the
+        ORM object made the next query autoflush an UPDATE on the shared
+        ``tools`` row, which stayed locked for the whole parallel agent run.
+        """
+        import uuid
+
+        from sqlalchemy import event, inspect as sa_inspect, select
+
+        from src.db.base import async_engine
+        from src.db.orm.mcp_servers import McpServer
+        from src.db.orm.sessions import SessionActiveTool
+        from src.db.orm.tools import Tool
+
+        server = McpServer(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            name="PowerShell Server",
+            transport="streamable_http",
+            url="http://127.0.0.1:65535/mcp",
+            enabled=True,
+        )
+        db_session.add(server)
+        await db_session.flush()
+
+        tool = Tool(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            name="PowerShell",
+            type="mcp",
+            enabled=True,
+            config={"mcp_server_id": server.id, "tool_name": "PowerShell"},
+        )
+        db_session.add(tool)
+        await db_session.flush()
+        db_session.add(
+            SessionActiveTool(session_id=test_session.id, tool_id=tool.id)
+        )
+        await db_session.flush()
+
+        original_config = dict(tool.config)
+        updates: list[str] = []
+
+        def _capture(conn, cursor, statement, parameters, context, executemany):
+            if statement.lstrip().upper().startswith("UPDATE"):
+                updates.append(statement)
+
+        event.listen(async_engine.sync_engine, "before_cursor_execute", _capture)
+        try:
+            with (
+                patch("src.tools.mcp.MCPStreamableHTTPTool") as MockMCPTool,
+                patch("httpx.AsyncClient"),
+            ):
+                await self.fn(
+                    db_session,
+                    {"id": test_session.id, "tenant_id": test_tenant.id},
+                    test_tenant.id,
+                    [],
+                    8192,
+                    None,
+                )
+            # Force any pending autoflush after resolution as well.
+            await db_session.execute(select(Tool).where(Tool.id == tool.id))
+        finally:
+            event.remove(
+                async_engine.sync_engine, "before_cursor_execute", _capture
+            )
+
+        assert updates == [], f"tool resolution wrote to the DB: {updates}"
+        assert tool.config == original_config
+        assert sa_inspect(tool).modified is False
+        assert MockMCPTool.call_args.kwargs["allowed_tools"] == ["PowerShell"]
+
 
 @pytest.mark.integration
 class TestAutoSelectTools:
@@ -2052,6 +2130,91 @@ class TestAutoSelectTools:
             "user1",
         )
         assert isinstance(result, list)
+
+    @pytest.mark.regression
+    async def test_auto_select_mcp_does_not_write_tool_config(
+        self, db_session, test_tenant, test_session
+    ):
+        """Auto-select must also resolve MCP tools without flushing Tool.config.
+
+        Regression for Issue #613 — the auto-select dedupe loop used the same
+        transient ``_allowed_tool_names`` mutation as the manual path.
+        """
+        import uuid
+
+        from sqlalchemy import event, inspect as sa_inspect, select
+
+        from src.db.base import async_engine
+        from src.db.orm.mcp_servers import McpServer
+        from src.db.orm.sessions import SessionActiveTool
+        from src.db.orm.tools import Tool
+
+        server = McpServer(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            name="PowerShell Server",
+            transport="streamable_http",
+            url="http://127.0.0.1:65535/mcp",
+            enabled=True,
+        )
+        db_session.add(server)
+        await db_session.flush()
+
+        tool = Tool(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            name="PowerShell",
+            type="mcp",
+            enabled=True,
+            config={"mcp_server_id": server.id, "tool_name": "PowerShell"},
+        )
+        db_session.add(tool)
+        await db_session.flush()
+        db_session.add(
+            SessionActiveTool(session_id=test_session.id, tool_id=tool.id)
+        )
+        await db_session.flush()
+
+        original_config = dict(tool.config)
+        updates: list[str] = []
+
+        def _capture(conn, cursor, statement, parameters, context, executemany):
+            if statement.lstrip().upper().startswith("UPDATE"):
+                updates.append(statement)
+
+        event.listen(async_engine.sync_engine, "before_cursor_execute", _capture)
+        try:
+            with (
+                patch("src.tools.mcp.MCPStreamableHTTPTool") as MockMCPTool,
+                patch("httpx.AsyncClient"),
+            ):
+                await self.fn(
+                    db_session,
+                    {
+                        "id": test_session.id,
+                        "tenant_id": test_tenant.id,
+                        "is_temporary": False,
+                        "auto_select_tools": True,
+                        "active_tool_ids": [tool.id],
+                    },
+                    test_tenant.id,
+                    "call PowerShell",
+                    [],
+                    [],
+                    8192,
+                    None,
+                )
+            # Force any pending autoflush after resolution as well.
+            await db_session.execute(select(Tool).where(Tool.id == tool.id))
+        finally:
+            event.remove(
+                async_engine.sync_engine, "before_cursor_execute", _capture
+            )
+
+        assert updates == [], f"tool resolution wrote to the DB: {updates}"
+        assert tool.config == original_config
+        assert sa_inspect(tool).modified is False
+        assert MockMCPTool.call_args.kwargs["allowed_tools"] == ["PowerShell"]
 
     async def test_step_5c_uses_session_data_active_tool_ids(
         self, db_session, test_tenant, test_tool, test_session, test_user

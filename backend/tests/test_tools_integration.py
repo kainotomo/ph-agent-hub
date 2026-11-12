@@ -2059,6 +2059,82 @@ class TestMcpTools:
             assert len(result) == 1
             MockMCPTool.assert_called_once()
 
+    async def test_explicit_allowed_tool_names(self, mock_server, mock_tool):
+        db = _make_mock_db_session()
+        result_mock = MagicMock()
+        result_mock.scalar_one_or_none.return_value = mock_server
+
+        async def mock_execute(*args, **kwargs):
+            return result_mock
+        db.execute = mock_execute
+
+        with (
+            patch("src.tools.mcp.MCPStreamableHTTPTool") as MockMCPTool,
+            patch("httpx.AsyncClient"),
+        ):
+            from src.tools.mcp import build_mcp_tool_callables
+            result = await build_mcp_tool_callables(
+                db=db, tool=mock_tool, tenant_id="tenant-1",
+                allowed_tool_names=["PowerShell"],
+            )
+
+        assert len(result) == 1
+        assert MockMCPTool.call_args.kwargs["allowed_tools"] == ["PowerShell"]
+
+    async def test_empty_allowed_tool_names_falls_back_to_server_list(
+        self, mock_server, mock_tool
+    ):
+        mock_server.allowed_tools = ["ServerTool"]
+        db = _make_mock_db_session()
+        result_mock = MagicMock()
+        result_mock.scalar_one_or_none.return_value = mock_server
+
+        async def mock_execute(*args, **kwargs):
+            return result_mock
+        db.execute = mock_execute
+
+        with (
+            patch("src.tools.mcp.MCPStreamableHTTPTool") as MockMCPTool,
+            patch("httpx.AsyncClient"),
+        ):
+            from src.tools.mcp import build_mcp_tool_callables
+            result = await build_mcp_tool_callables(
+                db=db, tool=mock_tool, tenant_id="tenant-1",
+                allowed_tool_names=[],
+            )
+
+        assert len(result) == 1
+        assert MockMCPTool.call_args.kwargs["allowed_tools"] == ["ServerTool"]
+
+    async def test_config_allowed_names_marker_is_ignored(
+        self, mock_server, mock_tool
+    ):
+        mock_server.allowed_tools = ["ServerTool"]
+        mock_tool.config = {
+            "mcp_server_id": "server-1",
+            "_allowed_tool_names": ["StaleMarker"],
+        }
+        db = _make_mock_db_session()
+        result_mock = MagicMock()
+        result_mock.scalar_one_or_none.return_value = mock_server
+
+        async def mock_execute(*args, **kwargs):
+            return result_mock
+        db.execute = mock_execute
+
+        with (
+            patch("src.tools.mcp.MCPStreamableHTTPTool") as MockMCPTool,
+            patch("httpx.AsyncClient"),
+        ):
+            from src.tools.mcp import build_mcp_tool_callables
+            result = await build_mcp_tool_callables(
+                db=db, tool=mock_tool, tenant_id="tenant-1",
+            )
+
+        assert len(result) == 1
+        # The legacy internal config key must no longer influence the result.
+        assert MockMCPTool.call_args.kwargs["allowed_tools"] == ["ServerTool"]
+
     async def test_websocket_transport(self, mock_tool):
         server = MagicMock()
         server.id = "server-ws"

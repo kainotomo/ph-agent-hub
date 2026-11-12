@@ -2045,21 +2045,18 @@ async def _resolve_tool_callables(
             if (t.config or {}).get("tool_name")
         ]
         primary = server_tools[0]
-        # Inject the tool-name filter into the primary's config so that
-        # build_mcp_tool_callables passes it as allowed_tools.
-        orig_config = dict(primary.config or {})
-        primary.config = {**orig_config, "_allowed_tool_names": tool_names}
+        # Pass the active tool names explicitly so resolving tools never
+        # mutates the shared Tool row (Issue #613).
         tc = await _build_tool_callables(
             db, primary, tenant_id,
             session_id=session_id, cleanup_clients=cleanup_clients,
+            mcp_allowed_tool_names=tool_names,
         )
         callables.extend(tc)
         # Check approval_required for each MCP server tool record
         for record in server_tools:
             if getattr(record, "approval_required", False):
                 approval_names.add(record.name)
-        # Restore original config (in-memory only, no DB write)
-        primary.config = orig_config
 
     # ---- Built-in tool: list_uploaded_files (always available) ----------
     # This discovery tool lets the agent see what files are attached to
@@ -2498,15 +2495,15 @@ async def _auto_select_tools(
             if (t.config or {}).get("tool_name")
         ]
         primary = server_tools[0]
-        orig_config = dict(primary.config or {})
-        primary.config = {**orig_config, "_allowed_tool_names": tool_names}
+        # Pass the active tool names explicitly so resolving tools never
+        # mutates the shared Tool row (Issue #613).
         tc = await _build_tool_callables(
             db, primary, tenant_id,
             session_id=session_id, cleanup_clients=cleanup_clients,
             user_credentials=user_credentials_map.get(primary.id),
+            mcp_allowed_tool_names=tool_names,
         )
         callables.extend(tc)
-        primary.config = orig_config
 
     # ── Step 6: Add always-available built-in tools ────────────────────
     # file_list and memory tools (same logic as _resolve_tool_callables)
@@ -2570,6 +2567,7 @@ async def _build_tool_callables(
     session_id: str = "",
     cleanup_clients: list | None = None,
     user_credentials: list | None = None,
+    mcp_allowed_tool_names: list[str] | None = None,
 ) -> list:
     """Dispatch on tool.type to the appropriate factory.
 
@@ -2578,6 +2576,9 @@ async def _build_tool_callables(
             instances for personal tools (email, calendar, tasks).
             When provided, the tool factory uses per-user auth instead
             of the tenant-level ``tool.config`` (Issue #312).
+        mcp_allowed_tool_names: Active MCP tool names for this session,
+            forwarded to ``build_mcp_tool_callables`` so the shared
+            ``Tool`` row is never mutated (Issue #613).
     """
     if tool.type == "erpnext":
         return await _build_erpnext_callables(
@@ -2702,6 +2703,7 @@ async def _build_tool_callables(
             db, tool, tenant_id,
             session_id=session_id,
             cleanup_clients=cleanup_clients,
+            allowed_tool_names=mcp_allowed_tool_names,
         )
     elif tool.type == "a2a":
         from ..tools.a2a import build_a2a_tool_callables

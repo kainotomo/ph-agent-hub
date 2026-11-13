@@ -940,6 +940,9 @@ export const ChatWindow = React.memo(function ChatWindow({
           }
           await startReconnect(sessionId, {
             ...reconnectHandlers,
+            // Attached: the run may continue for minutes, but the banner
+            // must not stay up for its whole duration.
+            onStreamStart: () => setReconnecting(false),
             onClose: () => {
               if (!cancelled) {
                 setReconnecting(false);

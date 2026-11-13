@@ -63,13 +63,14 @@ from ..services.run_registry import (
     OUTCOME_FAILED,
     RunLease,
     acquire_run,
+    begin_session_delete,
     clear_run_cancel,
     clear_run_cancel_marker,
+    clear_session_run_state,
+    end_session_delete,
     get_active_runs_for_user,
     get_run,
     get_run_outcome,
-    get_run_outcome_for_user,
-    get_runs,
     heartbeat_run,
     is_run_cancel_requested,
     release_run,
@@ -80,8 +81,14 @@ from ..db.orm.sessions import Session, SessionActiveTool
 from ..db.orm.tools import Tool
 from ..db.orm.user_tool_preferences import UserToolPreference
 from ..db.orm.users import User as UserORM
-from ..services import audit_service, folder_service, session_service, upload_service
-from ..services import run_record
+from ..services import (
+    audit_service,
+    folder_service,
+    run_record,
+    session_runtime,
+    session_service,
+    upload_service,
+)
 from ..storage import s3
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -204,6 +211,10 @@ class SessionResponse(BaseModel):
     for every client and after a reload."""
     run_id: str | None = None
     """The active run's id, when ``running`` is true."""
+    runtime_revision: int = 0
+    """Monotonic per-session ordering token of the composed runtime view.
+    Clients ignore a response whose token is older than the one they already
+    applied."""
     last_message: str | None = None
     """Deprecated: no longer populated. Kept so existing clients that read
     the field keep a stable schema. Sidebar previews are fetched through the
@@ -1001,7 +1012,7 @@ async def list_sessions(
         tenant_id=current_user.tenant_id,
     )
     responses = [SessionResponse.model_validate(s) for s in sessions]
-    return await _annotate_run_state(responses)
+    return await _annotate_run_state(responses, db, current_user.id)
 
 
 @router.get("/sessions/sidebar", response_model=SidebarSummaryResponse)
@@ -1028,7 +1039,7 @@ async def get_sessions_sidebar(
 
     by_folder: dict[str | None, list[SessionResponse]] = {}
     responses = [SessionResponse.model_validate(s) for s in sessions]
-    await _annotate_run_state(responses)
+    await _annotate_run_state(responses, db, current_user.id)
     for response in responses:
         by_folder.setdefault(response.folder_id, []).append(response)
 
@@ -1080,7 +1091,7 @@ async def get_sessions_sidebar_group(
         limit=limit,
     )
     responses = [SessionResponse.model_validate(s) for s in sessions]
-    await _annotate_run_state(responses)
+    await _annotate_run_state(responses, db, current_user.id)
     return SidebarGroupPageResponse(
         key=group,
         folder_id=folder_id,
@@ -1338,20 +1349,36 @@ async def delete_session(
     db: AsyncSession = Depends(get_db),
     current_user: UserORM = Depends(get_current_user),
 ):
-    """Delete a session (DB or Redis). Cleans up file uploads for temp sessions."""
+    """Delete a session (DB or Redis). Cleans up file uploads for temp sessions.
+
+    A live run is cancelled first (waiting briefly for the lease to clear);
+    the deletion lock blocks any new run until the session is gone.
+    """
     data = await _load_session(db, session_id)
     await _require_session_owner(data, current_user)
 
-    is_temp = data.get("is_temporary", False)
+    token = await begin_session_delete(session_id)
+    if token is None:
+        raise SessionBusyError(session_id, None, "delete")
+    try:
+        await _stop_run_for_session_delete(session_id)
 
-    if is_temp:
-        # Clean up associated file uploads (MinIO + DB) before deleting Redis keys
-        uploaded_ids: list[str] = data.get("uploaded_file_ids", [])
-        for file_id in uploaded_ids:
-            await upload_service._delete_temp_upload_by_id(db, file_id)
-        await delete_temp_session(session_id)
-    else:
-        await session_service.delete_session(db, session_id)
+        is_temp = data.get("is_temporary", False)
+
+        if is_temp:
+            # Clean up associated file uploads (MinIO + DB) before deleting
+            # Redis keys
+            uploaded_ids: list[str] = data.get("uploaded_file_ids", [])
+            for file_id in uploaded_ids:
+                await upload_service._delete_temp_upload_by_id(db, file_id)
+            await delete_temp_session(session_id)
+            await clear_session_run_state(
+                session_id, data.get("user_id") or current_user.id,
+            )
+        else:
+            await session_service.delete_session(db, session_id)
+    finally:
+        await end_session_delete(session_id, token)
 
 
 @router.post("/sessions/delete")
@@ -2245,19 +2272,26 @@ def _synthetic_message_complete(session_id: str, message_id: str) -> dict:
 
 async def _annotate_run_state(
     responses: list[SessionResponse],
+    db: AsyncSession,
+    user_id: str | None = None,
 ) -> list[SessionResponse]:
-    """Attach ``running`` / ``run_id`` to session responses.
+    """Attach the composed runtime view to session responses.
 
-    One Redis pipeline per response set (never per session), so list and
-    sidebar endpoints stay N+1-free.  Mutates and returns *responses*.
+    One batched resolve per response set (never per session), so list and
+    sidebar endpoints stay N+1-free.  ``running``/``run_id`` keep their old
+    meaning; ``runtime_revision`` lets the client ignore an older response
+    that raced a newer one.  Mutates and returns *responses*.
     """
     if not responses:
         return responses
-    runs = await get_runs([response.id for response in responses])
+    view = await session_runtime.resolve_runtime(
+        db, [response.id for response in responses], user_id=user_id,
+    )
     for response in responses:
-        lease = runs.get(response.id)
-        response.running = lease is not None
-        response.run_id = lease.run_id if lease is not None else None
+        runtime = view.get(response.id)
+        response.running = bool(runtime and runtime.running)
+        response.run_id = runtime.run_id if response.running else None
+        response.runtime_revision = runtime.revision if runtime else 0
     return responses
 
 
@@ -2271,6 +2305,32 @@ async def _release_lease_safely(lease: RunLease, outcome: str) -> None:
             lease.run_id, lease.session_id, outcome,
             exc_info=True,
         )
+
+
+async def _stop_run_for_session_delete(
+    session_id: str,
+    timeout_seconds: float = 5.0,
+) -> None:
+    """Cancel the session's live run and wait for its lease to clear.
+
+    The caller already holds the deletion lock, so no new run can start
+    while this waits.  Raises :class:`SessionBusyError` when the run does
+    not release within *timeout_seconds* — deleting then would let the run
+    write into a row that no longer exists.
+    """
+    lease = await get_run(session_id)
+    if lease is None:
+        return
+
+    await request_run_cancel(session_id, lease.run_id)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    while loop.time() < deadline:
+        await asyncio.sleep(0.1)
+        current = await get_run(session_id)
+        if current is None or current.run_id != lease.run_id:
+            return
+    raise SessionBusyError(session_id, lease.run_id, lease.kind)
 
 
 @asynccontextmanager
@@ -3373,23 +3433,30 @@ async def get_session_run_state(
     db: AsyncSession = Depends(get_db),
     current_user: UserORM = Depends(get_current_user),
 ):
-    """Return the most recent durable run record for *session_id*.
+    """Return the composed runtime view for *session_id*.
 
-    This is the client's authority for "how did the last run end" on mount,
-    on reconnect, on tab focus, and after a `stream_resync` — the transport
-    closing is not evidence of success.  Owner-scoped and cheap (one indexed
-    row lookup).
+    This is the client's single answer for "what is this conversation
+    doing?" on mount, on focus, and after a `stream_resync`.  It merges the
+    durable run row (how it ended) with the Redis lease (whether it is alive
+    right now) and stamps a monotonic ``revision``.  A stale `running` row
+    whose lease is gone is repaired to ``lost`` on read.  Owner-scoped.
     """
     data = await _load_session(db, session_id)
     await _require_session_owner(data, current_user)
 
-    state = await run_record.get_run_state(db, session_id)
+    # A stale `running` row (dead process, crashed replica, Redis eviction)
+    # is resolved on read instead of waiting for the next startup sweep.
+    state = await run_record.repair_unfinished_run(db, session_id)
+    runtime = await session_runtime.resolve_one(
+        db, session_id, user_id=current_user.id,
+    )
+
     if state is None:
-        return {
-            "run_id": None,
+        payload: dict[str, Any] = {
+            "run_id": runtime.run_id,
             "session_id": session_id,
-            "state": "idle",
-            "started_at": None,
+            "state": runtime.state,
+            "started_at": runtime.started_at,
             "finished_at": None,
             "error_code": None,
             "error_message": None,
@@ -3400,7 +3467,38 @@ async def get_session_run_state(
             "tokens_in": 0,
             "tokens_out": 0,
             "kind": None,
+            "revision": runtime.revision,
         }
+        return payload
+
+    if runtime.running and state.get("run_id") != runtime.run_id:
+        # A newer run started after the durable row was written; the old
+        # row's tokens/message would describe the previous turn.
+        return {
+            "run_id": runtime.run_id,
+            "session_id": session_id,
+            "state": "running",
+            "started_at": runtime.started_at,
+            "finished_at": None,
+            "error_code": None,
+            "error_message": None,
+            "message_id": None,
+            "persisted": False,
+            "client_attached": False,
+            "last_event_seq": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "kind": None,
+            "revision": runtime.revision,
+        }
+
+    state["state"] = runtime.state
+    state["run_id"] = runtime.run_id or state.get("run_id")
+    state["revision"] = runtime.revision
+    if runtime.started_at:
+        state["started_at"] = runtime.started_at
+    if runtime.finished_at:
+        state["finished_at"] = runtime.finished_at
     return state
 
 
@@ -3416,6 +3514,7 @@ def _lease_event_payload(lease: RunLease) -> dict[str, Any]:
         "kind": lease.kind,
         "started_at": lease.started_at,
         "state": "running",
+        "revision": session_runtime.revision_of(lease.started_at),
     }
 
 
@@ -3523,6 +3622,7 @@ def _parse_known_runs(raw: str | None, limit: int = 50) -> list[tuple[str, str]]
 @router.get("/runs")
 async def list_active_runs(
     sessions: str | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
     current_user: UserORM = Depends(get_current_user),
 ):
     """Authoritative run snapshot for lightweight polling clients.
@@ -3540,25 +3640,39 @@ async def list_active_runs(
     """
     leases = await get_active_runs_for_user(current_user.id)
     active = {lease.session_id: lease for lease in leases}
+    known = _parse_known_runs(sessions)
+
+    # One composed view for every session either side of the wire knows
+    # about: the live leases plus the runs the caller is asking about.
+    view = await session_runtime.resolve_runtime(
+        db,
+        list(active) + [session_id for session_id, _ in known],
+        user_id=current_user.id,
+    )
+
+    runs: list[dict[str, Any]] = [
+        _lease_event_payload(lease) for lease in active.values()
+    ]
 
     finished: list[dict[str, Any]] = []
-    for session_id, known_run_id in _parse_known_runs(sessions):
-        if session_id in active:
+    reported: set[str] = set()
+    for session_id, known_run_id in known:
+        if session_id in active or session_id in reported:
             continue
-        outcome = await get_run_outcome_for_user(
-            session_id, known_run_id, current_user.id,
-        )
-        if outcome is None:
+        runtime = view.get(session_id)
+        if runtime is None or runtime.running or runtime.outcome is None:
             continue
+        reported.add(session_id)
         finished.append({
             "session_id": session_id,
-            "run_id": known_run_id or None,
+            "run_id": runtime.run_id or known_run_id or None,
             "state": "finished",
-            "outcome": outcome,
+            "outcome": runtime.outcome,
+            "revision": runtime.revision,
         })
 
     return {
-        "runs": [_lease_event_payload(lease) for lease in active.values()],
+        "runs": runs,
         "finished": finished,
     }
 
@@ -3813,6 +3927,12 @@ async def delete_message(
 
     if data.get("is_temporary", False):
         raise ValidationError("Message deletion is not supported for temporary sessions")
+
+    # Deleting truncates every later message; doing that while an agent is
+    # still reading/writing the history would corrupt the turn.
+    lease = await get_run(session_id)
+    if lease is not None:
+        raise SessionBusyError(session_id, lease.run_id, lease.kind)
 
     msg_result = await db.execute(
         select(Message).where(
@@ -4719,7 +4839,7 @@ async def search_sessions(
             )
         )
 
-    await _annotate_run_state(out)
+    await _annotate_run_state(out, db, current_user.id)
     return out
 
 

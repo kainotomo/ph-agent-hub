@@ -53,6 +53,7 @@ interface RunsResponse {
     session_id: string;
     run_id: string | null;
     outcome?: RunStatusEvent["outcome"];
+    revision?: number;
   }>;
 }
 
@@ -120,6 +121,7 @@ export function useSessionStatusStream({
           run_id: finished.run_id,
           state: "finished",
           outcome: finished.outcome,
+          revision: finished.revision,
         });
       }
 
@@ -137,6 +139,7 @@ export function useSessionStatusStream({
             state: "running",
             kind: run.kind ?? null,
             started_at: run.started_at ?? null,
+            revision: run.revision,
           });
         }
       }

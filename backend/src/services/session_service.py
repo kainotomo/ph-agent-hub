@@ -10,7 +10,7 @@ from sqlalchemy import delete, exists, func, select, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..core.exceptions import NotFoundError, ValidationError
+from ..core.exceptions import NotFoundError, SessionBusyError, ValidationError
 from ..db.orm.messages import Message
 from ..db.orm.sessions import Session, SessionActiveTool
 from ..db.orm.tools import Tool
@@ -18,6 +18,13 @@ from ..db.orm.users import User
 from ..db.orm.autopilot_runs import AutopilotRun
 from ..db.orm.skills import Skill, SkillAllowedTool
 from ..services.model_service import list_models as _svc_list_models
+from .run_registry import (
+    begin_session_delete,
+    clear_session_run_state,
+    end_session_delete,
+    get_run,
+    request_run_cancel,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -455,6 +462,15 @@ async def delete_session(db: AsyncSession, session_id: str) -> None:
     if session is None:
         raise NotFoundError("Session not found")
 
+    # A live run must be stopped before its session disappears: the run's
+    # terminal write would otherwise hit a deleted row (and a client would
+    # keep a spinner for a conversation that no longer exists).
+    lease = await get_run(session_id)
+    if lease is not None:
+        raise SessionBusyError(session_id, lease.run_id, lease.kind)
+
+    owner_id = session.user_id
+
     # Get all message IDs for this session first
     result = await db.execute(
         select(Message.id).where(Message.session_id == session_id)
@@ -519,6 +535,21 @@ async def delete_session(db: AsyncSession, session_id: str) -> None:
     await db.delete(session)
     await db.commit()
 
+    # 8. Drop the run-registry trace (lease, marker, cancellation flags and
+    #    the per-user index entry), so no tab can show a spinner for a
+    #    conversation that is gone.
+    try:
+        await clear_session_run_state(session_id, owner_id)
+    except Exception:
+        # Registry cleanup is best-effort: the registry entries expire on
+        # their own (lease TTL / marker TTL) and the session row is already
+        # deleted, which is the durable outcome.
+        import logging
+        logging.getLogger(__name__).warning(
+            "Failed to clear run state for deleted session %s",
+            session_id, exc_info=True,
+        )
+
 
 async def delete_sessions_batch(
     db: AsyncSession,
@@ -556,6 +587,8 @@ async def delete_sessions_batch(
     errors: list[dict] = []
     db_session_ids: list[str] = []
     temp_session_ids: list[str] = []
+    owners: dict[str, str] = {}
+    locks: dict[str, str] = {}
 
     # --- Phase 1: Validate each session ---
     for sid in session_ids:
@@ -568,6 +601,7 @@ async def delete_sessions_batch(
             if not admin_override and session_orm.tenant_id != tenant_id:
                 skipped.append({"id": sid, "reason": "Session belongs to a different tenant"})
                 continue
+            owners[sid] = session_orm.user_id
             db_session_ids.append(sid)
             continue
 
@@ -582,11 +616,47 @@ async def delete_sessions_batch(
             if not admin_override and t_tenant != tenant_id:
                 skipped.append({"id": sid, "reason": "Session belongs to a different tenant"})
                 continue
+            owners[sid] = str(t_user or user_id)
             temp_session_ids.append(sid)
             continue
 
         # Not found anywhere
         skipped.append({"id": sid, "reason": "Session not found"})
+
+    # --- Phase 1.5: Stop live runs and lock the sessions ---
+    # A session cannot be deleted while an agent is writing into it, and no
+    # new run may start once the deletion owns the lock.  Busy sessions are
+    # cancelled and skipped (the caller can retry once they stop) instead of
+    # deleting a row a live run still needs.
+    accepted: list[str] = []
+    for sid in db_session_ids + temp_session_ids:
+        lease = await get_run(sid)
+        if lease is not None:
+            await request_run_cancel(sid, lease.run_id)
+            skipped.append({"id": sid, "reason": "Agent is running"})
+            continue
+        token = await begin_session_delete(sid)
+        if token is None:
+            skipped.append({"id": sid, "reason": "Deletion already in progress"})
+            continue
+        locks[sid] = token
+        accepted.append(sid)
+
+    accepted_set = set(accepted)
+    db_session_ids = [sid for sid in db_session_ids if sid in accepted_set]
+    temp_session_ids = [sid for sid in temp_session_ids if sid in accepted_set]
+
+    async def _release_session_locks(deleted_ids: list[str]) -> None:
+        for sid in deleted_ids:
+            try:
+                await clear_session_run_state(sid, owners.get(sid, user_id))
+            except Exception:
+                pass
+        for sid, token in locks.items():
+            try:
+                await end_session_delete(sid, token)
+            except Exception:
+                pass
 
     # --- Phase 2: Delete DB (permanent) sessions ---
     if db_session_ids:
@@ -673,6 +743,7 @@ async def delete_sessions_batch(
             for sid in db_session_ids:
                 skipped.insert(0, {"id": sid, "reason": "Transaction rolled back"})
             db_session_ids = []
+            await _release_session_locks(list(temp_session_ids))
             return {
                 "deleted": deleted_count,
                 "skipped": skipped,
@@ -680,6 +751,8 @@ async def delete_sessions_batch(
             }
 
     deleted_count = len(db_session_ids) + len(temp_session_ids)
+
+    await _release_session_locks(db_session_ids + temp_session_ids)
 
     return {
         "deleted": deleted_count,

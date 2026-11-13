@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select, func, and_, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -180,9 +180,9 @@ async def resume_scheduled_task(
 async def get_due_tasks(db: AsyncSession) -> list[ScheduledTask]:
     """Return all ACTIVE tasks where ``next_run_at <= now()``.
 
-    Used by the scheduler polling loop.  The caller should set
-    ``next_run_at = None`` immediately after retrieving to prevent
-    double-execution (the dedup guard).
+    A candidate is *not* claimed by this read — the caller must call
+    :func:`claim_due_task` before executing it, otherwise two scheduler
+    replicas (or two ticks) can execute the same task.
     """
     now = datetime.now(timezone.utc)
     result = await db.execute(
@@ -195,6 +195,52 @@ async def get_due_tasks(db: AsyncSession) -> list[ScheduledTask]:
         .order_by(ScheduledTask.next_run_at.asc())
     )
     return list(result.scalars().all())
+
+
+async def claim_due_task(
+    db: AsyncSession,
+    task_id: str,
+    expected_next_run_at: datetime | None,
+    *,
+    claim_ttl_seconds: int,
+) -> bool:
+    """Atomically claim a due task for execution.
+
+    Compare-and-swap on ``next_run_at``: the ``UPDATE`` only matches while
+    the row still carries the value this tick read, so exactly one replica
+    wins.  The winner pushes ``next_run_at`` forward by *claim_ttl_seconds*
+    instead of clearing it:
+
+    * a second poll during execution does not pick the task up again;
+    * a process killed mid-execution leaves a due time in the future, so
+      the task is retried after the window (at-least-once) rather than
+      being disabled forever — which is what the old
+      ``next_run_at = None`` guard did.
+    """
+    if expected_next_run_at is None:
+        return False
+    now = datetime.now(timezone.utc)
+    # MariaDB stores DATETIME without a timezone and at whole-second
+    # precision; normalize for the compare-and-swap so the match is exact.
+    expected = expected_next_run_at
+    if expected.tzinfo is not None:
+        expected = expected.astimezone(timezone.utc).replace(tzinfo=None)
+    expected = expected.replace(microsecond=0)
+    provisional = (now + timedelta(seconds=max(int(claim_ttl_seconds), 1))).replace(
+        tzinfo=None,
+        microsecond=0,
+    )
+    result = await db.execute(
+        update(ScheduledTask)
+        .where(
+            ScheduledTask.id == task_id,
+            ScheduledTask.state == ScheduledTask.STATE_ACTIVE,
+            ScheduledTask.next_run_at == expected,
+        )
+        .values(next_run_at=provisional)
+    )
+    await db.commit()
+    return result.rowcount == 1
 
 
 async def record_run_result(

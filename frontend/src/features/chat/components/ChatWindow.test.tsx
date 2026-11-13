@@ -512,6 +512,30 @@ describe("ChatWindow — Stream reconnect on mount (Issue #457)", () => {
     expect(mockStartReconnect).toHaveBeenCalledTimes(1);
   });
 
+  it("clears the reconnecting banner once the stream is attached", async () => {
+    mockGetStreamStatus.mockResolvedValue({ active: true });
+    let captured: { onStreamStart?: () => void } | null = null;
+    mockStartReconnect.mockImplementation(
+      (_sid: string, handlers: { onStreamStart?: () => void }) => {
+        captured = handlers;
+        // Stay "attached": the real hook resolves only when the run ends,
+        // which is exactly why the banner used to stay up for the answer.
+        return new Promise<void>(() => {});
+      },
+    );
+
+    renderChatWindow({ isPending: false, sessionId: "test-session-1" });
+    await settle();
+
+    expect(screen.queryByText("Reconnecting to live session…")).not.toBeNull();
+
+    act(() => {
+      captured?.onStreamStart?.();
+    });
+
+    expect(screen.queryByText("Reconnecting to live session…")).toBeNull();
+  });
+
   it("does NOT call startReconnect when getStreamStatus returns active:false", async () => {
     mockGetStreamStatus.mockResolvedValue({ active: false });
 

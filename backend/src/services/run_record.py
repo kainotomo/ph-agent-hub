@@ -24,6 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.orm.chat_runs import ChatRun
+from ..db.orm.messages import Message
 from .run_registry import (
     OUTCOME_COMPLETED,
     OUTCOME_FAILED,
@@ -144,6 +145,29 @@ async def finalize_run(
         )
 
     async with _session_scope(db) as session:
+        # The answer row must exist before `persisted=True` is recorded: the
+        # FK rejects a dangling id, and a missing answer is a failed run, not
+        # a run that lost its terminal state.
+        if persisted and message_id:
+            exists = (
+                await session.execute(
+                    select(Message.id).where(
+                        Message.id == message_id,
+                        Message.session_id == session_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if exists is None:
+                message_id = None
+                persisted = False
+                if outcome == OUTCOME_COMPLETED:
+                    outcome = OUTCOME_FAILED
+                    error_code = error_code or "not_persisted"
+                    error_message = error_message or (
+                        "The run completed without persisting an assistant "
+                        "message."
+                    )
+
         row = await session.get(ChatRun, run_id)
         if row is None:
             row = ChatRun(
@@ -222,6 +246,83 @@ async def get_run_state(
     )
     row = result.scalar_one_or_none()
     return _row_to_dict(row) if row is not None else None
+
+
+async def repair_unfinished_run(
+    db: AsyncSession,
+    session_id: str,
+) -> dict[str, Any] | None:
+    """Return the latest run, resolving a stale ``running`` row on read.
+
+    A row that never got ``finished_at`` is only genuinely running while a
+    live lease exists for its run id.  When the lease is gone (dead process,
+    another replica's crash, eviction) the read itself writes the terminal
+    ``lost`` state, so no client can keep seeing "running" until some
+    process happens to restart.
+    """
+    state = await get_run_state(db, session_id)
+    if state is None or state.get("state") != "running":
+        return state
+
+    from .run_registry import get_run  # local import: registry imports config
+
+    try:
+        lease = await get_run(session_id)
+    except Exception:
+        # Registry unavailable — do not fabricate a terminal state.
+        logger.warning(
+            "Could not read lease while repairing run %s", state.get("run_id"),
+            exc_info=True,
+        )
+        return state
+
+    if lease is not None and lease.run_id == state.get("run_id"):
+        return state
+
+    await finalize_run(
+        run_id=state["run_id"],
+        session_id=session_id,
+        outcome=OUTCOME_LOST,
+        error_code="orphaned",
+        error_message=(
+            "The run's lease expired before a terminal state was recorded."
+        ),
+        persisted=bool(state.get("persisted")),
+        client_attached=bool(state.get("client_attached")),
+        last_event_seq=int(state.get("last_event_seq") or 0),
+        tokens_in=int(state.get("tokens_in") or 0),
+        tokens_out=int(state.get("tokens_out") or 0),
+        db=db,
+    )
+    return await get_run_state(db, session_id)
+
+
+async def get_outcome_from_db(
+    db: AsyncSession,
+    *,
+    session_id: str,
+    run_id: str | None,
+    user_id: str,
+) -> str | None:
+    """Return the recorded outcome of *run_id*, owner-scoped.
+
+    Used by the status snapshot when the short-lived Redis completion marker
+    has expired: the durable row still knows how the run ended, and
+    answering "lost" while the database says ``completed`` is wrong.
+    """
+    if not run_id:
+        return None
+    result = await db.execute(
+        select(ChatRun).where(
+            ChatRun.id == run_id,
+            ChatRun.session_id == session_id,
+            ChatRun.user_id == user_id,
+        )
+    )
+    row = result.scalar_one_or_none()
+    if row is None or row.finished_at is None or not row.outcome:
+        return None
+    return str(row.outcome)
 
 
 # ---------------------------------------------------------------------------

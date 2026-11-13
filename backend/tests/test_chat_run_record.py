@@ -114,6 +114,17 @@ class TestRunRecord:
     ):
         run_id = str(uuid.uuid4())
         message_id = str(uuid.uuid4())
+        from src.db.orm.messages import Message
+
+        db_session.add(
+            Message(
+                id=message_id,
+                session_id=test_session.id,
+                sender="assistant",
+                content=[{"type": "text", "text": "hello"}],
+            )
+        )
+        await db_session.flush()
         await run_record.start_run(
             run_id=run_id,
             session_id=test_session.id,

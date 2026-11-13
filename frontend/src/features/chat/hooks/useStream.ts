@@ -1112,6 +1112,10 @@ export function useStream(apiPrefix: string = "chat") {
                 setStreamingSessionId(sessionId);
                 addStreamingSession(sessionId);
                 armWatchdog(sessionId, controller, handlers.onStall);
+                // The "reconnecting" indicator is about attaching, not about
+                // the run: it must clear as soon as the stream is open, not
+                // when the answer finishes.
+                handlers.onStreamStart?.();
                 return;
               }
               // Agent finished between status check and reconnect request.

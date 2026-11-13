@@ -71,7 +71,9 @@ describe("useSessionStatusStream", () => {
   it("polls the run snapshot and reports a new run", async () => {
     fetchMock.mockResolvedValue(
       jsonResponse({
-        runs: [{ session_id: "s1", run_id: "r1", kind: "chat" }],
+        runs: [
+          { session_id: "s1", run_id: "r1", kind: "chat", revision: 40 },
+        ],
         finished: [],
       }),
     );
@@ -86,10 +88,15 @@ describe("useSessionStatusStream", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0][0]).toBe("/api/chat/runs");
     expect(onSnapshot).toHaveBeenCalledWith([
-      { session_id: "s1", run_id: "r1", kind: "chat" },
+      { session_id: "s1", run_id: "r1", kind: "chat", revision: 40 },
     ]);
     expect(onEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ session_id: "s1", run_id: "r1", state: "running" }),
+      expect.objectContaining({
+        session_id: "s1",
+        run_id: "r1",
+        state: "running",
+        revision: 40,
+      }),
     );
   });
 
@@ -123,7 +130,7 @@ describe("useSessionStatusStream", () => {
         jsonResponse({
           runs: [],
           finished: [
-            { session_id: "s1", run_id: "r1", outcome: "completed" },
+            { session_id: "s1", run_id: "r1", outcome: "completed", revision: 41 },
           ],
         }),
       );
@@ -152,6 +159,7 @@ describe("useSessionStatusStream", () => {
         run_id: "r1",
         state: "finished",
         outcome: "completed",
+        revision: 41,
       }),
     );
   });

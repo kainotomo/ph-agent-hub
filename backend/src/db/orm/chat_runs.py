@@ -65,8 +65,14 @@ class ChatRun(Base):
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    #: The persisted assistant message, when one was produced.
-    message_id: Mapped[str | None] = mapped_column(CHAR(36), nullable=True)
+    #: The persisted assistant message, when one was produced.  ``ON DELETE
+    #: SET NULL`` keeps the durable record honest when the message is deleted
+    #: (message deletion also truncates the conversation tail).
+    message_id: Mapped[str | None] = mapped_column(
+        CHAR(36),
+        ForeignKey("messages.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     persisted: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="0",
     )

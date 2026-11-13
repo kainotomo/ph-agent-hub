@@ -190,6 +190,29 @@ export interface MessageCompleteEvent {
   };
 }
 
+/**
+ * Issue #608/#616 — the producer's mandatory terminal frame.
+ *
+ * Always the last event of a chat/regenerate/edit run.  The web client
+ * settles the visible turn from it instead of trusting the socket to close,
+ * which is what stranded "AI is thinking…" when a stream was aborted by the
+ * stall watchdog or a `stream_resync` (Issue #616).
+ */
+export interface RunTerminalEvent {
+  event: "run_terminal";
+  data: {
+    session_id: string;
+    outcome: "completed" | "failed" | "cancelled" | "lost" | string;
+    error_code?: string | null;
+    message?: string | null;
+    message_id?: string | null;
+    persisted?: boolean;
+    tokens_in?: number;
+    tokens_out?: number;
+    cache_hit_tokens?: number;
+  };
+}
+
 /** Issue #595 — emitted at the warning threshold of a run budget. */
 export interface BudgetWarningEvent {
   event: "budget_warning";
@@ -373,6 +396,7 @@ export type StreamEvent =
   | MemoryUpdatedEvent
   | StepCompleteEvent
   | MessageCompleteEvent
+  | RunTerminalEvent
   | BudgetWarningEvent
   | BudgetExceededEvent
   | ReasoningTokenEvent
@@ -417,8 +441,27 @@ export function useStream(apiPrefix: string = "chat") {
   }, []);
 
   /**
+   * Is *controller* still the stream this tab is showing?
+   *
+   * A stream can be superseded by a resume/send before its old callbacks
+   * drain.  Only the active stream may change `streaming`, touch the status
+   * store, or run the caller's terminal cleanup — otherwise a late callback
+   * from a previous conversation can clear a live spinner or revive a dead
+   * one (Issue #616).
+   */
+  const isActiveStream = useCallback(
+    (controller: AbortController): boolean => abortRef.current === controller,
+    [],
+  );
+
+  /**
    * Abort a stream that has gone silent.  The caller reconnects from the
    * stored cursor, so recovery is a resume rather than a replay.
+   *
+   * `fetchEventSource` resolves silently when its signal is aborted and never
+   * calls `onclose`, so the tab-local state MUST be settled here: relying on
+   * the abort path was what left `streaming` stuck forever after a stall
+   * (Issue #616).
    */
   const armWatchdog = useCallback(
     (
@@ -430,9 +473,21 @@ export function useStream(apiPrefix: string = "chat") {
       lastEventAtRef.current = Date.now();
       watchdogRef.current = setInterval(() => {
         if (Date.now() - lastEventAtRef.current < STALL_TIMEOUT_MS) return;
+        // A superseded stream's watchdog must never fire: the new stream owns
+        // the state (and armed its own watchdog when it opened).
+        if (abortRef.current !== controller) {
+          clearWatchdog();
+          return;
+        }
         clearWatchdog();
-        // Abort first: the abort path already clears streaming state.
         controller.abort();
+        abortRef.current = null;
+        setStreaming(false);
+        setStreamingSessionId(null);
+        // Do not remove the status-store entry: the run may still be alive
+        // server-side (a silent link, not a finished run).  The authoritative
+        // status poll owns that spinner, and the caller resumes from its
+        // cursor via `onStall`.
         onStall?.(sessionId);
       }, WATCHDOG_INTERVAL_MS);
     },
@@ -509,6 +564,8 @@ export function useStream(apiPrefix: string = "chat") {
         onMemoryUpdated?: (data: MemoryUpdatedEvent["data"]) => void;
         onStepComplete?: (data: StepCompleteEvent["data"]) => void;
         onMessageComplete?: (data: MessageCompleteEvent["data"]) => void;
+        /** Issue #608/#616 — the run's mandatory terminal frame. */
+        onRunTerminal?: (data: RunTerminalEvent["data"]) => void;
         onReasoningToken?: (delta: string, messageId: string) => void;
         onFollowUpQuestions?: (questions: string[]) => void;
         onSummarized?: (data: SummarizedEvent["data"]) => void;
@@ -665,6 +722,9 @@ export function useStream(apiPrefix: string = "chat") {
             openWhenHidden: true,
             signal: controller.signal,
             async onopen(response) {
+              // A superseded stream must not claim this tab's transport
+              // state (Issue #616).
+              if (!isActiveStream(controller)) return;
               if (
                 response.ok &&
                 response.headers
@@ -714,15 +774,22 @@ export function useStream(apiPrefix: string = "chat") {
               handlers.onClose?.();
             },
             onmessage(ev) {
+              // Ignore events from a stream this tab has already replaced.
+              if (!isActiveStream(controller)) return;
               // Drop replays of events this tab already rendered and keep
               // the liveness clock fresh (Issue #604 follow-up).
               if (!acceptEvent(sessionId, ev.id)) return;
               if (ev.event === "stream_resync") {
                 // The cursor fell out of the replay buffer: the partial text
                 // in memory may have a hole, so stop and let the caller
-                // reload the persisted message.
+                // reload the persisted message.  The abort path of
+                // fetchEventSource is silent (no onclose), so settle the
+                // local state here or the view spins forever (Issue #616).
                 clearWatchdog();
                 controller.abort();
+                abortRef.current = null;
+                setStreaming(false);
+                setStreamingSessionId(null);
                 handlers.onResync?.(ev);
                 return;
               }
@@ -798,6 +865,15 @@ export function useStream(apiPrefix: string = "chat") {
                   case "error":
                     handlers.onError?.(parsed.message || parsed.error || "Unknown error", parsed.message_id);
                     break;
+                  case "run_terminal":
+                    // The producer's last frame: the turn is over even if the
+                    // socket lingers.  Settle the local transport and let the
+                    // caller adopt the recorded outcome (Issue #616).
+                    handlers.onRunTerminal?.(parsed);
+                    removeStreamingSession(sessionId);
+                    setStreaming(false);
+                    setStreamingSessionId(null);
+                    break;
                   case "heartbeat":
                     // Ignore heartbeats
                     break;
@@ -807,15 +883,23 @@ export function useStream(apiPrefix: string = "chat") {
               }
             },
             onclose() {
-              // Always remove from active set — the stream has ended
-              // regardless of how (natural end, abort, or error).
+              // A stream this tab already replaced must not clear the state
+              // or run cleanup for the current turn (Issue #616).
+              if (!isActiveStream(controller)) return;
+              abortRef.current = null;
               clearWatchdog();
+              // Always remove from active set — the stream has ended
+              // regardless of how (natural end or error).  An intentional
+              // abort never reaches here (the library resolves silently and
+              // the aborting path settles the state itself).
               removeStreamingSession(sessionId);
               setStreaming(false);
               setStreamingSessionId(null);
               handlers.onClose?.();
             },
             onerror(_err) {
+              // A superseded stream must not report into the current turn.
+              if (!isActiveStream(controller)) throw _err;
               clearWatchdog();
               // IMPORTANT: must THROW to prevent fetchEventSource from
               // scheduling a retry.  When onerror returns (doesn't throw),
@@ -861,6 +945,8 @@ export function useStream(apiPrefix: string = "chat") {
           },
         );
       } catch (err) {
+        // A superseded stream must not run the new turn's cleanup.
+        if (!isActiveStream(controller)) return;
         // When onerror threw: onError was already called inside onerror.
         // We still call onClose so the caller can run query invalidation
         // and final cleanup (onError only does state reset + toast).
@@ -876,11 +962,12 @@ export function useStream(apiPrefix: string = "chat") {
           // run final cleanup (query invalidation, etc.).
           handlers.onClose?.();
         }
+        if (abortRef.current === controller) abortRef.current = null;
         setStreaming(false);
         setStreamingSessionId(null);
       }
     },
-    [acceptEvent, armWatchdog, clearWatchdog],
+    [acceptEvent, armWatchdog, clearWatchdog, isActiveStream],
   );
 
   const stopStream = useCallback(
@@ -936,6 +1023,8 @@ export function useStream(apiPrefix: string = "chat") {
         onMemoryUpdated?: (data: MemoryUpdatedEvent["data"]) => void;
         onStepComplete?: (data: StepCompleteEvent["data"]) => void;
         onMessageComplete?: (data: MessageCompleteEvent["data"]) => void;
+        /** Issue #608/#616 — the run's mandatory terminal frame. */
+        onRunTerminal?: (data: RunTerminalEvent["data"]) => void;
         onReasoningToken?: (delta: string, messageId: string) => void;
         onFollowUpQuestions?: (questions: string[]) => void;
         onSummarized?: (data: SummarizedEvent["data"]) => void;
@@ -1009,6 +1098,9 @@ export function useStream(apiPrefix: string = "chat") {
               return result.response;
             },
             async onopen(response) {
+              // A superseded stream must not claim this tab's transport
+              // state (Issue #616).
+              if (!isActiveStream(controller)) return;
               if (
                 response.ok &&
                 response.headers
@@ -1081,13 +1173,21 @@ export function useStream(apiPrefix: string = "chat") {
               handlers.onClose?.();
             },
             onmessage(ev) {
+              // Ignore events from a stream this tab has already replaced.
+              if (!isActiveStream(controller)) return;
               // The reconnect replays the server buffer; events this tab
               // already applied must not be re-appended (Issue #604
               // follow-up).
               if (!acceptEvent(sessionId, ev.id)) return;
               if (ev.event === "stream_resync") {
+                // Aborting a fetchEventSource stream is silent (no onclose),
+                // so settle the transport here instead of leaving the view
+                // "thinking" (Issue #616).
                 clearWatchdog();
                 controller.abort();
+                abortRef.current = null;
+                setStreaming(false);
+                setStreamingSessionId(null);
                 handlers.onResync?.(ev);
                 return;
               }
@@ -1160,6 +1260,15 @@ export function useStream(apiPrefix: string = "chat") {
                   case "error":
                     handlers.onError?.(parsed.message || parsed.error || "Unknown error", parsed.message_id);
                     break;
+                  case "run_terminal":
+                    // The producer's last frame: the turn is over even if the
+                    // socket lingers.  Settle the local transport and let the
+                    // caller adopt the recorded outcome (Issue #616).
+                    handlers.onRunTerminal?.(parsed);
+                    removeStreamingSession(sessionId);
+                    setStreaming(false);
+                    setStreamingSessionId(null);
+                    break;
                   case "heartbeat":
                     break;
                 }
@@ -1168,6 +1277,9 @@ export function useStream(apiPrefix: string = "chat") {
               }
             },
             onclose() {
+              // A superseded stream must not clear the current turn.
+              if (!isActiveStream(controller)) return;
+              abortRef.current = null;
               clearWatchdog();
               if (!controller.signal.aborted) {
                 removeStreamingSession(sessionId);
@@ -1177,6 +1289,9 @@ export function useStream(apiPrefix: string = "chat") {
               handlers.onClose?.();
             },
             onerror(_err) {
+              // A superseded stream must not report into the current turn.
+              if (!isActiveStream(controller)) return;
+              abortRef.current = null;
               clearWatchdog();
               if (controller.signal.aborted) {
                 setStreaming(false);
@@ -1193,15 +1308,17 @@ export function useStream(apiPrefix: string = "chat") {
           },
         );
       } catch (err) {
+        if (!isActiveStream(controller)) return;
         if (!controller.signal.aborted) {
           handlers.onError?.(String(err), "");
           removeStreamingSession(sessionId);
         }
+        if (abortRef.current === controller) abortRef.current = null;
         setStreaming(false);
         setStreamingSessionId(null);
       }
     },
-    [acceptEvent, armWatchdog, clearWatchdog],
+    [acceptEvent, armWatchdog, clearWatchdog, isActiveStream],
   );
 
   const startRegenerateStream = useCallback(
@@ -1215,6 +1332,8 @@ export function useStream(apiPrefix: string = "chat") {
         onMemoryUpdated?: (data: MemoryUpdatedEvent["data"]) => void;
         onStepComplete?: (data: StepCompleteEvent["data"]) => void;
         onMessageComplete?: (data: MessageCompleteEvent["data"]) => void;
+        /** Issue #608/#616 — the run's mandatory terminal frame. */
+        onRunTerminal?: (data: RunTerminalEvent["data"]) => void;
         onReasoningToken?: (delta: string, messageId: string) => void;
         onFollowUpQuestions?: (questions: string[]) => void;
         onSummarized?: (data: SummarizedEvent["data"]) => void;
@@ -1271,6 +1390,9 @@ export function useStream(apiPrefix: string = "chat") {
             openWhenHidden: true,
             signal: controller.signal,
             async onopen(response) {
+              // A superseded stream must not claim this tab's transport
+              // state (Issue #616).
+              if (!isActiveStream(controller)) return;
               if (
                 response.ok &&
                 response.headers
@@ -1281,6 +1403,8 @@ export function useStream(apiPrefix: string = "chat") {
               }
             },
             onmessage(ev) {
+              // Ignore events from a stream this tab has already replaced.
+              if (!isActiveStream(controller)) return;
               try {
                 const parsed = JSON.parse(ev.data);
                 switch (ev.event) {
@@ -1332,6 +1456,16 @@ export function useStream(apiPrefix: string = "chat") {
                   case "error":
                     if (handlers) handlers.onError?.(parsed.message || parsed.error || "Unknown error", parsed.message_id);
                     break;
+                  case "run_terminal":
+                    // The producer's last frame: the turn is over even if the
+                    // socket lingers (Issue #616).
+                    if (handlers) {
+                      handlers.onRunTerminal?.(parsed);
+                      removeStreamingSession(sessionId);
+                    }
+                    setStreaming(false);
+                    setStreamingSessionId(null);
+                    break;
                   case "heartbeat":
                     break;
                 }
@@ -1340,6 +1474,9 @@ export function useStream(apiPrefix: string = "chat") {
               }
             },
             onclose() {
+              // A superseded stream must not clear the current turn.
+              if (!isActiveStream(controller)) return;
+              abortRef.current = null;
               if (!controller.signal.aborted) {
                 removeStreamingSession(sessionId);
               }
@@ -1348,6 +1485,9 @@ export function useStream(apiPrefix: string = "chat") {
               if (handlers) handlers.onClose?.();
             },
             onerror(_err) {
+              // A superseded stream must not report into the current turn.
+              if (!isActiveStream(controller)) return;
+              abortRef.current = null;
               if (controller.signal.aborted) {
                 setStreaming(false);
                 setStreamingSessionId(null);
@@ -1363,15 +1503,18 @@ export function useStream(apiPrefix: string = "chat") {
           },
         );
       } catch (err) {
+        // A superseded stream must not run the new turn's cleanup.
+        if (!isActiveStream(controller)) return;
         if (!controller.signal.aborted) {
           if (handlers) handlers.onError?.(String(err), "");
           removeStreamingSession(sessionId);
         }
+        if (abortRef.current === controller) abortRef.current = null;
         setStreaming(false);
         setStreamingSessionId(null);
       }
     },
-    [],
+    [isActiveStream],
   );
 
   const startEditStream = useCallback(
@@ -1387,6 +1530,8 @@ export function useStream(apiPrefix: string = "chat") {
         onMemoryUpdated?: (data: MemoryUpdatedEvent["data"]) => void;
         onStepComplete?: (data: StepCompleteEvent["data"]) => void;
         onMessageComplete?: (data: MessageCompleteEvent["data"]) => void;
+        /** Issue #608/#616 — the run's mandatory terminal frame. */
+        onRunTerminal?: (data: RunTerminalEvent["data"]) => void;
         onReasoningToken?: (delta: string, messageId: string) => void;
         onFollowUpQuestions?: (questions: string[]) => void;
         onSummarized?: (data: SummarizedEvent["data"]) => void;
@@ -1452,6 +1597,8 @@ export function useStream(apiPrefix: string = "chat") {
               }
             },
             onmessage(ev) {
+              // Ignore events from a stream this tab has already replaced.
+              if (!isActiveStream(controller)) return;
               try {
                 const parsed = JSON.parse(ev.data);
                 switch (ev.event) {
@@ -1502,6 +1649,15 @@ export function useStream(apiPrefix: string = "chat") {
                     break;
                   case "error":
                     handlers.onError?.(parsed.message || parsed.error || "Unknown error", parsed.message_id);
+                    break;
+                  case "run_terminal":
+                    // The producer's last frame: the turn is over even if the
+                    // socket lingers.  Settle the local transport and let the
+                    // caller adopt the recorded outcome (Issue #616).
+                    handlers.onRunTerminal?.(parsed);
+                    removeStreamingSession(sessionId);
+                    setStreaming(false);
+                    setStreamingSessionId(null);
                     break;
                   case "heartbeat":
                     break;
@@ -1558,12 +1714,17 @@ export function useStream(apiPrefix: string = "chat") {
   // IMPORTANT: Do NOT touch the streaming context here — the sidebar
   // spinner must persist when navigating away from a running session.
   const resetStream = useCallback(() => {
+    // Disarm the watchdog first: a stall timer left behind by the previous
+    // session must never fire (and reconnect) after the user has moved on
+    // (Issue #616).
+    clearWatchdog();
     if (abortRef.current) {
       abortRef.current.abort();
       abortRef.current = null;
     }
     setStreaming(false);
-  }, []);
+    setStreamingSessionId(null);
+  }, [clearWatchdog]);
 
   return {
     streaming,

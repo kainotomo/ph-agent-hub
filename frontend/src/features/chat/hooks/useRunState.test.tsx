@@ -115,6 +115,31 @@ describe("useRunState (Issue #609)", () => {
     expect(result.current.snapshot.phase).toBe("lost");
   });
 
+  it("reconciles when the tab becomes visible again", async () => {
+    mockGetRunState.mockResolvedValue({
+      run_id: "run-1",
+      state: "completed",
+      persisted: true,
+      message_id: "msg-1",
+    });
+
+    const { result } = renderHook(() =>
+      useRunState({ sessionId: "session-1" }),
+    );
+    await waitFor(() => expect(mockGetRunState).toHaveBeenCalledTimes(1));
+
+    const visibility = vi
+      .spyOn(document, "visibilityState", "get")
+      .mockReturnValue("visible");
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    visibility.mockRestore();
+
+    await waitFor(() => expect(mockGetRunState).toHaveBeenCalledTimes(2));
+    expect(result.current.snapshot.phase).toBe("done");
+  });
+
   it("keeps local state when the server read fails", async () => {
     mockGetRunState.mockRejectedValue(new Error("network down"));
 

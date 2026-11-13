@@ -104,6 +104,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Workflow definition identity and edit policy** — `WorkflowDefinition.key` must match the module's `MAF_KEY` and is immutable (renaming is a create, not an edit); step `id` must be a non-empty, whitespace-free executor identity; and a new derived classification (`unchanged` / `config_only` / `topology`) states which edits leave paused runs resumable and which cannot be resumed. ([#551])
 
 ### Fixed
+- **A finished run no longer leaves the chat view "thinking" (Issue #616)** —
+  the chat view's "AI is thinking…" placeholder and Stop control were gated on
+  the SSE transport's `streaming` flag, while the sidebar used the polled run
+  registry. `@microsoft/fetch-event-source` resolves silently when the tab
+  aborts a stream and never calls `onclose`, so the watchdog stall path and the
+  `stream_resync` path left `streaming` stuck at `true` forever (the #609
+  terminal banner was suppressed by `!streaming`), and a session switch could
+  leave the previous session's watchdog armed. The client now handles the
+  backend's mandatory `run_terminal` frame, settles the local transport on
+  intentional aborts, ignores callbacks from a superseded stream, gates the
+  thinking/terminal UI on the run-state machine, and reconciles the visible
+  conversation from `GET /run-state` when the status store reports its run
+  finished (plus on tab visibility). A reload is no longer needed.
 - **Parallel sessions no longer contend on MCP tool rows (Issue #613)** —
   session tool resolution used to inject `_allowed_tool_names` into the shared
   `Tool.config` in memory to pass the active-tool filter to the MCP builder.

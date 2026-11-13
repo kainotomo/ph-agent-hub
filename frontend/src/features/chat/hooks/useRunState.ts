@@ -5,7 +5,7 @@
 // it from `GET /chat/session/:id/run-state`:
 //
 //   * on mount / session change,
-//   * on tab focus,
+//   * on tab focus and visibility,
 //   * on demand (reconnect, `stream_resync`, after a close).
 //
 // The transport callbacks call `dispatch(...)`; the reducer guarantees that
@@ -94,8 +94,21 @@ export function useRunState({
     const onFocus = () => {
       void reconcile();
     };
+    // `focus` does not always fire when a tab becomes visible again (e.g.
+    // iframe/embedded contexts, or a page that never lost keyboard focus).
+    // Reconcile on visibility too so a run that finished while hidden cannot
+    // leave the view "thinking" (Issue #616).
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") {
+        void reconcile();
+      }
+    };
     window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [enabled, reconcile]);
 
   return { snapshot, dispatch, begin, reconcile, reset };

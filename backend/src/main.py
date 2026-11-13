@@ -149,31 +149,36 @@ async def _run_scheduler_loop() -> None:
     """Periodic background task: poll for due scheduled tasks and execute
     them (Issue #297 — Scheduled & Recurring Agent Tasks).
 
-    Runs every ``SCHEDULER_POLL_INTERVAL_SECONDS`` (default 30s).
-    Sets ``next_run_at = None`` immediately on retrieval to prevent
-    double-execution if execution takes longer than the poll interval.
+    Runs every ``SCHEDULER_POLL_INTERVAL_SECONDS`` (default 30s).  Each
+    candidate is claimed with an atomic compare-and-swap on ``next_run_at``
+    before it is spawned, so two replicas (or two ticks) can never execute
+    the same task.  The claim pushes ``next_run_at`` forward instead of
+    clearing it: if the process dies mid-execution the task becomes due
+    again after ``SCHEDULER_CLAIM_TTL_SECONDS`` instead of never running
+    again.
     """
     from .db.base import AsyncSessionLocal
+    from .services.scheduled_task_service import claim_due_task as _claim
     from .services.scheduled_task_service import get_due_tasks as _get_due
-    from .services.scheduled_task_service import update_scheduled_task as _update_task
 
     interval = settings.SCHEDULER_POLL_INTERVAL_SECONDS
+    claim_ttl = max(
+        int(settings.SCHEDULER_CLAIM_TTL_SECONDS),
+        int(interval) * 2,
+    )
     while True:
         await asyncio.sleep(interval)
         try:
             async with AsyncSessionLocal() as _db:
                 due_tasks = await _get_due(_db)
-                if not due_tasks:
-                    continue
 
                 for task in due_tasks:
                     task_id = task.id
-                    # Dedup guard: clear next_run_at before spawning so
-                    # the next poll does NOT pick up the same task.
-                    # If the execution succeeds, record_run_result will
-                    # recompute the next_run_at.
-                    task.next_run_at = None
-                    await _db.commit()
+                    expected = task.next_run_at
+                    if not await _claim(_db, task_id, expected, claim_ttl_seconds=claim_ttl):
+                        # Another replica won the claim, or the task changed
+                        # between the read and the update.
+                        continue
 
                     # Spawn execution — don't block the poll loop.
                     asyncio.create_task(
@@ -211,6 +216,35 @@ async def _execute_scheduled_task_wrapper(task_id: str) -> None:
             "Fatal error in scheduled task executor for task %s",
             task_id,
         )
+
+
+async def _sweep_orphaned_chat_runs() -> None:
+    """Periodic background task: resolve runs abandoned by a dead process.
+
+    The startup sweep only covers a restart of *this* replica.  With more
+    than one replica, a run owned by a crashed peer would otherwise keep
+    ``finished_at IS NULL`` (and therefore look "running" to
+    ``/chat/session/{id}/run-state``) until some process happened to
+    restart.  Every replica runs this cheap sweep once a minute; live runs
+    keep a fresh lease heartbeat and are skipped.
+    """
+    from .db.base import AsyncSessionLocal
+    from .services.run_record import mark_orphan_runs_lost
+
+    interval = 60
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            async with AsyncSessionLocal() as run_db:
+                lost = await mark_orphan_runs_lost(run_db)
+                if lost:
+                    logging.getLogger(__name__).info(
+                        "Marked %d orphaned chat run(s) as lost", lost,
+                    )
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "Orphaned chat run sweep failed", exc_info=True,
+            )
 
 
 @asynccontextmanager
@@ -286,6 +320,10 @@ async def lifespan(app: FastAPI):
     # Start background task timeout cleanup (Issue #449)
     _bg_timeout_task = asyncio.create_task(_timeout_background_tasks())
 
+    # Periodic `lost` sweep so a run orphaned by another replica is resolved
+    # without waiting for a process restart.
+    _orphan_sweep_task = asyncio.create_task(_sweep_orphaned_chat_runs())
+
     # Start scheduler polling loop (Issue #297) — skip in test mode
     if not settings.TESTING:
         _scheduler_task = asyncio.create_task(_run_scheduler_loop())
@@ -299,6 +337,7 @@ async def lifespan(app: FastAPI):
     checkpoint_cleanup_task.cancel()
     demo_cleanup_task.cancel()
     _bg_timeout_task.cancel()
+    _orphan_sweep_task.cancel()
     if _scheduler_task is not None:
         _scheduler_task.cancel()
 

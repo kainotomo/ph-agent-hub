@@ -63,8 +63,11 @@ from ..services.run_registry import (
     OUTCOME_FAILED,
     RunLease,
     acquire_run,
+    begin_session_delete,
     clear_run_cancel,
     clear_run_cancel_marker,
+    clear_session_run_state,
+    end_session_delete,
     get_active_runs_for_user,
     get_run,
     get_run_outcome,
@@ -1338,20 +1341,36 @@ async def delete_session(
     db: AsyncSession = Depends(get_db),
     current_user: UserORM = Depends(get_current_user),
 ):
-    """Delete a session (DB or Redis). Cleans up file uploads for temp sessions."""
+    """Delete a session (DB or Redis). Cleans up file uploads for temp sessions.
+
+    A live run is cancelled first (waiting briefly for the lease to clear);
+    the deletion lock blocks any new run until the session is gone.
+    """
     data = await _load_session(db, session_id)
     await _require_session_owner(data, current_user)
 
-    is_temp = data.get("is_temporary", False)
+    token = await begin_session_delete(session_id)
+    if token is None:
+        raise SessionBusyError(session_id, None, "delete")
+    try:
+        await _stop_run_for_session_delete(session_id)
 
-    if is_temp:
-        # Clean up associated file uploads (MinIO + DB) before deleting Redis keys
-        uploaded_ids: list[str] = data.get("uploaded_file_ids", [])
-        for file_id in uploaded_ids:
-            await upload_service._delete_temp_upload_by_id(db, file_id)
-        await delete_temp_session(session_id)
-    else:
-        await session_service.delete_session(db, session_id)
+        is_temp = data.get("is_temporary", False)
+
+        if is_temp:
+            # Clean up associated file uploads (MinIO + DB) before deleting
+            # Redis keys
+            uploaded_ids: list[str] = data.get("uploaded_file_ids", [])
+            for file_id in uploaded_ids:
+                await upload_service._delete_temp_upload_by_id(db, file_id)
+            await delete_temp_session(session_id)
+            await clear_session_run_state(
+                session_id, data.get("user_id") or current_user.id,
+            )
+        else:
+            await session_service.delete_session(db, session_id)
+    finally:
+        await end_session_delete(session_id, token)
 
 
 @router.post("/sessions/delete")
@@ -2271,6 +2290,32 @@ async def _release_lease_safely(lease: RunLease, outcome: str) -> None:
             lease.run_id, lease.session_id, outcome,
             exc_info=True,
         )
+
+
+async def _stop_run_for_session_delete(
+    session_id: str,
+    timeout_seconds: float = 5.0,
+) -> None:
+    """Cancel the session's live run and wait for its lease to clear.
+
+    The caller already holds the deletion lock, so no new run can start
+    while this waits.  Raises :class:`SessionBusyError` when the run does
+    not release within *timeout_seconds* — deleting then would let the run
+    write into a row that no longer exists.
+    """
+    lease = await get_run(session_id)
+    if lease is None:
+        return
+
+    await request_run_cancel(session_id, lease.run_id)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    while loop.time() < deadline:
+        await asyncio.sleep(0.1)
+        current = await get_run(session_id)
+        if current is None or current.run_id != lease.run_id:
+            return
+    raise SessionBusyError(session_id, lease.run_id, lease.kind)
 
 
 @asynccontextmanager
@@ -3383,7 +3428,9 @@ async def get_session_run_state(
     data = await _load_session(db, session_id)
     await _require_session_owner(data, current_user)
 
-    state = await run_record.get_run_state(db, session_id)
+    # A stale `running` row (dead process, crashed replica, Redis
+    # eviction) is resolved on read instead of waiting for a restart.
+    state = await run_record.repair_unfinished_run(db, session_id)
     if state is None:
         return {
             "run_id": None,
@@ -3523,6 +3570,7 @@ def _parse_known_runs(raw: str | None, limit: int = 50) -> list[tuple[str, str]]
 @router.get("/runs")
 async def list_active_runs(
     sessions: str | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
     current_user: UserORM = Depends(get_current_user),
 ):
     """Authoritative run snapshot for lightweight polling clients.
@@ -3548,6 +3596,16 @@ async def list_active_runs(
         outcome = await get_run_outcome_for_user(
             session_id, known_run_id, current_user.id,
         )
+        if outcome is None:
+            # The completion marker is short-lived (90s by default).  Fall
+            # back to the durable row instead of letting the client conclude
+            # `lost` while the database still knows the real outcome.
+            outcome = await run_record.get_outcome_from_db(
+                db,
+                session_id=session_id,
+                run_id=known_run_id,
+                user_id=current_user.id,
+            )
         if outcome is None:
             continue
         finished.append({
@@ -3813,6 +3871,12 @@ async def delete_message(
 
     if data.get("is_temporary", False):
         raise ValidationError("Message deletion is not supported for temporary sessions")
+
+    # Deleting truncates every later message; doing that while an agent is
+    # still reading/writing the history would corrupt the turn.
+    lease = await get_run(session_id)
+    if lease is not None:
+        raise SessionBusyError(session_id, lease.run_id, lease.kind)
 
     msg_result = await db.execute(
         select(Message).where(

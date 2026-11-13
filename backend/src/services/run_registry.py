@@ -42,6 +42,7 @@ RUN_USER_INDEX_PREFIX = "runs:user:"
 RUN_LAST_KEY_PREFIX = "run:last:"
 RUN_CANCEL_KEY_PREFIX = "run:cancel:"
 STREAM_CANCEL_KEY_PREFIX = "stream:cancel:"
+DELETE_KEY_PREFIX = "delete:"
 
 #: Lease states stored in the hash.  Only ``running`` is currently used.
 RUN_STATE_RUNNING = "running"
@@ -116,6 +117,10 @@ def run_cancel_key(run_id: str) -> str:
     return f"{RUN_CANCEL_KEY_PREFIX}{run_id}"
 
 
+def delete_key(session_id: str) -> str:
+    return f"{DELETE_KEY_PREFIX}{session_id}"
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -146,11 +151,16 @@ def _lease_from_hash(session_id: str, raw: dict[str, Any]) -> RunLease | None:
 # Atomic scripts
 # ---------------------------------------------------------------------------
 
-# KEYS: run, user index, cancel
+# KEYS: run, user index, cancel, delete lock
 # ARGV: run_id, kind, user_id, tenant_id, owner, started_at, heartbeat_at,
 #       lease_ttl, session_id, index_ttl
 _ACQUIRE_SCRIPT = """
 if redis.call('EXISTS', KEYS[1]) == 1 then
+    return 0
+end
+-- A session being deleted must not accept a new run (the deletion holds
+-- the delete lock from before it cancels the previous run).
+if redis.call('EXISTS', KEYS[4]) == 1 then
     return 0
 end
 redis.call('HSET', KEYS[1],
@@ -239,10 +249,11 @@ async def acquire_run(
     r = await get_redis()
     acquired = await r.eval(
         _ACQUIRE_SCRIPT,
-        3,
+        4,
         run_key(session_id),
         user_index_key(user_id),
         cancel_key(session_id),
+        delete_key(session_id),
         run_id,
         kind,
         user_id,
@@ -374,6 +385,31 @@ async def get_runs(session_ids: list[str]) -> dict[str, RunLease]:
         if lease is not None:
             runs[sid] = lease
     return runs
+
+
+async def get_last_run_markers(session_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Return the live completion markers for *session_ids* in one MGET.
+
+    The marker is a short-lived cache of the durable outcome; it exists so a
+    status snapshot does not have to hit the database for every recent
+    finish.  Anything older than its TTL is simply absent.
+    """
+    ids = [sid for sid in dict.fromkeys(session_ids) if sid]
+    if not ids:
+        return {}
+    r = await get_redis()
+    values = await r.mget([last_run_key(sid) for sid in ids])
+    markers: dict[str, dict[str, Any]] = {}
+    for sid, raw in zip(ids, values):
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(data, dict):
+            markers[sid] = data
+    return markers
 
 
 async def get_active_runs_for_user(user_id: str) -> list[RunLease]:
@@ -533,6 +569,87 @@ async def clear_run_cancel(session_id: str, run_id: str | None = None) -> None:
         cancel_key(session_id),
         run_id or "",
     )
+
+
+# ---------------------------------------------------------------------------
+# Session deletion coordination
+# ---------------------------------------------------------------------------
+# Deleting a session must be exclusive with running it: a run that keeps
+# writing into a deleted session produces FK errors and leaves the registry
+# pointing at a session that no longer exists.  The deletion therefore takes
+# a short-lived lock that `acquire_run` honours, cancels any live run first,
+# and clears the registry afterwards.
+
+#: How long a deletion may hold the lock (covers MinIO cleanup of a large
+#: session).  The lock is released explicitly; the TTL only covers a crash.
+DELETE_LOCK_TTL_MS = 120_000
+
+_ACQUIRE_DELETE_LOCK_SCRIPT = """
+if redis.call('EXISTS', KEYS[1]) == 1 then
+    return 0
+end
+redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+return 1
+"""
+
+_RELEASE_DELETE_LOCK_SCRIPT = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+    return 0
+end
+return redis.call('DEL', KEYS[1])
+"""
+
+
+async def begin_session_delete(session_id: str) -> str | None:
+    """Take the exclusive deletion lock for *session_id*.
+
+    Returns an opaque token, or ``None`` when another deletion is already in
+    progress.  While the lock is held, :func:`acquire_run` refuses new runs
+    for the session.
+    """
+    token = str(uuid.uuid4())
+    r = await get_redis()
+    acquired = await r.eval(
+        _ACQUIRE_DELETE_LOCK_SCRIPT,
+        1,
+        delete_key(session_id),
+        token,
+        DELETE_LOCK_TTL_MS,
+    )
+    return token if acquired else None
+
+
+async def end_session_delete(session_id: str, token: str) -> None:
+    """Release the deletion lock if *token* still owns it."""
+    r = await get_redis()
+    await r.eval(
+        _RELEASE_DELETE_LOCK_SCRIPT,
+        1,
+        delete_key(session_id),
+        token,
+    )
+
+
+async def clear_session_run_state(session_id: str, user_id: str) -> None:
+    """Drop every run-registry trace of a session that no longer exists.
+
+    Removes the lease, the completion marker, both cancellation flags and the
+    per-user running index entry, so no client can keep showing a spinner for
+    a deleted conversation.
+    """
+    lease = await get_run(session_id)
+    run_id = lease.run_id if lease is not None else None
+    owner_id = lease.user_id if lease is not None else user_id
+    r = await get_redis()
+    keys = [
+        run_key(session_id),
+        last_run_key(session_id),
+        cancel_key(session_id),
+    ]
+    if run_id:
+        keys.append(run_cancel_key(run_id))
+    await r.delete(*keys)
+    await r.srem(user_index_key(owner_id), session_id)
 
 
 # ---------------------------------------------------------------------------

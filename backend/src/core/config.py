@@ -227,6 +227,17 @@ class Settings(BaseSettings):
     """TTL of a stream cancellation flag.  Auto-expires so a stale cancel
     can never outlive the run it was meant for."""
 
+    # --- Scheduled tasks (Issue #297) ---
+    SCHEDULER_POLL_INTERVAL_SECONDS: int = 30
+    """How often the scheduler loop looks for due scheduled tasks.  This
+    setting was referenced by the loop but missing from ``Settings``, which
+    made the loop raise ``AttributeError`` on its first tick and silently
+    never execute a single task."""
+    SCHEDULER_CLAIM_TTL_SECONDS: int = 900
+    """How far the atomic claim pushes ``next_run_at`` forward while a task
+    executes.  A crashed executor leaves the task due again after this
+    window (at-least-once) instead of silently disabling it forever."""
+
     # --- Testing ---
     TESTING: bool = False
     """When True, background scheduler loops and other lifespan tasks are

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.8.0] — 2026-11-13
+
+### Added
+- **One composed session runtime view** — the backend now answers "what is this conversation doing?" in one place (`services/session_runtime.py`) instead of exposing Redis, MariaDB and the transport as three separate truths. A live lease wins, then the newest `chat_runs` row, then the short-lived completion marker; the result carries a monotonically increasing `revision`. `GET /chat/session/{id}/run-state`, `GET /chat/runs` and every session/sidebar/search response are built from that view, and session responses add `runtime_revision` so a list fetched before a run started can no longer overwrite a newer live state. The browser now applies "highest revision wins" instead of maintaining first-snapshot flags and finished-run tombstones.
+- **Database-backed outcome fallback** — when the 90-second Redis completion marker has expired, the status snapshot reads the durable `chat_runs` row instead of reporting nothing (or a false `lost`).
+
+### Fixed
+- **Scheduled tasks could never run** — the scheduler loop read `settings.SCHEDULER_POLL_INTERVAL_SECONDS`, which was missing from `Settings`; the loop raised `AttributeError` on its first tick and died silently, so no scheduled task ever executed. The setting (and `SCHEDULER_CLAIM_TTL_SECONDS`) is now defined.
+- **Scheduled tasks could double-run or be disabled forever** — the dedup guard cleared `next_run_at` with a non-atomic read-modify-write and only recovered on a successful run record. A due task is now claimed with a compare-and-swap `UPDATE` and its `next_run_at` is pushed forward by a claim window: concurrent replicas cannot both execute it, and a process killed mid-execution leaves the task due again (at-least-once) instead of never running.
+- **A run orphaned by another replica kept reporting `running`** — the orphan sweep only ran on startup. It now also runs every minute, and `GET /run-state` repairs a stale unfinished row to `lost` on read when no live lease exists.
+- **Deleting a conversation while its agent was writing** — session deletion now takes an exclusive lock (honoured by `acquire_run`), cancels the live run and waits for its lease to clear before deleting, then removes the lease, completion marker, cancellation flags and per-user index entry. Batch delete cancels and skips busy sessions with an `Agent is running` reason. Deleting a message is refused while a run is active, because it truncates every later message.
+- **`chat_runs.message_id` could point at a deleted message** — a new FK (`ON DELETE SET NULL`, migration `f7a8b9c0d1e2`) keeps the durable record honest, and `finalize_run` verifies the assistant message exists before recording `persisted=true` (a missing row is downgraded to `failed/not_persisted` instead of failing the terminal write).
+
+### Changed
+- `GET /chat/runs` and the session responses include the runtime `revision`; the frontend status store, provider and polling hook order updates by it. `statusStreamReadyRef` and the finished-run tombstones were removed in favour of a per-session revision high-water mark.
+- `SessionSeed`/`SessionData` gained `runtime_revision`.
+
+---
+
 ## [Unreleased]
 
 ### Added

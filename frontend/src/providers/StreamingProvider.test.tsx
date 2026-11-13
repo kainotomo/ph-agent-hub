@@ -45,8 +45,8 @@ describe("StreamingProvider", () => {
 
     act(() => {
       result.current.seedFromSessions([
-        { id: "s1", running: true, run_id: "run-1" },
-        { id: "s2", running: false },
+        { id: "s1", running: true, run_id: "run-1", runtime_revision: 10 },
+        { id: "s2", running: false, runtime_revision: 0 },
       ]);
     });
 
@@ -61,7 +61,7 @@ describe("StreamingProvider", () => {
 
     act(() => {
       result.current.seedFromSessions([
-        { id: "s1", running: true, run_id: "run-1" },
+        { id: "s1", running: true, run_id: "run-1", runtime_revision: 10 },
       ]);
     });
     expect(result.current.streamingSessionIds.has("s1")).toBe(true);
@@ -72,6 +72,7 @@ describe("StreamingProvider", () => {
         run_id: "run-1",
         state: "finished",
         outcome: "completed",
+        revision: 11,
       });
     });
     expect(result.current.streamingSessionIds.has("s1")).toBe(false);
@@ -79,7 +80,7 @@ describe("StreamingProvider", () => {
     // A list response fetched while the run was still active is stale.
     act(() => {
       result.current.seedFromSessions([
-        { id: "s1", running: true, run_id: "run-1" },
+        { id: "s1", running: true, run_id: "run-1", runtime_revision: 10 },
       ]);
     });
     expect(result.current.streamingSessionIds.has("s1")).toBe(false);
@@ -91,7 +92,7 @@ describe("StreamingProvider", () => {
 
     act(() => {
       options.onSnapshot([
-        { session_id: "s1", run_id: "run-1", kind: "chat" },
+        { session_id: "s1", run_id: "run-1", kind: "chat", revision: 20 },
       ]);
     });
     act(() => {
@@ -114,7 +115,7 @@ describe("StreamingProvider", () => {
 
     act(() => {
       result.current.seedFromSessions([
-        { id: "s1", running: true, run_id: "run-1" },
+        { id: "s1", running: true, run_id: "run-1", runtime_revision: 10 },
       ]);
     });
     act(() => {
@@ -124,7 +125,7 @@ describe("StreamingProvider", () => {
 
     act(() => {
       result.current.seedFromSessions([
-        { id: "s1", running: true, run_id: "run-1" },
+        { id: "s1", running: true, run_id: "run-1", runtime_revision: 10 },
       ]);
     });
     expect(result.current.streamingSessionIds.has("s1")).toBe(false);
@@ -162,6 +163,7 @@ describe("StreamingProvider", () => {
         run_id: "run-1",
         state: "finished",
         outcome: "completed",
+        revision: 11,
       });
     });
     expect(result.current.completionRevisions.s1).toBe(1);
@@ -172,6 +174,7 @@ describe("StreamingProvider", () => {
         run_id: "run-1",
         state: "finished",
         outcome: "completed",
+        revision: 11,
       });
     });
     expect(result.current.completionRevisions.s1).toBe(2);
@@ -184,7 +187,7 @@ describe("StreamingProvider", () => {
     // Force-removed by the sidebar status poll (finish event was missed).
     act(() => {
       result.current.seedFromSessions([
-        { id: "s1", running: true, run_id: "run-1" },
+        { id: "s1", running: true, run_id: "run-1", runtime_revision: 10 },
       ]);
     });
     act(() => {
@@ -220,6 +223,7 @@ describe("StreamingProvider", () => {
         run_id: "run-1",
         state: "finished",
         outcome: "completed",
+        revision: 11,
       });
     });
     expect(result.current.streamingSessionIds.has("s1")).toBe(false);
@@ -233,7 +237,7 @@ describe("StreamingProvider", () => {
 
     act(() => {
       options.onSnapshot([
-        { session_id: "s1", run_id: "run-1", kind: "chat" },
+        { session_id: "s1", run_id: "run-1", kind: "chat", revision: 20 },
       ]);
     });
     expect(result.current.streamingSessionIds.has("s1")).toBe(true);
@@ -244,6 +248,7 @@ describe("StreamingProvider", () => {
         run_id: "run-1",
         state: "finished",
         outcome: "completed",
+        revision: 21,
       });
     });
     expect(result.current.streamingSessionIds.has("s1")).toBe(false);
@@ -267,6 +272,7 @@ describe("StreamingProvider", () => {
         run_id: "run-1",
         state: "finished",
         outcome: "completed",
+        revision: 11,
       });
     });
     expect(result.current.completedUnreadIds.has("s1")).toBe(false);
@@ -351,6 +357,7 @@ describe("StreamingProvider", () => {
         run_id: "run-1",
         state: "finished",
         outcome: "completed",
+        revision: 11,
       });
     });
     expect(result.current.completedUnreadIds.has("s1")).toBe(true);

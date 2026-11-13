@@ -60,6 +60,7 @@ interface SessionSeed {
   id: string;
   running?: boolean;
   run_id?: string | null;
+  runtime_revision?: number;
 }
 
 export interface StreamingContextValue {
@@ -122,35 +123,25 @@ export function StreamingProvider({
   runsRef.current = runs;
   const activeSessionRef = useRef<string | null>(null);
 
-  // Once the live status stream has delivered a snapshot it is the single
-  // source of truth.  Session-list seeds are only a first-paint fallback
-  // before that point — otherwise a stale `running: true` from a list
-  // fetched during a run would resurrect a finished spinner forever.
-  const statusStreamReadyRef = useRef(false);
-
-  // Runs that this client has already observed finish.  A stale list seed
-  // must not re-add them (keyed by `sessionId:runId`; `sessionId:*` is a
-  // wildcard tombstone for the poll fallback when no run id is known).
-  const finishedRunsRef = useRef<Set<string>>(new Set());
-
-  const rememberFinished = useCallback((id: string, runId: string | null) => {
-    const key = `${id}:${runId ?? "*"}`;
-    finishedRunsRef.current.add(key);
-    if (finishedRunsRef.current.size > 500) {
-      const oldest = finishedRunsRef.current.values().next().value;
-      if (oldest) finishedRunsRef.current.delete(oldest);
+  // Highest revision applied per session, kept even after the entry is
+  // removed.  This is the revision-ordered replacement for the old
+  // finished-run tombstones: an older list seed cannot resurrect a run that
+  // this tab already saw finish (or had force-removed by the poll).
+  const appliedRevisionsRef = useRef<Record<string, number>>({});
+  const noteRevisions = useCallback((updates: Record<string, number>) => {
+    for (const [id, revision] of Object.entries(updates)) {
+      appliedRevisionsRef.current[id] = Math.max(
+        appliedRevisionsRef.current[id] ?? 0,
+        revision,
+      );
     }
   }, []);
 
-  const forgetFinished = useCallback((id: string, runId: string | null) => {
-    finishedRunsRef.current.delete(`${id}:${runId ?? "*"}`);
-    finishedRunsRef.current.delete(`${id}:*`);
-  }, []);
-
-  const isFinished = useCallback((id: string, runId: string | null) => {
-    const set = finishedRunsRef.current;
-    return set.has(`${id}:${runId ?? "*"}`) || set.has(`${id}:*`);
-  }, []);
+  // Ordering is carried by the backend's per-session `revision`: every
+  // snapshot, event and list seed is applied only when it is at least as new
+  // as what this tab already knows.  That replaced the old "first snapshot
+  // wins" flag and the finished-run tombstones — a stale list can no longer
+  // resurrect a finished run because it carries an older revision.
 
   const bumpCompletionRevision = useCallback((id: string) => {
     setCompletionRevisions((prev) => ({
@@ -166,8 +157,6 @@ export function StreamingProvider({
 
   const addStreamingSession = useCallback(
     (id: string, runId: string | null = null) => {
-      if (runId) forgetFinished(id, runId);
-      forgetFinished(id, null);
       setRuns((prev) => {
         const existing = prev[id];
         return {
@@ -179,11 +168,14 @@ export function StreamingProvider({
             // A run already known from the server stays server-owned: a
             // local stream closing must not hide a run that is still live.
             origin: existing?.origin ?? "local",
+            // 0 sorts before any real server revision, so the first
+            // authoritative answer always wins over a local guess.
+            revision: existing?.revision ?? 0,
           },
         };
       });
     },
-    [forgetFinished],
+    [],
   );
 
   const removeStreamingSession = useCallback(
@@ -191,7 +183,7 @@ export function StreamingProvider({
       if (force) {
         const entry = runsRef.current[id];
         if (entry) {
-          rememberFinished(id, entry.runId);
+          noteRevisions({ [id]: entry.revision + 1 });
           bumpCompletionRevision(id);
         }
       }
@@ -207,7 +199,7 @@ export function StreamingProvider({
         return next;
       });
     },
-    [rememberFinished, bumpCompletionRevision],
+    [bumpCompletionRevision, noteRevisions],
   );
 
   const clearStreamingSessions = useCallback(() => {
@@ -216,22 +208,16 @@ export function StreamingProvider({
 
   const seedFromSessions = useCallback(
     (sessions: SessionSeed[]) => {
-      const liveAuthoritative = statusStreamReadyRef.current;
-      // After the live stream's first snapshot it owns removals: a list
-      // response that was already in flight when a run started must not
-      // erase it.  Additions are still welcome — they are how a run
-      // started in another tab is discovered while the SSE is temporarily
-      // down — but a finished-run tombstone blocks resurrection.
-      const usable = sessions
-        .filter((session) => !liveAuthoritative || session.running)
-        .map((session) =>
-          session.running && isFinished(session.id, session.run_id ?? null)
-            ? { ...session, running: false }
-            : session,
-        );
-      setRuns((prev) => seedRunningFromSessions(prev, usable));
+      setRuns((prev) =>
+        seedRunningFromSessions(prev, sessions, appliedRevisionsRef.current),
+      );
+      const updates: Record<string, number> = {};
+      for (const session of sessions) {
+        updates[session.id] = session.runtime_revision ?? 0;
+      }
+      noteRevisions(updates);
     },
-    [isFinished],
+    [noteRevisions],
   );
 
   const getRunId = useCallback(
@@ -252,17 +238,19 @@ export function StreamingProvider({
 
   const handleStatusSnapshot = useCallback(
     (snapshot: RunSnapshotEntry[]) => {
-      statusStreamReadyRef.current = true;
-      for (const run of snapshot) {
-        // A run present in the authoritative snapshot cannot be finished.
-        forgetFinished(run.session_id, run.run_id);
-      }
-
       // A periodic/reconnect snapshot is also how a finish can be
       // recovered when the individual `run_status` event was missed.
       const previous = runsRef.current;
       const next = applyStatusSnapshot(previous, snapshot);
       const removed = Object.keys(previous).filter((id) => !(id in next));
+      const updates: Record<string, number> = {};
+      for (const run of snapshot) {
+        updates[run.session_id] = run.revision ?? 0;
+      }
+      for (const id of removed) {
+        updates[id] = (previous[id]?.revision ?? 0) + 1;
+      }
+      noteRevisions(updates);
       if (removed.length > 0) {
         setCompletionRevisions((prev) => {
           const updated = { ...prev };
@@ -272,16 +260,22 @@ export function StreamingProvider({
       }
       setRuns(next);
     },
-    [forgetFinished],
+    [noteRevisions],
   );
 
   const handleStatusEvent = useCallback(
     (event: RunStatusEvent) => {
+      const existing = runsRef.current[event.session_id];
       if (event.state === "finished") {
-        rememberFinished(event.session_id, event.run_id);
+        noteRevisions({
+          [event.session_id]: Math.max(
+            (existing?.revision ?? 0) + 1,
+            event.revision ?? 0,
+          ),
+        });
         bumpCompletionRevision(event.session_id);
       } else {
-        forgetFinished(event.session_id, event.run_id);
+        noteRevisions({ [event.session_id]: event.revision ?? 0 });
       }
       setRuns((prev) => applyRunStatusEvent(prev, event));
       setStatusRevision((revision) => revision + 1);
@@ -295,7 +289,7 @@ export function StreamingProvider({
         }),
       );
     },
-    [forgetFinished, rememberFinished, bumpCompletionRevision],
+    [bumpCompletionRevision, noteRevisions],
   );
 
   useSessionStatusStream({
@@ -307,8 +301,7 @@ export function StreamingProvider({
   // A different user must not inherit another account's run state.
   const userId = user?.id ?? null;
   useEffect(() => {
-    statusStreamReadyRef.current = false;
-    finishedRunsRef.current.clear();
+    appliedRevisionsRef.current = {};
     setRuns({});
     setCompletionRevisions({});
   }, [userId]);

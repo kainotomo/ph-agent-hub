@@ -12,38 +12,48 @@ import {
 describe("applyStatusSnapshot", () => {
   it("seeds server entries and drops stale server entries", () => {
     const prev: SessionRunMap = {
-      a: { runId: null, kind: null, startedAt: null, origin: "server" },
+      a: { runId: null, kind: null, startedAt: null, origin: "server", revision: 10 },
     };
     const next = applyStatusSnapshot(prev, [
-      { session_id: "a", run_id: "r1", kind: "local", started_at: "t1" },
-      { session_id: "b", run_id: null, kind: null, started_at: null },
+      { session_id: "a", run_id: "r1", kind: "local", started_at: "t1", revision: 20 },
+      { session_id: "b", run_id: null, kind: null, started_at: null, revision: 0 },
     ]);
     expect(next).toEqual({
-      a: { runId: "r1", kind: "local", startedAt: "t1", origin: "server" },
-      b: { runId: null, kind: null, startedAt: null, origin: "server" },
+      a: { runId: "r1", kind: "local", startedAt: "t1", origin: "server", revision: 20 },
+      b: { runId: null, kind: null, startedAt: null, origin: "server", revision: 0 },
     });
     expect(next).not.toHaveProperty("c");
   });
 
   it("keeps a local entry missing from the snapshot and replaces a local entry present in it", () => {
     const prev: SessionRunMap = {
-      a: { runId: null, kind: null, startedAt: null, origin: "local" },
-      b: { runId: null, kind: null, startedAt: null, origin: "local" },
+      a: { runId: null, kind: null, startedAt: null, origin: "local", revision: 0 },
+      b: { runId: null, kind: null, startedAt: null, origin: "local", revision: 0 },
     };
     const next = applyStatusSnapshot(prev, [
-      { session_id: "b", run_id: "r2", kind: "local", started_at: "t2" },
+      { session_id: "b", run_id: "r2", kind: "local", started_at: "t2", revision: 5 },
     ]);
     expect(next).toEqual({
-      a: { runId: null, kind: null, startedAt: null, origin: "local" },
-      b: { runId: "r2", kind: "local", startedAt: "t2", origin: "server" },
+      a: { runId: null, kind: null, startedAt: null, origin: "local", revision: 0 },
+      b: { runId: "r2", kind: "local", startedAt: "t2", origin: "server", revision: 5 },
     });
+  });
+
+  it("does not let an older snapshot overwrite a newer entry", () => {
+    const prev: SessionRunMap = {
+      a: { runId: "r1", kind: null, startedAt: null, origin: "server", revision: 20 },
+    };
+    const next = applyStatusSnapshot(prev, [
+      { session_id: "a", run_id: "r1", kind: null, started_at: null, revision: 10 },
+    ]);
+    expect(next.a.revision).toBe(20);
   });
 });
 
 describe("applyRunStatusEvent", () => {
   it("adds a running entry and preserves a local origin", () => {
     const prev: SessionRunMap = {
-      a: { runId: null, kind: null, startedAt: null, origin: "local" },
+      a: { runId: null, kind: null, startedAt: null, origin: "local", revision: 0 },
     };
     const next = applyRunStatusEvent(prev, {
       session_id: "a",
@@ -51,41 +61,99 @@ describe("applyRunStatusEvent", () => {
       state: "running",
       kind: "local",
       started_at: "t1",
+      revision: 30,
     });
     expect(next).toEqual({
-      a: { runId: "r1", kind: "local", startedAt: "t1", origin: "local" },
+      a: { runId: "r1", kind: "local", startedAt: "t1", origin: "local", revision: 30 },
     });
   });
 
   it("removes the entry on a finished event", () => {
     const prev: SessionRunMap = {
-      a: { runId: "r1", kind: null, startedAt: null, origin: "server" },
+      a: { runId: "r1", kind: null, startedAt: null, origin: "server", revision: 30 },
     };
     const next = applyRunStatusEvent(prev, {
       session_id: "a",
       run_id: "r1",
       state: "finished",
+      revision: 31,
     });
     expect(next).toEqual({});
+  });
+
+  it("ignores a stale finish for an older run", () => {
+    const prev: SessionRunMap = {
+      a: { runId: "r2", kind: null, startedAt: null, origin: "server", revision: 40 },
+    };
+    const next = applyRunStatusEvent(prev, {
+      session_id: "a",
+      run_id: "r1",
+      state: "finished",
+      revision: 31,
+    });
+    expect(next).toBe(prev);
+  });
+
+  it("ignores a running event older than the entry it would replace", () => {
+    const prev: SessionRunMap = {
+      a: { runId: "r2", kind: null, startedAt: null, origin: "server", revision: 40 },
+    };
+    const next = applyRunStatusEvent(prev, {
+      session_id: "a",
+      run_id: "r1",
+      state: "running",
+      revision: 30,
+    });
+    expect(next).toBe(prev);
   });
 });
 
 describe("seedRunningFromSessions", () => {
   it("sets running sessions, removes stale server entries, and keeps local entries", () => {
     const prev: SessionRunMap = {
-      a: { runId: null, kind: null, startedAt: null, origin: "server" },
-      b: { runId: null, kind: null, startedAt: null, origin: "local" },
+      a: { runId: null, kind: null, startedAt: null, origin: "server", revision: 0 },
+      b: { runId: null, kind: null, startedAt: null, origin: "local", revision: 0 },
     };
     const next = seedRunningFromSessions(prev, [
-      { id: "a", running: true, run_id: "r1" },
+      { id: "a", running: true, run_id: "r1", runtime_revision: 10 },
       { id: "b", running: false },
-      { id: "c", running: true },
+      { id: "c", running: true, runtime_revision: 10 },
     ]);
     expect(next).toEqual({
-      a: { runId: "r1", kind: null, startedAt: null, origin: "server" },
-      b: { runId: null, kind: null, startedAt: null, origin: "local" },
-      c: { runId: null, kind: null, startedAt: null, origin: "server" },
+      a: { runId: "r1", kind: null, startedAt: null, origin: "server", revision: 10 },
+      b: { runId: null, kind: null, startedAt: null, origin: "local", revision: 0 },
+      c: { runId: null, kind: null, startedAt: null, origin: "server", revision: 10 },
     });
+  });
+
+  it("does not resurrect a finished run from an older list", () => {
+    const prev: SessionRunMap = {
+      a: { runId: "r2", kind: null, startedAt: null, origin: "server", revision: 40 },
+    };
+    const next = seedRunningFromSessions(prev, [
+      { id: "a", running: true, run_id: "r1", runtime_revision: 30 },
+    ]);
+    expect(next).toBe(prev);
+  });
+
+  it("does not remove a live run from an older list", () => {
+    const prev: SessionRunMap = {
+      a: { runId: "r1", kind: null, startedAt: null, origin: "server", revision: 40 },
+    };
+    const next = seedRunningFromSessions(prev, [
+      { id: "a", running: false, runtime_revision: 30 },
+    ]);
+    expect(next).toBe(prev);
+  });
+
+  it("removes a run once the list is newer", () => {
+    const prev: SessionRunMap = {
+      a: { runId: "r1", kind: null, startedAt: null, origin: "server", revision: 40 },
+    };
+    const next = seedRunningFromSessions(prev, [
+      { id: "a", running: false, runtime_revision: 41 },
+    ]);
+    expect(next).toEqual({});
   });
 });
 
@@ -140,8 +208,8 @@ describe("clearUnread", () => {
 describe("deriveStreamingSessionIds", () => {
   it("returns the keys of the map", () => {
     const next = deriveStreamingSessionIds({
-      a: { runId: null, kind: null, startedAt: null, origin: "server" },
-      b: { runId: null, kind: null, startedAt: null, origin: "server" },
+      a: { runId: null, kind: null, startedAt: null, origin: "server", revision: 0 },
+      b: { runId: null, kind: null, startedAt: null, origin: "server", revision: 0 },
     });
     expect([...next]).toEqual(["a", "b"]);
   });

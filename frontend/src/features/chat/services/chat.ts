@@ -56,6 +56,9 @@ export interface SessionData {
   running?: boolean;
   /** Id of the active run when `running` is true. */
   run_id?: string | null;
+  /** Monotonic runtime revision from the backend; a list response older
+   * than the one already applied must not change the spinner. */
+  runtime_revision?: number;
   created_at: string;
   updated_at: string;
 }
@@ -832,6 +835,8 @@ export interface RunStateResponse {
   tokens_in?: number;
   tokens_out?: number;
   kind?: string | null;
+  /** Composed runtime revision (see `runtime_revision` on sessions). */
+  revision?: number;
 }
 
 export function getRunState(sessionId: string): Promise<RunStateResponse> {

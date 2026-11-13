@@ -1082,9 +1082,17 @@ resume endpoint; cross-replica live reconnect remains a follow-up because
 the buffer is in-process.
 
 The browser-side counterpart is a stall watchdog: a run that is alive emits
-at least a heartbeat every 15 s, so 40 s of silence aborts the connection
+at least a heartbeat every 15 s, so 25 s of silence aborts the connection
 and the tab resumes from its cursor instead of spinning until a manual
 refresh.
+
+**Terminal frame.** Every chat, regenerate and edit run ends with exactly one
+`run_terminal` frame. The web client settles the visible turn from it (the
+run-state machine's `run_terminal` input) even when the socket lingers, and
+reconciles from `GET /chat/session/:id/run-state` when the frame was missed;
+the polled run registry remains the authority for the sidebar. Autopilot and
+workflow streams do not emit `run_terminal` and keep their close-based
+settling.
 
 ### 11.3 SSE Event Types
 
@@ -1103,6 +1111,7 @@ refresh.
 | `error` | `{ code, message }` | Non-recoverable error; connection closes after |
 | `heartbeat` | `{}` | Every 15s on idle to keep connection alive |
 | `stream_resync` | `{ reason: "buffer_gap" \| "slow_consumer", from_seq, oldest_seq, last_seq, run_id }` | The client's resume cursor predates the replay buffer (or the reader fell behind). Reload the persisted message instead of trusting the partial text. |
+| `run_terminal` | `{ outcome: "completed" \| "failed" \| "cancelled" \| "lost", error_code, message, message_id, persisted, tokens_in, tokens_out, cache_hit_tokens }` | Always the last event of a chat, regenerate and edit run (Issue #608). Clients settle the turn from this frame; a closing socket is not evidence of success. |
 
 **Error codes:** `model_timeout`, `model_error`, `tool_error`, `max_steps_exceeded`, `invalid_output`, `auth_error`, `internal_error`
 

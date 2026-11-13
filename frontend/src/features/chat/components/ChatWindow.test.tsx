@@ -76,7 +76,7 @@ vi.mock("../hooks/useStream", () => ({
     startReconnect: mockStartReconnect,
     resetStream: mockResetStream,
     isStreaming: false,
-    streaming: false,
+    streaming: mockStreamState.streaming,
   }),
 }));
 
@@ -98,6 +98,9 @@ const mockResetStream = vi.hoisted(() => vi.fn());
 const mockListMessages = vi.hoisted(() => vi.fn());
 const mockGetRunState = vi.hoisted(() => vi.fn());
 const mockSetActiveSession = vi.hoisted(() => vi.fn());
+// Mutable transport flag: tests can drive `streaming` the way the real hook
+// would (Issue #616).
+const mockStreamState = vi.hoisted(() => ({ streaming: false }));
 const mockRunStatus = vi.hoisted(() => ({
   streamingSessionIds: new Set<string>(),
   completionRevisions: {} as Record<string, number>,
@@ -139,9 +142,15 @@ vi.mock("react-virtuoso", async () => {
       scrollToIndex: virtuosoState.scrollToIndex,
     }));
     const data = props.data ?? [];
+    // Render the real Header/Footer components too: the "AI is thinking…"
+    // placeholder and other live-state UI live in Virtuoso's Footer, so tests
+    // that assert the finished-run UI need it mounted (Issue #616).
+    const Header = props.components?.Header;
+    const Footer = props.components?.Footer;
     return React.createElement(
       "div",
       { "data-testid": "virtuoso" },
+      Header ? React.createElement(Header, { key: "header" }) : null,
       data.map((item: any, index: number) =>
         React.createElement(
           "div",
@@ -153,6 +162,7 @@ vi.mock("react-virtuoso", async () => {
           props.itemContent ? props.itemContent(index, item) : null,
         ),
       ),
+      Footer ? React.createElement(Footer, { key: "footer" }) : null,
     );
   });
   return { Virtuoso, VirtuosoHandle: {} };
@@ -299,6 +309,7 @@ beforeEach(() => {
   breakpointMock.md = true;
   mockRunStatus.streamingSessionIds = new Set();
   mockRunStatus.completionRevisions = {};
+  mockStreamState.streaming = false;
 });
 
 // ---------------------------------------------------------------------------
@@ -1445,5 +1456,176 @@ describe("ChatWindow — terminal run states (Issue #609)", () => {
     await settle();
     // Resubmitted to the same session with the transcript's user message.
     expect(lastStreamHandlers.current).not.toBeNull();
+  });
+});
+
+// =============================================================================
+// Issue #616 — the visible turn settles from authoritative completion
+// =============================================================================
+// The chat view used to keep "AI is thinking…" whenever the SSE transport
+// stayed `streaming`, even after the run's `run_terminal` frame or after the
+// authoritative status store reported the finish.  These tests pin the two
+// settling paths: the producer's terminal frame and the durable-record
+// reconciliation.
+
+describe("ChatWindow — finished run settles the visible turn (Issue #616)", () => {
+  beforeEach(() => {
+    mockApi.mockReset();
+    mockApi.mockImplementation((url: string) => {
+      if (url === "/models") return Promise.resolve(FAKE_MODELS);
+      return Promise.resolve([]);
+    });
+    mockGetStreamStatus.mockReset();
+    mockGetStreamStatus.mockResolvedValue({ active: false });
+    mockListMessages.mockReset();
+    mockListMessages.mockResolvedValue({ items: [], has_more: false });
+    mockGetRunState.mockReset();
+    mockGetRunState.mockResolvedValue({ run_id: null, state: "idle" });
+    lastStreamHandlers.current = null;
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  function tree(client: QueryClient, temperature: number) {
+    return (
+      <QueryClientProvider client={client}>
+        <ChatWindow
+          sessionId="test-session-1"
+          isPending={false}
+          temperature={temperature}
+        />
+      </QueryClientProvider>
+    );
+  }
+
+  async function sendMessage() {
+    const user = userEvent.setup();
+    const textarea = screen.getByPlaceholderText(/Type a message/);
+    await user.clear(textarea);
+    await user.type(textarea, "test message");
+    const sendButton = screen
+      .getAllByRole("button")
+      .find(
+        (btn) =>
+          btn.textContent?.includes("Send") &&
+          !(btn as HTMLButtonElement).disabled,
+      );
+    expect(sendButton).toBeTruthy();
+    await user.click(sendButton!);
+    await settle();
+    return lastStreamHandlers.current;
+  }
+
+  /** Send with the transport idle, then flip the mocked transport to live. */
+  async function startStreaming(
+    client: QueryClient,
+    rerender: (ui: React.ReactElement) => void,
+  ) {
+    const handlers = await sendMessage();
+    expect(handlers).not.toBeNull();
+    mockStreamState.streaming = true;
+    rerender(tree(client, 0.2));
+    await settle();
+    return handlers;
+  }
+
+  it("hides the thinking placeholder once run_terminal completes the turn", async () => {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const { rerender } = render(tree(client, 0.1));
+    await settle();
+
+    const handlers = await startStreaming(client, rerender);
+    expect(screen.getByText(/AI is thinking/i)).toBeInTheDocument();
+
+    await act(async () => {
+      handlers.onRunTerminal({
+        session_id: "test-session-1",
+        outcome: "completed",
+        persisted: true,
+        message_id: "msg-1",
+      });
+    });
+
+    expect(screen.queryByText(/AI is thinking/i)).toBeNull();
+  });
+
+  it("explains a failed terminal state even while the transport still reports streaming", async () => {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const { rerender } = render(tree(client, 0.1));
+    await settle();
+
+    const handlers = await startStreaming(client, rerender);
+
+    await act(async () => {
+      handlers.onRunTerminal({
+        session_id: "test-session-1",
+        outcome: "failed",
+        error_code: "model_timeout",
+        message: "provider timed out",
+        persisted: false,
+      });
+    });
+
+    expect(screen.getByText(/The response failed/i)).toBeInTheDocument();
+    expect(screen.getByText(/provider timed out/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
+  });
+
+  it("reconciles from the durable record when the status store reports a finish", async () => {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const { rerender } = render(tree(client, 0.1));
+    await settle();
+
+    await startStreaming(client, rerender);
+    expect(screen.getByText(/AI is thinking/i)).toBeInTheDocument();
+
+    // The polled run registry is authoritative: it says the run finished and
+    // the durable record says it completed with a persisted answer.
+    mockGetRunState.mockResolvedValue({
+      run_id: "run-1",
+      state: "completed",
+      persisted: true,
+      message_id: "msg-1",
+    });
+    mockRunStatus.completionRevisions = { "test-session-1": 1 };
+    rerender(tree(client, 0.3));
+    await settle();
+
+    expect(mockGetRunState).toHaveBeenCalled();
+    expect(screen.queryByText(/AI is thinking/i)).toBeNull();
+  });
+
+  it("turns an unrecoverable stall into a visible lost state with Retry", async () => {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const { rerender } = render(tree(client, 0.1));
+    await settle();
+
+    const handlers = await startStreaming(client, rerender);
+    mockResetStream.mockClear();
+
+    await act(async () => {
+      // The first three stalls schedule a resume; the fourth gives up
+      // (MAX_STALL_RECOVERIES = 3 in ChatWindow).
+      for (let i = 0; i < 4; i += 1) {
+        handlers.onStall("test-session-1");
+      }
+    });
+
+    expect(mockResetStream).toHaveBeenCalled();
+    expect(
+      screen.getByText(/Lost connection to the run/i),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
   });
 });

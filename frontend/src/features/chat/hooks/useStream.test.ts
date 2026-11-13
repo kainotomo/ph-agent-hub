@@ -469,6 +469,7 @@ function latestConfig() {
   return lastCall[1] as {
     onmessage?: (ev: { event: string; data: string; id?: string }) => void;
     onopen?: (response: Response) => Promise<void>;
+    onclose?: () => void;
     signal?: AbortSignal;
   };
 }
@@ -564,12 +565,15 @@ describe("useStream stream resume and liveness", () => {
     });
     expect(onStall).not.toHaveBeenCalled();
 
-    // 40 s of silence (no tokens, no heartbeat) means the link is dead.
+    // 25 s of silence (no tokens, no heartbeat) means the link is dead, and
+    // the abort is silent — the hook must settle the state itself (#616).
     act(() => {
-      vi.advanceTimersByTime(41_000);
+      vi.advanceTimersByTime(26_000);
     });
 
     expect(onStall).toHaveBeenCalledWith("s1");
+    expect(result.current.streaming).toBe(false);
+    expect(result.current.streamingSessionId).toBeNull();
   });
 
   it("treats stream_resync as terminal and notifies the caller", async () => {
@@ -579,6 +583,10 @@ describe("useStream stream resume and liveness", () => {
     act(() => {
       result.current.startStream("s1", "hi", [], undefined, {}, { onResync });
     });
+    await act(async () => {
+      await openStream();
+    });
+    expect(result.current.streaming).toBe(true);
 
     act(() => {
       latestConfig().onmessage?.({
@@ -588,6 +596,92 @@ describe("useStream stream resume and liveness", () => {
     });
 
     expect(onResync).toHaveBeenCalledTimes(1);
+    // The hook aborted the link: a silent abort must not leave the view
+    // "thinking" forever (Issue #616).
+    expect(result.current.streaming).toBe(false);
+  });
+
+  it("delivers run_terminal and settles the transport even if the socket stays open", async () => {
+    const { result } = renderHook(() => useStream());
+    const onRunTerminal = vi.fn();
+
+    act(() => {
+      result.current.startStream("s1", "hi", [], undefined, {}, {
+        onRunTerminal,
+      });
+    });
+    await act(async () => {
+      await openStream();
+    });
+    expect(result.current.streaming).toBe(true);
+
+    act(() => {
+      sseEventWithId(
+        "run_terminal",
+        {
+          session_id: "s1",
+          outcome: "completed",
+          persisted: true,
+          message_id: "m1",
+        },
+        "run-1:9",
+      );
+    });
+
+    expect(onRunTerminal).toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: "completed", persisted: true }),
+    );
+    // The transport is still attached, but the turn is over.
+    expect(result.current.streaming).toBe(false);
+    expect(result.current.streamingSessionId).toBeNull();
+  });
+
+  it("resetStream disarms the previous stream's watchdog", async () => {
+    const { result } = renderHook(() => useStream());
+    const onStall = vi.fn();
+
+    act(() => {
+      result.current.startStream("s1", "hi", [], undefined, {}, { onStall });
+    });
+    await act(async () => {
+      await openStream();
+    });
+
+    act(() => {
+      result.current.resetStream();
+      vi.advanceTimersByTime(60_000);
+    });
+
+    expect(onStall).not.toHaveBeenCalled();
+    expect(result.current.streaming).toBe(false);
+  });
+
+  it("ignores a superseded stream's close", async () => {
+    const { result } = renderHook(() => useStream());
+
+    act(() => {
+      result.current.startStream("s1", "first", [], undefined, {}, {});
+    });
+    const firstConfig = latestConfig();
+    await act(async () => {
+      await openStream();
+    });
+
+    // A new stream supersedes the first while it is still draining.
+    act(() => {
+      result.current.startStream("s1", "second", [], undefined, {}, {});
+    });
+    await act(async () => {
+      await openStream();
+    });
+    expect(result.current.streaming).toBe(true);
+
+    act(() => {
+      firstConfig.onclose?.();
+    });
+
+    // The stale close must not clear the live turn's state.
+    expect(result.current.streaming).toBe(true);
   });
 });
 

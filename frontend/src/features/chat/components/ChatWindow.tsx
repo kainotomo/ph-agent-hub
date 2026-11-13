@@ -22,9 +22,9 @@ import {
 } from "@ant-design/icons";
 import { useQuery, useInfiniteQuery, useQueryClient, type InfiniteData } from "@tanstack/react-query";
 import { MessageBubble } from "./MessageBubble";
-import { useStream } from "../hooks/useStream";
+import { useStream, type RunTerminalEvent } from "../hooks/useStream";
 import { useRunState } from "../hooks/useRunState";
-import { terminalCopy } from "../runStateMachine";
+import { isTerminalPhase, terminalCopy } from "../runStateMachine";
 import { useStickToBottom } from "../hooks/useStickToBottom";
 import { useStreamingContext } from "../../../providers/StreamingProvider";
 import { computeFirstItemIndex, MESSAGES_PER_PAGE } from "../services/messagePaging";
@@ -561,6 +561,12 @@ export const ChatWindow = React.memo(function ChatWindow({
     return () => setActiveSession(null);
   }, [sessionId, setActiveSession]);
 
+  // Issue #604 — the backend registry can say this conversation is running
+  // even when this tab is not the one streaming it (another tab/device, or
+  // we navigated away and back).  Show that state until the reconnect
+  // attaches and normal streaming progress takes over.
+  const isSessionRunning = !!sessionId && streamingSessionIds.has(sessionId);
+
   // Issue #604 — when a run for this conversation finishes (in this tab,
   // another tab, or while we were navigated away), refetch its persisted
   // data. The chat SSE stream's `message_complete` is best-effort and is
@@ -572,8 +578,22 @@ export const ChatWindow = React.memo(function ChatWindow({
     ? (completionRevisions[sessionId] ?? 0)
     : 0;
   const appliedCompletionRevisionsRef = useRef<Record<string, number>>({});
+  const reconciledCompletionRevisionsRef = useRef<Record<string, number>>({});
   useEffect(() => {
     if (!sessionId) return;
+
+    // Issue #616 — the status store is authoritative for liveness.  When it
+    // reports this conversation's run finished, reconcile the run-state
+    // machine from the durable record too: a missed `run_terminal` frame (or
+    // a socket that never closed) must not leave the view "thinking".  This
+    // is skipped while a newer run is live so a late finish cannot settle it.
+    const reconciled =
+      reconciledCompletionRevisionsRef.current[sessionId] ?? 0;
+    if (completionRevision > reconciled && !isSessionRunning) {
+      reconciledCompletionRevisionsRef.current[sessionId] = completionRevision;
+      void reconcileRunState();
+    }
+
     const applied = appliedCompletionRevisionsRef.current[sessionId] ?? 0;
     if (completionRevision <= applied) return;
     appliedCompletionRevisionsRef.current[sessionId] = completionRevision;
@@ -583,17 +603,21 @@ export const ChatWindow = React.memo(function ChatWindow({
     queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
     queryClient.invalidateQueries({ queryKey: ["sessionUsage", sessionId] });
     queryClient.invalidateQueries({ queryKey: ["message-step"] });
-  }, [sessionId, completionRevision, queryClient]);
-
-  // Issue #604 — the backend registry can say this conversation is running
-  // even when this tab is not the one streaming it (another tab/device, or
-  // we navigated away and back).  Show that state until the reconnect
-  // attaches and normal streaming progress takes over.
-  const isSessionRunning = !!sessionId && streamingSessionIds.has(sessionId);
+  }, [
+    sessionId,
+    completionRevision,
+    isSessionRunning,
+    reconcileRunState,
+    queryClient,
+  ]);
 
   // Issue #609 — inline terminal state, rendered outside the message list so
   // it is visible even when the failed turn produced no assistant bubble.
   const runTerminalCopy = terminalCopy(runState.snapshot);
+  // Issue #616 — once the run is terminal (frame, close, or reconciliation)
+  // the turn is over: a transport that has not closed yet must not make the
+  // conversation look like it is still working.
+  const runSettled = isTerminalPhase(runState.snapshot.phase);
 
   // ---- Issue #521: sticky scroll intent (no auto-scroll on finish) --------
   const scrollToBottom = useCallback(() => {
@@ -1346,6 +1370,18 @@ export const ChatWindow = React.memo(function ChatWindow({
             markTurnEnded();
           }
         },
+        onRunTerminal: (data: RunTerminalEvent["data"]) => {
+          // Issue #616 — adopt the producer's terminal outcome immediately.
+          // The socket closing (or never closing) is not the authority.
+          dispatchRunState({
+            type: "run_terminal",
+            outcome: data.outcome,
+            errorCode: data.error_code,
+            message: data.message,
+            messageId: data.message_id,
+            persisted: data.persisted,
+          });
+        },
         onTransportError: (err: string) => {
           // The connection dropped mid-run (backend killed, network loss).
           // Close-while-running resolves to `lost` in the state machine —
@@ -1390,7 +1426,18 @@ export const ChatWindow = React.memo(function ChatWindow({
 
           if (state.count >= MAX_STALL_RECOVERIES) {
             // Recovery has given up: the run is `lost` (rendered inline),
-            // not a silent spinner.
+            // not a silent spinner.  Clear the tab-local transport so the
+            // lost state and its Retry are actually visible (Issue #616);
+            // the durable record is reconciled by the status-store effect.
+            resetStream();
+            setHandoffPending(false);
+            setStreamingContent("");
+            setStreamingSegments([]);
+            setStreamingMessageId(null);
+            setStreamingTokens(null);
+            setStreamingStart(null);
+            setStreamingDuration(null);
+            setWorkflowStep({});
             dispatchRunState({ type: "stream_closed" });
             message.error(
               "Lost the live connection to this run. Refresh the page to catch up.",
@@ -1483,7 +1530,7 @@ export const ChatWindow = React.memo(function ChatWindow({
       setPendingUserMessage, setRegeneratingMsgId, setEditingMsgId,
       setHandoffPending,
       fetchFollowUpQuestions, refetchLatestPage,
-      startReconnect, dispatchRunState, reconcileRunState,
+      startReconnect, resetStream, dispatchRunState, reconcileRunState,
     ],
   );
 
@@ -2415,7 +2462,7 @@ export const ChatWindow = React.memo(function ChatWindow({
         />
       )}
 
-      {isSessionRunning && !streaming && !reconnecting && (
+      {isSessionRunning && !streaming && !reconnecting && !runSettled && (
         <div style={{ padding: "8px 16px 0", flexShrink: 0 }}>
           <Alert
             message="Agent is running…"
@@ -2646,8 +2693,11 @@ export const ChatWindow = React.memo(function ChatWindow({
               ),
             Footer: () => (
               <>
-                {/* Thinking placeholder — shown while streaming but before any content or reasoning */}
-              {streaming && streamingSegments.length === 0 && (
+                {/* Thinking placeholder — shown while streaming but before any
+                    content or reasoning.  A terminal turn whose authoritative
+                    status already cleared the run must not keep spinning even
+                    if the socket lingers (Issue #616). */}
+              {streaming && !(runSettled && !isSessionRunning) && streamingSegments.length === 0 && (
                 <div style={{ padding: "0 16px", marginBottom: 16 }}>
                   <div style={{ display: "flex", justifyContent: "flex-start", marginBottom: 2 }}>
                     <Space style={{ marginLeft: 4 }} size={2}>
@@ -2767,7 +2817,7 @@ export const ChatWindow = React.memo(function ChatWindow({
           can retry the same turn. */}
       {!demo && !widget && (runTerminalCopy || runState.snapshot.otherClient) && (
         <div style={{ padding: "0 16px 8px" }}>
-          {runTerminalCopy && !streaming ? (
+          {runTerminalCopy && !(streaming && isSessionRunning) ? (
             <Alert
               message={runTerminalCopy.title}
               description={runTerminalCopy.description}

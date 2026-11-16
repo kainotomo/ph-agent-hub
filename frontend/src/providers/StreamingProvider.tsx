@@ -401,9 +401,23 @@ export function StreamingProvider({
     };
   }, []);
 
+  // A local "running" entry is optimistic: if the registry never confirms
+  // it (a send that failed, a session that was busy), it must not keep a
+  // spinner and a reconnect loop alive forever.
+  const handleLocalRunDropped = useCallback((sessionId: string) => {
+    setRuns((prev) => {
+      const entry = prev[sessionId];
+      if (!entry || entry.origin !== "local") return prev;
+      const next = { ...prev };
+      delete next[sessionId];
+      return next;
+    });
+  }, []);
+
   useSessionStatusStream({
     enabled: !!user,
     localRuns: runs,
+    onLocalRunDropped: handleLocalRunDropped,
     onSnapshot: handleStatusSnapshot,
     onEvent: handleStatusEvent,
   });

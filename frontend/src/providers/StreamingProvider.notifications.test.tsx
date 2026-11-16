@@ -66,6 +66,7 @@ function latestEvent() {
   const calls = mocks.stream.mock.calls;
   return calls[calls.length - 1][0] as {
     onEvent: (event: Record<string, unknown>) => void;
+    onLocalRunDropped?: (sessionId: string) => void;
   };
 }
 
@@ -85,6 +86,20 @@ describe("StreamingProvider browser notifications", () => {
 
   afterEach(() => {
     setDocumentState({ visible: true, focused: true });
+  });
+
+  it("clears an optimistic local run the registry never confirms", () => {
+    const { result } = renderStore();
+    act(() => {
+      result.current.addStreamingSession("s1");
+    });
+    expect(result.current.streamingSessionIds.has("s1")).toBe(true);
+
+    act(() => {
+      latestEvent().onLocalRunDropped?.("s1");
+    });
+
+    expect(result.current.streamingSessionIds.has("s1")).toBe(false);
   });
 
   it("notifies once for a completion in a hidden tab", () => {

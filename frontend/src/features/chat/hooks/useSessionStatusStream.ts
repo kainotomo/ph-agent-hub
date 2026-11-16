@@ -50,6 +50,12 @@ export interface SessionStatusStreamOptions {
    * reported as finished instead of never being seen at all.
    */
   localRuns?: SessionRunMap;
+  /**
+   * Called when a locally registered run was never confirmed by the
+   * registry and has been abandoned (e.g. the send failed).  The owner
+   * should drop its optimistic entry so the UI stops showing it as running.
+   */
+  onLocalRunDropped?: (sessionId: string) => void;
   /** Called with the authoritative snapshot on every successful poll. */
   onSnapshot: (runs: RunSnapshotEntry[]) => void;
   /** Called for every run start/finish transition since the last poll. */
@@ -65,6 +71,8 @@ interface KnownRun {
    * silently when absent: it may simply not have started when the poll ran.
    */
   confirmed: boolean;
+  /** Consecutive polls in which an unconfirmed run was absent. */
+  misses: number;
 }
 
 interface RunsResponse {
@@ -97,15 +105,18 @@ function knownRunsQuery(known: Map<string, KnownRun>): string {
 export function useSessionStatusStream({
   enabled,
   localRuns,
+  onLocalRunDropped,
   onSnapshot,
   onEvent,
 }: SessionStatusStreamOptions): void {
   // Keep the latest callbacks without restarting the poll loop on render.
   const onSnapshotRef = useRef(onSnapshot);
   const onEventRef = useRef(onEvent);
+  const onLocalRunDroppedRef = useRef(onLocalRunDropped);
   const localRunsRef = useRef(localRuns);
   onSnapshotRef.current = onSnapshot;
   onEventRef.current = onEvent;
+  onLocalRunDroppedRef.current = onLocalRunDropped;
   localRunsRef.current = localRuns;
 
   useEffect(() => {
@@ -157,6 +168,7 @@ export function useSessionStatusStream({
             sessionId: run.session_id,
             runId: run.run_id,
             confirmed: true,
+            misses: 0,
           });
           onEventRef.current({
             session_id: run.session_id,
@@ -168,25 +180,31 @@ export function useSessionStatusStream({
           });
         } else {
           previous.confirmed = true;
+          previous.misses = 0;
         }
       }
 
       // Anything we believed was running but the registry no longer lists,
       // and the server could not report an outcome for (marker expired).
       for (const [sessionId, run] of known) {
-        if (!activeIds.has(sessionId)) {
+        if (activeIds.has(sessionId)) continue;
+        if (!run.confirmed) {
+          // Registered here but never listed by the registry: admission may
+          // still be in flight.  Give it a couple of polls, then clear the
+          // optimistic entry so a failed send cannot leave a spinner behind.
+          run.misses += 1;
+          if (run.misses < 2) continue;
           known.delete(sessionId);
-          // A locally registered run the registry never listed is not a
-          // finish: it may not have been admitted when the poll ran.  Keep
-          // polling; if it starts, it will be learned as a new run.
-          if (!run.confirmed) continue;
-          onEventRef.current({
-            session_id: sessionId,
-            run_id: run.runId,
-            state: "finished",
-            outcome: "lost",
-          });
+          onLocalRunDroppedRef.current?.(sessionId);
+          continue;
         }
+        known.delete(sessionId);
+        onEventRef.current({
+          session_id: sessionId,
+          run_id: run.runId,
+          state: "finished",
+          outcome: "lost",
+        });
       }
 
       onSnapshotRef.current(runs);
@@ -208,6 +226,7 @@ export function useSessionStatusStream({
             sessionId,
             runId: entry.runId,
             confirmed: false,
+            misses: 0,
           });
         } else if (!existing.runId && entry.runId) {
           existing.runId = entry.runId;

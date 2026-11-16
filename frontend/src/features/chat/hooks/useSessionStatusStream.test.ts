@@ -323,6 +323,37 @@ describe("useSessionStatusStream", () => {
     expect(onEvent).not.toHaveBeenCalled();
   });
 
+  it("clears an unconfirmed local run after two polls without a registry match", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ runs: [], finished: [] }));
+    const onDropped = vi.fn();
+    renderHook(() =>
+      useSessionStatusStream({
+        enabled: true,
+        localRuns: {
+          s1: {
+            runId: null,
+            kind: null,
+            startedAt: null,
+            origin: "local",
+            revision: 0,
+          },
+        },
+        onLocalRunDropped: onDropped,
+        onSnapshot: vi.fn(),
+        onEvent: vi.fn(),
+      }),
+    );
+    await flush();
+    expect(onDropped).not.toHaveBeenCalled();
+
+    await act(async () => {
+      vi.advanceTimersByTime(VISIBLE_INTERVAL);
+    });
+    await flush();
+
+    expect(onDropped).toHaveBeenCalledWith("s1");
+  });
+
   it("reports the finish of a locally started run that never appeared in a snapshot", async () => {
     fetchMock.mockResolvedValue(
       jsonResponse({

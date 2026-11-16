@@ -55,6 +55,7 @@ import {
   CredentialData,
   ToolInfo,
 } from "../../services/credentials";
+import { NotificationSettingsSection } from "./NotificationSettingsSection";
 
 const { Content } = Layout;
 const { Title, Text } = Typography;
@@ -177,6 +178,8 @@ export function AccountSettingsPage() {
           Connect your email, calendar, and task accounts to let the AI assistant
           read, search, and manage them on your behalf.
         </Text>
+
+        <NotificationSettingsSection />
 
         {isLoading ? (
           <div style={{ textAlign: "center", padding: 60 }}>

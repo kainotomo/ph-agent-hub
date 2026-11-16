@@ -5,7 +5,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import String, Boolean, DateTime, Enum, ForeignKey, func
+from sqlalchemy import JSON, String, Boolean, DateTime, Enum, ForeignKey, func
 from sqlalchemy.dialects.mysql import CHAR
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -31,6 +31,10 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     default_model_id: Mapped[str | None] = mapped_column(
         CHAR(36), ForeignKey("models.id"), nullable=True
+    )
+    notification_prefs: Mapped[dict | None] = mapped_column(
+        JSON, nullable=True, default=None,
+        comment="Per-user browser notification preferences (JSON)",
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

@@ -26,6 +26,14 @@ import React, {
 } from "react";
 import { useAuth } from "./AuthProvider";
 import { useSessionStatusStream } from "../features/chat/hooks/useSessionStatusStream";
+import { DEFAULT_NOTIFICATION_PREFS } from "../services/auth";
+import {
+  getNotificationPermission,
+  showBrowserNotification,
+} from "../services/browserNotifications";
+import { shouldNotifyFinishedRun } from "../features/chat/notificationPolicy";
+import { useUnreadTitle } from "../shared/hooks/useUnreadTitle";
+import { playCompletionSound } from "../shared/utils/sound";
 import {
   applyCompletionUnread,
   applyRunStatusEvent,
@@ -41,6 +49,8 @@ import {
 /** Per-device completion-unread session ids. */
 const UNREAD_STORAGE_KEY = "ph.sidebar.completedUnread";
 const MAX_UNREAD_IDS = 100;
+/** One browser notification per run, even if two events report the finish. */
+const NOTIFIED_DEDUPE_MS = 5 * 60_000;
 
 function loadUnreadIds(): Set<string> {
   try {
@@ -58,6 +68,8 @@ function loadUnreadIds(): Set<string> {
 
 interface SessionSeed {
   id: string;
+  /** Used for notification copy when the run finishes elsewhere. */
+  title?: string;
   running?: boolean;
   run_id?: string | null;
   runtime_revision?: number;
@@ -119,9 +131,30 @@ export function StreamingProvider({
     Record<string, number>
   >({});
 
+  // Issue #619 — the tab title is the permission-free "something finished"
+  // signal, and it survives a denied Notification prompt.
+  useUnreadTitle(completedUnreadIds.size);
+
   const runsRef = useRef(runs);
   runsRef.current = runs;
   const activeSessionRef = useRef<string | null>(null);
+
+  // Issue #619 — the notification preference is account-level, the browser
+  // permission is per device.  Refs keep the stream callbacks stable.
+  const notificationPrefs = user?.notification_prefs ?? DEFAULT_NOTIFICATION_PREFS;
+  const notificationPrefsRef = useRef(notificationPrefs);
+  notificationPrefsRef.current = notificationPrefs;
+
+  const sessionTitlesRef = useRef<Record<string, string>>({});
+  const notifiedRunsRef = useRef<Map<string, number>>(new Map());
+  const viewStateRef = useRef({
+    visible:
+      typeof document === "undefined"
+        ? true
+        : document.visibilityState === "visible",
+    focused: typeof document === "undefined" ? true : document.hasFocus(),
+    lastVisibleAt: null as number | null,
+  });
 
   // Highest revision applied per session, kept even after the entry is
   // removed.  This is the revision-ordered replacement for the old
@@ -214,6 +247,9 @@ export function StreamingProvider({
       const updates: Record<string, number> = {};
       for (const session of sessions) {
         updates[session.id] = session.runtime_revision ?? 0;
+        if (session.title) {
+          sessionTitlesRef.current[session.id] = session.title;
+        }
       }
       noteRevisions(updates);
     },
@@ -234,6 +270,56 @@ export function StreamingProvider({
     if (id) {
       setCompletedUnreadIds((prev) => clearUnread(prev, id));
     }
+  }, []);
+
+  const maybeNotifyFinishedRun = useCallback((event: RunStatusEvent) => {
+    const prefs = notificationPrefsRef.current;
+    const view = viewStateRef.current;
+    if (
+      !shouldNotifyFinishedRun(event, {
+        enabled: prefs.enabled,
+        onCompletion: prefs.on_completion,
+        onFailure: prefs.on_failure,
+        permission: getNotificationPermission(),
+        activeSessionId: activeSessionRef.current,
+        visible: view.visible,
+        focused: view.focused,
+        lastVisibleAt: view.lastVisibleAt,
+        now: Date.now(),
+      })
+    ) {
+      return;
+    }
+
+    // The same finish can arrive twice (a run_status event and the next
+    // snapshot); one notification per run is enough.
+    const key = `${event.session_id}:${event.run_id ?? `rev${event.revision ?? 0}`}`;
+    const now = Date.now();
+    for (const [seenKey, seenAt] of notifiedRunsRef.current) {
+      if (now - seenAt > NOTIFIED_DEDUPE_MS) {
+        notifiedRunsRef.current.delete(seenKey);
+      }
+    }
+    if (notifiedRunsRef.current.has(key)) return;
+    notifiedRunsRef.current.set(key, now);
+
+    const title = sessionTitlesRef.current[event.session_id];
+    const failed = event.outcome === "failed";
+    const body = failed
+      ? title
+        ? `“${title}” ended with an error.`
+        : "A run ended with an error."
+      : title
+        ? `“${title}” finished while you were away.`
+        : "A response finished while you were away.";
+    void showBrowserNotification({
+      title: failed ? "Run failed" : "Response ready",
+      body,
+      tag: `ph-session-${event.session_id}`,
+      url: `/chat/${event.session_id}`,
+      silent: !prefs.sound,
+    });
+    if (prefs.sound) playCompletionSound();
   }, []);
 
   const handleStatusSnapshot = useCallback(
@@ -265,6 +351,7 @@ export function StreamingProvider({
 
   const handleStatusEvent = useCallback(
     (event: RunStatusEvent) => {
+      maybeNotifyFinishedRun(event);
       const existing = runsRef.current[event.session_id];
       if (event.state === "finished") {
         noteRevisions({
@@ -289,11 +376,48 @@ export function StreamingProvider({
         }),
       );
     },
-    [bumpCompletionRevision, noteRevisions],
+    [bumpCompletionRevision, maybeNotifyFinishedRun, noteRevisions],
   );
+
+  // A visible window can still sit behind another application, so track
+  // focus as well as document visibility; only "elsewhere" gets a prompt.
+  useEffect(() => {
+    const update = () => {
+      const visible = document.visibilityState === "visible";
+      const focused = document.hasFocus();
+      if (visible && !viewStateRef.current.visible) {
+        viewStateRef.current.lastVisibleAt = Date.now();
+      }
+      viewStateRef.current.visible = visible;
+      viewStateRef.current.focused = focused;
+    };
+    document.addEventListener("visibilitychange", update);
+    window.addEventListener("focus", update);
+    window.addEventListener("blur", update);
+    return () => {
+      document.removeEventListener("visibilitychange", update);
+      window.removeEventListener("focus", update);
+      window.removeEventListener("blur", update);
+    };
+  }, []);
+
+  // A local "running" entry is optimistic: if the registry never confirms
+  // it (a send that failed, a session that was busy), it must not keep a
+  // spinner and a reconnect loop alive forever.
+  const handleLocalRunDropped = useCallback((sessionId: string) => {
+    setRuns((prev) => {
+      const entry = prev[sessionId];
+      if (!entry || entry.origin !== "local") return prev;
+      const next = { ...prev };
+      delete next[sessionId];
+      return next;
+    });
+  }, []);
 
   useSessionStatusStream({
     enabled: !!user,
+    localRuns: runs,
+    onLocalRunDropped: handleLocalRunDropped,
     onSnapshot: handleStatusSnapshot,
     onEvent: handleStatusEvent,
   });

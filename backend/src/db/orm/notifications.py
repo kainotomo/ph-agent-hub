@@ -32,6 +32,11 @@ class Notification(Base):
     TYPE_TASK_SCHEDULED_COMPLETED = "TASK_SCHEDULED_COMPLETED"
     TYPE_TASK_SCHEDULED_FAILED = "TASK_SCHEDULED_FAILED"
 
+    # Chat-run outcome records (Issue #619) — created by
+    # ``services/run_notifications.py`` for runs nobody was watching.
+    TYPE_CHAT_RUN_COMPLETED = "CHAT_RUN_COMPLETED"
+    TYPE_CHAT_RUN_FAILED = "CHAT_RUN_FAILED"
+
     # --- Identity ---
     id: Mapped[str] = mapped_column(
         CHAR(36), primary_key=True, default=lambda: str(uuid.uuid4()),

@@ -519,6 +519,17 @@ GET    /notifications/unread-count # Get unread notification count
 
 Notifications are created for background task completion, scheduled task events, and other agent-triggered events. They are user-scoped with read/unread state tracking.
 
+Chat runs also produce a record when they end while nobody is watching (`services/run_notifications.py`): failures are recorded whenever the user's notifications are enabled, and successful completions only when no browser was subscribed to the run's stream and the run lasted at least `NOTIFY_MIN_COMPLETED_SECONDS` (default `60`). These records point at a session (`reference_type = "session"`) and are gated by the user's notification preferences below.
+
+Per-user preferences live in the `users.notification_prefs` JSON column and are normalised by `services/user_preferences.py`:
+
+```
+GET  /users/me                 # response includes notification_prefs
+PUT  /users/me/notifications   # merge-update (omitted fields are preserved)
+```
+
+The preference keys are `enabled` (master switch, opt-in), `on_completion`, `on_failure`, and `sound`.
+
 ### **3.22 Update Semantics**
 
 All `PUT` endpoints follow a consistent convention for handling request bodies:

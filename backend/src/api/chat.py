@@ -84,6 +84,7 @@ from ..db.orm.users import User as UserORM
 from ..services import (
     audit_service,
     folder_service,
+    run_notifications,
     run_record,
     session_runtime,
     session_service,
@@ -2707,6 +2708,11 @@ async def _run_agent_background(
                     tokens_out=tokens_out,
                 )
 
+            # Snapshot presence while subscribers are still registered:
+            # they unregister asynchronously after close(), so a count taken
+            # later would report an unwatched run as watched.
+            had_subscriber = bridge.subscriber_count > 0
+
             # Close the bridge — signals all subscribers to stop.
             await bridge.close()
 
@@ -2725,6 +2731,20 @@ async def _run_agent_background(
                 await asyncio.shield(stream_db.close())
             except (asyncio.CancelledError, Exception):
                 pass
+
+            # Issue #619 — a run that finished while nobody was subscribed
+            # to its stream must still be visible when the user comes back.
+            # The durable record is the catch-up path for the bell; the
+            # client-side notification covers the tab that is still open.
+            await run_notifications.record_run_outcome_safe(
+                session_id=session_id,
+                user_id=lease.user_id,
+                tenant_id=lease.tenant_id,
+                outcome=outcome,
+                duration_s=_duration_ms(lease.started_at) / 1000.0,
+                attached=had_subscriber,
+                started_at=_parse_iso_datetime(lease.started_at),
+            )
 
             logger.info(
                 "PH-RUN-FINISH run_id=%s session_id=%s outcome=%s "

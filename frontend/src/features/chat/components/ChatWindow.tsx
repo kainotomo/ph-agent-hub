@@ -552,6 +552,7 @@ export const ChatWindow = React.memo(function ChatWindow({
   // Issue #604 — tell the status store which conversation is on screen so
   // completion-unread markers clear when the user is actually looking.
   const {
+    addStreamingSession,
     setActiveSession,
     streamingSessionIds,
     completionRevisions,
@@ -560,6 +561,11 @@ export const ChatWindow = React.memo(function ChatWindow({
     setActiveSession(sessionId ?? null);
     return () => setActiveSession(null);
   }, [sessionId, setActiveSession]);
+
+  // Issue #619 — runs are registered explicitly where they are started
+  // (send / retry / regenerate), never from a reconnect: a reconnect is a
+  // reaction to a status entry, so registering there would let a stale
+  // entry keep itself alive.
 
   // Issue #604 — the backend registry can say this conversation is running
   // even when this tab is not the one streaming it (another tab/device, or
@@ -1554,6 +1560,7 @@ export const ChatWindow = React.memo(function ChatWindow({
     setStreamingTokens(null);
     beginRun();
     dispatchRunState({ type: "stream_open" });
+    if (sessionId) addStreamingSession(sessionId);
 
     // ---- Edit mode: streaming, like regenerate but on the user message ----
     if (editingMsgId) {
@@ -1752,7 +1759,7 @@ export const ChatWindow = React.memo(function ChatWindow({
         },
       );
     }
-  }, [inputValue, streaming, sessionId, startStream, queryClient, pendingFiles, editingMsgId, pendingFlag, folderId, pendModelId, pendTemplateId, pendSkillId, pendAutoRoute, pendAutoSelectTools, pendActiveToolIds, thinkingEnabled, reasoningEffort, sessionTemperature, isAutopilotMode, setAutopilotState, beginRun, dispatchRunState]);
+  }, [inputValue, streaming, sessionId, startStream, queryClient, pendingFiles, editingMsgId, pendingFlag, folderId, pendModelId, pendTemplateId, pendSkillId, pendAutoRoute, pendAutoSelectTools, pendActiveToolIds, thinkingEnabled, reasoningEffort, sessionTemperature, isAutopilotMode, setAutopilotState, beginRun, dispatchRunState, addStreamingSession]);
 
   /**
    * Issue #609 — retry the last submitted turn after a failed/lost run.
@@ -1779,6 +1786,7 @@ export const ChatWindow = React.memo(function ChatWindow({
     setHandoffPending(false);
     beginRun();
     dispatchRunState({ type: "stream_open" });
+    if (sessionId) addStreamingSession(sessionId);
     if (last?.autopilot) {
       setAutopilotState({
         currentTurn: 1,
@@ -1803,7 +1811,7 @@ export const ChatWindow = React.memo(function ChatWindow({
     );
   }, [
     streaming, sessionId, messages, beginRun, dispatchRunState, startStream,
-    buildStreamHandlers, followNow,
+    buildStreamHandlers, followNow, addStreamingSession,
   ]);
 
   const handleStop = async () => {
@@ -1892,6 +1900,7 @@ export const ChatWindow = React.memo(function ChatWindow({
     setStreamingTokens(null);
     beginRun();
     dispatchRunState({ type: "stream_open" });
+    if (sessionId) addStreamingSession(sessionId);
 
     // Jump to bottom and re-engage following when regenerating.
     followNow();
@@ -2079,7 +2088,7 @@ export const ChatWindow = React.memo(function ChatWindow({
       },
     };
     startRegenerateStream(sessionId, messageId, regenerateHandlers);
-  }, [streaming, sessionId, startRegenerateStream, queryClient, regeneratingMsgId, refetchLatestPage, beginRun, dispatchRunState]);
+  }, [streaming, sessionId, startRegenerateStream, queryClient, regeneratingMsgId, refetchLatestPage, beginRun, dispatchRunState, addStreamingSession]);
 
   // File upload handlers
   const handleFileUpload = useCallback(

@@ -227,6 +227,13 @@ class Settings(BaseSettings):
     """TTL of a stream cancellation flag.  Auto-expires so a stale cancel
     can never outlive the run it was meant for."""
 
+    # --- Completion notifications (Issue #619) ---
+    NOTIFY_MIN_COMPLETED_SECONDS: int = 60
+    """A successfully completed run becomes a server-side notification
+    only when no browser was subscribed to it and it lasted at least this
+    long.  Failures are recorded whenever the user's notifications are
+    enabled; short successful runs are not."""
+
     # --- Scheduled tasks (Issue #297) ---
     SCHEDULER_POLL_INTERVAL_SECONDS: int = 30
     """How often the scheduler loop looks for due scheduled tasks.  This

@@ -698,6 +698,7 @@ Notifications alert you to important events like background task completion and 
 - Click the **bell icon** 🔔 in the chat header to open the notification panel
 - Unread notifications show a badge with the count
 - Click any notification to view details or navigate to the related session
+- **Notification settings** at the bottom of the panel opens `/settings`, where browser notifications are enabled or disabled
 
 ### 16.2 Marking Notifications
 
@@ -711,6 +712,31 @@ Notifications alert you to important events like background task completion and 
 | Background task completed | Your background task finishes execution |
 | Background task failed | Your background task encounters an error |
 | Scheduled task executed | A scheduled task you created has run |
+| Chat response completed | A chat run finishes while no browser was watching it |
+| Chat run failed | A chat run ends with an error |
+
+### 16.4 Browser Notifications
+
+The app can also notify you **outside** the app while it is open in a browser tab:
+
+1. Open **Settings** (`/settings`) and find the **Notifications** card
+2. Turn on **Notify me when a response finishes**
+3. Allow the browser permission prompt
+
+Settings are saved to your account, so they follow you to other devices — but each browser still needs its own permission. The card shows whether this device is enabled and offers a **Send test notification** button.
+
+| Event | Notification |
+|---|---|
+| Response completed | A run finishes while you are not reading that session — another tab, another app, or another session |
+| Run failed | A run ends with an error |
+
+What does **not** notify:
+
+- A run in the session you are currently reading, with the app visible and focused (the answer is already on screen)
+- Nothing when the browser tab is fully closed — this is not a push service. Runs that failed (or took more than a minute) while nobody was watching appear in the bell when you open the app again
+- The embedded widget and the demo page
+
+When notifications are denied or unsupported, the tab title still shows an unread count (for example `(2) PH Agent Hub`), and the sidebar dot still marks finished sessions.
 
 ---
 

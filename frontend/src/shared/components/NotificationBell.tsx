@@ -221,7 +221,7 @@ export function NotificationBell() {
         />
       )}
 
-      {/* Footer link */}
+      {/* Footer links */}
       <div
         style={{
           borderTop: "1px solid #f0f0f0",
@@ -229,16 +229,28 @@ export function NotificationBell() {
           textAlign: "center",
         }}
       >
-        <Button
-          type="link"
-          size="small"
-          onClick={() => {
-            setOpen(false);
-            navigate("/background-tasks");
-          }}
-        >
-          View all background tasks
-        </Button>
+        <Space size="small" wrap>
+          <Button
+            type="link"
+            size="small"
+            onClick={() => {
+              setOpen(false);
+              navigate("/settings");
+            }}
+          >
+            Notification settings
+          </Button>
+          <Button
+            type="link"
+            size="small"
+            onClick={() => {
+              setOpen(false);
+              navigate("/background-tasks");
+            }}
+          >
+            View all background tasks
+          </Button>
+        </Space>
       </div>
     </div>
   );

@@ -698,6 +698,7 @@ Notifications alert you to important events like background task completion and 
 - Click the **bell icon** 🔔 in the chat header to open the notification panel
 - Unread notifications show a badge with the count
 - Click any notification to view details or navigate to the related session
+- **Notification settings** at the bottom of the panel opens `/settings`, where browser notifications are enabled or disabled
 
 ### 16.2 Marking Notifications
 

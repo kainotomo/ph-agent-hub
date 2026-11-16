@@ -108,14 +108,28 @@ describe("StreamingProvider browser notifications", () => {
     );
   });
 
-  it("stays quiet while the app is focused", () => {
+  it("stays quiet for the session on screen", () => {
     setDocumentState({ visible: true, focused: true });
     const { result } = renderStore();
     act(() => {
       result.current.seedFromSessions([{ id: "s1", title: "T" }]);
+      result.current.setActiveSession("s1");
       latestEvent().onEvent(finished);
     });
     expect(mocks.show).not.toHaveBeenCalled();
+  });
+
+  it("notifies for another session while the app is focused", () => {
+    setDocumentState({ visible: true, focused: true });
+    const { result } = renderStore();
+    act(() => {
+      result.current.seedFromSessions([{ id: "s1", title: "Quarterly report" }]);
+      result.current.setActiveSession("another-session");
+      latestEvent().onEvent(finished);
+    });
+    expect(mocks.show).toHaveBeenCalledWith(
+      expect.objectContaining({ tag: "ph-session-s1" }),
+    );
   });
 
   it("uses the failure copy for a failed run", () => {

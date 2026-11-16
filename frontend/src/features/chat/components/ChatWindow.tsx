@@ -552,6 +552,7 @@ export const ChatWindow = React.memo(function ChatWindow({
   // Issue #604 — tell the status store which conversation is on screen so
   // completion-unread markers clear when the user is actually looking.
   const {
+    addStreamingSession,
     setActiveSession,
     streamingSessionIds,
     completionRevisions,
@@ -560,6 +561,15 @@ export const ChatWindow = React.memo(function ChatWindow({
     setActiveSession(sessionId ?? null);
     return () => setActiveSession(null);
   }, [sessionId, setActiveSession]);
+
+  // Issue #619 — register the run the moment this tab starts it, so the
+  // status poll can report its finish even when the tab is hidden (or the
+  // user navigates away) before the first snapshot lists it as active.
+  useEffect(() => {
+    if (streaming && sessionId) {
+      addStreamingSession(sessionId);
+    }
+  }, [streaming, sessionId, addStreamingSession]);
 
   // Issue #604 — the backend registry can say this conversation is running
   // even when this tab is not the one streaming it (another tab/device, or

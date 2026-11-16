@@ -281,6 +281,7 @@ export function StreamingProvider({
         onCompletion: prefs.on_completion,
         onFailure: prefs.on_failure,
         permission: getNotificationPermission(),
+        activeSessionId: activeSessionRef.current,
         visible: view.visible,
         focused: view.focused,
         lastVisibleAt: view.lastVisibleAt,
@@ -402,6 +403,7 @@ export function StreamingProvider({
 
   useSessionStatusStream({
     enabled: !!user,
+    localRuns: runs,
     onSnapshot: handleStatusSnapshot,
     onEvent: handleStatusEvent,
   });

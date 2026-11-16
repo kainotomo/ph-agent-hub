@@ -22,6 +22,7 @@ import { getToken, refreshAccessToken } from "../../../services/api";
 import type {
   RunSnapshotEntry,
   RunStatusEvent,
+  SessionRunMap,
 } from "../sessionStatusStore";
 
 const BASE_URL = import.meta.env.VITE_API_URL || "/api";
@@ -30,12 +31,25 @@ const BASE_URL = import.meta.env.VITE_API_URL || "/api";
 const VISIBLE_INTERVAL_MS = 3_000;
 /** Slower cadence in a background tab — the run is still tracked exactly. */
 const HIDDEN_INTERVAL_MS = 15_000;
+/**
+ * Faster hidden cadence while this tab owns an active run (Issue #619):
+ * the completion notification is only as timely as the poll that reports
+ * it, and 15 s is a long wait when you just switched windows.
+ */
+const HIDDEN_ACTIVE_INTERVAL_MS = 5_000;
 /** Backoff cap after repeated failures (server down, offline). */
 const MAX_BACKOFF_MS = 30_000;
 
 export interface SessionStatusStreamOptions {
   /** Poll only while the user is authenticated. */
   enabled: boolean;
+  /**
+   * Runs this tab has already started (Issue #619).  They are merged into
+   * the poll's known set so a run that begins and ends between two polls —
+   * typically in a background tab, where the cadence is 15 s — is still
+   * reported as finished instead of never being seen at all.
+   */
+  localRuns?: SessionRunMap;
   /** Called with the authoritative snapshot on every successful poll. */
   onSnapshot: (runs: RunSnapshotEntry[]) => void;
   /** Called for every run start/finish transition since the last poll. */
@@ -45,6 +59,12 @@ export interface SessionStatusStreamOptions {
 interface KnownRun {
   sessionId: string;
   runId: string | null;
+  /**
+   * True once the registry has actually listed this run as active.  A run
+   * that was only registered locally and has not been seen yet is dropped
+   * silently when absent: it may simply not have started when the poll ran.
+   */
+  confirmed: boolean;
 }
 
 interface RunsResponse {
@@ -57,11 +77,12 @@ interface RunsResponse {
   }>;
 }
 
-function intervalForVisibility(): number {
+function intervalForVisibility(hasActiveRun: boolean): number {
   if (typeof document === "undefined") return VISIBLE_INTERVAL_MS;
-  return document.visibilityState === "hidden"
-    ? HIDDEN_INTERVAL_MS
-    : VISIBLE_INTERVAL_MS;
+  if (document.visibilityState === "hidden") {
+    return hasActiveRun ? HIDDEN_ACTIVE_INTERVAL_MS : HIDDEN_INTERVAL_MS;
+  }
+  return VISIBLE_INTERVAL_MS;
 }
 
 /** Build the `?sessions=` hint so the server can report finishes we know. */
@@ -75,14 +96,17 @@ function knownRunsQuery(known: Map<string, KnownRun>): string {
 
 export function useSessionStatusStream({
   enabled,
+  localRuns,
   onSnapshot,
   onEvent,
 }: SessionStatusStreamOptions): void {
   // Keep the latest callbacks without restarting the poll loop on render.
   const onSnapshotRef = useRef(onSnapshot);
   const onEventRef = useRef(onEvent);
+  const localRunsRef = useRef(localRuns);
   onSnapshotRef.current = onSnapshot;
   onEventRef.current = onEvent;
+  localRunsRef.current = localRuns;
 
   useEffect(() => {
     if (!enabled) return;
@@ -132,6 +156,7 @@ export function useSessionStatusStream({
           known.set(run.session_id, {
             sessionId: run.session_id,
             runId: run.run_id,
+            confirmed: true,
           });
           onEventRef.current({
             session_id: run.session_id,
@@ -141,6 +166,8 @@ export function useSessionStatusStream({
             started_at: run.started_at ?? null,
             revision: run.revision,
           });
+        } else {
+          previous.confirmed = true;
         }
       }
 
@@ -149,6 +176,10 @@ export function useSessionStatusStream({
       for (const [sessionId, run] of known) {
         if (!activeIds.has(sessionId)) {
           known.delete(sessionId);
+          // A locally registered run the registry never listed is not a
+          // finish: it may not have been admitted when the poll ran.  Keep
+          // polling; if it starts, it will be learned as a new run.
+          if (!run.confirmed) continue;
           onEventRef.current({
             session_id: sessionId,
             run_id: run.runId,
@@ -165,9 +196,27 @@ export function useSessionStatusStream({
       if (disposed || inFlight) return;
       inFlight = true;
 
+      // A run this tab started is worth asking about even before the first
+      // poll saw it active: a short run in a background tab can start and
+      // finish inside a single 15 s interval.
+      for (const [sessionId, entry] of Object.entries(
+        localRunsRef.current ?? {},
+      )) {
+        const existing = known.get(sessionId);
+        if (!existing) {
+          known.set(sessionId, {
+            sessionId,
+            runId: entry.runId,
+            confirmed: false,
+          });
+        } else if (!existing.runId && entry.runId) {
+          existing.runId = entry.runId;
+        }
+      }
+
       controller = new AbortController();
       const token = getToken();
-      let nextDelay = intervalForVisibility();
+      let nextDelay = intervalForVisibility(known.size > 0);
 
       try {
         const response = await fetch(

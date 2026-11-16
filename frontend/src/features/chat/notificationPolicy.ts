@@ -20,6 +20,8 @@ export interface NotificationContext {
   onFailure: boolean;
   /** Browser permission for this device. */
   permission: BrowserNotificationPermission;
+  /** Session currently on screen, if any. */
+  activeSessionId: string | null;
   visible: boolean;
   focused: boolean;
   /** Epoch ms of the last transition to visible, if it happened. */
@@ -42,8 +44,16 @@ export function shouldNotifyFinishedRun(
   if (event.outcome === "completed" && !context.onCompletion) return false;
   if (event.outcome === "failed" && !context.onFailure) return false;
 
-  // A visible, focused tab already shows the result (dot / message).
-  if (context.visible && context.focused) return false;
+  // A visible, focused tab already shows the result of the session on
+  // screen; a run in a *different* session still deserves a prompt even
+  // while the user is working in the app.
+  if (
+    context.visible &&
+    context.focused &&
+    context.activeSessionId === event.session_id
+  ) {
+    return false;
+  }
 
   // After refocusing, the poll re-delivers old finishes; they are not news.
   if (

@@ -55,6 +55,10 @@ describe("useSessionStatusStream", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.useRealTimers();
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "visible",
+    });
   });
 
   it("does not poll when disabled", () => {
@@ -254,5 +258,106 @@ describe("useSessionStatusStream", () => {
     await flush();
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("polls faster in a hidden tab while this tab owns a run", async () => {
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "hidden",
+    });
+    fetchMock.mockResolvedValue(
+      jsonResponse({ runs: [{ session_id: "s1", run_id: "r1" }], finished: [] }),
+    );
+
+    renderHook(() =>
+      useSessionStatusStream({
+        enabled: true,
+        localRuns: {
+          s1: {
+            runId: null,
+            kind: null,
+            startedAt: null,
+            origin: "local",
+            revision: 0,
+          },
+        },
+        onSnapshot: vi.fn(),
+        onEvent: vi.fn(),
+      }),
+    );
+    await flush();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // 5 s, not the 15 s idle cadence.
+    await act(async () => {
+      vi.advanceTimersByTime(5_000);
+    });
+    await flush();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("asks about a locally started run before the first snapshot sees it", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ runs: [], finished: [] }));
+    const onEvent = vi.fn();
+    renderHook(() =>
+      useSessionStatusStream({
+        enabled: true,
+        localRuns: {
+          s1: {
+            runId: null,
+            kind: null,
+            startedAt: null,
+            origin: "local",
+            revision: 0,
+          },
+        },
+        onSnapshot: vi.fn(),
+        onEvent,
+      }),
+    );
+    await flush();
+
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/chat/runs?sessions=s1%3A");
+    // Not seen active yet: absence is not a finish (it may just be starting).
+    expect(onEvent).not.toHaveBeenCalled();
+  });
+
+  it("reports the finish of a locally started run that never appeared in a snapshot", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        runs: [],
+        finished: [
+          { session_id: "s1", run_id: "r9", outcome: "completed", revision: 3 },
+        ],
+      }),
+    );
+    const onEvent = vi.fn();
+    renderHook(() =>
+      useSessionStatusStream({
+        enabled: true,
+        localRuns: {
+          s1: {
+            runId: null,
+            kind: null,
+            startedAt: null,
+            origin: "local",
+            revision: 0,
+          },
+        },
+        onSnapshot: vi.fn(),
+        onEvent,
+      }),
+    );
+    await flush();
+
+    expect(onEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        session_id: "s1",
+        run_id: "r9",
+        state: "finished",
+        outcome: "completed",
+      }),
+    );
   });
 });

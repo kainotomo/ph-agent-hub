@@ -24,6 +24,7 @@ function context(overrides: Partial<NotificationContext> = {}): NotificationCont
     onCompletion: true,
     onFailure: true,
     permission: "granted",
+    activeSessionId: null,
     visible: false,
     focused: false,
     lastVisibleAt: null,
@@ -43,10 +44,31 @@ describe("shouldNotifyFinishedRun", () => {
     ).toBe(true);
   });
 
-  it("stays quiet while the user is looking at the app", () => {
+  it("stays quiet for the session the user is reading", () => {
     expect(
-      shouldNotifyFinishedRun(completed, context({ visible: true, focused: true })),
+      shouldNotifyFinishedRun(
+        completed,
+        context({ visible: true, focused: true, activeSessionId: "s1" }),
+      ),
     ).toBe(false);
+  });
+
+  it("notifies for another session even while the app is focused", () => {
+    expect(
+      shouldNotifyFinishedRun(
+        completed,
+        context({ visible: true, focused: true, activeSessionId: "other" }),
+      ),
+    ).toBe(true);
+  });
+
+  it("notifies for any session when the user is off the chat area", () => {
+    expect(
+      shouldNotifyFinishedRun(
+        completed,
+        context({ visible: true, focused: true, activeSessionId: null }),
+      ),
+    ).toBe(true);
   });
 
   it("requires the master switch and the browser permission", () => {

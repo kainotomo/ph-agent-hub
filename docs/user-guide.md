@@ -727,12 +727,12 @@ Settings are saved to your account, so they follow you to other devices — but 
 
 | Event | Notification |
 |---|---|
-| Response completed | A run finishes while the tab is hidden or the window is unfocused |
+| Response completed | A run finishes while you are not reading that session — another tab, another app, or another session |
 | Run failed | A run ends with an error |
 
 What does **not** notify:
 
-- A run in the session you are reading, or while the app is focused
+- A run in the session you are currently reading, with the app visible and focused (the answer is already on screen)
 - Nothing when the browser tab is fully closed — this is not a push service. Runs that failed (or took more than a minute) while nobody was watching appear in the bell when you open the app again
 - The embedded widget and the demo page
 

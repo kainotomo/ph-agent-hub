@@ -108,6 +108,7 @@ const mockRunStatus = vi.hoisted(() => ({
 
 vi.mock("../../../providers/StreamingProvider", () => ({
   useStreamingContext: () => ({
+    addStreamingSession: vi.fn(),
     streamingSessionIds: mockRunStatus.streamingSessionIds,
     completionRevisions: mockRunStatus.completionRevisions,
     setActiveSession: mockSetActiveSession,

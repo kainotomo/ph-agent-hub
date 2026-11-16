@@ -261,7 +261,8 @@ The PWA install targets the **Chat Area** as the primary experience. The admin a
 - Use `vite-plugin-pwa` to generate the service worker and manifest during the build
 - Cache the app shell (HTML, JS, CSS) for fast load on repeat visits
 - Do not cache backend API responses in the service worker; data freshness is handled by TanStack Query
-- Push notifications (for agent completion events) are supported on Android and on iOS 16.4+
+- **Browser notifications** (Issue #619) are client-side only: a tab that stays open shows an OS notification when a run finishes while the page is hidden or unfocused. There is no Web Push subscription, so a closed tab receives nothing at that moment; the backend records qualifying finishes for the bell instead (`services/run_notifications.py`). Permission is requested only from the `/settings` switch, and `public/sw-notifications.js` (Workbox `importScripts`) handles notification clicks.
+- The tab title shows an unread count while completions are unread — the permission-free fallback when notifications are denied or unsupported.
 - In-app notifications (bell icon, count badge, dropdown panel) are supported for all users via the `/api/notifications` endpoints (see [backend-architecture.md](backend-architecture.md) §3.21)
 
 ---

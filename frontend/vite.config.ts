@@ -9,6 +9,10 @@ export default defineConfig({
       registerType: "autoUpdate",
       includeAssets: ["icons/icon-192.png", "icons/icon-512.png", "logo.svg"],
       workbox: {
+        // Issue #619 — notification click handling lives beside the
+        // generated service worker; Workbox imports it at install time.
+        importScripts: ["sw-notifications.js"],
+
         maximumFileSizeToCacheInBytes: 4 * 1024 * 1024, // 4 MB — our main bundle is ~2.2 MB
         runtimeCaching: [
           {

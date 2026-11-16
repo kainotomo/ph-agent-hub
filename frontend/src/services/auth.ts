@@ -7,6 +7,21 @@
 
 import api, { setToken, getToken } from "./api";
 
+/** Browser-notification preferences stored on the signed-in user. */
+export interface NotificationPreferences {
+  enabled: boolean;
+  on_completion: boolean;
+  on_failure: boolean;
+  sound: boolean;
+}
+
+export const DEFAULT_NOTIFICATION_PREFS: NotificationPreferences = {
+  enabled: false,
+  on_completion: true,
+  on_failure: true,
+  sound: false,
+};
+
 export interface UserProfile {
   id: string;
   email: string;
@@ -15,6 +30,9 @@ export interface UserProfile {
   tenant_id: string;
   is_active: boolean;
   default_model_id: string | null;
+  /** Absent on profiles cached before Issue #619. */
+  notification_prefs?: NotificationPreferences;
+
   created_at: string;
 }
 
@@ -58,6 +76,15 @@ export async function setDefaultModel(modelId: string | null): Promise<void> {
   return api<void>("/users/me/default-model", {
     method: "PUT",
     body: { model_id: modelId },
+  });
+}
+
+export async function setNotificationPrefs(
+  prefs: NotificationPreferences,
+): Promise<NotificationPreferences> {
+  return api<NotificationPreferences>("/users/me/notifications", {
+    method: "PUT",
+    body: prefs,
   });
 }
 

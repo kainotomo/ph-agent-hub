@@ -112,8 +112,11 @@ export function NotificationBell() {
     }
     setOpen(false);
 
-    // Navigate to the relevant session
-    if (notif.reference_id && notif.reference_type === "autopilot_run") {
+    // Chat-run records point at the session (Issue #619); autopilot
+    // records open the background task list.
+    if (notif.reference_id && notif.reference_type === "session") {
+      navigate(`/chat/${notif.reference_id}`);
+    } else if (notif.reference_id && notif.reference_type === "autopilot_run") {
       navigate("/background-tasks");
     }
   };

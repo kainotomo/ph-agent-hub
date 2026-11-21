@@ -132,7 +132,7 @@ async def get_widget_config(
         "selected_model_id": config.default_model_id,
         "thinking_enabled": False,
         "temperature": None,
-        "active_tool_ids": None,
+        "active_tool_ids": [],
         "created_at": now.isoformat(),
         "updated_at": now.isoformat(),
     }
@@ -348,5 +348,5 @@ async def get_widget_follow_up_questions(
     the message response completes.  Polled once by the frontend when
     the stream finishes.
     """
-    questions = await _get_follow_up_questions(ctx.session_id)
+    questions = await _get_follow_up_questions(ctx.tenant_id, ctx.session_id)
     return FollowUpQuestionsResponse(questions=questions or [])

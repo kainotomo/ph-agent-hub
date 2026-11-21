@@ -340,13 +340,18 @@ describe("useStream", () => {
   // ── Demo/widget fallback mode ─────────────────────────────────────────
 
   it("uses regular fetch instead of SSE when apiPrefix is not 'chat'", async () => {
-    mockFetch.mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({
-        content: "Demo response",
-        message_id: "demo-msg-1",
-      }),
-    });
+    mockFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          content: "Demo response",
+          message_id: "demo-msg-1",
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      ),
+    );
 
     const { result } = renderHook(() => useStream("demo"));
     const onToken = vi.fn();
@@ -370,6 +375,66 @@ describe("useStream", () => {
 
     expect(onMessageComplete).toHaveBeenCalled();
     expect(onToken).toHaveBeenCalled();
+  });
+
+  it("surfaces a plain-text 500 as onError instead of SyntaxError", async () => {
+    mockFetch.mockResolvedValue(
+      new Response("Internal Server Error", {
+        status: 500,
+        headers: { "Content-Type": "text/plain" },
+      }),
+    );
+
+    const { result } = renderHook(() => useStream("widget"));
+    const onError = vi.fn();
+    const onMessageComplete = vi.fn();
+    const onToken = vi.fn();
+    const onClose = vi.fn();
+
+    await act(async () => {
+      await result.current.startStream("widget-session", "Hello", [], undefined, {}, {
+        onError,
+        onMessageComplete,
+        onToken,
+        onClose,
+      });
+    });
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    const message = onError.mock.calls[0][0] as string;
+    expect(message).toContain("HTTP 500");
+    expect(message).toContain("Internal Server Error");
+    expect(message).not.toContain("SyntaxError");
+    expect(onMessageComplete).not.toHaveBeenCalled();
+    expect(onToken).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("surfaces a JSON 500 detail from the widget endpoint", async () => {
+    mockFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({ detail: "Agent execution failed: boom" }),
+        {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        },
+      ),
+    );
+
+    const { result } = renderHook(() => useStream("widget"));
+    const onError = vi.fn();
+    const onMessageComplete = vi.fn();
+
+    await act(async () => {
+      await result.current.startStream("widget-session", "Hello", [], undefined, {}, {
+        onError,
+        onMessageComplete,
+      });
+    });
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0][0]).toBe("Agent execution failed: boom");
+    expect(onMessageComplete).not.toHaveBeenCalled();
   });
 
   // ── Session busy (Issue #604) ─────────────────────────────────────────

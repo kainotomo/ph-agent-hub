@@ -764,7 +764,8 @@ export const ChatWindow = React.memo(function ChatWindow({
   const { data: modelList } = useQuery({
     queryKey: ["models"],
     queryFn: () => api<ModelInfo[]>("/models"),
-    enabled: !demo,
+    // Issue #622 — /models is user-only; embedded guests get 401s.
+    enabled: !demo && !widget,
   });
   const effectiveModelId =
     pendingFlag ? (pendModelId ?? undefined) : (selectedModelId ?? undefined);
@@ -1110,7 +1111,7 @@ export const ChatWindow = React.memo(function ChatWindow({
         }
       }, 1500);
     },
-    [demo],
+    [demo, widget],
   );
 
   // ---- Shared stream handler factory (Issue #457) ---------------------------
@@ -2513,6 +2514,7 @@ export const ChatWindow = React.memo(function ChatWindow({
                 key={msg.id}
                 message={msg}
                 sessionId={sessionId}
+                isGuest={widget || demo}
                 isLatestUserMessage={msg.sender === "user" && msg.id === latestUserMessageId}
                 isLatestAssistantMessage={msg.sender === "assistant" && msg.id === latestAssistantMessageId}
                 showFeedback={!embedded && !demo}
@@ -3084,7 +3086,7 @@ export const ChatWindow = React.memo(function ChatWindow({
             </Button>
           )}
         </div>
-        {!pendingFlag && (
+        {!pendingFlag && !demo && !widget && (
           <SessionUsageToolbar
             sessionId={sessionId}
             streaming={streaming}

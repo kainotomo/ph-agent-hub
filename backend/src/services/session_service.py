@@ -1091,7 +1091,7 @@ async def finalize_session(
     await db.flush()
 
     # 3. Migrate active tool associations
-    active_tool_ids: list[str] = temp_data.get("active_tool_ids", [])
+    active_tool_ids: list[str] = temp_data.get("active_tool_ids") or []
     for tool_id in active_tool_ids:
         sat = SessionActiveTool(session_id=session_id, tool_id=tool_id)
         db.add(sat)

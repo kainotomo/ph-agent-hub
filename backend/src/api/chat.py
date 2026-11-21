@@ -1243,7 +1243,7 @@ async def update_session(
                 )
                 new_tool_ids = {row[0] for row in result.all()}
 
-            current_active = set(data.get("active_tool_ids", []))
+            current_active = set(data.get("active_tool_ids") or [])
             to_remove = old_tool_ids - new_tool_ids - always_on_ids
             to_add = new_tool_ids - current_active
             data["active_tool_ids"] = list((current_active - to_remove) | to_add)
@@ -1477,7 +1477,7 @@ async def finalize_temp_session(
         "Finalized temporary session %s — migrated %d messages, %d tools",
         session_id,
         len(temp_messages),
-        len(data.get("active_tool_ids", [])),
+        len(data.get("active_tool_ids") or []),
     )
 
     return SessionResponse.model_validate(session)
@@ -4909,7 +4909,7 @@ async def upload_file(
             "thinking_enabled": None,
             "reasoning_effort": None,
             "temperature": None,
-            "active_tool_ids": None,
+            "active_tool_ids": [],
             "created_at": now,
             "updated_at": now,
         }
@@ -5599,7 +5599,7 @@ async def list_session_tools(
     is_temp = data.get("is_temporary", False)
 
     if is_temp:
-        tool_ids = data.get("active_tool_ids", [])
+        tool_ids = data.get("active_tool_ids") or []
         if not tool_ids:
             return []
         result = await db.execute(
@@ -5642,7 +5642,7 @@ async def add_session_tool(
     is_temp = data.get("is_temporary", False)
 
     if is_temp:
-        tool_ids: list[str] = list(data.get("active_tool_ids", []))
+        tool_ids: list[str] = list(data.get("active_tool_ids") or [])
         if tool_id not in tool_ids:
             tool_ids.append(tool_id)
             data["active_tool_ids"] = tool_ids
@@ -5673,7 +5673,7 @@ async def remove_session_tool(
     is_temp = data.get("is_temporary", False)
 
     if is_temp:
-        tool_ids: list[str] = list(data.get("active_tool_ids", []))
+        tool_ids: list[str] = list(data.get("active_tool_ids") or [])
         if tool_id in tool_ids:
             tool_ids.remove(tool_id)
             data["active_tool_ids"] = tool_ids

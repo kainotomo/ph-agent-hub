@@ -12,9 +12,10 @@ import re
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import JSONResponse
 
 from .api.admin import router as admin_router
 from .api.a2a_oauth import router as a2a_oauth_router
@@ -422,6 +423,24 @@ app.state.limiter = limiter
 # ---------------------------------------------------------------------------
 # Exception handlers
 # ---------------------------------------------------------------------------
+logger = logging.getLogger(__name__)
+
+
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """Return JSON for any unhandled error instead of a plain-text 500.
+
+    Without this, Starlette's fallback produces ``text/plain``
+    ``Internal Server Error``, which embedded clients cannot parse.
+    Exception text stays in the server log and is never exposed to clients.
+    """
+    logger.exception("Unhandled error %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error", "code": "internal_error"},
+    )
+
+
+app.add_exception_handler(Exception, unhandled_exception_handler)
 app.add_exception_handler(AppException, app_exception_handler)
 app.add_exception_handler(RateLimitExceeded, lambda req, exc: __import__("starlette.responses", fromlist=[""]).JSONResponse(
     status_code=429,

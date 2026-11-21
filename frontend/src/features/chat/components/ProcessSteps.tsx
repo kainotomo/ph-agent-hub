@@ -63,12 +63,15 @@ function StepRow({
   sessionId,
   messageId,
   nested = false,
+  allowLazyFetch = true,
 }: {
   step: ProcessStep;
   sessionId: string;
   messageId: string;
   /** Nested sub-agent rows carry their bodies inline and never lazy-fetch. */
   nested?: boolean;
+  /** Guest sessions cannot call the user-only step endpoint (Issue #622). */
+  allowLazyFetch?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const toggle = () => setOpen((v) => !v);
@@ -79,6 +82,7 @@ function StepRow({
   // We only need to fetch when the part is summary-only (no text/output
   // already present) AND the step is expanded.
   const needsFetch =
+    allowLazyFetch &&
     !nested &&
     ((step.kind === "reasoning" && !step.text) ||
       (step.kind === "tool_result" && step.output === undefined) ||
@@ -506,12 +510,15 @@ interface ProcessStepsProps {
   steps: ProcessStep[];
   sessionId: string;
   messageId: string;
+  /** Guest sessions keep summary/fallback text but skip user-only fetches. */
+  allowLazyFetch?: boolean;
 }
 
 export function ProcessSteps({
   steps,
   sessionId,
   messageId,
+  allowLazyFetch = true,
 }: ProcessStepsProps) {
   const [open, setOpen] = useState(false);
   const bodyId = `process-fold-${messageId}`;
@@ -564,6 +571,7 @@ export function ProcessSteps({
                   step={row.step}
                   sessionId={sessionId}
                   messageId={messageId}
+                  allowLazyFetch={allowLazyFetch}
                 />
               );
             }
@@ -591,6 +599,7 @@ export function ProcessSteps({
                       step={s}
                       sessionId={sessionId}
                       messageId={messageId}
+                      allowLazyFetch={allowLazyFetch}
                     />
                   ),
                 )}

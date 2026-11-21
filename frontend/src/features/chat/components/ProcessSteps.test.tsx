@@ -490,3 +490,38 @@ describe("ProcessSteps subagent rendering", () => {
     expect(screen.getByTestId("step-row-tool_result")).toBeInTheDocument();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #622 — guest embeds must not call the user-only step endpoint
+// ---------------------------------------------------------------------------
+
+describe("ProcessSteps — guest mode (Issue #622)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetFetchPromise();
+  });
+
+  it("never fetches step bodies when allowLazyFetch is false", async () => {
+    const user = userEvent.setup();
+    const steps = [
+      {
+        kind: "reasoning" as const,
+        key: "reasoning:0",
+        index: 0,
+        summary: "Guest preview",
+        chars: 99,
+      },
+    ];
+
+    renderProcessSteps({ steps, allowLazyFetch: false });
+
+    // Open the fold, then the summary-only step row.
+    await user.click(screen.getByRole("button"));
+    await user.click(screen.getByTestId("step-row-reasoning"));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(getMessageStep).not.toHaveBeenCalled();
+    // The summary/fallback text is still shown without the fetch.
+    expect(screen.getAllByText("Guest preview").length).toBeGreaterThan(0);
+  });
+});

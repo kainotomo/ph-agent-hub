@@ -2132,6 +2132,40 @@ class TestAutoSelectTools:
         assert isinstance(result, list)
 
     @pytest.mark.regression
+    async def test_temp_session_none_active_tool_ids(
+        self, db_session, test_tenant, test_tool
+    ):
+        """Temporary widget/demo sessions may store ``active_tool_ids: null``.
+
+        Regression for Issue #622: a present-but-``None`` key bypassed the
+        ``[]`` default, so ``set.update(None)`` raised
+        ``TypeError: 'NoneType' object is not iterable`` before any model
+        call.  Auto-select must tolerate the legacy shape and still rank the
+        tenant's tools.
+        """
+        result = await self.fn(
+            db_session,
+            {
+                "id": f"temp-{test_tool.id}",
+                "tenant_id": test_tenant.id,
+                "is_temporary": True,
+                "auto_select_tools": True,
+                "active_tool_ids": None,
+            },
+            test_tenant.id,
+            "unrelated message with no keyword match",
+            [],
+            [],
+            None,
+            None,
+        )
+        assert isinstance(result, list)
+        assert len(result) >= 1, (
+            "auto-select must tolerate active_tool_ids=None and still "
+            "return the tenant's tool callables"
+        )
+
+    @pytest.mark.regression
     async def test_auto_select_mcp_does_not_write_tool_config(
         self, db_session, test_tenant, test_session
     ):

@@ -205,7 +205,7 @@ async def create_demo_session(
         "selected_model_id": None,
         "thinking_enabled": False,
         "temperature": None,
-        "active_tool_ids": None,
+        "active_tool_ids": [],
         "created_at": now.isoformat(),
         "updated_at": now.isoformat(),
     }
@@ -481,5 +481,5 @@ async def get_demo_follow_up_questions(
     await _assert_demo_enabled(db)
     from ..core.redis import get_follow_up_questions as _redis_get_follow_up
 
-    questions = await _redis_get_follow_up(ctx.session_id)
+    questions = await _redis_get_follow_up(ctx.tenant_id, ctx.session_id)
     return FollowUpQuestionsResponse(questions=questions or [])

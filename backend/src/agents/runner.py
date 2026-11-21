@@ -1886,7 +1886,7 @@ async def _resolve_tool_callables(
 
     if is_temporary:
         # Temp session: use active_tool_ids from the Redis blob
-        tool_ids = session_data.get("active_tool_ids", [])
+        tool_ids = session_data.get("active_tool_ids") or []
         if tool_ids:
             result = await db.execute(
                 select(Tool).where(
@@ -2187,7 +2187,7 @@ async def _auto_select_tools(
 
     # Manually activated tools for this session
     if is_temporary:
-        raw_ids = session_data.get("active_tool_ids", [])
+        raw_ids = session_data.get("active_tool_ids") or []
         selected_tool_ids.update(raw_ids)
     else:
         sa_result = await db.execute(
@@ -2384,7 +2384,7 @@ async def _auto_select_tools(
     # second query that could fail transiently (Issue #439).
     active_ids: set[str] = set()
     if is_temporary:
-        active_ids.update(session_data.get("active_tool_ids", []))
+        active_ids.update(session_data.get("active_tool_ids") or [])
     else:
         # Prefer the already-loaded list from _load_session
         loaded_ids = session_data.get("active_tool_ids")

@@ -63,6 +63,8 @@ interface MessageBubbleProps {
   isLatestAssistantMessage?: boolean;
   /** Live elapsed duration for the currently streaming assistant message (ms since start). */
   streamingDuration?: number | null;
+  /** Guest (widget/demo) sessions cannot authorize user-only endpoints. */
+  isGuest?: boolean;
 }
 
 // ── Lazy-loaded syntax highlighter ──────────────────────────────────────
@@ -122,6 +124,7 @@ function MessageBubbleInner({
   isLatestUserMessage = false,
   isLatestAssistantMessage = false,
   streamingDuration,
+  isGuest = false,
 }: MessageBubbleProps) {
   const isUser = message.sender === "user";
   const isSystem = message.sender === "system";
@@ -193,7 +196,7 @@ function MessageBubbleInner({
   const { data: attachedFiles } = useQuery({
     queryKey: ["message-uploads", message.id],
     queryFn: () => listMessageUploads(sessionId, message.id),
-    enabled: isUser,
+    enabled: isUser && !isGuest,
     staleTime: Infinity,
   });
 
@@ -237,7 +240,13 @@ function MessageBubbleInner({
       <div style={bubbleStyle}>
         {/* Issue #538: process fold — one line per turn with ordered steps */}
         {turn && turn.process.length > 0 && (
-          <ProcessSteps key={message.id} steps={turn.process} sessionId={sessionId} messageId={message.id} />
+          <ProcessSteps
+            key={message.id}
+            steps={turn.process}
+            sessionId={sessionId}
+            messageId={message.id}
+            allowLazyFetch={!isGuest}
+          />
         )}
 
         {/* Inline edit mode for assistant messages */}
@@ -540,7 +549,8 @@ export const MessageBubble = React.memo(MessageBubbleInner, (prev, next) =>
   prev.onRegenerate === next.onRegenerate &&
   prev.onEditAssistant === next.onEditAssistant &&
   prev.hasSubsequentMessages === next.hasSubsequentMessages &&
-  prev.sessionId === next.sessionId
+  prev.sessionId === next.sessionId &&
+  prev.isGuest === next.isGuest
 );
 
 export default MessageBubble;

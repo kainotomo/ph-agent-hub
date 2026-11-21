@@ -1654,3 +1654,65 @@ describe("ChatWindow — finished run settles the visible turn (Issue #616)", ()
     expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #622 — embedded guests must not call user-only endpoints
+// ---------------------------------------------------------------------------
+
+describe("ChatWindow — Embedded guest query guards (Issue #622)", () => {
+  beforeEach(() => {
+    mockApi.mockReset();
+    mockApi.mockImplementation((url: string) => {
+      if (url === "/models") return Promise.resolve(FAKE_MODELS);
+      return Promise.resolve([]);
+    });
+    mockGetStreamStatus.mockReset();
+    mockGetStreamStatus.mockResolvedValue({ active: false });
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("widget mode does not fetch /models", async () => {
+    renderChatWindow({
+      isPending: false,
+      widget: true,
+      sessionId: "test-session-1",
+    });
+    await settle();
+
+    const modelCalls = mockApi.mock.calls.filter(([url]) => url === "/models");
+    expect(modelCalls).toHaveLength(0);
+  });
+
+  it("demo mode does not fetch /models", async () => {
+    renderChatWindow({
+      isPending: false,
+      demo: true,
+      sessionId: "test-session-1",
+    });
+    await settle();
+
+    const modelCalls = mockApi.mock.calls.filter(([url]) => url === "/models");
+    expect(modelCalls).toHaveLength(0);
+  });
+
+  it("widget mode does not render the session usage toolbar", async () => {
+    renderChatWindow({
+      isPending: false,
+      widget: true,
+      sessionId: "test-session-1",
+    });
+    await settle();
+
+    expect(screen.queryByTestId("session-usage-toolbar")).toBeNull();
+  });
+
+  it("regular chat mode still renders the session usage toolbar", async () => {
+    renderChatWindow({ isPending: false, sessionId: "test-session-1" });
+    await settle();
+
+    expect(screen.getByTestId("session-usage-toolbar")).toBeInTheDocument();
+  });
+});

@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.9.1] — 2026-11-21
+
+### Fixed
+- **Embed widget's first message crashed (Issue #622)** — temporary
+  widget/demo sessions were created with `active_tool_ids: null`, and the
+  auto-select tool step called `set.update()` on that value, so any tenant
+  with at least one tool failed with `TypeError: 'NoneType' object is not
+  iterable` before the model ran. Creation now writes `[]` and every
+  temp-session reader tolerates `null`, so existing Redis sessions keep
+  working without a flush. ([#622])
+- **Widget/demo follow-up endpoints returned 500 (Issue #622)** — both
+  endpoints called the tenant-scoped Redis helper with only the session id;
+  they now pass `(tenant_id, session_id)` and return `200 {"questions": []}`
+  when nothing is stored. ([#622])
+- **Unhandled backend errors returned plain-text 500s (Issue #622)** — a new
+  app-level handler returns
+  `{"detail": "Internal server error", "code": "internal_error"}` for any
+  uncaught exception, keeping the traceback in the server log instead of
+  exposing it (or a body the widget cannot parse) to clients. ([#622])
+- **Embedded chat called user-only endpoints (Issue #622)** — guest sessions
+  no longer request `/models`, the session usage toolbar (`/usage`,
+  `/context`), per-message uploads, or lazy step bodies, eliminating the
+  console's 401 noise. Non-JSON errors now surface as readable messages
+  instead of `SyntaxError: Unexpected token 'I'`. ([#622])
+
 ## [3.8.0] — 2026-11-13
 
 ### Added
@@ -451,3 +476,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#588]: https://github.com/kainotomo/ph-agent-hub/issues/588
 [#593]: https://github.com/kainotomo/ph-agent-hub/issues/593
 [#600]: https://github.com/kainotomo/ph-agent-hub/issues/600
+[#622]: https://github.com/kainotomo/ph-agent-hub/issues/622

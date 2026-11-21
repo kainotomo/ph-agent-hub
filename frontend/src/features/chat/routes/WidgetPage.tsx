@@ -12,6 +12,10 @@ import { ConfigProvider, Layout, Spin, Typography, theme as antTheme } from "ant
 import { ChatWindow } from "../components/ChatWindow";
 import { setToken, setSkipAutoRefresh } from "../../../services/api";
 import { createDemoSession, type DemoConfig } from "../services/demo";
+import {
+  describeHttpError,
+  readJsonResponse,
+} from "../../../shared/utils/http";
 
 const { Content } = Layout;
 const { Text } = Typography;
@@ -82,10 +86,14 @@ export function WidgetPage() {
 
     const baseUrl = import.meta.env.VITE_API_URL || "/api";
 
-    fetch(`${baseUrl}/widget/config/${encodeURIComponent(rawToken)}`)
-      .then((res) => {
-        if (!res.ok) return res.json().then((d) => Promise.reject(d.detail || "Failed to load widget config"));
-        return res.json();
+    fetch(`${baseUrl}/widget/config/${encodeURIComponent(rawToken)}`, {
+      headers: { Accept: "application/json" },
+    })
+      .then(async (res) => {
+        if (!res.ok) {
+          throw new Error(await describeHttpError(res));
+        }
+        return readJsonResponse<WidgetConfig>(res);
       })
       .then((data: WidgetConfig) => {
         setToken(data.guest_token);
@@ -110,7 +118,13 @@ export function WidgetPage() {
         setLoading(false);
       })
       .catch((err) => {
-        setError(typeof err === "string" ? err : "Failed to load widget");
+        setError(
+          err instanceof Error
+            ? err.message
+            : typeof err === "string"
+              ? err
+              : "Failed to load widget",
+        );
         setLoading(false);
       });
   }, [rawToken, isDemo]);

@@ -14,6 +14,7 @@ import {
 } from "@microsoft/fetch-event-source";
 import { getToken, refreshAccessToken } from "../../../services/api";
 import { useStreamingContext } from "../../../providers/StreamingProvider";
+import { describeHttpError, readJsonResponse } from "../../../shared/utils/http";
 
 const BASE_URL = import.meta.env.VITE_API_URL || "/api";
 
@@ -639,6 +640,7 @@ export function useStream(apiPrefix: string = "chat") {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
+              Accept: "application/json",
               ...(token ? { Authorization: `Bearer ${token}` } : {}),
             },
             body: JSON.stringify({
@@ -651,9 +653,14 @@ export function useStream(apiPrefix: string = "chat") {
             }),
           });
           if (!res.ok) {
-            handlers.onClose?.();
+            // Issue #622 — a plain-text 500 must surface as a readable
+            // error, never as a JSON parse failure with empty content.
+            throw new Error(await describeHttpError(res));
           }
-          const data = await res.json();
+          const data = await readJsonResponse<{
+            message_id?: string;
+            content?: string;
+          }>(res);
           // Call onMessageComplete first so it finalizes the message
           // without clearing content (the demo mode onMessageComplete
           // handler sets the final content from the data).
@@ -667,7 +674,10 @@ export function useStream(apiPrefix: string = "chat") {
           // Deliver tokens so the streaming UI shows the response
           handlers.onToken?.(data.content || "", data.message_id || "");
         } catch (err) {
-          handlers.onError?.(String(err), "");
+          handlers.onError?.(
+            err instanceof Error ? err.message : String(err),
+            "",
+          );
         } finally {
           setStreaming(false);
           setStreamingSessionId(null);

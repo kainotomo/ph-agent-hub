@@ -74,6 +74,7 @@ The project uses **pytest** for backend testing. Tests are organized by marker a
 | `test_oauth.py` | unit | Google/Microsoft OAuth code exchange |
 | `test_credential_security.py` | integration | Credential encryption and ownership |
 | `test_rate_limiter.py` | integration | Rate limiting on login |
+| `test_widget_api.py` | integration | Widget config → message → history smoke, follow-up tenant scoping, JSON 500 handler (Issue #622) |
 | `test_abuse_scenarios.py` | integration | Forged tokens, SQL injection, XSS |
 | `test_rag_service.py` | unit+integration | RAG pipeline (chunking, similarity, indexing, search) |
 | `test_demo.py` | integration | Demo tenant service, JWT creation |

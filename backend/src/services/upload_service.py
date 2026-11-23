@@ -660,6 +660,23 @@ async def generate_presigned_url(
     )
 
 
+async def _delete_rag_chunks_for_uploads(
+    db: AsyncSession,
+    file_ids: list[str],
+) -> int:
+    """Remove RAG chunks for upload ids, before their ``file_uploads`` rows.
+
+    Ordering matters: current databases have ``ON DELETE CASCADE`` on
+    ``rag_documents.file_id``, but rows orphaned by the old ``SET NULL``
+    behaviour can never be reclaimed by ``file_id`` again, so every delete
+    path removes the chunks explicitly first.  Does not commit — the caller
+    owns the transaction.
+    """
+    from ..services.rag_service import delete_documents_for_files as _rag_delete
+
+    return await _rag_delete(db, file_ids)
+
+
 async def delete_upload(
     db: AsyncSession,
     file_id: str,
@@ -668,12 +685,8 @@ async def delete_upload(
     """Delete a file upload (MinIO object + DB row + RAG chunks)."""
     upload = await get_upload_by_id(db, file_id, user_id)
 
-    # Clean up RAG document chunks first
-    try:
-        from ..services.rag_service import delete_document as _rag_delete
-        await _rag_delete(db, file_id)
-    except Exception:
-        logger.warning("Failed to delete RAG chunks for file %s", file_id, exc_info=True)
+    # Clean up RAG chunks before the file_uploads row goes away
+    await _delete_rag_chunks_for_uploads(db, [file_id])
 
     await s3.delete_object(bucket=upload.bucket, key=upload.storage_key)
     await db.execute(delete(FileUpload).where(FileUpload.id == file_id))
@@ -727,6 +740,9 @@ async def delete_uploads_for_session(
             pass  # Best-effort: MinIO object may already be gone
 
     if uploads:
+        # Chunks first: the file_uploads rows must still exist so the
+        # cleanup can be keyed by file_id.
+        await _delete_rag_chunks_for_uploads(db, [u.id for u in uploads])
         await db.execute(
             delete(FileUpload).where(FileUpload.session_id == session_id)
         )
@@ -754,6 +770,8 @@ async def delete_uploads_for_message(
             pass  # Best-effort
 
     if uploads:
+        # Chunks first, same ordering rule as the session path.
+        await _delete_rag_chunks_for_uploads(db, [u.id for u in uploads])
         await db.execute(
             delete(FileUpload).where(FileUpload.message_id == message_id)
         )
@@ -885,6 +903,7 @@ async def delete_orphaned_temp_uploads(db: AsyncSession) -> None:
 
     if uploads:
         ids = [u.id for u in uploads]
+        await _delete_rag_chunks_for_uploads(db, ids)
         await db.execute(delete(FileUpload).where(FileUpload.id.in_(ids)))
         await db.commit()
 
@@ -901,6 +920,7 @@ async def _delete_temp_upload_by_id(db: AsyncSession, file_id: str) -> None:
         await s3.delete_object(bucket=upload.bucket, key=upload.storage_key)
     except Exception:
         pass
+    await _delete_rag_chunks_for_uploads(db, [file_id])
     await db.execute(delete(FileUpload).where(FileUpload.id == file_id))
     await db.flush()
 
@@ -934,6 +954,7 @@ async def delete_demo_temp_uploads(db: AsyncSession) -> int:
 
     if uploads:
         ids = [u.id for u in uploads]
+        await _delete_rag_chunks_for_uploads(db, ids)
         await db.execute(delete(FileUpload).where(FileUpload.id.in_(ids)))
         await db.commit()
 

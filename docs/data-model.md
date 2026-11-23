@@ -500,7 +500,7 @@ Implemented in v1.11 (Issue #250). Document chunk-level storage with MariaDB JSO
 **Table: rag_documents**
 - id (UUID, PK) — formatted as `{file_id}_{chunk_index}`
 - tenant_id (UUID, FK → tenants.id)
-- file_id (UUID, FK → file_uploads.id, nullable) — source file upload
+- file_id (UUID, FK → file_uploads.id ON DELETE CASCADE, nullable) — source file upload
 - title (string) — document name (original filename)
 - content (text) — chunk text (not full document)
 - chunk_index (int) — position of this chunk within the source document

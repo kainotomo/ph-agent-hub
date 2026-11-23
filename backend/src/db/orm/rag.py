@@ -31,7 +31,7 @@ class RAGDocument(Base):
         CHAR(36), ForeignKey("tenants.id"), nullable=False
     )
     file_id: Mapped[str | None] = mapped_column(
-        CHAR(36), ForeignKey("file_uploads.id", ondelete="SET NULL"), nullable=True,
+        CHAR(36), ForeignKey("file_uploads.id", ondelete="CASCADE"), nullable=True,
         comment="Source file upload (null for ad-hoc indexed text)",
     )
     title: Mapped[str] = mapped_column(String(255), nullable=False)

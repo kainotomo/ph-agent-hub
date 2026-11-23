@@ -4285,8 +4285,10 @@ async def get_follow_up_questions(
 class SessionContextResponse(BaseModel):
     """Context window usage for a session.
 
-    Uses the most recent assistant message's provider-reported tokens_in
-    as the total context consumed.  context_length comes from the model.
+    Uses the size of the turn's final prompt (the metrics part's
+    ``last_input_tokens``, Issue #627), falling back to the most recent
+    assistant message's provider-reported ``tokens_in`` for messages
+    recorded before that field existed.  context_length comes from the model.
     """
     tokens_used: int = 0
     context_length: int | None = None
@@ -4311,7 +4313,10 @@ async def get_session_context(
 
     Returns the most recent provider-reported token count and the
     session's model context length, so the UI can render a progress
-    indicator.
+    indicator.  Uses the size of the turn's final prompt (the metrics
+    part's ``last_input_tokens``, Issue #627), falling back to the
+    most recent assistant message's provider-reported ``tokens_in``
+    for messages recorded before that field existed.
     """
     data = await _load_session(db, session_id)
     await _require_session_owner(data, current_user)
@@ -4349,6 +4354,21 @@ async def get_session_context(
         _msg_get(m, "summarized", False) for m in all_messages
     )
 
+    # Breakdown part of the most recent assistant message (Issues #309/#627).
+    # Looked up regardless of summarization so the popover keeps its rows
+    # after a compaction.
+    metrics_part: dict | None = None
+    for msg in reversed(all_messages):
+        if _msg_get(msg, "sender", "") != "assistant":
+            continue
+        content = _msg_get(msg, "content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "metrics":
+                    metrics_part = part
+                    break
+        break
+
     if has_summarized:
         # After summarization, the actual context is: summary + recent messages.
         # Estimate the current tokens by summing the summary system message
@@ -4363,40 +4383,57 @@ async def get_session_context(
                 text = _extract_message_text(_msg_get(msg, "content"))
                 tokens_used += _estimate_tokens(text)
     else:
-        # No summarization — use the most recent assistant's provider-reported tokens_in
-        tokens_used = 0
+        # No summarization — the ring shows the size of the turn's final
+        # prompt, not its cumulative billing across every model call
+        # (Issue #627).  Messages stored before ``last_input_tokens`` existed
+        # keep the previous cumulative behaviour.
+        orm_tokens_in = 0
         for msg in reversed(all_messages):
             sender = _msg_get(msg, "sender", "")
             if sender != "assistant":
                 continue
-            tokens_in = _msg_get(msg, "tokens_in", None)
-            if tokens_in is not None and tokens_in > 0:
-                tokens_used = tokens_in
-                break
+            stored = _msg_get(msg, "tokens_in", None)
+            if stored is not None and stored > 0:
+                orm_tokens_in = stored
+            break
+
+        last_input_tokens = (
+            metrics_part.get("last_input_tokens") if metrics_part else None
+        )
+        if isinstance(last_input_tokens, int) and last_input_tokens > 0:
+            tokens_used = last_input_tokens
+        else:
+            tokens_used = orm_tokens_in
 
     # Compute percentage
     percentage: float | None = None
     if context_length is not None and context_length > 0:
         percentage = round(tokens_used / context_length * 100, 1)
 
-    # Extract breakdown fields from the most recent assistant message's metrics part
+    # Breakdown from the most recent assistant message's metrics part.  When
+    # the final prompt is known, derive the message share from it so the rows
+    # add up to the displayed total (Issue #627); legacy parts keep the stored
+    # value.
     system_prompt_tokens: int | None = None
     tool_definition_tokens: int | None = None
     messages_tokens: int | None = None
-    for msg in reversed(all_messages):
-        sender = _msg_get(msg, "sender", "")
-        if sender != "assistant":
-            continue
-        content = _msg_get(msg, "content")
-        if not isinstance(content, list):
-            break
-        for part in content:
-            if isinstance(part, dict) and part.get("type") == "metrics":
-                system_prompt_tokens = part.get("system_prompt_tokens")
-                tool_definition_tokens = part.get("tool_definition_tokens")
-                messages_tokens = part.get("messages_tokens")
-                break
-        break
+    if metrics_part is not None:
+        system_prompt_tokens = metrics_part.get("system_prompt_tokens")
+        tool_definition_tokens = metrics_part.get("tool_definition_tokens")
+        messages_tokens = metrics_part.get("messages_tokens")
+        part_last_input = metrics_part.get("last_input_tokens")
+        if (
+            not has_summarized
+            and isinstance(part_last_input, int)
+            and part_last_input > 0
+            and (system_prompt_tokens is not None or tool_definition_tokens is not None)
+        ):
+            messages_tokens = max(
+                0,
+                tokens_used
+                - (system_prompt_tokens or 0)
+                - (tool_definition_tokens or 0),
+            )
 
     return SessionContextResponse(
         tokens_used=tokens_used,

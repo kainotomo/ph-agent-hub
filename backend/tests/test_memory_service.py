@@ -18,6 +18,7 @@ from src.core.exceptions import ConflictError, ForbiddenError, NotFoundError, Va
 from src.db.orm.memory import Memory
 from src.services.memory_service import (
     admin_delete_memory,
+    admin_delete_memories,
     admin_update_memory,
     clear_memories,
     create_memory,
@@ -365,6 +366,49 @@ class TestAdminDeleteMemory:
         import uuid
         with pytest.raises(NotFoundError):
             await admin_delete_memory(db_session, str(uuid.uuid4()))
+
+
+# ===========================================================================
+# AdminDeleteMemories (batch)
+# ===========================================================================
+
+
+class TestAdminDeleteMemories:
+    """Tests for admin_delete_memories — batch delete without ownership check."""
+
+    async def test_deletes_multiple_memories(
+        self, db_session: AsyncSession, test_user, test_tenant
+    ):
+        """Deletes only the requested entries and reports the row count."""
+        m1 = await create_memory(
+            db_session, tenant_id=test_tenant.id, user_id=test_user.id,
+            key="batch_del_1", value="v1",
+        )
+        m2 = await create_memory(
+            db_session, tenant_id=test_tenant.id, user_id=test_user.id,
+            key="batch_del_2", value="v2",
+        )
+        keep = await create_memory(
+            db_session, tenant_id=test_tenant.id, user_id=test_user.id,
+            key="batch_keep", value="v3",
+        )
+
+        deleted = await admin_delete_memories(db_session, [m1.id, m2.id])
+
+        assert deleted == 2
+        assert await db_session.get(Memory, m1.id) is None
+        assert await db_session.get(Memory, m2.id) is None
+        assert await db_session.get(Memory, keep.id) is not None
+
+    async def test_empty_list_returns_zero(self, db_session: AsyncSession):
+        """An empty id list is a no-op."""
+        assert await admin_delete_memories(db_session, []) == 0
+
+    async def test_unknown_ids_return_zero(self, db_session: AsyncSession):
+        """Unknown ids delete nothing and report zero rows."""
+        assert await admin_delete_memories(
+            db_session, [str(uuid.uuid4()), str(uuid.uuid4())]
+        ) == 0
 
 
 # ===========================================================================

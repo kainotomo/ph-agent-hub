@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+- **Admin bulk memory deletion (Issue #624)** — the admin **Memories**
+  screen now supports selecting multiple entries (table row checkboxes on
+  desktop, per-card checkboxes on mobile) and deleting them in one action via
+  `POST /admin/memories/delete`. Admins may delete any entry; managers are
+  limited to their own tenant, with missing or cross-tenant ids reported as
+  skipped. Each deletion is audited as `memory.deleted`. ([#624])
+
 ## [3.9.1] — 2026-11-21
 
 ### Fixed
@@ -477,3 +487,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#593]: https://github.com/kainotomo/ph-agent-hub/issues/593
 [#600]: https://github.com/kainotomo/ph-agent-hub/issues/600
 [#622]: https://github.com/kainotomo/ph-agent-hub/issues/622
+[#624]: https://github.com/kainotomo/ph-agent-hub/issues/624

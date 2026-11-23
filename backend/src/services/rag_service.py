@@ -16,6 +16,7 @@ import logging
 import math
 import uuid
 from datetime import datetime, timezone
+from typing import Sequence
 
 from sqlalchemy import select, delete, func as sa_func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -198,8 +199,41 @@ async def index_document(
     return len(chunks)
 
 
+async def delete_documents_for_files(
+    db: AsyncSession,
+    file_ids: Sequence[str],
+) -> int:
+    """Bulk-delete RAG document chunks for several file uploads.
+
+    Does **not** commit — the caller owns the transaction, so the chunk
+    deletion and the ``file_uploads`` row deletion stay atomic.
+
+    Args:
+        db: Active async DB session.
+        file_ids: ``FileUpload.id`` values whose chunks should be removed.
+
+    Returns:
+        Number of deleted rows.
+    """
+    from ..db.orm.rag import RAGDocument
+
+    ids = [file_id for file_id in file_ids if file_id]
+    if not ids:
+        return 0
+
+    result = await db.execute(
+        delete(RAGDocument).where(RAGDocument.file_id.in_(ids))
+    )
+    deleted = int(result.rowcount or 0)
+    if deleted:
+        logger.info("Deleted %d RAG chunks for %d file(s)", deleted, len(ids))
+    return deleted
+
+
 async def delete_document(db: AsyncSession, file_id: str) -> int:
     """Delete all RAG document chunks for a given file upload.
+
+    Thin wrapper over :func:`delete_documents_for_files` that commits.
 
     Args:
         db: Active async DB session.
@@ -208,22 +242,8 @@ async def delete_document(db: AsyncSession, file_id: str) -> int:
     Returns:
         Number of deleted rows.
     """
-    from ..db.orm.rag import RAGDocument
-
-    result = await db.execute(
-        select(sa_func.count()).select_from(RAGDocument).where(
-            RAGDocument.file_id == file_id
-        )
-    )
-    count = result.scalar() or 0
-
-    await db.execute(
-        delete(RAGDocument).where(RAGDocument.file_id == file_id)
-    )
+    count = await delete_documents_for_files(db, [file_id])
     await db.commit()
-
-    if count:
-        logger.info("Deleted %d RAG chunks for file %s", count, file_id)
     return count
 
 

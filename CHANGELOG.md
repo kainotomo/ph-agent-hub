@@ -33,6 +33,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   skipped. Each deletion is audited as `memory.deleted`. ([#624])
 
 ### Fixed
+- **Deleting a session or a message left its RAG chunks searchable (Issue
+  #628)** — `delete_uploads_for_session()` and `delete_uploads_for_message()`
+  removed the `file_uploads` rows and the MinIO objects but not the chunks
+  indexed from those files. The FK was `ON DELETE SET NULL`, so those rows
+  were orphaned with `file_id = NULL`, could never be reclaimed (every delete
+  path filters by `file_id`) and still answered `rag_search` queries for the
+  whole tenant. Chunk cleanup now runs before every upload delete (session,
+  message, temp/demo cleanup, single file), the FK is `ON DELETE CASCADE` so
+  future paths cannot regress, and
+  `scripts/backfill_orphan_rag_chunks.py` reports and removes pre-existing
+  orphans without touching ad-hoc indexed text. ([#628])
 - **The context indicator reported a turn's cumulative billing as the window
   in use (Issue #627)** — `GET /chat/session/{id}/context` read the assistant
   message's `tokens_in`, which the streaming runner accumulates across every
@@ -518,3 +529,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#624]: https://github.com/kainotomo/ph-agent-hub/issues/624
 [#626]: https://github.com/kainotomo/ph-agent-hub/issues/626
 [#627]: https://github.com/kainotomo/ph-agent-hub/issues/627
+[#628]: https://github.com/kainotomo/ph-agent-hub/issues/628

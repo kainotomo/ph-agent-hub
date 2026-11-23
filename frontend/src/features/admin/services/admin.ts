@@ -678,6 +678,13 @@ export function deleteAdminMemory(id: string): Promise<void> {
   return api<void>(`/admin/memories/${id}`, { method: "DELETE" });
 }
 
+export function deleteAdminMemories(ids: string[]): Promise<AdminBatchDeleteResult> {
+  return api<AdminBatchDeleteResult>("/admin/memories/delete", {
+    method: "POST",
+    body: { ids },
+  });
+}
+
 export function updateAdminMemory(
   id: string,
   data: { key?: string; value?: string },

@@ -3913,6 +3913,67 @@ async def admin_delete_memory(
     )
 
 
+class AdminBatchDeleteMemoriesRequest(BaseModel):
+    """Request body for admin batch-deleting memories. Max 100 per call."""
+    ids: list[str]
+
+
+@router.post("/memories/delete")
+async def admin_delete_memories_batch(
+    body: AdminBatchDeleteMemoriesRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(require_admin_or_manager),
+):
+    """Batch-delete memories (admin/manager).
+
+    Admin: deletes any memory entry. Manager: only entries in own tenant.
+    Skips non-existent entries and (for managers) cross-tenant entries.
+    """
+    ids = list(dict.fromkeys(body.ids))
+    if not ids:
+        raise ValidationError("ids must be a non-empty list of memory IDs")
+    if len(ids) > 100:
+        raise ValidationError("Cannot delete more than 100 memories at once")
+
+    from ..db.orm.memory import Memory as MemoryORM
+
+    result = await db.execute(select(MemoryORM).where(MemoryORM.id.in_(ids)))
+    memories = list(result.scalars().all())
+    by_id = {m.id: m for m in memories}
+
+    deletable: list[str] = []
+    skipped: list[dict] = []
+
+    for mid in ids:
+        entry = by_id.get(mid)
+        if entry is None:
+            skipped.append({"id": mid, "reason": "Memory entry not found"})
+            continue
+        if current_user.role == "manager" and entry.tenant_id != current_user.tenant_id:
+            skipped.append({"id": mid, "reason": "Memory belongs to a different tenant"})
+            continue
+        deletable.append(mid)
+
+    if not deletable:
+        return {"deleted": 0, "skipped": skipped, "errors": []}
+
+    deleted = await memory_service.admin_delete_memories(db, deletable)
+
+    for mid in deletable:
+        await write_audit_log(
+            db,
+            actor=current_user,
+            action="memory.deleted",
+            target_type="memory",
+            target_id=mid,
+            tenant_id=current_user.tenant_id,
+            ip_address=_get_client_ip(request),
+        )
+
+    return {"deleted": deleted, "skipped": skipped, "errors": []}
+
+
 # =============================================================================
 # Admin Session Management
 # =============================================================================

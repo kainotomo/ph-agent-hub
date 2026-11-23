@@ -13,7 +13,9 @@ import pytest_asyncio
 
 from sqlalchemy import select
 from src.db.orm.audit_logs import AuditLog
+from src.db.orm.memory import Memory
 from src.main import app
+from src.services.memory_service import create_memory
 
 pytestmark = [
     pytest.mark.integration,
@@ -564,3 +566,142 @@ class TestAdminMemoryPaginationBounds:
     async def test_valid_bounds_accepted(self, async_client, auth_headers, admin_user):
         resp = await async_client.get("/api/admin/memories?page=1&page_size=200", headers=auth_headers(admin_user))
         assert resp.status_code == 200
+
+
+class TestAdminMemoryBatchDelete:
+    """Tests for POST /admin/memories/delete (bulk admin delete)."""
+
+    @staticmethod
+    async def _create(db_session, tenant_id, user_id, key):
+        return await create_memory(
+            db_session,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            key=key,
+            value=f"value-{key}",
+        )
+
+    async def test_admin_deletes_multiple_entries(
+        self, async_client, auth_headers, admin_user, test_user, test_tenant, db_session
+    ):
+        m1 = await self._create(db_session, test_tenant.id, test_user.id, "batch_a")
+        m2 = await self._create(db_session, test_tenant.id, test_user.id, "batch_b")
+        keep = await self._create(db_session, test_tenant.id, test_user.id, "batch_keep")
+
+        resp = await async_client.post(
+            "/api/admin/memories/delete",
+            json={"ids": [m1.id, m2.id]},
+            headers=auth_headers(admin_user),
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["deleted"] == 2
+        assert data["skipped"] == []
+        assert data["errors"] == []
+        assert await db_session.get(Memory, m1.id) is None
+        assert await db_session.get(Memory, m2.id) is None
+        assert await db_session.get(Memory, keep.id) is not None
+
+    async def test_admin_deletes_cross_tenant_entry(
+        self, async_client, auth_headers, admin_user, second_user, second_tenant, db_session
+    ):
+        cross = await self._create(db_session, second_tenant.id, second_user.id, "cross_tenant")
+        resp = await async_client.post(
+            "/api/admin/memories/delete",
+            json={"ids": [cross.id]},
+            headers=auth_headers(admin_user),
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["deleted"] == 1
+        assert resp.json()["skipped"] == []
+        assert await db_session.get(Memory, cross.id) is None
+
+    async def test_manager_skips_cross_tenant_entries(
+        self, async_client, auth_headers, manager_user, test_user, test_tenant,
+        second_user, second_tenant, db_session
+    ):
+        own = await self._create(db_session, test_tenant.id, test_user.id, "mgr_own")
+        cross = await self._create(db_session, second_tenant.id, second_user.id, "mgr_cross")
+
+        resp = await async_client.post(
+            "/api/admin/memories/delete",
+            json={"ids": [own.id, cross.id]},
+            headers=auth_headers(manager_user),
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["deleted"] == 1
+        assert data["skipped"] == [
+            {"id": cross.id, "reason": "Memory belongs to a different tenant"}
+        ]
+        assert await db_session.get(Memory, own.id) is None
+        assert await db_session.get(Memory, cross.id) is not None
+
+    async def test_missing_ids_are_skipped(self, async_client, auth_headers, admin_user):
+        missing = str(uuid.uuid4())
+        resp = await async_client.post(
+            "/api/admin/memories/delete",
+            json={"ids": [missing]},
+            headers=auth_headers(admin_user),
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["deleted"] == 0
+        assert data["skipped"] == [{"id": missing, "reason": "Memory entry not found"}]
+
+    async def test_duplicate_ids_delete_once(
+        self, async_client, auth_headers, admin_user, test_user, test_tenant, db_session
+    ):
+        mem = await self._create(db_session, test_tenant.id, test_user.id, "dup")
+        resp = await async_client.post(
+            "/api/admin/memories/delete",
+            json={"ids": [mem.id, mem.id]},
+            headers=auth_headers(admin_user),
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["deleted"] == 1
+
+    async def test_empty_ids_rejected(self, async_client, auth_headers, admin_user):
+        resp = await async_client.post(
+            "/api/admin/memories/delete",
+            json={"ids": []},
+            headers=auth_headers(admin_user),
+        )
+        assert resp.status_code == 422
+
+    async def test_more_than_100_ids_rejected(self, async_client, auth_headers, admin_user):
+        resp = await async_client.post(
+            "/api/admin/memories/delete",
+            json={"ids": [str(uuid.uuid4()) for _ in range(101)]},
+            headers=auth_headers(admin_user),
+        )
+        assert resp.status_code == 422
+
+    async def test_regular_user_forbidden(self, async_client, auth_headers, test_user):
+        resp = await async_client.post(
+            "/api/admin/memories/delete",
+            json={"ids": [str(uuid.uuid4())]},
+            headers=auth_headers(test_user),
+        )
+        assert resp.status_code == 403
+
+    async def test_writes_audit_log_per_deleted_entry(
+        self, async_client, auth_headers, admin_user, test_user, test_tenant, db_session
+    ):
+        m1 = await self._create(db_session, test_tenant.id, test_user.id, "audit_1")
+        m2 = await self._create(db_session, test_tenant.id, test_user.id, "audit_2")
+        resp = await async_client.post(
+            "/api/admin/memories/delete",
+            json={"ids": [m1.id, m2.id]},
+            headers=auth_headers(admin_user),
+        )
+        assert resp.status_code == 200, resp.text
+        rows = (
+            await db_session.execute(
+                select(AuditLog).where(
+                    AuditLog.action == "memory.deleted",
+                    AuditLog.target_id.in_([m1.id, m2.id]),
+                )
+            )
+        ).scalars().all()
+        assert {r.target_id for r in rows} == {m1.id, m2.id}

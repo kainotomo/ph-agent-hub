@@ -22,6 +22,7 @@ import {
   Select,
   Modal,
   Form,
+  Checkbox,
 } from "antd";
 import {
   DeleteOutlined,
@@ -33,6 +34,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   listAdminMemories,
   deleteAdminMemory,
+  deleteAdminMemories,
   updateAdminMemory,
   listTenants,
   listUsers,
@@ -56,6 +58,7 @@ export function MemoryList() {
   const [detailVisible, setDetailVisible] = useState(false);
   const [viewingRecord, setViewingRecord] = useState<MemoryData | null>(null);
   const [editForm] = Form.useForm();
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
 
   const debouncedSearch = useDebounce(searchText, 300);
 
@@ -96,6 +99,28 @@ export function MemoryList() {
     },
   });
 
+  const batchDeleteMutation = useMutation({
+    mutationFn: (ids: string[]) => deleteAdminMemories(ids),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ["admin-memories"] });
+      if (result.deleted > 0) {
+        message.success(
+          `Deleted ${result.deleted} memory ${result.deleted === 1 ? "entry" : "entries"}`,
+        );
+      }
+      if (result.skipped.length > 0) {
+        message.warning(
+          `${result.skipped.length} memory ${result.skipped.length === 1 ? "entry" : "entries"} skipped`,
+        );
+      }
+      setSelectedRowKeys([]);
+    },
+    onError: (err: Error) => {
+      message.error(`Failed to delete memories: ${err.message}`);
+      setSelectedRowKeys([]);
+    },
+  });
+
   const editMutation = useMutation({
     mutationFn: ({ id, data }: { id: string; data: { key?: string; value?: string } }) =>
       updateAdminMemory(id, data),
@@ -109,6 +134,28 @@ export function MemoryList() {
 
   const memoriesData = data?.items || [];
   const totalMemories = data?.total || 0;
+
+  const rowSelection = {
+    selectedRowKeys,
+    onChange: (keys: React.Key[]) => setSelectedRowKeys(keys),
+  };
+
+  const handleBatchDelete = () => {
+    const ids = selectedRowKeys.map(String);
+    if (ids.length > 100) {
+      message.warning("You can delete at most 100 memory entries at once.");
+      return;
+    }
+    Modal.confirm({
+      title: `Delete ${ids.length} memory ${ids.length === 1 ? "entry" : "entries"}?`,
+      content:
+        "This permanently deletes the selected memory entries. This action cannot be undone.",
+      okText: "Delete",
+      okButtonProps: { danger: true },
+      cancelText: "Cancel",
+      onOk: () => batchDeleteMutation.mutate(ids),
+    });
+  };
 
   const columns = [
     {
@@ -249,6 +296,20 @@ export function MemoryList() {
             { label: "Automatic", value: "automatic" },
           ]}
         />
+        {selectedRowKeys.length > 0 && (
+          <>
+            <Text type="secondary">{selectedRowKeys.length} selected</Text>
+            <Button
+              type="primary"
+              danger
+              size="small"
+              loading={batchDeleteMutation.isPending}
+              onClick={handleBatchDelete}
+            >
+              Delete Selected
+            </Button>
+          </>
+        )}
       </Space>
 
       {isMobile ? (
@@ -300,6 +361,17 @@ export function MemoryList() {
               <Card.Meta
                 title={
                   <Space>
+                    <Checkbox
+                      aria-label={`Select memory ${item.key}`}
+                      checked={selectedRowKeys.includes(item.id)}
+                      onChange={(e) => {
+                        setSelectedRowKeys((keys) =>
+                          e.target.checked
+                            ? [...keys.filter((k) => k !== item.id), item.id]
+                            : keys.filter((k) => k !== item.id),
+                        );
+                      }}
+                    />
                     <Text strong>{item.key}</Text>
                     <Tag color={item.source === "automatic" ? "blue" : "green"}>
                       {item.source}
@@ -336,6 +408,7 @@ export function MemoryList() {
           columns={columns}
           dataSource={memoriesData}
           rowKey="id"
+          rowSelection={rowSelection}
           loading={isLoading}
           size="middle"
           pagination={{

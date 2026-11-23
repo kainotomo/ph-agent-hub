@@ -971,6 +971,8 @@ The scheduler runs in the backend process. In testing mode (`TESTING=true`), the
 
 You can view and delete any memory entry. Deleting a memory entry removes it permanently — the user will no longer see it in their Memory Manager.
 
+To remove several entries at once, select them with the checkboxes and click **Delete Selected**. Administrators can delete any selected entry; managers are limited to entries in their own tenant. Entries that no longer exist or belong to another tenant are reported as skipped.
+
 ### 15.2 Session Management
 
 **Admin Area → Sessions** provides a read-only view of all permanent chat sessions:

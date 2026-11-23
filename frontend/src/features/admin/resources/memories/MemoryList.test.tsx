@@ -9,12 +9,14 @@ import { cleanup, render, screen, act, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter } from "react-router-dom";
+import { message } from "antd";
 import { MemoryList } from "./MemoryList";
 
 // Hoisted mocks for the admin API module
 const {
   mockListAdminMemories,
   mockDeleteAdminMemory,
+  mockDeleteAdminMemories,
   mockUpdateAdminMemory,
   mockListTenants,
   mockListUsers,
@@ -22,6 +24,7 @@ const {
   () => ({
     mockListAdminMemories: vi.fn(),
     mockDeleteAdminMemory: vi.fn(),
+    mockDeleteAdminMemories: vi.fn(),
     mockUpdateAdminMemory: vi.fn(),
     mockListTenants: vi.fn(),
     mockListUsers: vi.fn(),
@@ -32,6 +35,7 @@ const {
 vi.mock("../../services/admin", () => ({
   listAdminMemories: (...args: unknown[]) => mockListAdminMemories(...args),
   deleteAdminMemory: (...args: unknown[]) => mockDeleteAdminMemory(...args),
+  deleteAdminMemories: (...args: unknown[]) => mockDeleteAdminMemories(...args),
   updateAdminMemory: (...args: unknown[]) => mockUpdateAdminMemory(...args),
   listTenants: (...args: unknown[]) => mockListTenants(...args),
   listUsers: (...args: unknown[]) => mockListUsers(...args),
@@ -126,6 +130,9 @@ describe("MemoryList", () => {
 
   afterEach(() => {
     cleanup();
+    // antd's imperative Modal.confirm renders into its own root, which
+    // RTL's cleanup() does not unmount.
+    document.querySelectorAll(".ant-modal-root").forEach((node) => node.remove());
   });
 
   it("renders memory entries from the API", async () => {
@@ -381,5 +388,207 @@ describe("MemoryList", () => {
 
     expect(await screen.findByText("testKey")).toBeInTheDocument();
     expect(screen.getByText(/Jane Doe/)).toBeInTheDocument();
+  });
+
+  it("batch-deletes selected memories from the mobile card list", async () => {
+    mockListAdminMemories.mockResolvedValue({
+      items: [
+        {
+          id: "mem-a",
+          tenant_id: "tenant-1",
+          user_id: "user-1",
+          session_id: null,
+          key: "keyA",
+          value: "valueA",
+          source: "manual",
+          created_at: "2024-01-15T00:00:00Z",
+          updated_at: null,
+        },
+        {
+          id: "mem-b",
+          tenant_id: "tenant-1",
+          user_id: "user-1",
+          session_id: null,
+          key: "keyB",
+          value: "valueB",
+          source: "automatic",
+          created_at: "2024-01-15T00:00:00Z",
+          updated_at: null,
+        },
+      ],
+      total: 2,
+      page: 1,
+      page_size: 25,
+      total_pages: 1,
+    });
+    mockListTenants.mockResolvedValue({
+      items: [],
+      total: 0,
+      page: 1,
+      page_size: 25,
+      total_pages: 1,
+    });
+    mockDeleteAdminMemories.mockResolvedValue({
+      deleted: 2,
+      skipped: [],
+      errors: [],
+    });
+
+    renderScreen();
+    await settle();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByLabelText("Select memory keyA"));
+    await user.click(screen.getByLabelText("Select memory keyB"));
+    expect(screen.getByText("2 selected")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /delete selected/i }));
+    await settle();
+
+    await user.click(await screen.findByRole("button", { name: "Delete" }));
+    await settle();
+
+    expect(mockDeleteAdminMemories).toHaveBeenCalledWith(["mem-a", "mem-b"]);
+    expect(vi.mocked(message.success)).toHaveBeenCalledWith("Deleted 2 memory entries");
+    await waitFor(() => {
+      expect(screen.getByLabelText("Select memory keyA")).not.toBeChecked();
+      expect(screen.getByLabelText("Select memory keyB")).not.toBeChecked();
+    });
+  });
+
+  it("warns when selected memories are skipped", async () => {
+    mockListAdminMemories.mockResolvedValue({
+      items: [
+        {
+          id: "mem-a",
+          tenant_id: "tenant-1",
+          user_id: "user-1",
+          session_id: null,
+          key: "keyA",
+          value: "valueA",
+          source: "manual",
+          created_at: "2024-01-15T00:00:00Z",
+          updated_at: null,
+        },
+        {
+          id: "mem-b",
+          tenant_id: "tenant-1",
+          user_id: "user-1",
+          session_id: null,
+          key: "keyB",
+          value: "valueB",
+          source: "automatic",
+          created_at: "2024-01-15T00:00:00Z",
+          updated_at: null,
+        },
+      ],
+      total: 2,
+      page: 1,
+      page_size: 25,
+      total_pages: 1,
+    });
+    mockListTenants.mockResolvedValue({
+      items: [],
+      total: 0,
+      page: 1,
+      page_size: 25,
+      total_pages: 1,
+    });
+    mockDeleteAdminMemories.mockResolvedValue({
+      deleted: 1,
+      skipped: [
+        { id: "mem-b", reason: "Memory belongs to a different tenant" },
+      ],
+      errors: [],
+    });
+
+    renderScreen();
+    await settle();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByLabelText("Select memory keyA"));
+    await user.click(screen.getByLabelText("Select memory keyB"));
+    await user.click(screen.getByRole("button", { name: /delete selected/i }));
+    await settle();
+    await user.click(await screen.findByRole("button", { name: "Delete" }));
+    await settle();
+
+    expect(vi.mocked(message.success)).toHaveBeenCalledWith("Deleted 1 memory entry");
+    expect(vi.mocked(message.warning)).toHaveBeenCalledWith("1 memory entry skipped");
+    await waitFor(() => {
+      expect(screen.getByLabelText("Select memory keyA")).not.toBeChecked();
+    });
+  });
+
+  it("batch-deletes memories selected in the desktop table", async () => {
+    const originalMatchMedia = window.matchMedia;
+    window.matchMedia = ((query: string) => ({
+      ...originalMatchMedia(query),
+      matches: true,
+    })) as typeof window.matchMedia;
+
+    try {
+      mockListAdminMemories.mockResolvedValue({
+        items: [
+          {
+            id: "mem-a",
+            tenant_id: "tenant-1",
+            user_id: "user-1",
+            session_id: null,
+            key: "keyA",
+            value: "valueA",
+            source: "manual",
+            created_at: "2024-01-15T00:00:00Z",
+            updated_at: null,
+          },
+          {
+            id: "mem-b",
+            tenant_id: "tenant-1",
+            user_id: "user-1",
+            session_id: null,
+            key: "keyB",
+            value: "valueB",
+            source: "automatic",
+            created_at: "2024-01-15T00:00:00Z",
+            updated_at: null,
+          },
+        ],
+        total: 2,
+        page: 1,
+        page_size: 25,
+        total_pages: 1,
+      });
+      mockListTenants.mockResolvedValue({
+        items: [],
+        total: 0,
+        page: 1,
+        page_size: 25,
+        total_pages: 1,
+      });
+      mockDeleteAdminMemories.mockResolvedValue({
+        deleted: 2,
+        skipped: [],
+        errors: [],
+      });
+
+      renderScreen();
+      await settle();
+
+      const checkboxes = screen.getAllByRole("checkbox");
+      expect(checkboxes.length).toBeGreaterThanOrEqual(3);
+      const user = userEvent.setup();
+      await user.click(checkboxes[1]);
+      await user.click(checkboxes[2]);
+      expect(screen.getByText("2 selected")).toBeInTheDocument();
+
+      await user.click(screen.getByRole("button", { name: /delete selected/i }));
+      await settle();
+      await user.click(await screen.findByRole("button", { name: "Delete" }));
+      await settle();
+
+      expect(mockDeleteAdminMemories).toHaveBeenCalledWith(["mem-a", "mem-b"]);
+    } finally {
+      window.matchMedia = originalMatchMedia;
+    }
   });
 });

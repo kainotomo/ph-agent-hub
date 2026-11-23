@@ -519,6 +519,22 @@ async def admin_delete_memory(
     await db.commit()
 
 
+async def admin_delete_memories(
+    db: AsyncSession,
+    memory_ids: list[str],
+) -> int:
+    """Delete several memory entries by ID.  Admin use only — no ownership check.
+
+    Returns the number of rows deleted.
+    """
+    if not memory_ids:
+        return 0
+    result = await db.execute(delete(Memory).where(Memory.id.in_(memory_ids)))
+    await db.commit()
+    rowcount = result.rowcount
+    return rowcount if rowcount is not None else 0
+
+
 async def upsert_memory(
     db: AsyncSession,
     user_id: str,

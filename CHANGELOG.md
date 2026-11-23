@@ -32,6 +32,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   limited to their own tenant, with missing or cross-tenant ids reported as
   skipped. Each deletion is audited as `memory.deleted`. ([#624])
 
+### Fixed
+- **The context indicator reported a turn's cumulative billing as the window
+  in use (Issue #627)** — `GET /chat/session/{id}/context` read the assistant
+  message's `tokens_in`, which the streaming runner accumulates across every
+  model call in the turn, so any long turn pinned the ring at 100% (10.9M
+  tokens on a 41-step turn) and the popover's breakdown mixed one-call and
+  41-call figures. The runner now also records the final prompt's size as
+  `last_input_tokens` in the message metrics part — workflow runs record their
+  largest single-step prompt — and the endpoint prefers it, deriving
+  `messages_tokens` from it so the breakdown rows add up. Messages stored
+  before the field existed keep the cumulative fallback, and the turn total is
+  still what billing and the usage toolbar report. ([#627])
+
 ## [3.9.1] — 2026-11-21
 
 ### Fixed
@@ -504,3 +517,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#622]: https://github.com/kainotomo/ph-agent-hub/issues/622
 [#624]: https://github.com/kainotomo/ph-agent-hub/issues/624
 [#626]: https://github.com/kainotomo/ph-agent-hub/issues/626
+[#627]: https://github.com/kainotomo/ph-agent-hub/issues/627

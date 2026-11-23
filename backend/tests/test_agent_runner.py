@@ -92,6 +92,19 @@ def _make_mock_stream_update(
     return update
 
 
+def _make_usage_update(input_tokens: int, output_tokens: int = 10):
+    """Return a MagicMock MAF stream update carrying provider usage."""
+    content = MagicMock()
+    content.type = "usage"
+    content.usage_details = {
+        "input_token_count": input_tokens,
+        "output_token_count": output_tokens,
+    }
+    update = MagicMock()
+    update.contents = [content]
+    return update
+
+
 def _make_mock_agent_result(
     text: str = "Hello! I am an AI assistant.",
     tokens_in: int = 50,
@@ -1296,6 +1309,28 @@ class TestRunAgentStream:
         assert events[0]["event"] == "token"
         assert json.loads(events[0]["data"])["delta"] == "Hello"
         assert events[1]["event"] == "token"
+
+    @patch("agent_framework.Agent")
+    async def test_last_in_tracks_final_step(self, mock_agent_class):
+        mock_instance = MagicMock()
+        mock_instance.run.return_value = self._stream_from_updates([
+            _make_mock_stream_update("text", text="a"),
+            _make_usage_update(1000),
+            _make_mock_stream_update("text", text="b"),
+            _make_usage_update(1200),
+            _make_usage_update(1500),
+        ])
+        mock_agent_class.return_value = mock_instance
+
+        model = await self._make_mock_model()
+        token_counts = {"in": 0, "out": 0, "cache_hit": 0}
+        async for _event in self.fn(model, "client", "prompt", [], "hi",
+                                    "assistant", "sess1", "msg1", token_counts):
+            pass
+
+        assert token_counts["in"] == 3700
+        assert token_counts["last_in"] == 1500
+        assert token_counts["metrics"]["last_input_tokens"] == 1500
 
     @patch("agent_framework.Agent")
     async def test_yields_reasoning_token_events(self, mock_agent_class):
@@ -2968,4 +3003,41 @@ class TestComputeTurnMetrics:
         assert metrics["llm_ms"] == 100
         assert metrics["ttft_ms"] == 250  # includes the 200 ms tool call
         assert metrics["ttft_ms"] > metrics["llm_ms"]
+
+    def test_last_input_tokens_overrides_cumulative(self):
+        from src.agents.runner import _compute_turn_metrics
+
+        metrics = _compute_turn_metrics(
+            turn_start_s=0.0,
+            turn_end_s=10.0,
+            first_token_at_s=None,
+            tool_durations_s=[],
+            steps=41,
+            cache_hit_tokens=10_652_928,
+            system_prompt_tokens=4_475,
+            tool_definition_tokens=14_516,
+            tokens_in=10_907_937,
+            last_input_tokens=310_000,
+        )
+
+        assert metrics["last_input_tokens"] == 310_000
+        assert metrics["messages_tokens"] == 310_000 - 4_475 - 14_516  # == 291_009
+
+    def test_last_input_tokens_defaults_to_none(self):
+        from src.agents.runner import _compute_turn_metrics
+
+        metrics = _compute_turn_metrics(
+            turn_start_s=0.0,
+            turn_end_s=10.0,
+            first_token_at_s=None,
+            tool_durations_s=[],
+            steps=1,
+            cache_hit_tokens=0,
+            system_prompt_tokens=500,
+            tool_definition_tokens=0,
+            tokens_in=1_500,
+        )
+
+        assert metrics["last_input_tokens"] is None
+        assert metrics["messages_tokens"] == 1_000
 

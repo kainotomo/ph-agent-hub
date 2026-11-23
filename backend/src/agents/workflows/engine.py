@@ -932,6 +932,7 @@ async def iter_workflow_sse(
     try:
         # Accumulators for token counts during streaming
         streaming_tokens_in = 0
+        streaming_last_input = 0
         streaming_tokens_out = 0
         streaming_cache_hit = 0
         event_types_seen = set()
@@ -1005,6 +1006,9 @@ async def iter_workflow_sse(
                                            usage.get("output_token_count", 0),
                                            usage.get("cache_read_input_token_count", 0))
                                 streaming_tokens_in += usage.get("input_token_count", 0) or 0
+                                streaming_last_input = max(
+                                    streaming_last_input, usage.get("input_token_count", 0) or 0
+                                )
                                 streaming_tokens_out += usage.get("output_token_count", 0) or 0
                                 streaming_cache_hit += usage.get("cache_read_input_token_count", 0) or 0
                                 if budget_state is not None:
@@ -1083,6 +1087,9 @@ async def iter_workflow_sse(
                                    usage.get("output_token_count", 0),
                                    usage.get("cache_read_input_token_count", 0))
                         streaming_tokens_in += usage.get("input_token_count", 0) or 0
+                        streaming_last_input = max(
+                            streaming_last_input, usage.get("input_token_count", 0) or 0
+                        )
                         streaming_tokens_out += usage.get("output_token_count", 0) or 0
                         streaming_cache_hit += usage.get("cache_read_input_token_count", 0) or 0
 
@@ -1157,6 +1164,9 @@ async def iter_workflow_sse(
                                    usage.get("output_token_count", 0),
                                    usage.get("cache_read_input_token_count", 0))
                         streaming_tokens_in += usage.get("input_token_count", 0) or 0
+                        streaming_last_input = max(
+                            streaming_last_input, usage.get("input_token_count", 0) or 0
+                        )
                         streaming_tokens_out += usage.get("output_token_count", 0) or 0
                         streaming_cache_hit += usage.get("cache_read_input_token_count", 0) or 0
 
@@ -1206,6 +1216,7 @@ async def iter_workflow_sse(
             token_counts["in"] = final_tokens_in
             token_counts["out"] = final_tokens_out
             token_counts["cache_hit"] = final_cache_hit
+            token_counts["last_in"] = streaming_last_input
             token_counts["outcome"] = outcome
             # Also store system_prompt/tools for metrics estimation
             token_counts["_system_prompt"] = system_prompt or ""
@@ -1285,7 +1296,12 @@ def _emit_workflow_metrics(
     tokens_out: int,
     cache_hit_tokens: int,
 ) -> None:
-    """Compute and set the metrics dict for workflow execution."""
+    """Compute and set the metrics dict for workflow execution.
+
+    ``last_input_tokens`` is the largest single-step prompt (``None`` when no
+    step usage was streamed); ``messages_tokens`` is derived from it so the
+    context breakdown adds up.
+    """
     if token_counts is None:
         return
     turn_end_s = time.monotonic()
@@ -1301,8 +1317,11 @@ def _emit_workflow_metrics(
     system_prompt_tokens = _estimate_tokens(token_counts.get("_system_prompt", ""))
     tool_definition_tokens = _estimate_tool_definitions(token_counts.get("_tools", []))
 
+    last_in = token_counts.get("last_in") or None
+
     if tokens_in > 0:
-        messages_tokens = max(0, tokens_in - system_prompt_tokens - tool_definition_tokens)
+        effective_in = last_in or tokens_in
+        messages_tokens = max(0, effective_in - system_prompt_tokens - tool_definition_tokens)
     else:
         messages_tokens = None
 
@@ -1315,4 +1334,5 @@ def _emit_workflow_metrics(
         "system_prompt_tokens": system_prompt_tokens if system_prompt_tokens > 0 else None,
         "tool_definition_tokens": tool_definition_tokens if tool_definition_tokens > 0 else None,
         "messages_tokens": messages_tokens,
+        "last_input_tokens": last_in,
     }

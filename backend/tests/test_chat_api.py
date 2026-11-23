@@ -3913,6 +3913,148 @@ class TestSessionContext:
         assert data["messages_tokens"] is None
         assert data["tokens_used"] == 1500
 
+    async def test_get_context_multi_step_uses_last_prompt(
+        self, async_client, auth_headers, test_user, test_session, test_model, db_session
+    ):
+        """Verify /context reports the final prompt, not the turn's cumulative sum."""
+        from src.db.orm.messages import Message
+        from datetime import datetime, timezone, timedelta
+
+        test_model.context_length = 1_000_000
+        await db_session.flush()
+
+        base_time = datetime.now(timezone.utc)
+        asst_msg = Message(
+            id=str(uuid.uuid4()),
+            session_id=test_session.id,
+            sender="assistant",
+            content=[
+                {"type": "text", "text": "resp"},
+                {
+                    "type": "metrics",
+                    "steps": 41,
+                    "cache_hit_tokens": 10652928,
+                    "system_prompt_tokens": 4475,
+                    "tool_definition_tokens": 14516,
+                    "messages_tokens": 10888946,
+                    "last_input_tokens": 310000,
+                },
+            ],
+            model_id=test_model.id,
+            tokens_in=10907937,
+            tokens_out=36808,
+            is_deleted=False,
+            created_at=base_time + timedelta(seconds=1),
+            updated_at=base_time + timedelta(seconds=1),
+        )
+        db_session.add(asst_msg)
+        await db_session.flush()
+
+        headers = auth_headers(test_user)
+        resp = await async_client.get(
+            f"/api/chat/session/{test_session.id}/context", headers=headers
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["tokens_used"] == 310000
+        assert data["percentage"] == 31.0
+        assert data["messages_tokens"] == 310000 - 4475 - 14516
+        assert (
+            data["system_prompt_tokens"]
+            + data["tool_definition_tokens"]
+            + data["messages_tokens"]
+            == data["tokens_used"]
+        )
+
+    async def test_get_context_one_step_unchanged(
+        self, async_client, auth_headers, test_user, test_session, test_model, db_session
+    ):
+        """A one-step turn (last == cumulative) reports the same numbers as before."""
+        from src.db.orm.messages import Message
+        from datetime import datetime, timezone, timedelta
+
+        base_time = datetime.now(timezone.utc)
+        asst_msg = Message(
+            id=str(uuid.uuid4()),
+            session_id=test_session.id,
+            sender="assistant",
+            content=[
+                {"type": "text", "text": "resp"},
+                {
+                    "type": "metrics",
+                    "steps": 1,
+                    "system_prompt_tokens": 500,
+                    "tool_definition_tokens": 0,
+                    "messages_tokens": 1000,
+                    "last_input_tokens": 1500,
+                },
+            ],
+            model_id=test_model.id,
+            tokens_in=1500,
+            tokens_out=50,
+            is_deleted=False,
+            created_at=base_time + timedelta(seconds=1),
+            updated_at=base_time + timedelta(seconds=1),
+        )
+        db_session.add(asst_msg)
+        await db_session.flush()
+
+        headers = auth_headers(test_user)
+        resp = await async_client.get(
+            f"/api/chat/session/{test_session.id}/context", headers=headers
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["tokens_used"] == 1500
+        assert data["messages_tokens"] == 1000
+
+    async def test_get_context_summarized_keeps_breakdown(
+        self, async_client, auth_headers, test_user, test_session, test_model, db_session
+    ):
+        """A compacted session still reports its stored breakdown rows."""
+        from src.db.orm.messages import Message
+        from datetime import datetime, timezone, timedelta
+
+        base_time = datetime.now(timezone.utc)
+        asst_msg = Message(
+            id=str(uuid.uuid4()),
+            session_id=test_session.id,
+            sender="assistant",
+            content=[
+                {"type": "text", "text": "compacted resp"},
+                {
+                    "type": "metrics",
+                    "steps": 40,
+                    "system_prompt_tokens": 3000,
+                    "tool_definition_tokens": 8000,
+                    "messages_tokens": 1750749,
+                    "last_input_tokens": 310000,
+                },
+            ],
+            model_id=test_model.id,
+            tokens_in=1761749,
+            tokens_out=36808,
+            summarized=True,
+            is_deleted=False,
+            created_at=base_time + timedelta(seconds=1),
+            updated_at=base_time + timedelta(seconds=1),
+        )
+        db_session.add(asst_msg)
+        await db_session.flush()
+
+        headers = auth_headers(test_user)
+        resp = await async_client.get(
+            f"/api/chat/session/{test_session.id}/context", headers=headers
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        # Summarized messages are excluded from the estimate, so it is 0 here;
+        # the breakdown still comes from the stored metrics part.
+        assert data["tokens_used"] == 0
+        assert data["system_prompt_tokens"] == 3000
+        assert data["tool_definition_tokens"] == 8000
+        assert data["messages_tokens"] == 1750749
+
 
 class TestSessionUsage:
     """Tests for GET /chat/session/{session_id}/usage."""

@@ -4173,6 +4173,7 @@ async def _run_agent_stream(
     # accumulate the provider-reported usage of every model round-trip.
     tool_calls = 0
     stream_usage_in = 0
+    stream_last_in = 0
     stream_usage_out = 0
     stream_cache_hit = 0
     usage_seen = False
@@ -4228,6 +4229,8 @@ async def _run_agent_stream(
                 getattr(content, "usage_details", None)
             )
             stream_usage_in += in_tokens
+            if in_tokens:
+                stream_last_in = in_tokens
             stream_usage_out += out_tokens
             stream_cache_hit += cache_tokens
             update_usage_seen = True
@@ -4239,6 +4242,8 @@ async def _run_agent_stream(
             )
             if in_tokens or out_tokens or cache_tokens:
                 stream_usage_in += in_tokens
+                if in_tokens:
+                    stream_last_in = in_tokens
                 stream_usage_out += out_tokens
                 stream_cache_hit += cache_tokens
                 update_usage_seen = True
@@ -4585,6 +4590,7 @@ async def _run_agent_stream(
     #   4. If all else fails, keep the streamed totals.
     if token_counts is not None:
         token_counts["in"] = stream_usage_in
+        token_counts["last_in"] = stream_last_in
         token_counts["out"] = stream_usage_out
         token_counts["cache_hit"] = stream_cache_hit
         token_counts["tool_calls"] = tool_calls
@@ -4638,6 +4644,7 @@ async def _run_agent_stream(
                 system_prompt_tokens=_estimate_tokens(system_prompt or ""),
                 tool_definition_tokens=_estimate_tool_definitions(tools),
                 tokens_in=token_counts.get("in", 0) or 0,
+                last_input_tokens=stream_last_in or None,
                 tool_calls=tool_calls,
                 budget=token_counts.get("budget"),
                 budget_exceeded=budget_exceeded,
@@ -5321,6 +5328,7 @@ def _compute_turn_metrics(
     system_prompt_tokens: int,
     tool_definition_tokens: int,
     tokens_in: int,
+    last_input_tokens: int | None = None,
     tool_calls: int = 0,
     budget: dict | None = None,
     budget_exceeded: bool = False,
@@ -5342,6 +5350,11 @@ def _compute_turn_metrics(
     model latency and may legitimately be larger than ``llm_ms`` (which
     excludes tool time).  The key keeps its historical name so stored metrics
     stay compatible; the UI labels it "time to first text".
+
+    ``last_input_tokens`` is the size of the final prompt of the turn
+    (``None`` when the caller cannot measure it).  It drives the message
+    share of the breakdown, while ``tokens_in`` keeps the cumulative total
+    for billing.
     """
     tool_ms = int(round(sum(tool_durations_s) * 1000))
     turn_wall_ms = int(round((turn_end_s - turn_start_s) * 1000))
@@ -5368,10 +5381,13 @@ def _compute_turn_metrics(
             "system_prompt_tokens": None,
             "tool_definition_tokens": None,
             "messages_tokens": None,
+            "last_input_tokens": None,
             **budget_meta,
         }
 
-    messages_tokens = max(0, tokens_in - system_prompt_tokens - tool_definition_tokens)
+    last_in = last_input_tokens if (last_input_tokens or 0) > 0 else None
+    effective_in = last_in or tokens_in
+    messages_tokens = max(0, effective_in - system_prompt_tokens - tool_definition_tokens)
     return {
         "llm_ms": llm_ms,
         "tool_ms": tool_ms,
@@ -5381,6 +5397,7 @@ def _compute_turn_metrics(
         "system_prompt_tokens": system_prompt_tokens,
         "tool_definition_tokens": tool_definition_tokens,
         "messages_tokens": messages_tokens,
+        "last_input_tokens": last_in,
         **budget_meta,
     }
 

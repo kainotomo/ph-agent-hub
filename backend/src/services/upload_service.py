@@ -15,7 +15,7 @@ import unicodedata
 import uuid
 from urllib.parse import quote
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -438,6 +438,154 @@ async def create_upload(
         except Exception:
             logger.warning("Failed to schedule RAG indexing for file %s", file_id, exc_info=True)
 
+    return upload
+
+
+# ---------------------------------------------------------------------------
+# Agent-saved documents (Issue #626)
+# ---------------------------------------------------------------------------
+# ``extract_pdf`` / ``fetch_url`` with ``save_to=...`` store the extracted text
+# as a ``file_uploads`` row instead of returning it inline, so a document read
+# once is not re-billed on every later model call of the turn.
+#
+# Saving is deliberately leaner than ``create_upload``: the text is already
+# extracted, so there is no MIME allowlist to consult and no markitdown pass,
+# and — critically — **no RAG auto-indexing**.  A saved page must not be
+# embedded: that would add an embedding cost for every document saved.
+
+AGENT_SAVE_KEY_PREFIX: str = "agent-saves/"
+AGENT_SAVE_MAX_DOCS_PER_SESSION: int = 50
+AGENT_SAVE_MAX_TEXT_CHARS: int = 2_000_000
+
+
+async def count_agent_saved_docs(
+    db: AsyncSession,
+    session_id: str,
+    tenant_id: str,
+) -> int:
+    """Count documents saved through ``save_to`` for one session.
+
+    Matches on the storage-key prefix rather than a dedicated column so no
+    schema change is needed; the session id is embedded in the key.
+    """
+    stmt = (
+        select(func.count())
+        .select_from(FileUpload)
+        .where(
+            FileUpload.tenant_id == tenant_id,
+            FileUpload.storage_key.like(
+                f"{AGENT_SAVE_KEY_PREFIX}%/{session_id}/%"
+            ),
+        )
+    )
+    result = await db.execute(stmt)
+    return int(result.scalar() or 0)
+
+
+async def create_text_upload(
+    db: AsyncSession,
+    *,
+    session_id: str,
+    tenant_id: str,
+    user_id: str,
+    filename: str,
+    text: str,
+    is_temporary: bool = False,
+) -> FileUpload:
+    """Store *text* as a ``file_uploads`` row (MinIO + DB) and return it.
+
+    Unlike :func:`create_upload` this takes already-extracted text: it skips
+    the MIME allowlist, markitdown extraction, and RAG indexing.
+
+    The caller is responsible for turning the result into a manifest that
+    does **not** include the text (Issue #626).
+
+    Raises:
+        ValidationError: empty text, text above the save limit, or the
+            per-session document quota is exhausted.
+    """
+    if not text or not text.strip():
+        raise ValidationError("Refusing to save an empty document.")
+
+    if len(text) > AGENT_SAVE_MAX_TEXT_CHARS:
+        raise ValidationError(
+            f"Document is {len(text)} characters, above the "
+            f"{AGENT_SAVE_MAX_TEXT_CHARS}-character save limit."
+        )
+
+    saved = await count_agent_saved_docs(db, session_id, tenant_id)
+    if saved >= AGENT_SAVE_MAX_DOCS_PER_SESSION:
+        raise ValidationError(
+            f"Save limit reached for this session "
+            f"({AGENT_SAVE_MAX_DOCS_PER_SESSION} documents)."
+        )
+
+    file_id = str(uuid.uuid4())
+    safe_name = _sanitize_storage_filename(filename) or "document.txt"
+    bucket = f"{settings.MINIO_BUCKET_PREFIX}-{tenant_id}"
+    key = (
+        f"{AGENT_SAVE_KEY_PREFIX}{user_id}/{session_id}/"
+        f"{file_id}-{safe_name}"
+    )
+
+    payload = text.encode("utf-8")
+
+    # 1. Blob first: a row without an object would be unreadable.
+    await s3.ensure_bucket_exists(bucket)
+    await s3.upload_object(bucket, key, payload, "text/plain")
+
+    upload = FileUpload(
+        id=file_id,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        session_id=None if is_temporary else session_id,
+        original_filename=filename,
+        content_type="text/plain",
+        size_bytes=len(payload),
+        storage_key=key,
+        bucket=bucket,
+        is_temporary=is_temporary,
+        extracted_text=text,
+    )
+
+    # 2. Row second; roll the blob back if the insert fails.
+    try:
+        db.add(upload)
+        await db.commit()
+        await db.refresh(upload)
+    except Exception:
+        logger.warning(
+            "create_text_upload: DB insert failed for %s", file_id,
+            exc_info=True,
+        )
+        try:
+            await s3.delete_object(bucket=bucket, key=key)
+        except Exception:
+            pass
+        raise
+
+    # 3. Temporary sessions track their files in Redis so they can be read
+    #    and cleaned up (``read_file_content`` reads this list).
+    if is_temporary:
+        try:
+            from ..core.redis import get_temp_session, store_temp_session
+
+            redis_data = await get_temp_session(session_id)
+            if redis_data is not None:
+                tracked = list(redis_data.get("uploaded_file_ids") or [])
+                tracked.append(file_id)
+                redis_data["uploaded_file_ids"] = tracked
+                await store_temp_session(session_id, redis_data)
+        except Exception:
+            logger.warning(
+                "create_text_upload: could not track %s in Redis",
+                file_id, exc_info=True,
+            )
+
+    logger.info(
+        "create_text_upload: session=%s file=%s chars=%d",
+        session_id, file_id, len(text),
+    )
     return upload
 
 

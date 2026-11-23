@@ -14,6 +14,8 @@ import html2text
 import httpx
 from agent_framework import tool
 
+from ._agent_save import filename_for_url, save_extracted_text
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -100,7 +102,15 @@ def _warn_if_sec_user_agent_noncompliant(user_agent: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def build_fetch_url_tools(tool_config: dict | None = None) -> list:
+def build_fetch_url_tools(
+    tool_config: dict | None = None,
+    *,
+    db=None,
+    session_id: str = "",
+    tenant_id: str = "",
+    user_id: str | None = None,
+    is_temporary: bool = False,
+) -> list:
     """Return a list containing the MAF @tool-decorated fetch_url function.
 
     Args:
@@ -113,6 +123,13 @@ def build_fetch_url_tools(tool_config: dict | None = None) -> list:
               so keep this in ``Product/Version (contact@example.com)`` form.
             - ``timeout`` (float): request timeout in seconds (default 30)
             - ``max_content_length`` (int): max chars to return (default 500k)
+        db: The runner's async session, used only when ``save_to`` is passed
+            (Issue #626).  ``None`` disables saving.
+        session_id: Current session, for the saved document's ownership.
+        tenant_id: Current tenant, recorded on the saved document.
+        user_id: Current user; a saved document requires an uploader.
+        is_temporary: Temporary sessions save with ``session_id=None`` and
+            track the id in Redis instead.
 
     Returns:
         A list with a single callable ready to pass to ``Agent(tools=...)``.
@@ -125,8 +142,15 @@ def build_fetch_url_tools(tool_config: dict | None = None) -> list:
     max_len: int = int(config.get("max_content_length", DEFAULT_MAX_CONTENT_LENGTH))
 
     @tool
-    async def fetch_url(url: str) -> dict:
+    async def fetch_url(url: str, save_to: str | None = None) -> dict:
         """Fetch a web page and return its readable text content.
+
+        For a long page, pass ``save_to`` (a filename such as
+        ``"yield-curve.txt"``) to store the text instead of returning it,
+        then read only the lines you need with
+        ``read_file_content(file_id, pattern="...")``.  Returning a whole
+        page costs its length on every later step of the turn; saving costs
+        a short manifest once.
 
         SEC EDGAR (sec.gov) requests declare a contact User-Agent to satisfy
         SEC's fair-access policy.  For EDGAR filings, the ``sec_filings``
@@ -134,15 +158,19 @@ def build_fetch_url_tools(tool_config: dict | None = None) -> list:
 
         Args:
             url: The full URL to fetch (must start with http:// or https://).
+            save_to: Optional filename.  When given, the page text is stored
+                and the result carries a manifest (``file_id``, ``chars``,
+                ``sha256``, ``preview``) with no ``text`` key.  Omit it to
+                get the text inline, as before.
 
         Returns:
-            A dict with:
-            - ``url``: the URL fetched
-            - ``status_code``: HTTP status code
-            - ``title``: page title extracted from HTML
-            - ``text``: plain-text content of the page (truncated if too long)
-            - ``content_type``: Content-Type header value
-            - ``truncated``: True if text was truncated
+            Without ``save_to``: a dict with ``url``, ``status_code``,
+            ``title``, ``text`` (truncated if too long), ``content_type``
+            and ``truncated``.
+
+            With ``save_to``: ``url``, ``status_code``, ``content_type``,
+            ``title``, ``file_id``, ``filename``, ``chars``, ``sha256``,
+            ``preview`` and ``saved``.
         """
         if not _is_safe_url(url):
             logger.warning("fetch_url rejected unsafe URL: %s", url)
@@ -173,9 +201,30 @@ def build_fetch_url_tools(tool_config: dict | None = None) -> list:
 
         content_type = response.headers.get("content-type", "")
 
+        async def _save(text: str, title: str) -> dict:
+            """Store *text* and return a manifest instead of the body."""
+            return await save_extracted_text(
+                db,
+                text=text,
+                url=str(response.url),
+                filename=(save_to or "").strip()
+                or filename_for_url(str(response.url)),
+                session_id=session_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                is_temporary=is_temporary,
+                extra={
+                    "status_code": response.status_code,
+                    "content_type": content_type,
+                    "title": title,
+                },
+            )
+
         # Only convert HTML content
         if "text/html" not in content_type and "application/xhtml" not in content_type:
             raw_text = response.text
+            if save_to is not None:
+                return await _save(raw_text, "")
             truncated = len(raw_text) > max_len
             if truncated:
                 half = max_len // 2
@@ -241,6 +290,8 @@ def build_fetch_url_tools(tool_config: dict | None = None) -> list:
             pass
 
         text = markdown_text.strip()
+        if save_to is not None:
+            return await _save(text, title)
         truncated = len(text) > max_len
         if truncated:
             half = max_len // 2

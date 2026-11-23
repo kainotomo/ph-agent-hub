@@ -13,6 +13,8 @@ from urllib.parse import urlparse
 import httpx
 from agent_framework import tool
 
+from ._agent_save import filename_for_url, save_extracted_text
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -91,13 +93,28 @@ def _parse_page_selection(spec: str) -> tuple[set[int] | None, str | None]:
 # ---------------------------------------------------------------------------
 
 
-def build_pdf_extractor_tools(tool_config: dict | None = None) -> list:
+def build_pdf_extractor_tools(
+    tool_config: dict | None = None,
+    *,
+    db=None,
+    session_id: str = "",
+    tenant_id: str = "",
+    user_id: str | None = None,
+    is_temporary: bool = False,
+) -> list:
     """Return a list containing the MAF @tool-decorated extract_pdf function.
 
     Args:
         tool_config: Optional ``Tool.config`` JSON dict.  May include:
             - ``timeout`` (float): request timeout in seconds (default 60)
             - ``max_chars`` (int): max characters to return (default 500k)
+        db: The runner's async session, used only when ``save_to`` is passed
+            (Issue #626).  ``None`` disables saving.
+        session_id: Current session, for the saved document's ownership.
+        tenant_id: Current tenant, recorded on the saved document.
+        user_id: Current user; a saved document requires an uploader.
+        is_temporary: Temporary sessions save with ``session_id=None`` and
+            track the id in Redis instead.
 
     Returns:
         A list with a single callable ready to pass to ``Agent(tools=...)``.
@@ -108,12 +125,23 @@ def build_pdf_extractor_tools(tool_config: dict | None = None) -> list:
     max_chars: int = int(config.get("max_chars", DEFAULT_MAX_CHARS))
 
     @tool
-    async def extract_pdf(url: str, pages: str | None = None) -> dict:
+    async def extract_pdf(
+        url: str,
+        pages: str | None = None,
+        save_to: str | None = None,
+    ) -> dict:
         """Download a PDF from a URL and extract its readable text content.
 
         Uses pdfplumber to extract text from the pages of the PDF.
         Useful for reading financial reports, regulatory filings,
         earnings press releases, and other PDF-format documents.
+
+        For a long filing, pass ``save_to`` (a filename such as
+        ``"annual-report-2025.txt"``) to store the text instead of returning
+        it, then read only the lines you need with
+        ``read_file_content(file_id, pattern="Total revenue")``.  Returning
+        a whole filing costs its length on every later step of the turn;
+        saving costs a short manifest once.
 
         Args:
             url: The URL of the PDF file (must start with http:// or
@@ -123,19 +151,19 @@ def build_pdf_extractor_tools(tool_config: dict | None = None) -> list:
                 filing the full text is hundreds of KB and gets clipped, so
                 select the pages you need (a statement of financial position
                 usually sits around page 150-200 of an annual report).
+            save_to: Optional filename.  When given, the extracted text is
+                stored and the result carries a manifest with no ``text``
+                key.  Omit it to get the text inline, as before.
 
         Returns:
-            A dict with:
-            - ``url``: the PDF URL fetched
-            - ``status_code``: HTTP status code of the download
-            - ``content_type``: the Content-Type header
-            - ``pages``: number of pages extracted
-            - ``text``: extracted text content (truncated to the
-              configured max_chars limit)
-            - ``text_length``: character count of the text (before
-              truncation if any)
-            - ``truncated``: true if text was truncated to max_chars
-            - ``source``: "pdfplumber"
+            Without ``save_to``: a dict with ``url``, ``status_code``,
+            ``content_type``, ``pages``, ``text`` (truncated to the
+            configured max_chars limit), ``text_length``, ``truncated`` and
+            ``source``.
+
+            With ``save_to``: ``url``, ``status_code``, ``content_type``,
+            ``pages``, ``file_id``, ``filename``, ``chars``, ``sha256``,
+            ``preview`` and ``saved``.
 
             If the URL does not point to a PDF (Content-Type mismatch)
             or the file cannot be parsed, an error key is returned
@@ -233,6 +261,24 @@ def build_pdf_extractor_tools(tool_config: dict | None = None) -> list:
                         if pt.strip():
                             retry_parts.append(f"[Page {i}]\n{pt}")
                 full_text = "\n\n".join(retry_parts) if retry_parts else ""
+
+            if save_to is not None:
+                return await save_extracted_text(
+                    db,
+                    text=full_text,
+                    url=url,
+                    filename=(save_to or "").strip()
+                    or filename_for_url(url),
+                    session_id=session_id,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    is_temporary=is_temporary,
+                    extra={
+                        "status_code": resp.status_code,
+                        "content_type": content_type,
+                        "pages": page_count,
+                    },
+                )
 
             text_length = len(full_text)
             truncated = text_length > max_chars

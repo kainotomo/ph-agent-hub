@@ -1880,6 +1880,10 @@ async def _resolve_tool_callables(
     session_id = session_data["id"]
     cleanup_clients: list = []
     is_temporary = session_data.get("is_temporary", False)
+    # Issue #626 — tools with a ``save_to`` need an uploader for the
+    # ``file_uploads`` row.  Falls back to the session owner when the caller
+    # did not pass an authenticated user id.
+    session_user_id = user_id or session_data.get("user_id") or ""
 
     # Load Tool ORM records
     tools: list[Tool] = []
@@ -2018,7 +2022,10 @@ async def _resolve_tool_callables(
                 # No server reference — build individually (will log warning)
                 tc = await _build_tool_callables(
                     db, tool, tenant_id,
-                    session_id=session_id, cleanup_clients=cleanup_clients,
+                    session_id=session_id,
+                    user_id=session_user_id,
+                    is_temporary=is_temporary,
+                    cleanup_clients=cleanup_clients,
                     user_credentials=user_credentials_map.get(tool.id),
                 )
                 callables.extend(tc)
@@ -2027,7 +2034,10 @@ async def _resolve_tool_callables(
         else:
             tc = await _build_tool_callables(
                 db, tool, tenant_id,
-                session_id=session_id, cleanup_clients=cleanup_clients,
+                session_id=session_id,
+                user_id=session_user_id,
+                is_temporary=is_temporary,
+                cleanup_clients=cleanup_clients,
                 user_credentials=user_credentials_map.get(tool.id),
             )
             callables.extend(tc)
@@ -2049,7 +2059,10 @@ async def _resolve_tool_callables(
         # mutates the shared Tool row (Issue #613).
         tc = await _build_tool_callables(
             db, primary, tenant_id,
-            session_id=session_id, cleanup_clients=cleanup_clients,
+            session_id=session_id,
+            user_id=session_user_id,
+            is_temporary=is_temporary,
+            cleanup_clients=cleanup_clients,
             mcp_allowed_tool_names=tool_names,
         )
         callables.extend(tc)
@@ -2166,6 +2179,8 @@ async def _auto_select_tools(
     """
     session_id = session_data["id"]
     is_temporary = session_data.get("is_temporary", False)
+    # Issue #626 — see ``_resolve_tool_callables``.
+    session_user_id = user_id or session_data.get("user_id") or ""
 
     # ── Step 1: Build candidate pool ────────────────────────────────────
     # Collect all enabled tools for the tenant (including tools not
@@ -2475,14 +2490,20 @@ async def _auto_select_tools(
             else:
                 tc = await _build_tool_callables(
                     db, tool, tenant_id,
-                    session_id=session_id, cleanup_clients=cleanup_clients,
+                    session_id=session_id,
+                    user_id=session_user_id,
+                    is_temporary=is_temporary,
+                    cleanup_clients=cleanup_clients,
                     user_credentials=user_credentials_map.get(tool.id),
                 )
                 callables.extend(tc)
         else:
             tc = await _build_tool_callables(
                 db, tool, tenant_id,
-                session_id=session_id, cleanup_clients=cleanup_clients,
+                session_id=session_id,
+                user_id=session_user_id,
+                is_temporary=is_temporary,
+                cleanup_clients=cleanup_clients,
                 user_credentials=user_credentials_map.get(tool.id),
             )
             callables.extend(tc)
@@ -2565,6 +2586,8 @@ async def _build_tool_callables(
     tool: Tool,
     tenant_id: str,
     session_id: str = "",
+    user_id: str = "",
+    is_temporary: bool = False,
     cleanup_clients: list | None = None,
     user_credentials: list | None = None,
     mcp_allowed_tool_names: list[str] | None = None,
@@ -2572,6 +2595,11 @@ async def _build_tool_callables(
     """Dispatch on tool.type to the appropriate factory.
 
     Args:
+        user_id: Uploader recorded on documents saved via ``save_to``
+            (Issue #626).
+        is_temporary: Whether the session is temporary, forwarded to the
+            ``save_to``-capable tools so they can track the file in Redis
+            instead of the DB.
         user_credentials: Optional list of ``UserToolCredential`` ORM
             instances for personal tools (email, calendar, tasks).
             When provided, the tool factory uses per-user auth instead
@@ -2604,7 +2632,14 @@ async def _build_tool_callables(
         return build_web_search_tools(tool.config or {})
     elif tool.type == "fetch_url":
         from ..tools.fetch_url import build_fetch_url_tools
-        return build_fetch_url_tools(tool.config or {})
+        return build_fetch_url_tools(
+            tool.config or {},
+            db=db,
+            session_id=session_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            is_temporary=is_temporary,
+        )
     elif tool.type == "weather":
         from ..tools.weather import build_weather_tools
         return build_weather_tools(tool.config or {})
@@ -2656,7 +2691,14 @@ async def _build_tool_callables(
         )
     elif tool.type == "pdf_extractor":
         from ..tools.pdf_extractor import build_pdf_extractor_tools
-        return build_pdf_extractor_tools(tool.config or {})
+        return build_pdf_extractor_tools(
+            tool.config or {},
+            db=db,
+            session_id=session_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            is_temporary=is_temporary,
+        )
     elif tool.type == "rag_search":
         from ..tools.rag_search import build_rag_search_tools
         return build_rag_search_tools(

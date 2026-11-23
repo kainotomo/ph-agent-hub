@@ -352,3 +352,113 @@ class TestDeepSeekImageRejection:
                 headers=headers,
             )
             assert msg_resp.status_code == 422, msg_resp.text
+
+
+# =============================================================================
+# Agent-saved documents (Issue #626)
+# =============================================================================
+
+
+class TestAgentSavedDocuments:
+    """``create_text_upload`` writes a lean row and stays tenant-scoped."""
+
+    @pytest_asyncio.fixture(autouse=True)
+    def no_minio(self, monkeypatch):
+        """Keep MinIO out of the test path."""
+        from unittest.mock import AsyncMock
+
+        monkeypatch.setattr(upload_service.s3, "ensure_bucket_exists", AsyncMock())
+        monkeypatch.setattr(upload_service.s3, "upload_object", AsyncMock())
+        monkeypatch.setattr(upload_service.s3, "delete_object", AsyncMock())
+
+    async def _save(self, db_session, test_tenant, test_user, test_session, text):
+        return await upload_service.create_text_upload(
+            db_session,
+            session_id=test_session.id,
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            filename="filing.txt",
+            text=text,
+        )
+
+    async def test_stores_the_text_without_extracting_it_again(
+        self, db_session, test_tenant, test_user, test_session
+    ):
+        text = "Total revenue 1,234\nNet income 42"
+        upload = await self._save(
+            db_session, test_tenant, test_user, test_session, text
+        )
+
+        assert upload.extracted_text == text
+        assert upload.content_type == "text/plain"
+        assert upload.original_filename == "filing.txt"
+        assert upload.session_id == test_session.id
+        assert upload.is_temporary is False
+        assert upload.size_bytes == len(text.encode("utf-8"))
+        assert upload.storage_key.startswith(upload_service.AGENT_SAVE_KEY_PREFIX)
+        assert f"/{test_session.id}/" in upload.storage_key
+
+    async def test_empty_text_is_rejected(
+        self, db_session, test_tenant, test_user, test_session
+    ):
+        from src.core.exceptions import ValidationError
+
+        with pytest.raises(ValidationError, match="empty document"):
+            await self._save(
+                db_session, test_tenant, test_user, test_session, "   \n "
+            )
+
+    async def test_quota_is_enforced(
+        self, monkeypatch, db_session, test_tenant, test_user, test_session
+    ):
+        from src.core.exceptions import ValidationError
+
+        monkeypatch.setattr(
+            upload_service, "AGENT_SAVE_MAX_DOCS_PER_SESSION", 1
+        )
+
+        await self._save(db_session, test_tenant, test_user, test_session, "one")
+        with pytest.raises(ValidationError, match="Save limit reached"):
+            await self._save(
+                db_session, test_tenant, test_user, test_session, "two"
+            )
+
+    async def test_temporary_session_stores_no_session_id(
+        self, db_session, test_tenant, test_user, test_session
+    ):
+        upload = await upload_service.create_text_upload(
+            db_session,
+            session_id=test_session.id,
+            tenant_id=test_tenant.id,
+            user_id=test_user.id,
+            filename="temp.txt",
+            text="temporary body",
+            is_temporary=True,
+        )
+
+        assert upload.session_id is None
+        assert upload.is_temporary is True
+
+    async def test_cross_tenant_file_id_cannot_be_read(
+        self, db_session, sample_file_upload, second_tenant
+    ):
+        from src.tools.file_list import build_file_list_tool
+
+        other = build_file_list_tool(
+            db=db_session,
+            session_id="other-session",
+            tenant_id=str(second_tenant.id),
+        )
+        denied = await other[1](file_id=sample_file_upload.id)
+        assert denied["error_code"] == "file_not_found"
+
+        owner = build_file_list_tool(
+            db=db_session,
+            session_id="own-session",
+            tenant_id=sample_file_upload.tenant_id,
+        )
+        allowed = await owner[1](
+            file_id=sample_file_upload.id, pattern="Guido"
+        )
+        assert allowed["matched_lines"] == 1
+        assert "Guido" in allowed["text"]

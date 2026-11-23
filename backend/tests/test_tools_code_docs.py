@@ -2256,3 +2256,99 @@ class TestSqlQuery:
         with the 'exc' variable in the except block closure. Skipping this
         test as the no-connection-string path covers error-stub behavior."""
         pass
+
+
+# ===========================================================================
+# extract_pdf — save_to (Issue #626)
+# ===========================================================================
+
+
+class TestPdfExtractorSaveTo:
+    """``save_to`` stores the extracted text instead of returning it."""
+
+    @pytest.fixture
+    def saved_row(self):
+        row = MagicMock()
+        row.id = "file-7"
+        row.original_filename = "filing.txt"
+        return row
+
+    def _tool(self, **context):
+        from src.tools.pdf_extractor import build_pdf_extractor_tools
+
+        (tool,) = build_pdf_extractor_tools(
+            db=context.get("db", object()),
+            session_id=context.get("session_id", "session-1"),
+            tenant_id=context.get("tenant_id", "tenant-1"),
+            user_id=context.get("user_id", "user-1"),
+        )
+        return tool
+
+    @staticmethod
+    def _pdf_client(page_text: str):
+        mock_resp = _make_mock_httpx_response(
+            status_code=200,
+            headers={"content-type": "application/pdf"},
+            content=b"%PDF-1.4 fake",
+        )
+        mock_page = MagicMock()
+        mock_page.extract_text.return_value = page_text
+        mock_pdf = MagicMock()
+        mock_pdf.__enter__.return_value = mock_pdf
+        mock_pdf.pages = [mock_page]
+        return _make_mock_httpx_client(mock_resp), mock_pdf
+
+    async def test_save_to_returns_manifest_without_text(self, saved_row):
+        client, mock_pdf = self._pdf_client("A very long filing body")
+
+        with (
+            patch("src.tools.pdf_extractor.httpx.AsyncClient", return_value=client),
+            patch("pdfplumber.open", return_value=mock_pdf),
+            patch(
+                "src.services.upload_service.create_text_upload",
+                new=AsyncMock(return_value=saved_row),
+            ) as create,
+        ):
+            result = await self._tool()(
+                url="https://example.com/f.pdf", save_to="filing.txt",
+            )
+
+        assert "text" not in result
+        assert result["file_id"] == "file-7"
+        assert result["pages"] == 1
+        assert result["saved"] is True
+        assert result["chars"] == len("A very long filing body")
+        create.assert_awaited_once()
+
+    async def test_omitting_save_to_keeps_the_old_shape(self):
+        client, mock_pdf = self._pdf_client("short body")
+
+        with (
+            patch("src.tools.pdf_extractor.httpx.AsyncClient", return_value=client),
+            patch("pdfplumber.open", return_value=mock_pdf),
+            patch(
+                "src.services.upload_service.create_text_upload",
+                new=AsyncMock(),
+            ) as create,
+        ):
+            result = await self._tool()(url="https://example.com/f.pdf")
+
+        assert "text" in result
+        assert result["source"] == "pdfplumber"
+        assert "file_id" not in result
+        create.assert_not_awaited()
+
+    async def test_save_to_without_context_is_named(self):
+        client, mock_pdf = self._pdf_client("body")
+
+        from src.tools.pdf_extractor import build_pdf_extractor_tools
+
+        (tool,) = build_pdf_extractor_tools()  # legacy call, no context
+
+        with (
+            patch("src.tools.pdf_extractor.httpx.AsyncClient", return_value=client),
+            patch("pdfplumber.open", return_value=mock_pdf),
+        ):
+            result = await tool(url="https://example.com/f.pdf", save_to="x.txt")
+
+        assert result["error_code"] == "save_to_unavailable"

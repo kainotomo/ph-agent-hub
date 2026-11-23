@@ -10,6 +10,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`save_to` on `extract_pdf` / `fetch_url` (Issue #626)** — both tools
+  returned the whole document body, and MAF replays every tool result into
+  each later step of the turn, so a filing read at call 12 of 55 was billed
+  dozens of times (26% of one measured turn's input tokens). Passing
+  `save_to="name.txt"` now stores the text in the existing tenant-scoped
+  store (`file_uploads` + MinIO, via `create_text_upload`) and returns only a
+  manifest — `file_id`, `chars`, `sha256`, a ≤500-char `preview` — with no
+  `text` key. Saved documents are not RAG-indexed. Omitting `save_to` keeps
+  the previous behaviour exactly. ([#626])
+- **`read_file_content` can search and page (Issue #626)** — the built-in
+  reader gained `pattern` (case-insensitive regex), `offset` and `limit`, so
+  a 25k-character extraction can be answered with the half-dozen lines that
+  matter instead of the whole body. Results report `matched_lines`,
+  `total_lines` and `first_line`/`last_line`; a call with no new arguments
+  returns the same shape as before. ([#626])
 - **Admin bulk memory deletion (Issue #624)** — the admin **Memories**
   screen now supports selecting multiple entries (table row checkboxes on
   desktop, per-card checkboxes on mobile) and deleting them in one action via
@@ -488,3 +503,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#600]: https://github.com/kainotomo/ph-agent-hub/issues/600
 [#622]: https://github.com/kainotomo/ph-agent-hub/issues/622
 [#624]: https://github.com/kainotomo/ph-agent-hub/issues/624
+[#626]: https://github.com/kainotomo/ph-agent-hub/issues/626

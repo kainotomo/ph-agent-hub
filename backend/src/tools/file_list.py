@@ -6,6 +6,7 @@
 # =============================================================================
 
 import logging
+import re
 from typing import Any
 from uuid import UUID
 
@@ -101,12 +102,24 @@ def build_file_list_tool(
         return files
 
     @tool
-    async def read_file_content(file_id: str) -> dict[str, Any]:
-        """Read and analyze the full text content of an uploaded file.
+    async def read_file_content(
+        file_id: str,
+        pattern: str | None = None,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """Read an uploaded file, optionally only the lines that matter.
+
+        ALWAYS pass ``pattern`` when you are looking for something specific
+        in a long document.  A saved PDF or web page can be tens of thousands
+        of characters; asking for the whole thing puts all of it into the
+        conversation, where it is re-sent on every later model call of the
+        turn.  ``pattern="Total revenue"`` answers the same question with a
+        handful of lines.
 
         Use this ONLY when you need to SUMMARIZE, ANALYZE, or answer
-        questions about a file's content.  This returns the extracted
-        text — it is NOT suitable for email attachments.
+        questions about a file's content.  This returns text — it is NOT
+        suitable for email attachments.
 
         For EMAIL ATTACHMENTS: do NOT call this tool.  Instead, use
         the ``file_ids`` parameter of ``send_email`` / ``reply_email`` /
@@ -114,16 +127,28 @@ def build_file_list_tool(
         already tells you enough about the file.
 
         Args:
-            file_id: The file ID returned by ``list_uploaded_files()``.
+            file_id: The file ID returned by ``list_uploaded_files()``, or
+                the ``file_id`` from a tool result that saved a document.
+            pattern: Optional case-insensitive regular expression.  When
+                given, only matching lines are returned.
+            offset: Number of selected lines to skip (0-based) — use it to
+                page through a long result.
+            limit: Maximum number of lines to return.  Omit it (with no
+                ``pattern``) to get the legacy full-text behaviour.
 
-        Returns a dict with ``filename``, ``content_type``, ``text`` (the full
-        extracted text), ``truncated`` (bool), and optionally ``error``.
-        """.format(max_chars=MAX_FILE_CONTENT_CHARS)
-
+        Returns a dict with ``filename``, ``content_type``, ``text`` (the
+        selected lines, numbered when a selection was requested),
+        ``truncated`` (bool), ``total_lines``, ``returned_lines``,
+        ``first_line``/``last_line`` (1-based), ``matched_lines`` when a
+        ``pattern`` was supplied, and ``error``/``error_code`` on failure.
+        """
         try:
             UUID(file_id)  # validate format only
         except ValueError:
-            return {"error": f"Invalid file_id: {file_id!r}"}
+            return {
+                "error": f"Invalid file_id: {file_id!r}",
+                "error_code": "invalid_file_id",
+            }
 
         result = await db.execute(
             select(FileUpload).where(
@@ -133,8 +158,13 @@ def build_file_list_tool(
         )
         upload = result.scalar_one_or_none()
 
+        # A file owned by another tenant never reaches this point: the query
+        # is already scoped by ``tenant_id``, so both cases look identical.
         if upload is None:
-            return {"error": f"File not found: {file_id}"}
+            return {
+                "error": f"File not found: {file_id}",
+                "error_code": "file_not_found",
+            }
 
         has_text = bool(upload.extracted_text)
         if not has_text:
@@ -147,22 +177,79 @@ def build_file_list_tool(
                 "note": "No text could be extracted from this file.",
             }
 
-        text = upload.extracted_text
-        truncated = len(text) > MAX_FILE_CONTENT_CHARS
+        full_text: str = upload.extracted_text
+        selecting = pattern is not None or offset > 0 or limit is not None
+
+        # ---- Legacy path: nothing selected, return today's exact shape ----
+        if not selecting:
+            text = full_text
+            truncated = len(text) > MAX_FILE_CONTENT_CHARS
+            if truncated:
+                text = text[:MAX_FILE_CONTENT_CHARS]
+
+            logger.debug(
+                "read_file_content file_id=%s → %d chars (truncated=%s)",
+                file_id, len(text), truncated,
+            )
+            return {
+                "file_id": upload.id,
+                "filename": upload.original_filename,
+                "content_type": upload.content_type,
+                "text": text,
+                "truncated": truncated,
+            }
+
+        # ---- Selection path: pattern and/or a line window ----
+        lines = full_text.splitlines()
+        total_lines = len(lines)
+
+        if pattern:
+            try:
+                regex = re.compile(pattern, re.IGNORECASE)
+            except re.error as exc:
+                return {
+                    "error": f"Invalid regular expression: {exc}",
+                    "error_code": "invalid_pattern",
+                }
+            matched: list[tuple[int, str]] = [
+                (number, line)
+                for number, line in enumerate(lines, start=1)
+                if regex.search(line)
+            ]
+        else:
+            matched = list(enumerate(lines, start=1))
+        matched_lines = len(matched)
+
+        start = max(0, offset)
+        end = None if limit is None else start + max(0, limit)
+        window = matched[start:end]
+
+        rendered = "\n".join(f"{number}: {line}" for number, line in window)
+        truncated = len(rendered) > MAX_FILE_CONTENT_CHARS
         if truncated:
-            text = text[:MAX_FILE_CONTENT_CHARS]
+            rendered = rendered[:MAX_FILE_CONTENT_CHARS]
 
         logger.debug(
-            "read_file_content file_id=%s → %d chars (truncated=%s)",
-            file_id, len(text), truncated,
+            "read_file_content file_id=%s pattern=%r → %d/%d lines",
+            file_id, pattern, len(window), matched_lines,
         )
-        return {
+        payload: dict[str, Any] = {
             "file_id": upload.id,
             "filename": upload.original_filename,
             "content_type": upload.content_type,
-            "text": text,
+            "text": rendered,
             "truncated": truncated,
+            "offset": start,
+            "limit": limit,
+            "total_lines": total_lines,
+            "returned_lines": len(window),
+            "first_line": window[0][0] if window else None,
+            "last_line": window[-1][0] if window else None,
         }
+        if pattern:
+            payload["pattern"] = pattern
+            payload["matched_lines"] = matched_lines
+        return payload
 
     @tool
     async def download_file_for_attachment(file_id: str) -> dict[str, Any]:

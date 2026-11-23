@@ -1278,3 +1278,106 @@ class TestRssFeedTool:
             result = await tool_with_feed()
 
         assert result["entries"][0]["published"] == "2025-06-01T12:00:00Z"
+
+
+# ===========================================================================
+# fetch_url — save_to (Issue #626)
+# ===========================================================================
+
+
+class TestFetchUrlSaveTo:
+    """``save_to`` stores the page text instead of returning it."""
+
+    @pytest.fixture
+    def saved_row(self):
+        from unittest.mock import MagicMock
+
+        row = MagicMock()
+        row.id = "file-9"
+        row.original_filename = "yield.txt"
+        return row
+
+    def _tool(self):
+        from src.tools.fetch_url import build_fetch_url_tools
+
+        (tool,) = build_fetch_url_tools(
+            db=object(),
+            session_id="session-1",
+            tenant_id="tenant-1",
+            user_id="user-1",
+        )
+        return tool
+
+    async def test_save_to_returns_manifest_without_text(self, saved_row):
+        page = "<html><head><title>Yields</title></head><body>4.2%</body></html>"
+        mock_resp = _make_mock_httpx_response(
+            status_code=200,
+            headers={"content-type": "text/html"},
+            text=page,
+        )
+        mock_client = _make_mock_httpx_client(mock_resp)
+
+        with (
+            patch("src.tools.fetch_url.httpx.AsyncClient", return_value=mock_client),
+            patch(
+                "src.services.upload_service.create_text_upload",
+                new=AsyncMock(return_value=saved_row),
+            ) as create,
+        ):
+            result = await self._tool()(
+                url="https://example.com/yield", save_to="yield.txt",
+            )
+
+        assert "text" not in result
+        assert "truncated" not in result
+        assert result["file_id"] == "file-9"
+        assert result["filename"] == "yield.txt"
+        assert result["saved"] is True
+        assert result["chars"] > 0
+        assert result["status_code"] == 200
+        create.assert_awaited_once()
+
+    async def test_omitting_save_to_keeps_the_old_shape(self):
+        page = "<html><body>plain page</body></html>"
+        mock_resp = _make_mock_httpx_response(
+            status_code=200,
+            headers={"content-type": "text/html"},
+            text=page,
+        )
+        mock_client = _make_mock_httpx_client(mock_resp)
+
+        with (
+            patch("src.tools.fetch_url.httpx.AsyncClient", return_value=mock_client),
+            patch(
+                "src.services.upload_service.create_text_upload",
+                new=AsyncMock(),
+            ) as create,
+        ):
+            result = await self._tool()(url="https://example.com/plain")
+
+        assert "text" in result
+        assert "truncated" in result
+        assert "file_id" not in result
+        create.assert_not_awaited()
+
+    async def test_save_to_without_context_is_named(self):
+        """Built with no db → a named error, not an exception."""
+        page = "just text"
+        mock_resp = _make_mock_httpx_response(
+            status_code=200,
+            headers={"content-type": "text/plain"},
+            text=page,
+        )
+        mock_client = _make_mock_httpx_client(mock_resp)
+
+        from src.tools.fetch_url import build_fetch_url_tools
+
+        (tool,) = build_fetch_url_tools()  # legacy call, no context
+
+        with patch(
+            "src.tools.fetch_url.httpx.AsyncClient", return_value=mock_client
+        ):
+            result = await tool(url="https://example.com/x", save_to="x.txt")
+
+        assert result["error_code"] == "save_to_unavailable"
+        assert "text" not in result

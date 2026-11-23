@@ -2250,3 +2250,111 @@ class TestMcpTools:
             )
             assert len(result) == 1
             assert len(cleanup) == 1  # http_client appended
+
+
+# ===================================================================
+# File list — read_file_content paging (Issue #626)
+# ===================================================================
+
+
+def _read_tool(extracted_text: str, *, tenant_id: str = "tenant-1"):
+    """Build the ``read_file_content`` tool backed by a mock upload row."""
+    db = _make_mock_db_session()
+    upload = _make_mock_orm_row(
+        id="file-1",
+        original_filename="doc.txt",
+        content_type="text/plain",
+        size_bytes=len(extracted_text),
+        extracted_text=extracted_text,
+    )
+    result_mock = MagicMock()
+    result_mock.scalar_one_or_none.return_value = upload
+
+    async def mock_execute(*args, **kwargs):
+        return result_mock
+
+    db.execute = mock_execute
+
+    from src.tools.file_list import build_file_list_tool
+
+    tools = build_file_list_tool(
+        db=db, session_id="session-1", tenant_id=tenant_id,
+    )
+    return tools[1]
+
+
+FILE_ID = "00000000-0000-0000-0000-000000000001"
+
+
+class TestReadFileContentPaging:
+    """``pattern`` / ``offset`` / ``limit`` on ``read_file_content``."""
+
+    TEXT = "\n".join(
+        [
+            "Header line",
+            "Total revenue 1,234",
+            "Net income 42",
+            "total revenue 9,999",
+            "Footer line",
+        ]
+    )
+
+    async def test_legacy_shape_unchanged_without_args(self):
+        """Omitting every new argument must reproduce the old result."""
+        result = await _read_tool(self.TEXT)(file_id=FILE_ID)
+        assert result["text"] == self.TEXT
+        assert result["truncated"] is False
+        assert "total_lines" not in result
+
+    async def test_pattern_returns_only_matching_lines(self):
+        result = await _read_tool(self.TEXT)(file_id=FILE_ID, pattern="Total revenue")
+        assert result["matched_lines"] == 2
+        assert result["total_lines"] == 5
+        assert "Header line" not in result["text"]
+        assert "2: Total revenue 1,234" in result["text"]
+        # Matching is case-insensitive.
+        assert "4: total revenue 9,999" in result["text"]
+
+    async def test_limit_caps_returned_lines(self):
+        result = await _read_tool(self.TEXT)(
+            file_id=FILE_ID, pattern="revenue", limit=1,
+        )
+        assert result["returned_lines"] == 1
+        assert result["matched_lines"] == 2
+
+    async def test_offset_pages_through_matches(self):
+        result = await _read_tool(self.TEXT)(
+            file_id=FILE_ID, pattern="revenue", offset=1, limit=1,
+        )
+        assert result["first_line"] == 4
+
+    async def test_limit_without_pattern_is_a_line_window(self):
+        result = await _read_tool(self.TEXT)(file_id=FILE_ID, offset=1, limit=2)
+        assert result["returned_lines"] == 2
+        assert result["first_line"] == 2
+        assert result["last_line"] == 3
+
+    async def test_invalid_pattern_is_named(self):
+        result = await _read_tool(self.TEXT)(file_id=FILE_ID, pattern="[unclosed")
+        assert result["error_code"] == "invalid_pattern"
+
+    async def test_missing_file_is_named(self):
+        db = _make_mock_db_session()  # scalar_one_or_none → None
+
+        from src.tools.file_list import build_file_list_tool
+
+        tools = build_file_list_tool(
+            db=db, session_id="session-1", tenant_id="tenant-1",
+        )
+        result = await tools[1](file_id=FILE_ID)
+        assert result["error_code"] == "file_not_found"
+
+    async def test_25k_document_pattern_result_stays_small(self):
+        """Acceptance: a 25k-char document + one pattern → < 2,000 chars."""
+        filler = "\n".join(f"line {i} of filler text" for i in range(1200))
+        text = filler + "\nTotal revenue 1,234,567\n" + filler
+        assert len(text) > 25_000
+
+        result = await _read_tool(text)(file_id=FILE_ID, pattern="Total revenue")
+        assert result["matched_lines"] == 1
+        assert len(json.dumps(result)) < 2000

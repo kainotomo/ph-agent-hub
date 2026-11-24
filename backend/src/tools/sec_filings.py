@@ -149,6 +149,21 @@ def _shape_text_result(
     }
 
 
+def _clean_filing_html(html: str) -> str:
+    """Strip scripts/styles and normalize SEC filing HTML (worker thread)."""
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, "html.parser")
+        for tag in soup(["script", "style", "noscript", "meta", "link"]):
+            tag.decompose()
+        text = soup.get_text(separator="\n", strip=True)
+        lines = [l.strip() for l in text.split("\n") if l.strip()]
+        return "\n".join(l for l in lines if len(l) > 2 or l.isdigit())
+    except Exception:
+        text = re.sub(r"<[^>]+>", " ", html)
+        return re.sub(r"\s+", " ", text).strip()
+
+
 async def _fetch_url_direct(
     url: str, headers: dict, timeout: float
 ) -> tuple[str, str]:
@@ -201,7 +216,7 @@ async def _fetch_url_direct(
     if "/cgi-bin/viewer" in url:
         from bs4 import BeautifulSoup
 
-        soup = BeautifulSoup(html, "html.parser")
+        soup = await asyncio.to_thread(BeautifulSoup, html, "html.parser")
         iframe = soup.find("iframe")
         if iframe and iframe.get("src"):
             doc_url = iframe["src"]
@@ -215,7 +230,7 @@ async def _fetch_url_direct(
     elif "-index.htm" in url or "-index.html" in url:
         from bs4 import BeautifulSoup
 
-        soup = BeautifulSoup(html, "html.parser")
+        soup = await asyncio.to_thread(BeautifulSoup, html, "html.parser")
         doc_link: str | None = None
         for table in soup.find_all("table"):
             for row in table.find_all("tr"):
@@ -250,18 +265,7 @@ async def _fetch_url_direct(
                 url = doc_link
 
     # Clean HTML
-    try:
-        from bs4 import BeautifulSoup
-
-        soup = BeautifulSoup(html, "html.parser")
-        for tag in soup(["script", "style", "noscript", "meta", "link"]):
-            tag.decompose()
-        text = soup.get_text(separator="\n", strip=True)
-        lines = [l.strip() for l in text.split("\n") if l.strip()]
-        text = "\n".join(l for l in lines if len(l) > 2 or l.isdigit())
-    except Exception:
-        text = re.sub(r"<[^>]+>", " ", html)
-        text = re.sub(r"\s+", " ", text).strip()
+    text = await asyncio.to_thread(_clean_filing_html, html)
 
     return text, url
 

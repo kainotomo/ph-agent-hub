@@ -6,6 +6,7 @@
 # No API key required.
 # =============================================================================
 
+import asyncio
 import io
 import logging
 from urllib.parse import urlparse
@@ -91,6 +92,49 @@ def _parse_page_selection(spec: str) -> tuple[set[int] | None, str | None]:
 # ---------------------------------------------------------------------------
 # Tool factory
 # ---------------------------------------------------------------------------
+
+
+def _extract_pdf_pages(
+    raw_bytes: bytes,
+    selected: set[int] | None,
+) -> tuple[list[tuple[int, str]], int, str]:
+    """Extract text from PDF bytes with pdfplumber (runs in a worker thread).
+
+    Returns ``(extracted_pages, page_count, full_text)``.  pdfplumber is
+    CPU-bound and a large filing can take minutes, so callers must run
+    this through ``asyncio.to_thread`` instead of blocking the loop.
+    """
+    import pdfplumber
+    extracted: list[tuple[int, str]] = []
+    page_count = 0
+    with pdfplumber.open(io.BytesIO(raw_bytes)) as pdf:
+        for index, page in enumerate(pdf.pages, start=1):
+            page_count += 1
+            if selected is not None and index not in selected:
+                continue
+            page_text = page.extract_text()
+            if page_text:
+                extracted.append((index, page_text))
+    if len(extracted) > 1:
+        full_text = "\n\n".join(
+            f"--- Page {number} ---\n\n{text}"
+            for number, text in extracted
+        )
+    elif extracted:
+        full_text = extracted[0][1]
+    else:
+        full_text = ""
+    if not full_text.strip() and page_count > 0:
+        retry_parts = []
+        with pdfplumber.open(io.BytesIO(raw_bytes)) as pdf:
+            for i, page in enumerate(pdf.pages, start=1):
+                if selected is not None and i not in selected:
+                    continue
+                pt = page.extract_text() or ""
+                if pt.strip():
+                    retry_parts.append(f"[Page {i}]\n{pt}")
+        full_text = "\n\n".join(retry_parts) if retry_parts else ""
+    return extracted, page_count, full_text
 
 
 def build_pdf_extractor_tools(
@@ -184,8 +228,6 @@ def build_pdf_extractor_tools(
         logger.info("extract_pdf: %s", url)
 
         try:
-            import pdfplumber
-
             # Download PDF
             async with httpx.AsyncClient(
                 timeout=timeout,
@@ -228,39 +270,9 @@ def build_pdf_extractor_tools(
                 }
 
             # Extract text from the requested pages
-            extracted: list[tuple[int, str]] = []
-            page_count = 0
-
-            with pdfplumber.open(io.BytesIO(raw_bytes)) as pdf:
-                for index, page in enumerate(pdf.pages, start=1):
-                    page_count += 1
-                    if selected is not None and index not in selected:
-                        continue
-                    page_text = page.extract_text()
-                    if page_text:
-                        extracted.append((index, page_text))
-
-            if len(extracted) > 1:
-                full_text = "\n\n".join(
-                    f"--- Page {number} ---\n\n{text}"
-                    for number, text in extracted
-                )
-            elif extracted:
-                full_text = extracted[0][1]
-            else:
-                full_text = ""
-
-            # If pdfplumber extracted nothing, try pages one-by-one
-            if not full_text.strip() and page_count > 0:
-                retry_parts = []
-                with pdfplumber.open(io.BytesIO(raw_bytes)) as pdf:
-                    for i, page in enumerate(pdf.pages, start=1):
-                        if selected is not None and i not in selected:
-                            continue
-                        pt = page.extract_text() or ""
-                        if pt.strip():
-                            retry_parts.append(f"[Page {i}]\n{pt}")
-                full_text = "\n\n".join(retry_parts) if retry_parts else ""
+            extracted, page_count, full_text = await asyncio.to_thread(
+                _extract_pdf_pages, raw_bytes, selected,
+            )
 
             if save_to is not None:
                 return await save_extracted_text(

@@ -342,6 +342,15 @@ async def lifespan(app: FastAPI):
     if _scheduler_task is not None:
         _scheduler_task.cancel()
 
+    # Issue #632 — stop this process's run heartbeats *before* releasing the
+    # leases.  A heartbeat tick after the release would re-acquire the lease
+    # and make a gracefully stopped process look busy again.
+    try:
+        from .services.run_heartbeat import stop_all_run_heartbeats
+        await stop_all_run_heartbeats()
+    except Exception:
+        logger.warning("Failed to stop run heartbeats on shutdown", exc_info=True)
+
     # Issue #604 — release every run lease this process still owns so a
     # graceful restart does not leave sessions looking busy for the lease
     # TTL.  (A hard kill is still covered by the TTL.)
@@ -354,7 +363,7 @@ async def lifespan(app: FastAPI):
         logger.warning("Failed to release run leases on shutdown", exc_info=True)
 
 
-app = FastAPI(title="PH Agent Hub", version="3.11.0", lifespan=lifespan)
+app = FastAPI(title="PH Agent Hub", version="3.12.0", lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------

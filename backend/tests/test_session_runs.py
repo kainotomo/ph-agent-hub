@@ -8,6 +8,7 @@
 
 import asyncio
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import func, select
@@ -22,6 +23,7 @@ from src.core.redis import (
     set_stream_cancel,
 )
 from src.db.orm.messages import Message
+from src.services import run_record
 from src.services.run_registry import (
     OUTCOME_CANCELLED,
     OUTCOME_COMPLETED,
@@ -489,6 +491,45 @@ class TestStatusAndSnapshot:
         finally:
             await release_run(lease, OUTCOME_COMPLETED)
             await _cleanup(sid, test_user.id)
+
+    async def test_runs_snapshot_keeps_a_heartbeating_run_without_lease(
+        self, async_client, test_user, auth_headers, db_session, test_session,
+    ):
+        """Issue #632 — absence from the lease list is not a finish signal.
+
+        A run whose lease key blipped but whose durable heartbeat is fresh
+        must stay in ``runs`` (state running) instead of being reported as
+        finished/lost to the polling client, which would show the
+        "Lost connection to the run" banner for a live agent.
+        """
+        run_id = str(uuid.uuid4())
+        await run_record.start_run(
+            run_id=run_id,
+            session_id=test_session.id,
+            user_id=test_user.id,
+            tenant_id=test_user.tenant_id,
+            started_at=datetime.now(timezone.utc) - timedelta(minutes=20),
+            db=db_session,
+        )
+        await run_record.touch_run_heartbeat(run_id, db=db_session)
+        try:
+            resp = await async_client.get(
+                "/api/chat/runs",
+                params={"sessions": f"{test_session.id}:{run_id}"},
+                headers=auth_headers(test_user),
+            )
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            runs = [
+                run for run in body["runs"]
+                if run["session_id"] == test_session.id
+            ]
+            assert len(runs) == 1
+            assert runs[0]["run_id"] == run_id
+            assert runs[0]["state"] == "running"
+            assert body["finished"] == []
+        finally:
+            await _cleanup(test_session.id, test_user.id)
 
     async def test_runs_snapshot_reports_finished_outcome_for_known_run(
         self, async_client, test_user, auth_headers

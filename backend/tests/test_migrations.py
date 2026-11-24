@@ -318,11 +318,11 @@ class TestMigrationDAG:
     def test_migration_count(self, migrations):
         """Snapshot the total migration count to detect unintended additions."""
         count = len(migrations)
-        # 2026-11-23: 81 files — the rag_documents.file_id FK was switched to
-        # ON DELETE CASCADE on top of the previous 80 (the old snapshot of 79
-        # had already drifted).
-        assert count == 81, (
-            f"Expected 81 migration files, found {count}. "
+        # 2026-11-24: 82 files — the chat_runs durable heartbeat
+        # (last_heartbeat_at) was added for Issue #632 on top of the previous
+        # 81 (the rag_documents.file_id ON DELETE CASCADE migration).
+        assert count == 82, (
+            f"Expected 82 migration files, found {count}. "
             "Update this assertion after adding/removing migrations."
         )
 

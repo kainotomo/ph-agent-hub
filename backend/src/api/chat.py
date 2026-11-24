@@ -71,10 +71,13 @@ from ..services.run_registry import (
     get_active_runs_for_user,
     get_run,
     get_run_outcome,
-    heartbeat_run,
     is_run_cancel_requested,
     release_run,
     request_run_cancel,
+)
+from ..services.run_heartbeat import (
+    start_run_heartbeat,
+    stop_run_heartbeat,
 )
 from ..db.orm.messages import Message, MessageFeedback
 from ..db.orm.sessions import Session, SessionActiveTool
@@ -2308,6 +2311,17 @@ async def _release_lease_safely(lease: RunLease, outcome: str) -> None:
         )
 
 
+async def _stop_heartbeat_safely(run_id: str) -> None:
+    """Stop a run heartbeat without letting cancellation skip the cleanup."""
+    try:
+        await asyncio.shield(stop_run_heartbeat(run_id))
+    except (asyncio.CancelledError, Exception):
+        logger.warning(
+            "Failed to stop the run heartbeat for %s", run_id,
+            exc_info=True,
+        )
+
+
 async def _stop_run_for_session_delete(
     session_id: str,
     timeout_seconds: float = 5.0,
@@ -2377,14 +2391,22 @@ async def _session_run(
             kind=active.kind if active is not None else None,
         )
 
+    # Issue #632 — heartbeat from admission, not from the moment the
+    # background agent task starts.  A slow pre-stream phase (auto-routing,
+    # session promotion, attachment validation) used to let the lease expire
+    # before the first heartbeat ever ran, orphaning a run that was alive.
+    await start_run_heartbeat(lease)
+
     try:
         yield lease
     except BaseException:
         if not lease.handed_off:
+            await _stop_heartbeat_safely(lease.run_id)
             await _release_lease_safely(lease, OUTCOME_FAILED)
         raise
     else:
         if not lease.handed_off:
+            await _stop_heartbeat_safely(lease.run_id)
             await _release_lease_safely(lease, OUTCOME_COMPLETED)
 
 
@@ -2519,15 +2541,8 @@ async def _run_agent_background(
     async with AsyncSessionLocal() as stream_db:
         # Initialise early so finally blocks don't UnboundLocalError if
         # the refresh query below fails (detached current_user).
-        heartbeat_task: asyncio.Task | None = None
         local_user = current_user
         try:
-            # Start heartbeating before any DB work so the lease cannot
-            # expire while the task is still initialising.
-            heartbeat_task = asyncio.ensure_future(
-                _heartbeat_run_loop(lease, bridge)
-            )
-
             # Durable start row.  A SIGKILL before the terminal frame leaves
             # evidence that the startup sweep turns into `lost` (#608).
             _user_id = data.get("user_id") or current_user.id
@@ -2665,14 +2680,6 @@ async def _run_agent_background(
                 }),
             })
         finally:
-            # Stop the lease heartbeat loop.
-            if heartbeat_task is not None:
-                heartbeat_task.cancel()
-                try:
-                    await heartbeat_task
-                except (asyncio.CancelledError, Exception):
-                    pass
-
             # Clean up only this run's cancel flag (a newer run may have
             # started between release and cleanup in theory).
             await clear_stream_cancel(session_id, run_id=lease.run_id)
@@ -2718,6 +2725,11 @@ async def _run_agent_background(
 
             # Remove from registry.
             remove_bridge(session_id, run_id=lease.run_id)
+
+            # Issue #632 — stop the heartbeat only now: it must keep the
+            # lease alive through the record write and bridge teardown, and
+            # it must stop before the owner-checked release.
+            await _stop_heartbeat_safely(lease.run_id)
 
             # Release the run lease and record how it ended.
             await _release_lease_safely(lease, outcome)
@@ -2798,15 +2810,8 @@ async def _run_autopilot_background(
 
     async with AsyncSessionLocal() as agent_db:
         # Initialise early so finally blocks don't UnboundLocalError.
-        heartbeat_task: asyncio.Task | None = None
         local_user = current_user
         try:
-            # Start heartbeating before any DB work so the lease cannot
-            # expire while the task is still initialising.
-            heartbeat_task = asyncio.ensure_future(
-                _heartbeat_run_loop(lease, bridge)
-            )
-
             # Refresh current_user in this session's context using the
             # user_id from data (a plain dict, no ORM access).
             from sqlalchemy import select as _sa_select
@@ -2944,14 +2949,6 @@ async def _run_autopilot_background(
                 }),
             })
         finally:
-            # Stop the lease heartbeat loop (may be None if setup failed).
-            if heartbeat_task is not None:
-                heartbeat_task.cancel()
-                try:
-                    await heartbeat_task
-                except (asyncio.CancelledError, Exception):
-                    pass
-
             # Clean up only this run's cancel flag.
             await clear_stream_cancel(session_id, run_id=lease.run_id)
 
@@ -2966,6 +2963,10 @@ async def _run_autopilot_background(
 
             # Remove from registry.
             remove_bridge(session_id, run_id=lease.run_id)
+
+            # Issue #632 — the heartbeat stays alive through teardown and
+            # stops before the owner-checked release.
+            await _stop_heartbeat_safely(lease.run_id)
 
             # Release the run lease and record how it ended.
             await _release_lease_safely(lease, outcome)
@@ -2983,47 +2984,6 @@ async def _run_autopilot_background(
             )
 
 
-async def _heartbeat_run_loop(
-    lease: RunLease,
-    bridge: StreamBridge,
-) -> None:
-    """Refresh the run lease while the agent is alive.
-
-    Stops when the bridge closes or the lease is lost.  Losing the lease
-    means another run may now own the session, so heartbeating must stop
-    immediately.
-    """
-    interval = max(0.1, float(settings.RUN_HEARTBEAT_INTERVAL_SECONDS))
-    while not bridge.is_closed:
-        try:
-            if not await heartbeat_run(lease):
-                logger.warning(
-                    "Lost run lease %s for session %s — stopping heartbeat",
-                    lease.run_id, lease.session_id,
-                )
-                return
-        except Exception:
-            logger.warning(
-                "Run lease heartbeat failed for session %s",
-                lease.session_id,
-                exc_info=True,
-            )
-        try:
-            await asyncio.wait_for(
-                _wait_for_bridge_close(bridge),
-                timeout=interval,
-            )
-            return
-        except asyncio.TimeoutError:
-            continue
-
-
-async def _wait_for_bridge_close(bridge: StreamBridge) -> None:
-    """Wait until the bridge is closed."""
-    while not bridge.is_closed:
-        await asyncio.sleep(1)
-
-
 def _spawn_agent_background(
     session_id: str,
     data: dict,
@@ -3037,10 +2997,11 @@ def _spawn_agent_background(
     """Create and return a background ``asyncio.Task`` for agent execution.
 
     Registers the bridge (tagged with *lease*'s run id) and hands the
-    lease to the background task, which heartbeats it and releases it in
-    its ``finally`` block.  Ownership transfer is atomic from the event
-    loop's perspective: no ``await`` happens between creating the task
-    and setting ``lease.handed_off``.
+    lease to the background task, which releases it in its ``finally``
+    block (the heartbeat itself was started when the run was admitted and
+    stops immediately before that release).  Ownership transfer is atomic
+    from the event loop's perspective: no ``await`` happens between
+    creating the task and setting ``lease.handed_off``.
     """
     # Register the bridge immediately so reconnect subscribers can find it.
     register_bridge(session_id, bridge)
@@ -3538,6 +3499,26 @@ def _lease_event_payload(lease: RunLease) -> dict[str, Any]:
     }
 
 
+def _runtime_running_payload(
+    runtime: session_runtime.SessionRuntime,
+) -> dict[str, Any]:
+    """Status payload for a run that is alive by durable heartbeat only.
+
+    Issue #632 — after an event-loop stall or a Redis blip the lease may not
+    be back yet while the durable ``chat_runs`` heartbeat proves the run is
+    alive.  Reporting it here keeps the client from inferring "finished" just
+    because the session is absent from the lease list.
+    """
+    return {
+        "session_id": runtime.session_id,
+        "run_id": runtime.run_id,
+        "kind": runtime.kind,
+        "started_at": runtime.started_at,
+        "state": "running",
+        "revision": runtime.revision,
+    }
+
+
 async def _iter_session_status_events(
     user_id: str,
     is_disconnected,
@@ -3670,9 +3651,16 @@ async def list_active_runs(
         user_id=current_user.id,
     )
 
-    runs: list[dict[str, Any]] = [
-        _lease_event_payload(lease) for lease in active.values()
-    ]
+    runs: list[dict[str, Any]] = []
+    for session_id, runtime in view.items():
+        if not runtime.running:
+            continue
+        lease = active.get(session_id)
+        runs.append(
+            _lease_event_payload(lease)
+            if lease is not None
+            else _runtime_running_payload(runtime)
+        )
 
     finished: list[dict[str, Any]] = []
     reported: set[str] = set()

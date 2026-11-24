@@ -7,6 +7,7 @@
 # =============================================================================
 
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -23,6 +24,10 @@ pytestmark = pytest.mark.integration
 
 def _sid() -> str:
     return str(uuid.uuid4())
+
+
+def _minutes_ago(minutes: int) -> datetime:
+    return datetime.now(timezone.utc) - timedelta(minutes=minutes)
 
 
 async def _cleanup(session_id: str, user_id: str) -> None:
@@ -88,6 +93,8 @@ class TestResolveRuntime:
             session_id=test_session.id,
             user_id=test_user.id,
             tenant_id=test_user.tenant_id,
+            # Old row, no lease and no heartbeat: the process is gone.
+            started_at=_minutes_ago(60),
             db=db_session,
         )
         view = await session_runtime.resolve_one(
@@ -96,6 +103,31 @@ class TestResolveRuntime:
         assert view.state == "lost"
         assert view.outcome == "lost"
         assert view.run_id == run_id
+
+    async def test_unfinished_row_with_fresh_heartbeat_is_running(
+        self, db_session, test_user, test_session,
+    ):
+        """Issue #632 — a lease blip must not turn a live run into `lost`."""
+        run_id = _sid()
+        await run_record.start_run(
+            run_id=run_id,
+            session_id=test_session.id,
+            user_id=test_user.id,
+            tenant_id=test_user.tenant_id,
+            # The row was written long ago, but its heartbeat is fresh: the
+            # Redis lease key may be missing while the process keeps working.
+            started_at=_minutes_ago(30),
+            db=db_session,
+        )
+        await run_record.touch_run_heartbeat(run_id, db=db_session)
+
+        view = await session_runtime.resolve_one(
+            db_session, test_session.id, user_id=test_user.id,
+        )
+        assert view.state == "running"
+        assert view.run_id == run_id
+        assert view.outcome is None
+        assert view.kind == "chat"
 
     async def test_revision_moves_forward_on_finish(
         self, db_session, test_user, test_session,

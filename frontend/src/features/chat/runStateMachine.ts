@@ -190,6 +190,23 @@ function applyServerState(
 
   switch (input.state) {
     case "running":
+      // Issue #632 — a transient `lost` (the server saw the run's Redis
+      // lease blip while the agent kept working) must be recoverable once
+      // the server confirms the same run is alive again.  `done`/`failed`/
+      // `cancelled` stay final.
+      if (
+        base.phase === "lost" &&
+        (!input.runId || !base.runId || input.runId === base.runId)
+      ) {
+        return {
+          ...base,
+          phase: "running",
+          runId: input.runId ?? base.runId,
+          errorCode: null,
+          reason: null,
+          otherClient: false,
+        };
+      }
       if (isTerminalPhase(base.phase)) return base;
       return {
         ...base,
@@ -234,6 +251,9 @@ function applyServerState(
         otherClient: false,
       };
     case "lost":
+      // A completed, persisted turn is final: a stale or late `lost` record
+      // for the same run must never turn a delivered answer into an error.
+      if (base.phase === "done" && base.persisted) return base;
       return lost(
         base,
         input.message ||

@@ -25,6 +25,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.orm.chat_runs import ChatRun
+from .run_record import row_is_recently_alive
 from .run_registry import get_last_run_markers, get_runs
 
 #: Terminal run states.
@@ -82,6 +83,7 @@ class SessionRuntime:
     revision: int = 0
     error_code: str | None = None
     message_id: str | None = None
+    kind: str | None = None
 
     @property
     def running(self) -> bool:
@@ -98,6 +100,7 @@ class SessionRuntime:
             "revision": self.revision,
             "error_code": self.error_code,
             "message_id": self.message_id,
+            "kind": self.kind,
         }
 
 
@@ -146,6 +149,7 @@ def _from_lease(lease: Any) -> SessionRuntime:
         run_id=lease.run_id,
         started_at=started,
         revision=revision_of(started),
+        kind=getattr(lease, "kind", None),
     )
 
 
@@ -154,9 +158,13 @@ def _from_row(row: ChatRun) -> SessionRuntime:
     finished = iso(row.finished_at)
     if row.outcome in TERMINAL_STATES:
         state = str(row.outcome)
+    elif row.finished_at is None and row_is_recently_alive(row):
+        # Issue #632 — no lease is not proof of death.  The durable heartbeat
+        # is written by the run's own process, so a lease blip during an
+        # event-loop stall or a Redis restart must keep the run "running".
+        state = "running"
     elif row.finished_at is None:
-        # No lease reached this function's caller and the row never got a
-        # terminal state: the process that owned it is gone.
+        # No lease and no fresh heartbeat: the process that owned it is gone.
         state = "lost"
     else:
         state = "unknown"
@@ -167,9 +175,14 @@ def _from_row(row: ChatRun) -> SessionRuntime:
         outcome=state if state in TERMINAL_STATES else None,
         started_at=started,
         finished_at=finished,
-        revision=revision_of(finished or started, terminal=True),
+        revision=(
+            revision_of(started)
+            if state == "running"
+            else revision_of(finished or started, terminal=True)
+        ),
         error_code=row.error_code,
         message_id=row.message_id,
+        kind=row.kind,
     )
 
 
@@ -185,6 +198,7 @@ def _from_marker(session_id: str, marker: dict[str, Any]) -> SessionRuntime:
         started_at=started,
         finished_at=finished,
         revision=revision_of(finished or started, terminal=True),
+        kind=marker.get("kind"),
     )
 
 
@@ -213,6 +227,15 @@ async def resolve_runtime(
         return {}
 
     leases = await get_runs(ids)
+    if user_id is not None:
+        # Owner-scoped callers must not learn that another user's session is
+        # running just by naming it in a status query (issue #632 made the
+        # lease a reported liveness source, so this matters).
+        leases = {
+            sid: lease
+            for sid, lease in leases.items()
+            if not lease.user_id or str(lease.user_id) == str(user_id)
+        }
     rows = await _latest_runs(db, ids, user_id=user_id)
     markers: dict[str, dict[str, Any]] = {}
     # Only sessions without a durable row or with an unfinished one need the

@@ -7,6 +7,7 @@
 # Dependencies: weasyprint, markdown, openpyxl (already installed)
 # =============================================================================
 
+import asyncio
 import csv
 import io
 import logging
@@ -99,12 +100,15 @@ def build_document_generation_tools(
         if not markdown or not markdown.strip():
             return {"error": "No markdown content provided to generate PDF"}
 
-        try:
+        def _render_markdown() -> str:
             import markdown as md_lib
-            html_content = md_lib.markdown(
+            return md_lib.markdown(
                 markdown,
                 extensions=["tables", "fenced_code", "codehilite", "toc", "nl2br"],
             )
+
+        try:
+            html_content = await asyncio.to_thread(_render_markdown)
         except ImportError:
             # Fallback if markdown lib is not available
             html_content = markdown.replace("\n", "<br>\n")
@@ -141,9 +145,12 @@ def build_document_generation_tools(
 </body>
 </html>"""
 
-        try:
+        def _render_pdf() -> bytes:
             from weasyprint import HTML
-            pdf_bytes = HTML(string=html_doc).write_pdf()
+            return HTML(string=html_doc).write_pdf()
+
+        try:
+            pdf_bytes = await asyncio.to_thread(_render_pdf)
         except ImportError:
             return {
                 "error": (

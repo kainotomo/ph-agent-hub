@@ -15,14 +15,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..core.config import settings
 from ..db.orm.chat_runs import ChatRun
 from ..db.orm.messages import Message
 from .run_registry import (
@@ -56,6 +58,77 @@ def _as_aware(value: datetime | None) -> datetime | None:
 def _iso(value: datetime | None) -> str | None:
     aware = _as_aware(value)
     return aware.isoformat().replace("+00:00", "Z") if aware else None
+
+
+def _parse_iso(value: Any) -> datetime | None:
+    """Parse an ISO timestamp from a run snapshot (naive values are UTC)."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return _as_aware(parsed)
+
+
+def row_is_recently_alive(
+    row: ChatRun,
+    now: datetime | None = None,
+) -> bool:
+    """True when an unfinished row carries a fresh durable heartbeat.
+
+    Issue #632 — a missing Redis lease is not proof that the run died: an
+    event-loop stall (blocking tool call) or a Redis restart can drop the
+    lease while the process keeps working.  The heartbeat task writes
+    ``last_heartbeat_at`` every few seconds, so the row itself is the
+    independent proof of life used to avoid declaring a live run ``lost``.
+    Rows written before the column existed fall back to ``started_at``.
+    """
+    if row.finished_at is not None:
+        return False
+    last = _as_aware(row.last_heartbeat_at) or _as_aware(row.started_at)
+    if last is None:
+        return False
+    current = now or _utcnow()
+    return (current - last).total_seconds() <= max(
+        int(settings.RUN_LOST_GRACE_SECONDS), 1,
+    )
+
+
+def _state_is_recently_alive(state: dict[str, Any], now: datetime) -> bool:
+    """Same rule as :func:`row_is_recently_alive` for a snapshot dict."""
+    last = _parse_iso(state.get("last_heartbeat_at")) or _parse_iso(
+        state.get("started_at")
+    )
+    if last is None:
+        return False
+    return (now - last).total_seconds() <= max(
+        int(settings.RUN_LOST_GRACE_SECONDS), 1,
+    )
+
+
+def _lease_owns(lease: Any, state: dict[str, Any]) -> bool:
+    """Whether *lease* is the run described by *state*."""
+    return (
+        lease is not None
+        and getattr(lease, "run_id", None) == state.get("run_id")
+    )
+
+
+async def _lease_snapshot(session_id: str) -> tuple[bool, Any]:
+    """Read the session's lease, distinguishing "absent" from "unavailable".
+
+    Returns ``(ok, lease)``.  ``ok=False`` means the registry could not be
+    read at all — callers must not fabricate a terminal state from that.
+    """
+    try:
+        return True, await get_run(session_id)
+    except Exception:
+        logger.warning(
+            "Could not read the run lease for session %s", session_id,
+            exc_info=True,
+        )
+        return False, None
 
 
 @asynccontextmanager
@@ -94,6 +167,7 @@ async def start_run(
     async with _session_scope(db) as session:
         existing = await session.get(ChatRun, run_id)
         if existing is None:
+            started = started_at or _utcnow()
             session.add(
                 ChatRun(
                     id=run_id,
@@ -101,7 +175,12 @@ async def start_run(
                     user_id=user_id,
                     tenant_id=tenant_id,
                     kind=kind or "chat",
-                    started_at=started_at or _utcnow(),
+                    started_at=started,
+                    # Issue #632 — the durable proof of life starts at the
+                    # same instant as the row, so a crash before the first
+                    # heartbeat still has a grace window instead of an
+                    # immediate `lost`.
+                    last_heartbeat_at=started,
                     finished_at=None,
                     outcome=None,
                     persisted=False,
@@ -112,6 +191,30 @@ async def start_run(
                 )
             )
         await session.commit()
+
+
+async def touch_run_heartbeat(
+    run_id: str,
+    *,
+    now: datetime | None = None,
+    db: AsyncSession | None = None,
+) -> bool:
+    """Refresh the durable proof of life for *run_id*.
+
+    Only an unfinished row is updated: a run that already reported a
+    terminal state must never look alive again.  Returns ``True`` when a row
+    was updated (``False`` before ``start_run`` has written the row, or after
+    it was finalized).
+    """
+    stamp = now or _utcnow()
+    async with _session_scope(db) as session:
+        result = await session.execute(
+            update(ChatRun)
+            .where(ChatRun.id == run_id, ChatRun.finished_at.is_(None))
+            .values(last_heartbeat_at=stamp)
+        )
+        await session.commit()
+        return bool(getattr(result, "rowcount", 0))
 
 
 async def finalize_run(
@@ -220,6 +323,7 @@ def _row_to_dict(row: ChatRun) -> dict[str, Any]:
         "state": row.outcome
         or ("running" if row.finished_at is None else "unknown"),
         "started_at": _iso(row.started_at),
+        "last_heartbeat_at": _iso(row.last_heartbeat_at),
         "finished_at": _iso(row.finished_at),
         "error_code": row.error_code,
         "error_message": row.error_message,
@@ -251,47 +355,61 @@ async def get_run_state(
 async def repair_unfinished_run(
     db: AsyncSession,
     session_id: str,
+    *,
+    now: datetime | None = None,
 ) -> dict[str, Any] | None:
     """Return the latest run, resolving a stale ``running`` row on read.
 
-    A row that never got ``finished_at`` is only genuinely running while a
-    live lease exists for its run id.  When the lease is gone (dead process,
-    another replica's crash, eviction) the read itself writes the terminal
-    ``lost`` state, so no client can keep seeing "running" until some
-    process happens to restart.
+    Liveness has two independent sources (Issue #632): the expiry of the
+    Redis lease and the run's durable ``last_heartbeat_at``.  A row is only
+    resolved to ``lost`` when *both* are stale for ``RUN_LOST_GRACE_SECONDS``
+    — otherwise a transient lease blip (event-loop stall in a blocking tool
+    call, Redis restart) would mark a live run lost and show the user
+    "The run's lease expired before a terminal state was recorded."
+
+    Before writing the terminal state the lease and the row are re-read after
+    ``RUN_LOST_CONFIRM_SECONDS`` so a heartbeat task resuming from the same
+    stall can re-acquire the lease first.
     """
     state = await get_run_state(db, session_id)
     if state is None or state.get("state") != "running":
         return state
 
-    from .run_registry import get_run  # local import: registry imports config
-
-    try:
-        lease = await get_run(session_id)
-    except Exception:
+    current = now or _utcnow()
+    ok, lease = await _lease_snapshot(session_id)
+    if not ok:
         # Registry unavailable — do not fabricate a terminal state.
-        logger.warning(
-            "Could not read lease while repairing run %s", state.get("run_id"),
-            exc_info=True,
-        )
+        return state
+    if _lease_owns(lease, state) or _state_is_recently_alive(state, current):
         return state
 
-    if lease is not None and lease.run_id == state.get("run_id"):
+    # Confirm before recording a terminal state: after a stall the heartbeat
+    # may be about to re-acquire the lease, and a read must never win that race.
+    delay = max(0.0, float(settings.RUN_LOST_CONFIRM_SECONDS))
+    if delay:
+        await asyncio.sleep(delay)
+    ok, lease = await _lease_snapshot(session_id)
+    if not ok:
         return state
+    fresh = await get_run_state(db, session_id)
+    if fresh is None or fresh.get("state") != "running":
+        return fresh
+    if _lease_owns(lease, fresh) or _state_is_recently_alive(fresh, _utcnow()):
+        return fresh
 
     await finalize_run(
-        run_id=state["run_id"],
+        run_id=fresh["run_id"],
         session_id=session_id,
         outcome=OUTCOME_LOST,
         error_code="orphaned",
         error_message=(
             "The run's lease expired before a terminal state was recorded."
         ),
-        persisted=bool(state.get("persisted")),
-        client_attached=bool(state.get("client_attached")),
-        last_event_seq=int(state.get("last_event_seq") or 0),
-        tokens_in=int(state.get("tokens_in") or 0),
-        tokens_out=int(state.get("tokens_out") or 0),
+        persisted=bool(fresh.get("persisted")),
+        client_attached=bool(fresh.get("client_attached")),
+        last_event_seq=int(fresh.get("last_event_seq") or 0),
+        tokens_in=int(fresh.get("tokens_in") or 0),
+        tokens_out=int(fresh.get("tokens_out") or 0),
         db=db,
     )
     return await get_run_state(db, session_id)
@@ -358,9 +476,10 @@ async def mark_orphan_runs_lost(
 ) -> int:
     """Mark unfinished run rows whose lease is gone/expired as ``lost``.
 
-    Called once on startup.  Rows owned by a live replica (matching run id
-    and a fresh heartbeat) are left alone; everything else is a process that
-    died without writing a terminal state.
+    Called once on startup and periodically by every replica.  Issue #632:
+    a row is only dead when its lease is gone **and** its durable heartbeat
+    is stale.  Rows owned by a live replica (matching run id and fresh
+    heartbeat) and rows whose heartbeat is still fresh are left alone.
     """
     now = now or _utcnow()
     marked = 0
@@ -379,9 +498,18 @@ async def mark_orphan_runs_lost(
                     exc_info=True,
                 )
                 # Without the registry we cannot prove the run is dead; the
-                # next startup will retry rather than fabricating a `lost`.
+                # next sweep will retry rather than fabricating a `lost`.
                 continue
             if _lease_is_live(lease, row.id, now):
+                continue
+            if row_is_recently_alive(row, now):
+                # The lease key blipped but the owning process is still
+                # heartbeating: do not declare a live run dead.
+                logger.info(
+                    "PH-RUN-SWEEP keeping run %s for session %s — lease "
+                    "absent but durable heartbeat is fresh",
+                    row.id, row.session_id,
+                )
                 continue
 
             row.outcome = OUTCOME_LOST

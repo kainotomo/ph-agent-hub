@@ -193,6 +193,42 @@ redis.call('EXPIRE', KEYS[2], ARGV[5])
 return 1
 """
 
+# KEYS: run, user index, delete lock
+# ARGV: run_id, kind, user_id, tenant_id, owner, started_at, heartbeat_at,
+#       lease_ttl, session_id, index_ttl
+_REACQUIRE_SCRIPT = """
+-- A session being deleted must not accept (or revive) a run.
+if redis.call('EXISTS', KEYS[3]) == 1 then
+    return 0
+end
+if redis.call('EXISTS', KEYS[1]) == 1 then
+    -- Someone else's run owns the session: this run is superseded.
+    if redis.call('HGET', KEYS[1], 'run_id') ~= ARGV[1] then
+        return 0
+    end
+    redis.call('HSET', KEYS[1], 'heartbeat_at', ARGV[7])
+    redis.call('EXPIRE', KEYS[1], ARGV[8])
+    redis.call('SADD', KEYS[2], ARGV[9])
+    redis.call('EXPIRE', KEYS[2], ARGV[10])
+    return 1
+end
+-- The key expired while this process was still running: restore the same
+-- run id instead of starting a second, competing run in the session.
+redis.call('HSET', KEYS[1],
+    'run_id', ARGV[1],
+    'kind', ARGV[2],
+    'user_id', ARGV[3],
+    'tenant_id', ARGV[4],
+    'owner', ARGV[5],
+    'started_at', ARGV[6],
+    'heartbeat_at', ARGV[7],
+    'state', 'running')
+redis.call('EXPIRE', KEYS[1], ARGV[8])
+redis.call('SADD', KEYS[2], ARGV[9])
+redis.call('EXPIRE', KEYS[2], ARGV[10])
+return 1
+"""
+
 # KEYS: run, user index, last marker
 # ARGV: run_id, session_id, marker_json, marker_ttl
 _RELEASE_SCRIPT = """
@@ -305,6 +341,37 @@ async def heartbeat_run(lease: RunLease) -> bool:
         int(settings.RUN_USER_INDEX_TTL_SECONDS),
     )
     return bool(refreshed)
+
+
+async def reacquire_run(lease: RunLease) -> bool:
+    """Restore *lease*'s own run key after it expired, without stealing a session.
+
+    A live run can outlive its Redis lease key (event-loop stall, Redis
+    restart, eviction).  The heartbeat loop calls this before giving up: the
+    same ``run_id`` is restored only when the key is absent — or still
+    carries this run id — and no session deletion is in progress.  When
+    another run owns the session this returns ``False`` and the caller must
+    stop heartbeating, because the run has been superseded.
+    """
+    r = await get_redis()
+    reacquired = await r.eval(
+        _REACQUIRE_SCRIPT,
+        3,
+        run_key(lease.session_id),
+        user_index_key(lease.user_id),
+        delete_key(lease.session_id),
+        lease.run_id,
+        lease.kind,
+        lease.user_id,
+        lease.tenant_id,
+        lease.owner,
+        lease.started_at,
+        _now_iso(),
+        int(settings.RUN_LEASE_TTL_SECONDS),
+        lease.session_id,
+        int(settings.RUN_USER_INDEX_TTL_SECONDS),
+    )
+    return bool(reacquired)
 
 
 async def release_run(

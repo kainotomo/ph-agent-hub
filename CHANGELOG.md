@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [3.12.0] — 2026-11-24
 
 ### Added
 - **`save_to` on `extract_pdf` / `fetch_url` (Issue #626)** — both tools
@@ -33,6 +33,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   skipped. Each deletion is audited as `memory.deleted`. ([#624])
 
 ### Fixed
+- **A live run is no longer reported as lost during a long chat (Issue
+  #632)** — the "Lost connection to the run / The run's lease expired before
+  a terminal state was recorded." banner came from the read-path repair
+  writing `lost` the first time a run's 6 s Redis lease was missing, even
+  though the process kept working: an event-loop stall inside a synchronous
+  tool call (or a Redis blip) starved the heartbeat, and the heartbeat task
+  then stopped for good. The lease is now heartbeated from admission
+  (covering auto-routing/attachment work), the TTL is 20 s, an expired key is
+  re-acquired with the same run id unless another run already owns the
+  session, and every run also refreshes `chat_runs.last_heartbeat_at` every
+  5 s. A `running` row is only resolved to `lost` when both the lease and
+  that durable heartbeat are older than `RUN_LOST_GRACE_SECONDS` (30 s),
+  after a short confirm re-read; `/chat/runs`, the sidebar flags and
+  `/run-state` keep reporting such a run as `running`, and the client can
+  revive a `lost` view when the server confirms the same run is alive again.
+  The synchronous yfinance/pdfplumber/WeasyPrint/BeautifulSoup calls in the
+  tool handlers were moved to `asyncio.to_thread` so they no longer stall
+  the loop at all. ([#632])
 - **Deleting a session or a message left its RAG chunks searchable (Issue
   #628)** — `delete_uploads_for_session()` and `delete_uploads_for_message()`
   removed the `file_uploads` rows and the MinIO objects but not the chunks
@@ -530,3 +548,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#626]: https://github.com/kainotomo/ph-agent-hub/issues/626
 [#627]: https://github.com/kainotomo/ph-agent-hub/issues/627
 [#628]: https://github.com/kainotomo/ph-agent-hub/issues/628
+[#632]: https://github.com/kainotomo/ph-agent-hub/issues/632

@@ -16,10 +16,12 @@ import pytest
 from src.core.config import settings
 from src.core.exceptions import SessionBusyError
 from src.core.redis import get_redis
+from src.db.orm.chat_runs import ChatRun
 from src.services import run_record, session_service
 from src.services.run_registry import (
     OUTCOME_CANCELLED,
     OUTCOME_LOST,
+    RunLease,
     acquire_run,
     begin_session_delete,
     clear_session_run_state,
@@ -141,8 +143,37 @@ class TestSchedulerClaim:
 
 class TestRunStateRepair:
     async def test_stale_running_row_becomes_lost(
-        self, db_session, test_user, test_session,
+        self, db_session, test_user, test_session, monkeypatch,
     ):
+        monkeypatch.setattr(settings, "RUN_LOST_CONFIRM_SECONDS", 0.0)
+        run_id = _sid()
+        await run_record.start_run(
+            run_id=run_id,
+            session_id=test_session.id,
+            user_id=test_user.id,
+            tenant_id=test_user.tenant_id,
+            # No lease and no heartbeat for an hour: the process is gone.
+            started_at=datetime.now(timezone.utc) - timedelta(hours=1),
+            db=db_session,
+        )
+
+        state = await run_record.repair_unfinished_run(db_session, test_session.id)
+
+        assert state is not None
+        assert state["state"] == OUTCOME_LOST
+        assert state["finished_at"] is not None
+
+    async def test_recently_heartbeated_row_stays_running(
+        self, db_session, test_user, test_session, monkeypatch,
+    ):
+        """Issue #632 — a missing lease is not proof that the run died.
+
+        A live run whose Redis lease key blipped (event-loop stall in a
+        blocking tool call, Redis restart) used to be resolved to `lost` on
+        the first read, which is exactly the "The run's lease expired before
+        a terminal state was recorded." banner from the report.
+        """
+        monkeypatch.setattr(settings, "RUN_LOST_CONFIRM_SECONDS", 0.0)
         run_id = _sid()
         await run_record.start_run(
             run_id=run_id,
@@ -155,8 +186,105 @@ class TestRunStateRepair:
         state = await run_record.repair_unfinished_run(db_session, test_session.id)
 
         assert state is not None
-        assert state["state"] == OUTCOME_LOST
-        assert state["finished_at"] is not None
+        assert state["state"] == "running"
+        assert state["finished_at"] is None
+        assert state["last_heartbeat_at"] is not None
+
+    async def test_touched_heartbeat_keeps_an_old_row_running(
+        self, db_session, test_user, test_session, monkeypatch,
+    ):
+        """A long run keeps its row alive by the durable heartbeat alone."""
+        monkeypatch.setattr(settings, "RUN_LOST_CONFIRM_SECONDS", 0.0)
+        run_id = _sid()
+        await run_record.start_run(
+            run_id=run_id,
+            session_id=test_session.id,
+            user_id=test_user.id,
+            tenant_id=test_user.tenant_id,
+            started_at=datetime.now(timezone.utc) - timedelta(minutes=30),
+            db=db_session,
+        )
+        assert await run_record.touch_run_heartbeat(
+            run_id, db=db_session,
+        ) is True
+
+        state = await run_record.repair_unfinished_run(db_session, test_session.id)
+
+        assert state is not None
+        assert state["state"] == "running"
+
+    async def test_touch_heartbeat_never_revives_a_finished_row(
+        self, db_session, test_user, test_session,
+    ):
+        run_id = _sid()
+        await run_record.start_run(
+            run_id=run_id,
+            session_id=test_session.id,
+            user_id=test_user.id,
+            tenant_id=test_user.tenant_id,
+            db=db_session,
+        )
+        await run_record.finalize_run(
+            run_id=run_id,
+            session_id=test_session.id,
+            outcome=OUTCOME_CANCELLED,
+            db=db_session,
+        )
+        assert await run_record.touch_run_heartbeat(
+            run_id, db=db_session,
+        ) is False
+        state = await run_record.get_run_state(db_session, test_session.id)
+        assert state is not None
+        assert state["state"] == OUTCOME_CANCELLED
+
+    async def test_confirm_read_lets_a_reacquiring_heartbeat_win(
+        self, db_session, test_user, test_session, monkeypatch,
+    ):
+        """The confirm re-read must not lose to a heartbeat that just resumed.
+
+        After an event-loop stall the heartbeat task and the run-state read
+        resume in an arbitrary order.  The read waits
+        ``RUN_LOST_CONFIRM_SECONDS`` and re-reads the lease; if the heartbeat
+        re-acquired it in the meantime, the run is alive and must stay
+        ``running``.
+        """
+        monkeypatch.setattr(settings, "RUN_LOST_CONFIRM_SECONDS", 0.05)
+        run_id = _sid()
+        await run_record.start_run(
+            run_id=run_id,
+            session_id=test_session.id,
+            user_id=test_user.id,
+            tenant_id=test_user.tenant_id,
+            started_at=datetime.now(timezone.utc) - timedelta(hours=1),
+            db=db_session,
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        lease = RunLease(
+            session_id=test_session.id,
+            run_id=run_id,
+            kind="chat",
+            user_id=test_user.id,
+            tenant_id=test_user.tenant_id,
+            owner="test:1",
+            started_at=now,
+            heartbeat_at=now,
+        )
+        calls = {"n": 0}
+
+        async def _blip(_session_id):
+            calls["n"] += 1
+            return None if calls["n"] == 1 else lease
+
+        monkeypatch.setattr(run_record, "get_run", _blip)
+
+        state = await run_record.repair_unfinished_run(db_session, test_session.id)
+
+        assert calls["n"] == 2
+        assert state is not None
+        assert state["state"] == "running"
+        row = await db_session.get(ChatRun, run_id)
+        assert row.finished_at is None
+        assert row.outcome is None
 
     async def test_live_lease_keeps_run_running(
         self, db_session, test_user, test_session,

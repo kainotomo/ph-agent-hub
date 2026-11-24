@@ -1061,14 +1061,39 @@ DELETE /chat/session/:id/stream?run_id=<id>
 ```
 
 A session may have at most one live run. Sends, edits, regenerations and
-autopilot resumes acquire a short Redis lease (`run:{session_id}`, 6 s TTL,
+autopilot resumes acquire a short Redis lease (`run:{session_id}`, 20 s TTL,
 heartbeat every 2 s); a second request gets `409` with
 `code="session_busy"` and the active `run_id` before anything is
-persisted. Session/sidebar/search responses carry `running` and `run_id`,
-so every client (including after a reload or in a second tab) can render
-the running indicator. A crashed host stops looking busy after the lease
-TTL instead of the old five-minute `stream:active:*` TTL, and graceful
-shutdown releases local leases.
+persisted. The heartbeat starts when the run is **admitted**, not when its
+background agent task starts, so the pre-stream work (auto-routing,
+attachment validation, session promotion) is covered too. If the lease key
+expires while the process is still working — an event-loop stall inside a
+synchronous tool call, a Redis restart — the heartbeat re-creates the
+**same** run id instead of letting a second run start in the same
+conversation; if another run has taken the session by then it stops and logs
+a warning.
+
+The durable `chat_runs` row is a second, independent proof of life
+(`last_heartbeat_at`, refreshed every 5 s). An unfinished row is only
+resolved to `lost` when the lease is gone **and** that heartbeat is older
+than `RUN_LOST_GRACE_SECONDS` (30 s), and the read path re-checks after
+`RUN_LOST_CONFIRM_SECONDS` so a heartbeat resuming from a stall wins the
+race. `GET /chat/runs`, the session/sidebar `running` flags and
+`GET /chat/session/{id}/run-state` therefore keep reporting a live run as
+`running`; a lease blip can no longer surface the "The run's lease expired
+before a terminal state was recorded." banner for a live agent. A crashed
+host still stops looking busy within the grace window instead of the old
+five-minute `stream:active:*` TTL, and graceful shutdown stops the
+heartbeats before releasing local leases.
+
+Tool handlers that call synchronous libraries (yfinance, pdfplumber,
+WeasyPrint, BeautifulSoup) run those calls through `asyncio.to_thread`,
+because blocking the loop also blocks the lease heartbeat and every other
+request.
+
+Session/sidebar/search responses carry `running` and `run_id`, so every
+client (including after a reload or in a second tab) can render the running
+indicator.
 
 `GET /chat/runs` is the browser's status source: it returns the caller's
 active runs plus a `finished` list carrying the recorded `outcome` for any

@@ -207,13 +207,39 @@ class Settings(BaseSettings):
     whether the agent is prompted to produce batched calls."""
 
     # --- Authoritative session run registry (Issue #604) ---
-    RUN_LEASE_TTL_SECONDS: int = 6
+    RUN_LEASE_TTL_SECONDS: int = 20
     """TTL of a per-session run lease.  If the owning backend process dies
     without releasing it, the session looks idle again after this many
     seconds (seconds, not minutes — the old ``stream:active:*`` flag used
-    300 s).  Must be comfortably larger than the heartbeat interval."""
+    300 s).  Must stay comfortably larger than the heartbeat interval: 20 s
+    comfortably exceeds the 2 s heartbeat, so a single missed refresh never
+    makes a live run look idle (Issue #632)."""
     RUN_HEARTBEAT_INTERVAL_SECONDS: float = 2.0
     """How often a running agent task refreshes its run lease."""
+    RUN_DB_HEARTBEAT_INTERVAL_SECONDS: float = 5.0
+    """How often the durable run row's ``last_heartbeat_at`` is refreshed.
+
+    This is the durable proof of life used to distinguish a live run from a
+    process that died, so it only has to be frequent enough that a read after
+    a crash resolves within ``RUN_LOST_GRACE_SECONDS``.  It must be smaller
+    than the grace window."""
+
+    RUN_LOST_GRACE_SECONDS: int = 30
+    """How long an unfinished run row stays ``running`` without a lease.
+
+    A live run whose Redis lease key blips (event-loop stall, Redis restart)
+    must not be declared dead on the first read.  The run is only resolved to
+    ``lost`` after this many seconds without a matching lease *and* without a
+    fresh durable heartbeat.  Must be larger than ``RUN_LEASE_TTL_SECONDS``
+    and comfortably larger than ``RUN_DB_HEARTBEAT_INTERVAL_SECONDS``."""
+
+    RUN_LOST_CONFIRM_SECONDS: float = 1.0
+    """Short re-read delay before a run is resolved to ``lost`` on read.
+
+    After an event-loop stall the heartbeat task and the read may resume in
+    either order; waiting this long before the confirm read lets a pending
+    re-acquire land first."""
+
     RUN_USER_INDEX_TTL_SECONDS: int = 86_400
     """TTL of the per-user running-session index (1 day, refreshed by
     every acquire and heartbeat)."""

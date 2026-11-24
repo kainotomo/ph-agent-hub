@@ -182,6 +182,48 @@ describe("runStateMachine", () => {
     );
   });
 
+  it("server running revives a transient lost state for the same run", () => {
+    // Issue #632 — a lease blip used to show "Lost connection to the run"
+    // for a live agent; the next successful reconcile must clear it.
+    const lost = reduce(
+      INITIAL_RUN_STATE,
+      { type: "submit" },
+      { type: "stream_open", runId: "run-1" },
+      { type: "server_state", state: "lost", runId: "run-1", message: "lease blip" },
+    );
+    expect(lost.phase).toBe("lost");
+
+    const revived = reduce(lost, {
+      type: "server_state",
+      state: "running",
+      runId: "run-1",
+    });
+    expect(revived.phase).toBe("running");
+    expect(revived.errorCode).toBeNull();
+    expect(revived.reason).toBeNull();
+  });
+
+  it("a delivered answer is never regressed to a lost state", () => {
+    // A stale/late lost record for a completed turn must not replace the
+    // answer with an error (Issue #632).
+    const done = reduce(
+      INITIAL_RUN_STATE,
+      { type: "submit" },
+      { type: "stream_open", runId: "run-1" },
+      { type: "message_complete", messageId: "msg-1" },
+      { type: "stream_closed" },
+    );
+    expect(done.phase).toBe("done");
+    expect(done.persisted).toBe(true);
+
+    const after = reduce(done, {
+      type: "server_state",
+      state: "lost",
+      runId: "run-1",
+    });
+    expect(after.phase).toBe("done");
+  });
+
   it("terminal states ignore later transport events", () => {
     const done = reduce(
       INITIAL_RUN_STATE,

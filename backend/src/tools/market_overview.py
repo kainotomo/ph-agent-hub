@@ -124,8 +124,6 @@ def build_market_overview_tools(tool_config: dict | None = None) -> list:
             ``volume``, ``open``, ``market_cap``, ``fifty_day_avg``,
             ``two_hundred_day_avg``, ``currency``, ``exchange``.
         """
-        import yfinance as yf
-
         # Determine which tickers to fetch
         if symbol and symbol.lower() != "all":
             # Try matching by name first, then by raw ticker
@@ -143,56 +141,61 @@ def build_market_overview_tools(tool_config: dict | None = None) -> list:
 
         logger.info("get_index_quote: fetching %d indices", len(tickers_to_fetch))
 
-        try:
-            # yfinance Tickers (plural) for batch download
-            yf_tickers = yf.Tickers(" ".join(tickers_to_fetch))
-        except Exception as exc:
-            logger.exception("get_index_quote: yfinance Tickers failed")
-            return {"error": f"Failed to fetch index data: {exc}"}
+        def _fetch_index_quote() -> dict:
+            import yfinance as yf
 
-        quotes = []
-        for sym in tickers_to_fetch:
             try:
-                t = getattr(yf_tickers, "tickers", {}).get(sym)
-                if t is None:
-                    t = yf.Ticker(sym)
-                quote = _ticker_to_dict(t)
-                if not quote.get("name"):
-                    quote["name"] = _INDEX_NAMES_BY_SYMBOL.get(sym, sym)
-                if quote.get("price") is None:
-                    # Try fast_info
-                    try:
-                        fi = t.fast_info
-                        quote["price"] = _safe_float(getattr(fi, "last_price", None))
-                        quote["previous_close"] = _safe_float(
-                            getattr(fi, "previous_close", None)
-                        )
-                        if (
-                            quote["price"] is not None
-                            and quote["previous_close"] is not None
-                            and quote["previous_close"] != 0
-                        ):
-                            chg = quote["price"] - quote["previous_close"]
-                            quote["change"] = round(chg, 2)
-                            quote["change_pct"] = round(
-                                (chg / quote["previous_close"]) * 100, 2
-                            )
-                    except Exception:
-                        pass
-                quotes.append(quote)
+                # yfinance Tickers (plural) for batch download
+                yf_tickers = yf.Tickers(" ".join(tickers_to_fetch))
             except Exception as exc:
-                logger.warning("get_index_quote: failed for %s: %s", sym, exc)
-                quotes.append({
-                    "symbol": sym,
-                    "name": _INDEX_NAMES_BY_SYMBOL.get(sym, sym),
-                    "error": str(exc),
-                })
+                logger.exception("get_index_quote: yfinance Tickers failed")
+                return {"error": f"Failed to fetch index data: {exc}"}
 
-        return {
-            "quotes": quotes,
-            "count": len(quotes),
-            "source": "yfinance",
-        }
+            quotes = []
+            for sym in tickers_to_fetch:
+                try:
+                    t = getattr(yf_tickers, "tickers", {}).get(sym)
+                    if t is None:
+                        t = yf.Ticker(sym)
+                    quote = _ticker_to_dict(t)
+                    if not quote.get("name"):
+                        quote["name"] = _INDEX_NAMES_BY_SYMBOL.get(sym, sym)
+                    if quote.get("price") is None:
+                        # Try fast_info
+                        try:
+                            fi = t.fast_info
+                            quote["price"] = _safe_float(getattr(fi, "last_price", None))
+                            quote["previous_close"] = _safe_float(
+                                getattr(fi, "previous_close", None)
+                            )
+                            if (
+                                quote["price"] is not None
+                                and quote["previous_close"] is not None
+                                and quote["previous_close"] != 0
+                            ):
+                                chg = quote["price"] - quote["previous_close"]
+                                quote["change"] = round(chg, 2)
+                                quote["change_pct"] = round(
+                                    (chg / quote["previous_close"]) * 100, 2
+                                )
+                        except Exception:
+                            pass
+                    quotes.append(quote)
+                except Exception as exc:
+                    logger.warning("get_index_quote: failed for %s: %s", sym, exc)
+                    quotes.append({
+                        "symbol": sym,
+                        "name": _INDEX_NAMES_BY_SYMBOL.get(sym, sym),
+                        "error": str(exc),
+                    })
+
+            return {
+                "quotes": quotes,
+                "count": len(quotes),
+                "source": "yfinance",
+            }
+
+        return await asyncio.to_thread(_fetch_index_quote)
 
     @tool
     async def get_market_movers(
@@ -301,32 +304,35 @@ async def _fallback_movers(market: str, count: int) -> tuple[list[dict], list[di
         "US": {"operator": "gt", "operand": 2, "quoteType": "EQUITY"},
     }
 
-    for key, body in screener_bodies.items():
-        try:
-            scr = yf.Screener(body=body, count=count)
-            quotes = getattr(scr, "quotes", []) or []
-            # Sort by change percent
-            sorted_quotes = sorted(
-                quotes,
-                key=lambda q: _safe_float(
-                    q.get("regularMarketChangePercent", 0)
-                    if isinstance(q, dict)
-                    else getattr(q, "regularMarketChangePercent", 0)
+    def _fetch() -> tuple[list[dict], list[dict]]:
+        for key, body in screener_bodies.items():
+            try:
+                scr = yf.Screener(body=body, count=count)
+                quotes = getattr(scr, "quotes", []) or []
+                # Sort by change percent
+                sorted_quotes = sorted(
+                    quotes,
+                    key=lambda q: _safe_float(
+                        q.get("regularMarketChangePercent", 0)
+                        if isinstance(q, dict)
+                        else getattr(q, "regularMarketChangePercent", 0)
+                    )
+                    or 0,
+                    reverse=True,
                 )
-                or 0,
-                reverse=True,
-            )
-            for q in sorted_quotes[:count]:
-                if isinstance(q, dict):
-                    gainers.append({
-                        "symbol": q.get("symbol", ""),
-                        "name": q.get("shortName", ""),
-                        "price": _safe_float(q.get("regularMarketPrice")),
-                        "change": _safe_float(q.get("regularMarketChange")),
-                        "change_pct": _safe_float(q.get("regularMarketChangePercent")),
-                        "volume": _safe_float(q.get("regularMarketVolume")),
-                    })
-        except Exception:
-            pass
+                for q in sorted_quotes[:count]:
+                    if isinstance(q, dict):
+                        gainers.append({
+                            "symbol": q.get("symbol", ""),
+                            "name": q.get("shortName", ""),
+                            "price": _safe_float(q.get("regularMarketPrice")),
+                            "change": _safe_float(q.get("regularMarketChange")),
+                            "change_pct": _safe_float(q.get("regularMarketChangePercent")),
+                            "volume": _safe_float(q.get("regularMarketVolume")),
+                        })
+            except Exception:
+                pass
+        return gainers, losers
 
+    gainers, losers = await asyncio.to_thread(_fetch)
     return gainers, losers

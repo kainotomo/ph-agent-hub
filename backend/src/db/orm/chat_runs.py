@@ -56,6 +56,14 @@ class ChatRun(Base):
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False,
     )
+    #: Durable proof of life (Issue #632).  Refreshed every
+    #: ``RUN_DB_HEARTBEAT_INTERVAL_SECONDS`` by the run's heartbeat task; a
+    #: ``running`` row with a matching live lease *or* a fresh value is not
+    #: declared ``lost``.  NULL on rows written before the column existed —
+    #: readers fall back to ``started_at``.
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
     finished_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True,
     )

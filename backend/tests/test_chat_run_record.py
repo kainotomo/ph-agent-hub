@@ -25,6 +25,7 @@ from sqlalchemy import select
 
 from src.agents.stream_bridge import StreamBridge
 from src.api import chat as chat_api
+from src.core.config import settings
 from src.db.orm.chat_runs import ChatRun
 from src.services import run_record
 from src.services.run_registry import (
@@ -204,6 +205,33 @@ class TestRunRecord:
         assert row.finished_at is None
         assert row.outcome is None
 
+    async def test_startup_sweep_skips_a_recently_heartbeated_run(
+        self, db_session, test_session, test_user, monkeypatch
+    ):
+        """Issue #632 — no lease is not proof of death in the sweep either."""
+        run_id = str(uuid.uuid4())
+        await run_record.start_run(
+            run_id=run_id,
+            session_id=test_session.id,
+            user_id=test_user.id,
+            tenant_id=test_user.tenant_id,
+            # Old enough that only the heartbeat can prove it alive.
+            started_at=datetime.now(timezone.utc) - timedelta(hours=1),
+            db=db_session,
+        )
+        await run_record.touch_run_heartbeat(run_id, db=db_session)
+
+        async def _no_lease(_session_id):
+            return None
+
+        monkeypatch.setattr(run_record, "get_run", _no_lease)
+
+        marked = await run_record.mark_orphan_runs_lost(db_session)
+        assert marked == 0
+        row = await db_session.get(ChatRun, run_id)
+        assert row.finished_at is None
+        assert row.outcome is None
+
 
 # =============================================================================
 # Run-state read endpoint
@@ -254,6 +282,57 @@ class TestRunStateEndpoint:
         )
         assert response.status_code == 200, response.text
         assert response.json()["state"] == "idle"
+
+    async def test_live_heartbeat_survives_a_missing_lease(
+        self,
+        async_client,
+        auth_headers,
+        db_session,
+        test_session,
+        test_user,
+        monkeypatch,
+    ):
+        """Issue #632 regression — the long-chat banner must not appear.
+
+        The run row is unfinished and heartbeating, but its Redis lease is
+        gone (an event-loop stall in a blocking tool call, or a Redis
+        restart).  The endpoint used to write `lost` and return "The run's
+        lease expired before a terminal state was recorded."; it must keep
+        reporting `running` and leave the durable row unfinished.
+        """
+        monkeypatch.setattr(settings, "RUN_LOST_CONFIRM_SECONDS", 0.0)
+        run_id = str(uuid.uuid4())
+        await run_record.start_run(
+            run_id=run_id,
+            session_id=test_session.id,
+            user_id=test_user.id,
+            tenant_id=test_user.tenant_id,
+            started_at=datetime.now(timezone.utc) - timedelta(minutes=15),
+            db=db_session,
+        )
+        await run_record.touch_run_heartbeat(run_id, db=db_session)
+
+        async def _no_lease(_session_id):
+            return None
+
+        monkeypatch.setattr(run_record, "get_run", _no_lease)
+
+        response = await async_client.get(
+            f"/api/chat/session/{test_session.id}/run-state",
+            headers=auth_headers(test_user),
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["state"] == "running"
+        assert body["run_id"] == run_id
+        assert body["error_code"] is None
+        assert body["error_message"] is None
+        assert body["last_heartbeat_at"] is not None
+
+        row = await db_session.get(ChatRun, run_id)
+        await db_session.refresh(row)
+        assert row.finished_at is None
+        assert row.outcome is None
 
     async def test_rejects_another_users_session(
         self, async_client, auth_headers, test_session, test_user, db_session

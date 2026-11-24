@@ -4,6 +4,7 @@ import {
   formatTokensExact,
   formatTokensApprox,
   formatDuration,
+  formatElapsedClock,
   formatTps,
   formatPercent,
 } from "./formatMetrics";
@@ -48,4 +49,17 @@ describe("formatPercent", () => {
   it("97.6 -> 98%", () => expect(formatPercent(97.6)).toBe("98%"));
   it("9.0 -> 9%", () => expect(formatPercent(9.0)).toBe("9%"));
   it("null -> —", () => expect(formatPercent(null)).toBe("\u2014"));
+});
+
+describe("formatElapsedClock", () => {
+  it("0 -> 00:00:00", () => expect(formatElapsedClock(0)).toBe("00:00:00"));
+  it("5000 -> 00:00:05", () => expect(formatElapsedClock(5000)).toBe("00:00:05"));
+  it("59999 -> 00:00:59", () => expect(formatElapsedClock(59999)).toBe("00:00:59"));
+  it("65000 -> 00:01:05", () => expect(formatElapsedClock(65000)).toBe("00:01:05"));
+  it("3661000 -> 01:01:01", () => expect(formatElapsedClock(3661000)).toBe("01:01:01"));
+  it("360000000 -> 100:00:00", () => expect(formatElapsedClock(360000000)).toBe("100:00:00"));
+  it("-1000 -> 00:00:00", () => expect(formatElapsedClock(-1000)).toBe("00:00:00"));
+  it("null -> —", () => expect(formatElapsedClock(null)).toBe("\u2014"));
+  it("NaN -> —", () => expect(formatElapsedClock(Number.NaN)).toBe("\u2014"));
+  it("Infinity -> —", () => expect(formatElapsedClock(Infinity)).toBe("\u2014"));
 });

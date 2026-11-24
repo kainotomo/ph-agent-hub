@@ -2295,6 +2295,10 @@ class TestAutoSelectTools:
         """
         from src.db.orm.sessions import SessionActiveTool
 
+        # Issue #635 — auto-select now applies the public/group access rule,
+        # so the session-active fixture tool must be accessible to the user.
+        test_tool.is_public = True
+
         # Create a session with an active tool in the DB
         sat = SessionActiveTool(
             session_id=test_session.id,
@@ -2321,7 +2325,7 @@ class TestAutoSelectTools:
             [],
             [],
             None,
-            "user1",
+            test_user.id,
         )
         assert isinstance(result, list)
 
@@ -2334,6 +2338,158 @@ class TestAutoSelectTools:
             "Step 5c should retain the session-active tool even when "
             "the message doesn't match the tool's keywords"
         )
+
+    async def test_auto_select_retains_accessible_subagent_past_top_k(
+        self, db_session, test_tenant, test_user, test_session, monkeypatch
+    ):
+        """Issue #635 — Top-K must not hide an enabled, accessible persona."""
+        import uuid
+
+        from src.core.config import settings
+        from src.db.orm.tools import Tool
+
+        monkeypatch.setattr(settings, "AUTO_SELECT_TOOLS_TOP_K", 1)
+
+        calculator = Tool(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            name="Calculator",
+            type="calculator",
+            category="utility",
+            enabled=True,
+            is_public=True,
+        )
+        persona = Tool(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            name="Researcher",
+            type="subagent",
+            category="agents",
+            enabled=True,
+            is_public=True,
+            config={
+                "instructions": "You research topics.",
+                "model_role": "@general",
+            },
+        )
+        db_session.add_all([calculator, persona])
+        await db_session.flush()
+
+        session_data = {
+            "id": test_session.id,
+            "is_temporary": False,
+            "tenant_id": test_tenant.id,
+            "user_id": test_user.id,
+            "auto_select_tools": True,
+            "active_tool_ids": [],
+            "selected_skill_id": None,
+        }
+        result = await self.fn(
+            db_session,
+            session_data,
+            test_tenant.id,
+            "calculate 2 + 2",
+            [],
+            [],
+            None,
+            test_user.id,
+        )
+        names = [getattr(c, "name", "") for c in result]
+
+        assert "calculate" in names
+        assert "delegate_to_researcher" in names
+
+    async def test_private_ungrouped_tool_not_auto_selected_outside_group(
+        self, db_session, test_tenant, test_user, test_session, caplog
+    ):
+        """Issue #635 — auto-select uses the same access rule as the drawer."""
+        import logging
+        import uuid
+
+        from src.db.orm.groups import ToolGroup, UserGroup, UserGroupMember
+        from src.db.orm.tools import Tool
+
+        public_time = Tool(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            name="Datetime",
+            type="datetime",
+            category="utility",
+            enabled=True,
+            is_public=True,
+        )
+        secret_calc = Tool(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            name="SecretPersona",
+            type="subagent",
+            category="agents",
+            enabled=True,
+            is_public=False,
+            config={
+                "instructions": "You research topics.",
+                "model_role": "@general",
+            },
+        )
+        db_session.add_all([public_time, secret_calc])
+        await db_session.flush()
+
+        session_data = {
+            "id": test_session.id,
+            "is_temporary": False,
+            "tenant_id": test_tenant.id,
+            "user_id": test_user.id,
+            "auto_select_tools": True,
+            "active_tool_ids": [],
+            "selected_skill_id": None,
+        }
+        message = "what time is it, and delegate the research to a sub-agent"
+
+        with caplog.at_level(logging.INFO, logger="src.agents.runner"):
+            first = await self.fn(
+                db_session,
+                session_data,
+                test_tenant.id,
+                message,
+                [],
+                [],
+                None,
+                test_user.id,
+            )
+        first_names = [getattr(c, "name", "") for c in first]
+        assert "current_time" in first_names
+        assert "delegate_to_secretpersona" not in first_names
+        assert any(
+            "excluded_by_access" in record.getMessage()
+            and "SecretPersona" in record.getMessage()
+            for record in caplog.records
+        )
+
+        group = UserGroup(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            name="Persona Group",
+        )
+        db_session.add(group)
+        await db_session.flush()
+        db_session.add_all([
+            UserGroupMember(group_id=group.id, user_id=test_user.id),
+            ToolGroup(group_id=group.id, tool_id=secret_calc.id),
+        ])
+        await db_session.flush()
+
+        second = await self.fn(
+            db_session,
+            session_data,
+            test_tenant.id,
+            message,
+            [],
+            [],
+            None,
+            test_user.id,
+        )
+        second_names = [getattr(c, "name", "") for c in second]
+        assert "delegate_to_secretpersona" in second_names
 
     async def test_step_5c_falls_back_to_db_when_session_data_missing(
         self, db_session, test_tenant, test_tool, test_session

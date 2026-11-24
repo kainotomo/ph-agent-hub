@@ -224,10 +224,14 @@ async def create_tool(
     code: str | None = None,
     description: str | None = None,
     enabled: bool = True,
-    is_public: bool = False,
+    is_public: bool | None = None,
     approval_required: bool = False,
 ) -> Tool:
-    """Create a new tool. Raises ValidationError if type is invalid."""
+    """Create a new tool. Raises ValidationError if type is invalid.
+
+    ``is_public`` defaults to True for subagent personas (Issue #635) and to
+    False for every other tool type.  An explicit value always wins.
+    """
     if type not in VALID_TOOL_TYPES:
         raise ValidationError(
             f"Invalid tool type '{type}'. "
@@ -236,6 +240,9 @@ async def create_tool(
 
     if type == "subagent":
         _validate_subagent_config(config)
+
+    if is_public is None:
+        is_public = type == "subagent"
 
     tool = Tool(
         tenant_id=tenant_id,

@@ -10,6 +10,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **An enabled subagent is no longer hidden, and `save_to` no longer uses
+  the run's session (Issue #635)** — a persona created and enabled for the
+  tenant could still never reach the model: Auto Tool Selection built its
+  candidate pool from `enabled` alone, a subagent row scored ~0 against the
+  message, and the Top-K cut dropped it unless the session had it active.
+  Auto-select now builds its pool through `list_tools`, so the same
+  Public-or-group rule as the session drawer applies (a private, ungrouped
+  tool is not auto-selected for a user outside its group); accessible
+  subagent personas are force-retained outside the Top-K cut, delegation
+  intent keywords are ranked, and the retained/excluded names are logged.
+  Separately, `save_to` wrote through the runner's shared `AsyncSession`, so
+  its commit could flush stale `file_uploads` state and raise
+  `StaleDataError`; each save now uses a short-lived session of its own
+  (the lock still serialises the quota check + insert). File reads built by
+  the runner use a fresh short-lived session too, so a save committed on
+  another session is visible to `read_file_content` in the same turn
+  (MariaDB's REPEATABLE READ snapshot would otherwise hide it). New subagent
+  tools default to Public (backend and admin form) so they are activatable
+  without an extra group step, a failed delegate build now emits a
+  `warning` SSE event (`subagent_delegate_build_failed`) instead of only a
+  log line, and the admin/user/streaming docs describe the full activation
+  chain. ([#635])
 - **A streamed answer is no longer lost when the turn's DB session fails
   (Issue #634)** — after a long chat the response could stream to the end and
   then be replaced by *"The response failed / The run ended without producing
@@ -571,3 +593,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#628]: https://github.com/kainotomo/ph-agent-hub/issues/628
 [#632]: https://github.com/kainotomo/ph-agent-hub/issues/632
 [#634]: https://github.com/kainotomo/ph-agent-hub/issues/634
+[#635]: https://github.com/kainotomo/ph-agent-hub/issues/635

@@ -1171,6 +1171,25 @@ export const ChatWindow = React.memo(function ChatWindow({
         onTagsUpdated: () => {
           queryClient.invalidateQueries({ queryKey: ["sessions"] });
         },
+        // Issue #635 — non-fatal setup warnings (e.g. a subagent delegate
+        // that could not be built).  Suppress on reconnect: the event was
+        // already shown when the run started; replaying it would duplicate
+        // the toast.
+        onWarning: isReconnect
+          ? () => { /* already reported when the run started */ }
+          : (data: Record<string, unknown>) => {
+              const code = String(data.code || "warning");
+              notification.warning({
+                message: code === "subagent_delegate_build_failed"
+                  ? "A delegated agent could not be enabled"
+                  : "Warning",
+                description: String(
+                  data.message || "The run continued without it.",
+                ),
+                placement: "bottomRight",
+                duration: 6,
+              });
+            },
         onMemoryUpdated: isReconnect
           ? () => { /* Sidebar auto-refreshes on session invalidation */ }
           : (data: { action: string; key: string | null; success: boolean; tool_name: string }) => {

@@ -1160,6 +1160,7 @@ exists; `outcome=completed` is never emitted without it.
 | `message_complete` | `{ total_tokens, tokens_in, tokens_out, input_tokens, output_tokens, cache_hits, steps, tool_calls, budget_exceeded, budget, model_id }` | Agent finishes; message persisted |
 | `follow_up_questions` | `{ questions: [...] }` | After `message_complete` if follow-up questions are enabled |
 | `summarized` | `{ summary, summarized_message_count, tokens_saved }` | Conversation history was auto-summarized |
+| `warning` | `{ code, message, tool_id?, tool_name? }` | Non-fatal setup warning; the run continues. `code="subagent_delegate_build_failed"` means an enabled subagent persona could not be turned into a `delegate_to_*` tool (Issue #635). Workflow definitions may also emit this event with only `{ message }`. |
 | `error` | `{ code, message }` | Non-recoverable error; connection closes after |
 | `heartbeat` | `{}` | Every 15s on idle to keep connection alive |
 | `stream_resync` | `{ reason: "buffer_gap" \| "slow_consumer", from_seq, oldest_seq, last_seq, run_id }` | The client's resume cursor predates the replay buffer (or the reader fell behind). Reload the persisted message instead of trusting the partial text. |

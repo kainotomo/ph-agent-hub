@@ -410,7 +410,8 @@ class ToolCreate(BaseModel):
     code: str | None = None
     enabled: bool = True
     approval_required: bool = False
-    is_public: bool = False
+    # Omitted → the service defaults (True for subagents, False otherwise).
+    is_public: bool | None = None
 
 
 class ToolUpdate(BaseModel):

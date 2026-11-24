@@ -143,6 +143,9 @@ class SessionConfig:
     cleanup_clients: list = field(default_factory=list)
     # Issue #595 — effective per-run step/token budget (skill → template → global).
     run_budget: RunBudget | None = None
+    # Issue #635 — non-fatal setup warnings (e.g. a delegate build failure)
+    # surfaced as `warning` SSE events by the streaming path.
+    diagnostics: list[dict] = field(default_factory=list)
 
 
 async def _resolve_session_config(
@@ -181,13 +184,19 @@ async def _resolve_session_config(
     # 4. Resolve active tools
     context_length = getattr(model, "context_length", None)
     user_id = user.id if user else session_data.get("user_id", "")
+    # Issue #635 — only report diagnostics from the path that actually builds
+    # the final pool; auto-select replaces the manual pool below.
+    manual_diagnostics: list[dict] = []
     active_tool_callables, cleanup_clients = await _resolve_tool_callables(
         db, session_data, tenant_id, file_ids=file_ids,
         context_length=context_length, user_id=user_id,
+        diagnostics=manual_diagnostics,
     )
 
     # 4b. Auto-select Top-K shortlist if auto_select_tools is enabled
+    diagnostics: list[dict] = manual_diagnostics
     if session_data.get("auto_select_tools", True):
+        diagnostics = []
         active_tool_callables = await _auto_select_tools(
             db=db,
             session_data=session_data,
@@ -197,6 +206,7 @@ async def _resolve_session_config(
             cleanup_clients=cleanup_clients,
             context_length=context_length,
             user_id=user_id,
+            diagnostics=diagnostics,
         )
 
     # 5. Determine execution type and name
@@ -304,6 +314,7 @@ async def _resolve_session_config(
         tenant_name=tenant_name,
         cleanup_clients=cleanup_clients,
         run_budget=run_budget,
+        diagnostics=diagnostics,
     )
 
 
@@ -1859,12 +1870,19 @@ async def _resolve_tool_callables(
     file_ids: list[str] | None = None,
     context_length: int | None = None,
     user_id: str | None = None,
+    *,
+    diagnostics: list[dict] | None = None,
 ) -> tuple[list, list]:
     """Resolve active tools into MAF tool callables.
 
     When a ``user_id`` is provided, per-user credentials for personal
     tools (email, calendar, tasks) are loaded and passed to the
     appropriate tool factory (Issue #312).
+
+    Args:
+        diagnostics: Optional list that receives non-fatal setup warnings
+            (Issue #635); the streaming path turns them into ``warning``
+            events.
 
     Returns:
         A tuple of (callables, cleanup_clients) where cleanup_clients is a
@@ -2078,6 +2096,9 @@ async def _resolve_tool_callables(
             db, session_id, tenant_id,
             is_temporary=is_temporary,
             uploaded_file_ids=session_data.get("uploaded_file_ids"),
+            # Issue #635 — the runner's session holds a REPEATABLE READ
+            # snapshot taken before a save_to commit on another session.
+            fresh_session_reads=True,
         )
         callables.extend(file_list_tools)
     except Exception:
@@ -2106,6 +2127,7 @@ async def _resolve_tool_callables(
         tenant_id=tenant_id,
         session_id=session_id,
         session_data=session_data,
+        diagnostics=diagnostics,
     )
 
     # ---- Cap tool output size to prevent context overflow (Issue #206) ----
@@ -2149,6 +2171,8 @@ async def _auto_select_tools(
     cleanup_clients: list,
     context_length: int | None = None,
     user_id: str | None = None,
+    *,
+    diagnostics: list[dict] | None = None,
 ) -> list:
     """Auto-select tool shortlist for the current user message.
 
@@ -2171,6 +2195,9 @@ async def _auto_select_tools(
         cleanup_clients: Client list for cleanup registration.
         context_length: Model context length for output cap.
         user_id: User ID for loading per-user credentials.
+        diagnostics: Optional list that receives non-fatal setup warnings
+            (Issue #635); the streaming path turns them into ``warning``
+            events.
 
     Returns:
         Shortlisted list of callables to pass to the agent.
@@ -2181,18 +2208,22 @@ async def _auto_select_tools(
     session_user_id = user_id or session_data.get("user_id") or ""
 
     # ── Step 1: Build candidate pool ────────────────────────────────────
-    # Collect all enabled tools for the tenant (including tools not
-    # manually selected by the user).
-    result = await db.execute(
-        select(Tool).where(
-            Tool.tenant_id == tenant_id,
-            Tool.enabled == True,  # noqa: E712
-        )
+    # Issue #635 — reuse ``list_tools`` so auto-select applies exactly the
+    # same access rule as the session drawer / ``/session/tools/available``:
+    # public, or assigned to a group the user belongs to.  Without a known
+    # user (guest/internal temp sessions) no per-user filter is applied,
+    # preserving the previous behaviour.
+    from ..services.tool_service import list_tools
+
+    candidate_tools, _ = await list_tools(
+        db,
+        tenant_id=tenant_id,
+        user_id=user_id or None,
+        enabled=True,
     )
-    candidate_tools: list[Tool] = list(result.scalars().all())
 
     if not candidate_tools:
-        # No tenant-approved tools — fall back to current callables
+        # No accessible tenant tools — fall back to current callables
         return current_callables
 
     # ── Step 2: Identify selected tool IDs (manual + skill) as priors ──
@@ -2242,6 +2273,12 @@ async def _auto_select_tools(
         "calendar": ["calendar", "schedule", "meeting", "appointment", "event"],
         "tasks": ["task", "todo", "to-do", "remind", "deadline"],
         "rag_search": ["rag", "document", "knowledge", "search my"],
+        # Issue #635 — a delegation request should rank subagent personas
+        # even before the force-retain step below.
+        "subagent": [
+            "delegate", "delegation", "subagent", "sub-agent",
+            "sub agent", "another agent",
+        ],
     }
 
     scored: list[tuple[Tool, float]] = []
@@ -2438,6 +2475,42 @@ async def _auto_select_tools(
                 [t.name for t in kept_active],
             )
 
+    # ── Step 5d: Force-retain accessible subagent personas (Issue #635) ──
+    # A subagent row scores ~0 against the user message, so Top-K would hide
+    # it even when the admin created and enabled it.  Personas are cheap to
+    # expose (the child's pool is the session's own pool) and are retained
+    # regardless of Top-K, like always-on tools.
+    accessible_subagents = [
+        t for t in candidate_tools if t.type == "subagent"
+    ]
+    if accessible_subagents or user_id:
+        # Diagnostic query: enabled subagents the access filter removed, so
+        # an operator can tell "not created" from "not accessible".
+        all_subagents, _ = await list_tools(
+            db,
+            tenant_id=tenant_id,
+            user_id=None,
+            type="subagent",
+            enabled=True,
+        )
+        accessible_ids = {t.id for t in accessible_subagents}
+        excluded_subagents = [
+            t for t in all_subagents if t.id not in accessible_ids
+        ]
+        already_selected = {t.id for t in shortlisted_tools}
+        forced_subagents = [
+            t for t in accessible_subagents if t.id not in already_selected
+        ]
+        if forced_subagents:
+            shortlisted_tools = forced_subagents + shortlisted_tools
+        logger.info(
+            "Auto-select: subagent personas retained=%s forced=%s "
+            "excluded_by_access=%s",
+            [t.name for t in accessible_subagents],
+            [t.name for t in forced_subagents],
+            [t.name for t in excluded_subagents],
+        )
+
     if not shortlisted_tools:
         return current_callables
 
@@ -2532,6 +2605,9 @@ async def _auto_select_tools(
             db, session_id, tenant_id,
             is_temporary=is_temporary,
             uploaded_file_ids=session_data.get("uploaded_file_ids"),
+            # Issue #635 — the runner's session holds a REPEATABLE READ
+            # snapshot taken before a save_to commit on another session.
+            fresh_session_reads=True,
         )
         callables.extend(file_list_tools)
     except Exception:
@@ -2571,6 +2647,7 @@ async def _auto_select_tools(
         tenant_id=tenant_id,
         session_id=session_id,
         session_data=session_data,
+        diagnostics=diagnostics,
     )
 
     # ---- Cap tool output size to prevent context overflow (Issue #206) ----
@@ -2929,6 +3006,9 @@ def _wrap_tools_with_output_cap(
     return wrapped
 
 
+SUBAGENT_DELEGATE_BUILD_FAILED = "subagent_delegate_build_failed"
+
+
 def _append_subagent_delegates(
     callables: list,
     subagent_rows: list,
@@ -2936,6 +3016,7 @@ def _append_subagent_delegates(
     tenant_id: str,
     session_id: str,
     session_data: dict,
+    diagnostics: list[dict] | None = None,
 ) -> None:
     """Append one delegate FunctionTool per active ``subagent`` tool row.
 
@@ -2943,6 +3024,9 @@ def _append_subagent_delegates(
     point — the session's resolved pool.  The snapshot is taken *before*
     any delegate is appended, so no delegate ever sees itself or a sibling
     (Issue #574: one level of nesting only).
+
+    A failure to build a delegate is recorded in *diagnostics* (and logged
+    at ERROR) instead of disappearing into a log line (Issue #635).
     """
     if not subagent_rows:
         return
@@ -2966,12 +3050,23 @@ def _append_subagent_delegates(
                     used_names=used_names,
                 )
             )
-        except Exception:
-            logger.warning(
-                "Failed to build subagent delegate for tool %s",
-                getattr(row, "id", "?"),
+        except Exception as exc:  # noqa: BLE001 - surfaced as a run warning
+            tool_id = getattr(row, "id", "")
+            tool_name = getattr(row, "name", "")
+            logger.error(
+                "subagent_delegate_build_failed tool_id=%s name=%s: %s",
+                tool_id,
+                tool_name,
+                exc,
                 exc_info=True,
             )
+            if diagnostics is not None:
+                diagnostics.append({
+                    "code": SUBAGENT_DELEGATE_BUILD_FAILED,
+                    "tool_id": tool_id,
+                    "tool_name": tool_name,
+                    "message": str(exc),
+                })
 
 
 def _build_compaction_strategy(
@@ -3710,6 +3805,16 @@ async def run_agent_stream(
         # Issue #634 — read every model attribute the terminal path needs now,
         # while the session is healthy (see ``_snapshot_model_info``).
         model_info = _snapshot_model_info(cfg)
+
+        # Issue #635 — surface non-fatal setup problems (e.g. a subagent
+        # delegate that could not be built) to the client instead of only
+        # leaving them in the log.
+        for _warning_event in _diagnostic_events(
+            cfg.diagnostics,
+            session_id=session_id,
+            message_id=message_id,
+        ):
+            yield _warning_event
 
         # ---- Build contextualized message (history + auto-summarization) --
         contextualized_message, summary_info = await _maybe_summarize_and_build_context(
@@ -4938,6 +5043,24 @@ def _sse_event(
     if message_id is not None and "message_id" not in payload:
         payload["message_id"] = message_id
     return {"event": event, "data": json.dumps(payload)}
+
+
+def _diagnostic_events(
+    diagnostics: list[dict] | None,
+    *,
+    session_id: str,
+    message_id: str,
+) -> list[dict]:
+    """Turn setup diagnostics into non-fatal ``warning`` SSE events (#635)."""
+    return [
+        _sse_event(
+            "warning",
+            dict(diagnostic),
+            session_id=session_id,
+            message_id=message_id,
+        )
+        for diagnostic in (diagnostics or [])
+    ]
 
 
 # ---------------------------------------------------------------------------

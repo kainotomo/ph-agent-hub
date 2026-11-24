@@ -54,7 +54,9 @@ async def create_tool(
         config={},
         enabled=enabled,
         code=None,
-        is_public=False,
+        # Issue #635 — auto-select applies the public/group access rule,
+        # so e2e tenant tools must be public to stay in the candidate pool.
+        is_public=True,
     )
     db.add(tool)
     await db.flush()

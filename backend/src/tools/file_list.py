@@ -7,6 +7,7 @@
 
 import logging
 import re
+from contextlib import asynccontextmanager
 from typing import Any
 from uuid import UUID
 
@@ -22,12 +23,27 @@ MAX_FILE_CONTENT_CHARS = 50_000
 MAX_BASE64_BYTES = 20 * 1024 * 1024  # 20 MB — cap raw bytes for base64 encoding
 
 
+async def _new_read_session() -> AsyncSession:
+    """Open a short-lived session for reading committed file rows (Issue #635).
+
+    The agent runner's session holds a REPEATABLE READ snapshot taken before
+    ``save_to`` committed its row on another session; a read on that session
+    would not see the new file.  Reads are independent of the writer, so the
+    runner can ask for a fresh session instead.
+    """
+    from ..db.base import AsyncSessionLocal
+
+    return AsyncSessionLocal()
+
+
 def build_file_list_tool(
     db: AsyncSession,
     session_id: str,
     tenant_id: str,
     is_temporary: bool = False,
     uploaded_file_ids: list[str] | None = None,
+    *,
+    fresh_session_reads: bool = False,
 ) -> list:
     """Return built-in MAF @tools for file discovery and content reading.
 
@@ -37,8 +53,78 @@ def build_file_list_tool(
         tenant_id: Current tenant ID.
         is_temporary: Whether the session is temporary (changes DB query).
         uploaded_file_ids: Specific file IDs for temp sessions (from Redis).
+        fresh_session_reads: When True, read rows through a short-lived
+            session of our own instead of the caller's session.  The runner
+            sets this because its session may predate a ``save_to`` commit
+            (Issue #635); direct callers/tests keep the default.
     """
     from ..db.orm.file_uploads import FileUpload
+
+    @asynccontextmanager
+    async def _read_db():
+        """Yield the session a file read should use."""
+        if not fresh_session_reads:
+            yield db
+            return
+        session = await _new_read_session()
+        try:
+            yield session
+        finally:
+            try:
+                await session.close()
+            except Exception:
+                logger.debug(
+                    "file_list: failed to close fresh read session",
+                    exc_info=True,
+                )
+
+    def _snapshot(upload: Any) -> dict[str, Any]:
+        """Copy the columns the tools need before the session closes."""
+        return {
+            "id": upload.id,
+            "filename": upload.original_filename,
+            "content_type": upload.content_type,
+            "size_bytes": upload.size_bytes,
+            "extracted_text": upload.extracted_text,
+            "bucket": upload.bucket,
+            "storage_key": upload.storage_key,
+        }
+
+    async def _load_upload(file_id: str) -> dict[str, Any] | None:
+        async with _read_db() as read_db:
+            result = await read_db.execute(
+                select(FileUpload).where(
+                    FileUpload.id == file_id,
+                    FileUpload.tenant_id == tenant_id,
+                )
+            )
+            upload = result.scalar_one_or_none()
+            return _snapshot(upload) if upload is not None else None
+
+    async def _load_session_uploads() -> list[dict[str, Any]]:
+        async with _read_db() as read_db:
+            if is_temporary and uploaded_file_ids:
+                result = await read_db.execute(
+                    select(FileUpload).where(
+                        FileUpload.id.in_(uploaded_file_ids),
+                        FileUpload.tenant_id == tenant_id,
+                    )
+                )
+            elif is_temporary:
+                # No file IDs tracked — return empty
+                result = await read_db.execute(
+                    select(FileUpload).where(
+                        FileUpload.id.in_([]),
+                    )
+                )
+            else:
+                result = await read_db.execute(
+                    select(FileUpload).where(
+                        FileUpload.session_id == session_id,
+                        FileUpload.tenant_id == tenant_id,
+                    )
+                )
+            return [_snapshot(u) for u in result.scalars().all()]
 
     @tool
     async def list_uploaded_files() -> list[dict[str, Any]]:
@@ -57,41 +143,20 @@ def build_file_list_tool(
         ANALYZE or SUMMARIZE the file's text content.  For attachments,
         just pass ``file_ids`` to the email tool.
         """
-        if is_temporary and uploaded_file_ids:
-            result = await db.execute(
-                select(FileUpload).where(
-                    FileUpload.id.in_(uploaded_file_ids),
-                    FileUpload.tenant_id == tenant_id,
-                )
-            )
-        elif is_temporary:
-            # No file IDs tracked — return empty
-            result = await db.execute(
-                select(FileUpload).where(
-                    FileUpload.id.in_([]),
-                )
-            )
-        else:
-            result = await db.execute(
-                select(FileUpload).where(
-                    FileUpload.session_id == session_id,
-                    FileUpload.tenant_id == tenant_id,
-                )
-            )
-        uploads = result.scalars().all()
+        uploads = await _load_session_uploads()
 
         files: list[dict[str, Any]] = []
         for u in uploads:
-            kb_size = u.size_bytes / 1024
+            kb_size = (u["size_bytes"] or 0) / 1024
             preview = ""
-            if u.extracted_text:
-                preview = u.extracted_text[:200]
-                if len(u.extracted_text) > 200:
+            if u["extracted_text"]:
+                preview = u["extracted_text"][:200]
+                if len(u["extracted_text"]) > 200:
                     preview += "..."
             files.append({
-                "file_id": u.id,
-                "filename": u.original_filename,
-                "content_type": u.content_type,
+                "file_id": u["id"],
+                "filename": u["filename"],
+                "content_type": u["content_type"],
                 "size_kb": round(kb_size, 1),
                 "preview": preview,
             })
@@ -150,34 +215,28 @@ def build_file_list_tool(
                 "error_code": "invalid_file_id",
             }
 
-        result = await db.execute(
-            select(FileUpload).where(
-                FileUpload.id == file_id,
-                FileUpload.tenant_id == tenant_id,
-            )
-        )
-        upload = result.scalar_one_or_none()
+        record = await _load_upload(file_id)
 
         # A file owned by another tenant never reaches this point: the query
         # is already scoped by ``tenant_id``, so both cases look identical.
-        if upload is None:
+        if record is None:
             return {
                 "error": f"File not found: {file_id}",
                 "error_code": "file_not_found",
             }
 
-        has_text = bool(upload.extracted_text)
+        has_text = bool(record["extracted_text"])
         if not has_text:
             return {
-                "file_id": upload.id,
-                "filename": upload.original_filename,
-                "content_type": upload.content_type,
+                "file_id": record["id"],
+                "filename": record["filename"],
+                "content_type": record["content_type"],
                 "text": "",
                 "truncated": False,
                 "note": "No text could be extracted from this file.",
             }
 
-        full_text: str = upload.extracted_text
+        full_text: str = record["extracted_text"]
         selecting = pattern is not None or offset > 0 or limit is not None
 
         # ---- Legacy path: nothing selected, return today's exact shape ----
@@ -192,9 +251,9 @@ def build_file_list_tool(
                 file_id, len(text), truncated,
             )
             return {
-                "file_id": upload.id,
-                "filename": upload.original_filename,
-                "content_type": upload.content_type,
+                "file_id": record["id"],
+                "filename": record["filename"],
+                "content_type": record["content_type"],
                 "text": text,
                 "truncated": truncated,
             }
@@ -234,9 +293,9 @@ def build_file_list_tool(
             file_id, pattern, len(window), matched_lines,
         )
         payload: dict[str, Any] = {
-            "file_id": upload.id,
-            "filename": upload.original_filename,
-            "content_type": upload.content_type,
+            "file_id": record["id"],
+            "filename": record["filename"],
+            "content_type": record["content_type"],
             "text": rendered,
             "truncated": truncated,
             "offset": start,
@@ -284,22 +343,18 @@ def build_file_list_tool(
         except ValueError:
             return {"error": f"Invalid file_id: {file_id!r}"}
 
-        fu_result = await db.execute(
-            select(FileUpload).where(
-                FileUpload.id == file_id,
-                FileUpload.tenant_id == tenant_id,
-            )
-        )
-        upload = fu_result.scalar_one_or_none()
+        record = await _load_upload(file_id)
 
-        if upload is None:
+        if record is None:
             return {"error": f"File not found: {file_id}"}
 
         content_base64 = ""
         download_error: str | None = None
         base64_truncated = False
         try:
-            raw_bytes = await download_object(upload.bucket, upload.storage_key)
+            raw_bytes = await download_object(
+                record["bucket"], record["storage_key"],
+            )
             if len(raw_bytes) > MAX_BASE64_BYTES:
                 base64_truncated = True
                 logger.warning(
@@ -312,14 +367,18 @@ def build_file_list_tool(
             download_error = f"Could not download file from storage: {exc}"
             logger.warning(
                 "Could not download file %s from storage (bucket=%s, key=%s): %s",
-                file_id, upload.bucket, upload.storage_key, exc,
+                file_id, record["bucket"], record["storage_key"], exc,
             )
 
         result: dict = {
-            "file_id": upload.id,
-            "filename": upload.original_filename,
-            "content_type": upload.content_type,
-            "size_bytes": upload.size_bytes or len(raw_bytes) if not download_error else 0,
+            "file_id": record["id"],
+            "filename": record["filename"],
+            "content_type": record["content_type"],
+            "size_bytes": (
+                (record["size_bytes"] or len(raw_bytes))
+                if not download_error
+                else 0
+            ),
             "content_base64": content_base64,
         }
 

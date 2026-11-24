@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.core.exceptions import ValidationError
+from src.tools import _agent_save as agent_save_mod
 from src.tools._agent_save import (
     CODE_EMPTY_TEXT,
     CODE_FAILED,
@@ -26,6 +27,19 @@ from src.tools._agent_save import (
 )
 
 pytestmark = [pytest.mark.unit]
+
+
+@pytest.fixture(autouse=True)
+def _fake_save_session(monkeypatch):
+    """Keep every save-related unit test off the real DB (Issue #635)."""
+    session = MagicMock(name="save-session")
+    session.close = AsyncMock()
+    monkeypatch.setattr(
+        agent_save_mod,
+        "_open_save_session",
+        AsyncMock(return_value=session),
+    )
+    return session
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +227,84 @@ class TestSaveExtractedText:
 
         assert result["error_code"] == CODE_FAILED
         assert "minio down" in result["error"]
+
+    # ---- Issue #635: the save writes on its own session ------------------
+
+    async def test_save_writes_on_an_isolated_session_not_the_runner(
+        self, _fake_save_session
+    ):
+        runner_db = MagicMock(name="runner-db")
+        with patch(
+            "src.services.upload_service.create_text_upload",
+            new=AsyncMock(return_value=_fake_upload("file-9")),
+        ) as create:
+            result = await _call(db=runner_db)
+
+        assert result["file_id"] == "file-9"
+        assert create.await_args.args[0] is _fake_save_session
+        assert create.await_args.args[0] is not runner_db
+        runner_db.add.assert_not_called()
+        runner_db.commit.assert_not_called()
+        _fake_save_session.close.assert_awaited_once()
+
+    async def test_save_succeeds_when_runner_commit_would_raise_stale_data(self):
+        from sqlalchemy.orm.exc import StaleDataError
+
+        runner_db = MagicMock(name="runner-db")
+        runner_db.commit = AsyncMock(
+            side_effect=StaleDataError(
+                "Record has changed since last read in table 'file_uploads'"
+            )
+        )
+
+        with patch(
+            "src.services.upload_service.create_text_upload",
+            new=AsyncMock(return_value=_fake_upload("file-1")),
+        ):
+            result = await _call(db=runner_db)
+
+        assert result["saved"] is True
+        assert result["file_id"] == "file-1"
+        runner_db.commit.assert_not_called()
+
+    async def test_isolated_session_is_closed_on_failure(self, _fake_save_session):
+        with patch(
+            "src.services.upload_service.create_text_upload",
+            new=AsyncMock(side_effect=RuntimeError("minio down")),
+        ):
+            result = await _call()
+
+        assert result["error_code"] == CODE_FAILED
+        _fake_save_session.close.assert_awaited_once()
+
+    async def test_parallel_saves_use_distinct_sessions(self, monkeypatch):
+        first = MagicMock(name="save-session-1")
+        first.close = AsyncMock()
+        second = MagicMock(name="save-session-2")
+        second.close = AsyncMock()
+        monkeypatch.setattr(
+            agent_save_mod,
+            "_open_save_session",
+            AsyncMock(side_effect=[first, second]),
+        )
+
+        create = AsyncMock(
+            side_effect=[_fake_upload("file-a"), _fake_upload("file-b")]
+        )
+        with patch(
+            "src.services.upload_service.create_text_upload",
+            new=create,
+        ):
+            results = await asyncio.gather(
+                _call(text="a" * 10),
+                _call(text="b" * 10),
+            )
+
+        assert {r["file_id"] for r in results} == {"file-a", "file-b"}
+        used_sessions = [call.args[0] for call in create.await_args_list]
+        assert {id(s) for s in used_sessions} == {id(first), id(second)}
+        first.close.assert_awaited_once()
+        second.close.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

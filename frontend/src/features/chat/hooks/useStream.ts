@@ -586,6 +586,8 @@ export function useStream(apiPrefix: string = "chat") {
           name: string,
           data: Record<string, unknown>,
         ) => void;
+        /** Non-fatal setup warning, e.g. a delegate build failure (#635). */
+        onWarning?: (data: Record<string, unknown>) => void;
         onError?: (error: string, messageId: string) => void;
         /** A transport failure (network drop, killed backend), as opposed to
          *  a producer `error` event.  The run is `lost`, not failed (#609). */
@@ -845,6 +847,9 @@ export function useStream(apiPrefix: string = "chat") {
                   case "summarized":
                     handlers.onSummarized?.(parsed);
                     break;
+                  case "warning":
+                    handlers.onWarning?.(parsed);
+                    break;
                   case "tags_updated":
                     handlers.onTagsUpdated?.(parsed);
                     break;
@@ -1054,6 +1059,8 @@ export function useStream(apiPrefix: string = "chat") {
           name: string,
           data: Record<string, unknown>,
         ) => void;
+        /** Non-fatal setup warning, e.g. a delegate build failure (#635). */
+        onWarning?: (data: Record<string, unknown>) => void;
         onError?: (error: string, messageId: string) => void;
         /** A second client tried to send while a run is active (HTTP 409). */
         onSessionBusy?: (info: {
@@ -1247,6 +1254,9 @@ export function useStream(apiPrefix: string = "chat") {
                   case "summarized":
                     handlers.onSummarized?.(parsed);
                     break;
+                  case "warning":
+                    handlers.onWarning?.(parsed);
+                    break;
                   case "tags_updated":
                     handlers.onTagsUpdated?.(parsed);
                     break;
@@ -1367,6 +1377,8 @@ export function useStream(apiPrefix: string = "chat") {
           name: string,
           data: Record<string, unknown>,
         ) => void;
+        /** Non-fatal setup warning, e.g. a delegate build failure (#635). */
+        onWarning?: (data: Record<string, unknown>) => void;
         onError?: (error: string, messageId: string) => void;
         /** A second client tried to send while a run is active (HTTP 409). */
         onSessionBusy?: (info: {
@@ -1460,6 +1472,9 @@ export function useStream(apiPrefix: string = "chat") {
                     break;
                   case "summarized":
                     if (handlers) handlers.onSummarized?.(parsed);
+                    break;
+                  case "warning":
+                    if (handlers) handlers.onWarning?.(parsed);
                     break;
                   case "tags_updated":
                     if (handlers) handlers.onTagsUpdated?.(parsed);
@@ -1558,6 +1573,8 @@ export function useStream(apiPrefix: string = "chat") {
           name: string,
           data: Record<string, unknown>,
         ) => void;
+        /** Non-fatal setup warning, e.g. a delegate build failure (#635). */
+        onWarning?: (data: Record<string, unknown>) => void;
         onError?: (error: string, messageId: string) => void;
         /** A second client tried to send while a run is active (HTTP 409). */
         onSessionBusy?: (info: {
@@ -1654,6 +1671,9 @@ export function useStream(apiPrefix: string = "chat") {
                     break;
                   case "summarized":
                     handlers.onSummarized?.(parsed);
+                    break;
+                  case "warning":
+                    handlers.onWarning?.(parsed);
                     break;
                   case "tags_updated":
                     handlers.onTagsUpdated?.(parsed);

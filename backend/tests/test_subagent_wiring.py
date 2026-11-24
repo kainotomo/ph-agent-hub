@@ -172,3 +172,52 @@ async def test_wrap_gives_delegates_a_longer_timeout(monkeypatch):
     assert isinstance(plain_result, dict)
     assert "timed out" in plain_result["error"]
     assert delegate_result == "done"
+
+
+def test_delegate_build_failure_records_diagnostic(monkeypatch):
+    """Issue #635 — a failed build is a named diagnostic, not a silent log."""
+    def _boom(**kwargs):
+        raise RuntimeError("bad persona config")
+
+    monkeypatch.setattr(subagent_mod, "build_subagent_delegate", _boom)
+
+    pool: list = []
+    diagnostics: list[dict] = []
+    _append_subagent_delegates(
+        pool,
+        [_row()],
+        tenant_id="t1",
+        session_id="s1",
+        session_data={"id": "s1"},
+        diagnostics=diagnostics,
+    )
+
+    assert pool == []
+    assert diagnostics == [
+        {
+            "code": "subagent_delegate_build_failed",
+            "tool_id": "row-1",
+            "tool_name": "Researcher",
+            "message": "bad persona config",
+        }
+    ]
+
+
+def test_diagnostic_events_are_warning_frames():
+    """The streaming path turns diagnostics into `warning` SSE frames."""
+    import json
+
+    from src.agents.runner import _diagnostic_events
+
+    events = _diagnostic_events(
+        [{"code": "subagent_delegate_build_failed", "message": "boom"}],
+        session_id="s1",
+        message_id="m1",
+    )
+
+    assert len(events) == 1
+    assert events[0]["event"] == "warning"
+    payload = json.loads(events[0]["data"])
+    assert payload["code"] == "subagent_delegate_build_failed"
+    assert payload["session_id"] == "s1"
+    assert payload["message_id"] == "m1"

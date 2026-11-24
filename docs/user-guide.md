@@ -200,6 +200,7 @@ Tools let the AI interact with external systems — query databases, call APIs, 
 | **Creative** | Image Generation | Generate images from text descriptions (DALL·E 3, Stable Diffusion) |
 | **MCP** | (dynamically synced) | External tools connected by your administrator via MCP servers — GitHub, databases, file systems, or any MCP-compatible service |
 | **A2A** | (dynamically synced) | Skills from remote AI agents connected via the A2A (Agent-to-Agent) Protocol — your agent can collaborate with other agents across different platforms |
+| **Agents** | Subagent personas | Delegate a focused task to a sub-agent that works in its own context, so long research does not fill your conversation. Personas are created by your administrator. |
 | **Productivity** | Calendar, Tasks | Check your calendar, schedule meetings, find free time slots; **create, update, and manage tasks and to-do lists** from your connected accounts |
 | **DevOps** | GitHub | Search code, list issues/PRs, read files from GitHub/GitLab repos. Connect your own GitHub account via **Settings → Account Settings**. |
 
@@ -210,6 +211,8 @@ Tools let the AI interact with external systems — query databases, call APIs, 
 3. The AI will now be able to call these tools when relevant
 
 You can only activate tools that your administrator has approved for your tenant.
+
+**Subagents.** A subagent appears as `delegate_to_<name>` when the AI decides to hand work off. With **Auto Tool Selection** on (the default), a subagent your administrator shared with you is offered automatically and is not dropped by the selection limit. With it off, activate the subagent here or mark it **Always-on**. If you cannot see a subagent, ask your administrator to make it Public or add you to its group.
 
 ### 6.3 Always-On Tools
 
@@ -652,15 +655,18 @@ Instead of manually activating tools per session, the agent can automatically se
 
 ### 14.1 How It Works
 
-1. When you send a message, the LLM reviews your available tools
-2. It selects the tools most relevant to your request (up to a configurable limit, default 8)
-3. The selected tools are invoked automatically during the conversation
+1. When you send a message, the platform scores your available tools against it
+2. It shortlists the most relevant tools (up to a configurable limit, default 8)
+3. The shortlisted tools are invoked automatically during the conversation
+
+The limit is a cap on the relevance ranking, not a hard ceiling on the pool: tools you marked **Always-on** and subagent personas your administrator shared with you are always retained.
 
 ### 14.2 Manual vs Auto Selection
 
 - **Manual**: You explicitly activate tools in session settings — only those tools are available
-- **Auto**: The LLM picks tools dynamically — you don't need to manage tool activation
+- **Auto**: The platform picks tools from the accessible pool — you don't need to manage tool activation
 - **Mixed**: Auto-selection works alongside manual tool activation; both are supported simultaneously
+- **Subagents**: an enabled, Public-or-group-assigned subagent is kept outside the Top-K cut automatically, so it is offered even when the message does not mention delegation. A private, ungrouped persona is not auto-selected; activate only tools your administrator shared with you.
 
 Auto selection is enabled by default. Your administrator can disable it per tenant.
 

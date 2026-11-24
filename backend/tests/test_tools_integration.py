@@ -552,6 +552,47 @@ class TestFileListTools:
         assert result["text"] == "Full text content here"
         assert result["truncated"] is False
 
+    async def test_read_file_content_uses_fresh_session_when_enabled(self):
+        """Issue #635 — reads can bypass the runner's stale snapshot.
+
+        The runner's session must not be queried at all when the runner asked
+        for fresh reads; the row is loaded through our own short-lived
+        session, which is then closed.
+        """
+        db = _make_mock_db_session()
+
+        upload = _make_mock_orm_row(
+            id="file-1",
+            original_filename="test.txt",
+            content_type="text/plain",
+            size_bytes=1024,
+            extracted_text="Committed by a save on another session",
+        )
+        fresh_result = MagicMock()
+        fresh_result.scalar_one_or_none.return_value = upload
+        fresh = MagicMock()
+        fresh.execute = AsyncMock(return_value=fresh_result)
+        fresh.close = AsyncMock()
+
+        from src.tools.file_list import build_file_list_tool
+
+        with patch(
+            "src.tools.file_list._new_read_session",
+            new=AsyncMock(return_value=fresh),
+        ):
+            tools = build_file_list_tool(
+                db=db,
+                session_id="session-1",
+                tenant_id="tenant-1",
+                fresh_session_reads=True,
+            )
+            result = await tools[1](
+                file_id="00000000-0000-0000-0000-000000000001"
+            )
+
+        assert result["text"] == "Committed by a save on another session"
+        fresh.close.assert_awaited_once()
+
     async def test_read_file_content_not_found(self):
         db = _make_mock_db_session()
         result_mock = MagicMock()

@@ -62,6 +62,31 @@ emit a synthetic final message so the turn never ends on an empty bubble.
 
 **Run budgets (Issue #595):** Each skill (via its existing `agent_config` JSON column) and template (via the new nullable `agent_config` JSON column, migration `t7u8v9w0x1y2`) can carry per-run budget keys `max_steps` (integer 1..500) and `max_input_tokens` (integer >= 0, `0` = unlimited). Budgets are per agent invocation: the autopilot's internal turns each get the budget, the autopilot run-level `AUTOPILOT_MAX_TOKENS` is unchanged, sub-agent tokens are billed to the parent turn but not counted in its mid-run budget, and workflows are unchanged. Precedence per dimension is skill → template → global fallback (`AGENT_MAX_STEPS` for `max_steps`, `AGENT_MAX_INPUT_TOKENS` for `max_input_tokens`); `AGENT_BUDGET_WARN_RATIO` sets the warning fraction and `AGENT_MAX_STEPS_CEILING` bounds admin-supplied per-skill/template step values. `max_steps` counts model round-trips that executed at least one tool — a parallel batch counts as ONE step (Issue #447) — while `max_input_tokens` counts cumulative provider-reported input tokens (cache hits included) for one agent invocation/turn. At `ceil(budget * AGENT_BUDGET_WARN_RATIO)` the stream emits a `budget_warning` event (once per dimension); at 100% it stops and emits a `budget_exceeded` event with `kind` = `"steps"` or `"input_tokens"`, then makes one tool-less wrap-up call and appends a deterministic footer to the final text (`_Budget: 70 steps / 12,000,000 input tokens · Used: 70 steps, 78 tool calls, 12,345,678 input tokens_`). Non-streaming runs bind MAF's `max_iterations` to the effective `max_steps + 1`; a token-budget overage cannot interrupt the run mid-loop, so it is reported after the fact (`budget_exceeded=true` in metrics plus a short notice appended to the response). If the provider never reports usage mid-stream, the token budget cannot bind, so `budget_enforced=false` is recorded and a warning is logged. `steps` (model rounds) and `tool_calls` (individual tool executions) are now reported so a run is never ambiguous.
 
+**Reasoning-only rounds and reasoning integrity (Issues #639, #640):** A model
+round that streams `reasoning_content` but produces no text and no tool call
+cannot continue the turn; it used to be accepted as the natural end, so the
+terminal path reported `empty_output` with no retry and no recorded reason.
+`_run_agent_stream` now closes every model round on the provider's
+`finish_reason` chunk and tracks that round's text, reasoning and tool
+activity. A round with reasoning but no text and no tool call is logged
+(model id, `finish_reason`, reasoning size, effective `max_tokens`) and retried
+once: the retry re-enters `agent.run` with the run's own conversation
+(assistant rounds, tool results, the reasoning-only reply) plus a directive
+nudge, so it resumes instead of restarting. If no conversation can be recovered
+or the retry is degenerate too, the #579 tool-less wrap-up produces the final
+message, so such a turn never ends on an empty bubble. The persisted
+per-message `metrics` part now also carries `finish_reason` (why the final
+round stopped — `stop` vs `length`), `provider_usage` (the provider-reported
+input/output/cache totals behind the turn's token fields) and
+`reasoning_only_retried`.
+
+Reasoning whitespace is content: streamed reasoning arrives one token per
+delta, so each delta is persisted and re-sent as `reasoning_content` verbatim.
+The DSML sanitiser trims a delta only when it actually removed leaked markup
+(previously it `.strip()`ed every delta, deleting every space and newline and
+fusing the reasoning into one run-on string). The final answer text is still
+trimmed when it is stored.
+
 **Auto Tool Selection (Issues #287, #439):** Instead of requiring users to
 manually activate tools per session, the agent can automatically select
 relevant tools from the available pool. The LLM receives tool definitions

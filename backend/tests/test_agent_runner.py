@@ -1337,6 +1337,10 @@ class TestRunAgentStream:
         mock_instance = MagicMock()
         mock_instance.run.return_value = self._stream_from_updates([
             _make_mock_stream_update("text_reasoning", text="I think"),
+            # Issue #639 — a turn that ends on reasoning alone is retried and
+            # would otherwise append a wrap-up token; give it an answer so
+            # this test stays about the reasoning delta.
+            _make_mock_stream_update("text", text="Answer"),
         ])
         mock_agent_class.return_value = mock_instance
 
@@ -1346,7 +1350,7 @@ class TestRunAgentStream:
                                    "assistant", "sess1", "msg1"):
             events.append(event)
 
-        assert len(events) == 1
+        assert [e["event"] for e in events] == ["reasoning_token", "token"]
         assert events[0]["event"] == "reasoning_token"
 
     @patch("agent_framework.Agent")

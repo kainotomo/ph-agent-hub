@@ -28,6 +28,7 @@ import type { MessageData } from "../services/chat";
 import { listMessageUploads } from "../services/chat";
 import { getToken } from "../../../services/api";
 import { buildSteps } from "../utils/buildSteps";
+import { formatElapsedClock } from "../utils/formatMetrics";
 import { ProcessSteps } from "./ProcessSteps";
 
 const { Text } = Typography;
@@ -228,9 +229,8 @@ function MessageBubbleInner({
           )}
           {/* Live response timer — shown only while streaming and only for the active assistant message. */}
           {streaming && streamingDuration !== null && streamingDuration !== undefined && streamingDuration > 0 && (
-            <Text type="secondary" style={{ fontSize: 10, color: "#bbb" }}>
-              · {Math.floor(streamingDuration / 1000).toString().padStart(2, "0")}:
-              {String(Math.floor((streamingDuration % 1000) / 10)).padStart(2, "0")}s
+            <Text type="secondary" style={{ fontSize: 10, color: "#bbb" }} data-testid="streaming-duration">
+              · {formatElapsedClock(streamingDuration)}
             </Text>
           )}
         </Space>

@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **The live response timer now reads as a clock (Issue #637)** — while a
+  turn streamed, the header showed elapsed time as a minutes:centiseconds
+  counter with an `s` suffix (65 s rendered as `65:00s`), which was hard to
+  read past a minute. It is now a zero-padded `hh:mm:ss` clock (`00:01:05`),
+  still shown only while the response streams. ([#637])
 - **An enabled subagent is no longer hidden, and `save_to` no longer uses
   the run's session (Issue #635)** — a persona created and enabled for the
   tenant could still never reach the model: Auto Tool Selection built its
@@ -594,3 +599,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#632]: https://github.com/kainotomo/ph-agent-hub/issues/632
 [#634]: https://github.com/kainotomo/ph-agent-hub/issues/634
 [#635]: https://github.com/kainotomo/ph-agent-hub/issues/635
+[#637]: https://github.com/kainotomo/ph-agent-hub/issues/637

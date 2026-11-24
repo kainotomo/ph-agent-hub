@@ -455,4 +455,52 @@ describe("MessageBubble", () => {
     expect(screen.getByText("Results found")).toBeInTheDocument();
     expect(screen.getByText("Here are the results.")).toBeInTheDocument();
   });
+
+  it("shows the live duration as a zero-padded hh:mm:ss clock (Issue #637)", () => {
+    renderBubble({
+      message: {
+        id: "msg-timer",
+        session_id: "session-1",
+        sender: "assistant",
+        content: [{ type: "text", text: "Working" }],
+        model_id: "deepseek-r1",
+        model_name: "DeepSeek R1",
+        model_provider: "DeepSeek",
+        tool_calls: null,
+        tokens_in: 0,
+        tokens_out: 0,
+        is_deleted: false,
+        created_at: "2024-01-01T00:00:00Z",
+        updated_at: "2024-01-01T00:00:00Z",
+      } as any,
+      streaming: true,
+      streamingDuration: 65_000,
+    });
+
+    expect(screen.getByTestId("streaming-duration")).toHaveTextContent("00:01:05");
+  });
+
+  it("hides the live duration once the response is no longer streaming", () => {
+    renderBubble({
+      message: {
+        id: "msg-timer-settled",
+        session_id: "session-1",
+        sender: "assistant",
+        content: [{ type: "text", text: "Done" }],
+        model_id: "deepseek-r1",
+        model_name: "DeepSeek R1",
+        model_provider: "DeepSeek",
+        tool_calls: null,
+        tokens_in: 0,
+        tokens_out: 0,
+        is_deleted: false,
+        created_at: "2024-01-01T00:00:00Z",
+        updated_at: "2024-01-01T00:00:00Z",
+      } as any,
+      streaming: false,
+      streamingDuration: 65_000,
+    });
+
+    expect(screen.queryByTestId("streaming-duration")).not.toBeInTheDocument();
+  });
 });

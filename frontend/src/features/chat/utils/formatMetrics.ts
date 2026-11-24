@@ -47,3 +47,17 @@ export function formatPercent(n: number | null | undefined): string {
   if (n == null) return EM_DASH;
   return Math.round(n) + "%";
 }
+
+/**
+ * Elapsed wall-clock time rendered as a zero-padded `hh:mm:ss` clock
+ * (Issue #637). Seconds are truncated, not rounded.
+ */
+export function formatElapsedClock(ms: number | null | undefined): string {
+  if (ms == null || !Number.isFinite(ms)) return EM_DASH;
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+}

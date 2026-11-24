@@ -3466,9 +3466,12 @@ async def _persist_assistant_message(
     content: list[dict] = list(content_segments or [])
 
     # Always append the final text response, stripped of any leaked
-    # <function_calls> XML (DeepSeek thinking-mode artifact)
-    clean_text = _strip_raw_tool_xml(assistant_response)
-    if clean_text.strip():
+    # <function_calls> XML (DeepSeek thinking-mode artifact).  Issue #640 —
+    # `_strip_raw_tool_xml` now preserves whitespace when no markup was
+    # removed, so the final answer is trimmed here (only the answer, never the
+    # reasoning segments).
+    clean_text = _strip_raw_tool_xml(assistant_response).strip()
+    if clean_text:
         content.append({"type": "text", "text": clean_text})
 
     # Issue #531 — session usage metrics (last element).
@@ -3528,7 +3531,7 @@ async def _persist_messages(
         A tuple of (user_message_id, assistant_message_id).
     """
     user_msg_content = [{"type": "text", "text": user_message}]
-    clean_response = _strip_raw_tool_xml(assistant_response)
+    clean_response = _strip_raw_tool_xml(assistant_response).strip()
     assistant_msg_content = [{"type": "text", "text": clean_response}]
 
     # Issue #531 — session usage metrics (last element).
@@ -4399,15 +4402,6 @@ async def _run_agent_stream(
         tokenizer=tokenizer,
     )
 
-    if function_invocation_kwargs is not None:
-        response_stream = agent.run(user_message, stream=True, function_invocation_kwargs=function_invocation_kwargs)
-    else:
-        response_stream = agent.run(user_message, stream=True)
-    logger.info(
-        "Agent.run returned: type=%s",
-        type(response_stream).__module__ + "." + type(response_stream).__qualname__,
-    )
-
     step_index = 0
     # Timing: measure per-turn wall-clock and tool durations.
     turn_start_s = time.monotonic()
@@ -4442,295 +4436,317 @@ async def _run_agent_stream(
     )
     usage_missing_logged = False
 
-    inner_event_count = 0
-    last_update = None
-    response_iter = response_stream.__aiter__()
-    while True:
-        try:
-            update = await asyncio.wait_for(
-                response_iter.__anext__(),
-                timeout=MAF_STREAM_IDLE_TIMEOUT,
-            )
-        except StopAsyncIteration:
-            break
-        except asyncio.TimeoutError:
-            logger.warning(
-                "Agent stream idle timeout (%ss) for session %s after %d events",
-                MAF_STREAM_IDLE_TIMEOUT, session_id, inner_event_count,
-            )
-            break
-        except Exception:
-            # Stream exhausted or error — log it (Issue #579: this used to be
-            # swallowed silently) then break so post-loop code can run.
-            logger.exception(
-                "Agent stream raised for session %s after %d events",
-                session_id, inner_event_count,
-            )
-            break
-        last_update = update
-        inner_event_count += 1
-        if inner_event_count <= 5 or inner_event_count % 20 == 0:
-            content_types = [getattr(c, "type", "?") for c in (update.contents if hasattr(update, 'contents') else [])]
+    # ---- Issue #639 — one retry for a reasoning-only round ---------------
+    # A round that produced tokens but no text and no tool call cannot
+    # continue the turn: there is nothing to render and nothing to follow.
+    # It used to be accepted as the natural end, which surfaced as
+    # ``empty_output`` with no retry and no ``finish_reason`` recorded.
+    # Such a round is now retried once with a directive nudge, and a second
+    # degenerate round falls back to the #579 wrap-up instead of an empty
+    # answer.
+    attempt = 0
+    run_inputs: Any = user_message
+    # Provider-reported reason the last model round ended (Issue #639).
+    finish_reason: str | None = None
+    reasoning_only_retried = False
+    stream_exhausted_cleanly = False
+    # Per-round accounting: counters for the round currently streaming.
+    # A round ends on the chunk carrying the provider's finish_reason; the
+    # counters are then snapshotted into ``last_round`` and reset.
+    round_text_chars = 0
+    round_reasoning_chars = 0
+    round_tool_activity = 0
+    last_round: dict | None = None
 
-        # Issue #595 — accumulate provider-reported usage for every model
-        # round-trip so the input-token budget can bind during the run.  The
-        # OpenAI-compatible clients receive ``stream_options={"include_usage":
-        # True}``, so each round's final chunk carries a ``usage`` content.
-        update_usage_seen = False
-        for content in update.contents:
-            if getattr(content, "type", None) != "usage":
-                continue
-            in_tokens, out_tokens, cache_tokens = _usage_token_fields(
-                getattr(content, "usage_details", None)
+    def _close_round(round_finish_reason: str | None) -> None:
+        """Snapshot the round that just ended and start a fresh one."""
+        nonlocal last_round, round_text_chars
+        nonlocal round_reasoning_chars, round_tool_activity
+        last_round = {
+            "text_chars": round_text_chars,
+            "reasoning_chars": round_reasoning_chars,
+            "tool_activity": round_tool_activity,
+            "finish_reason": round_finish_reason,
+        }
+        round_text_chars = 0
+        round_reasoning_chars = 0
+        round_tool_activity = 0
+
+    while True:
+        attempt += 1
+        stream_exhausted_cleanly = False
+        finish_reason = None
+        if function_invocation_kwargs is not None:
+            response_stream = agent.run(
+                run_inputs, stream=True,
+                function_invocation_kwargs=function_invocation_kwargs,
             )
-            stream_usage_in += in_tokens
-            if in_tokens:
-                stream_last_in = in_tokens
-            stream_usage_out += out_tokens
-            stream_cache_hit += cache_tokens
-            update_usage_seen = True
-        if not update_usage_seen:
-            # Some clients attach usage directly to the update instead of
-            # emitting a usage content.  Never count both shapes.
-            in_tokens, out_tokens, cache_tokens = _usage_token_fields(
-                getattr(update, "usage_details", None)
-            )
-            if in_tokens or out_tokens or cache_tokens:
+        else:
+            response_stream = agent.run(run_inputs, stream=True)
+        logger.info(
+            "Agent.run returned (attempt %d): type=%s",
+            attempt,
+            type(response_stream).__module__ + "." + type(response_stream).__qualname__,
+        )
+
+        inner_event_count = 0
+        last_update = None
+        response_iter = response_stream.__aiter__()
+        while True:
+            try:
+                update = await asyncio.wait_for(
+                    response_iter.__anext__(),
+                    timeout=MAF_STREAM_IDLE_TIMEOUT,
+                )
+            except StopAsyncIteration:
+                stream_exhausted_cleanly = True
+                break
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Agent stream idle timeout (%ss) for session %s after %d events",
+                    MAF_STREAM_IDLE_TIMEOUT, session_id, inner_event_count,
+                )
+                break
+            except Exception:
+                # Stream exhausted or error — log it (Issue #579: this used to be
+                # swallowed silently) then break so post-loop code can run.
+                logger.exception(
+                    "Agent stream raised for session %s after %d events",
+                    session_id, inner_event_count,
+                )
+                break
+            last_update = update
+            inner_event_count += 1
+            if inner_event_count <= 5 or inner_event_count % 20 == 0:
+                content_types = [getattr(c, "type", "?") for c in (update.contents if hasattr(update, 'contents') else [])]
+
+            # Issue #639 — the provider reports why a model round ended on the
+            # chunk that closes it (which may also carry text).  ``isinstance``
+            # keeps lightweight test doubles, whose auto-created attributes are
+            # not strings, from looking like a real finish reason.
+            update_finish_reason = getattr(update, "finish_reason", None)
+            if isinstance(update_finish_reason, str) and update_finish_reason:
+                finish_reason = update_finish_reason
+
+            # Issue #595 — accumulate provider-reported usage for every model
+            # round-trip so the input-token budget can bind during the run.  The
+            # OpenAI-compatible clients receive ``stream_options={"include_usage":
+            # True}``, so each round's final chunk carries a ``usage`` content.
+            update_usage_seen = False
+            for content in update.contents:
+                if getattr(content, "type", None) != "usage":
+                    continue
+                in_tokens, out_tokens, cache_tokens = _usage_token_fields(
+                    getattr(content, "usage_details", None)
+                )
                 stream_usage_in += in_tokens
                 if in_tokens:
                     stream_last_in = in_tokens
                 stream_usage_out += out_tokens
                 stream_cache_hit += cache_tokens
                 update_usage_seen = True
-        if update_usage_seen:
-            usage_seen = True
+            if not update_usage_seen:
+                # Some clients attach usage directly to the update instead of
+                # emitting a usage content.  Never count both shapes.
+                in_tokens, out_tokens, cache_tokens = _usage_token_fields(
+                    getattr(update, "usage_details", None)
+                )
+                if in_tokens or out_tokens or cache_tokens:
+                    stream_usage_in += in_tokens
+                    if in_tokens:
+                        stream_last_in = in_tokens
+                    stream_usage_out += out_tokens
+                    stream_cache_hit += cache_tokens
+                    update_usage_seen = True
+            if update_usage_seen:
+                usage_seen = True
 
-        # Issue #447 — detect parallel tool batches.
-        # MAF yields all function_results from an asyncio.gather batch in
-        # a single ChatResponseUpdate.  Group them so the frontend can
-        # display parallel execution and we count the batch as ONE step.
-        func_results_in_update: list[Any] = []
-        for content in update.contents:
-            if getattr(content, "type", None) in ("function_result", "tool_result"):
-                func_results_in_update.append(content)
+            # Issue #447 — detect parallel tool batches.
+            # MAF yields all function_results from an asyncio.gather batch in
+            # a single ChatResponseUpdate.  Group them so the frontend can
+            # display parallel execution and we count the batch as ONE step.
+            func_results_in_update: list[Any] = []
+            for content in update.contents:
+                if getattr(content, "type", None) in ("function_result", "tool_result"):
+                    func_results_in_update.append(content)
 
-        is_parallel_batch = len(func_results_in_update) > 1
-        batch_id = str(uuid.uuid4()) if is_parallel_batch else None
+            is_parallel_batch = len(func_results_in_update) > 1
+            batch_id = str(uuid.uuid4()) if is_parallel_batch else None
 
-        # Check each content item in the update
-        for content in update.contents:
-            content_type = getattr(content, "type", None)
+            # Check each content item in the update
+            for content in update.contents:
+                content_type = getattr(content, "type", None)
 
-            if content_type == "text":
-                delta = getattr(content, "text", "")
-                if delta:
-                    # Issue #579 — strip leaked DeepSeek DSML special-token
-                    # markup so it never reaches the UI or the database.
-                    if contains_dsml(delta):
-                        logger.warning(
-                            "Stripped leaked tool-call markup from agent text "
-                            "(session %s)", session_id,
+                if content_type == "text":
+                    delta = getattr(content, "text", "")
+                    if delta:
+                        # Issue #579 — strip leaked DeepSeek DSML special-token
+                        # markup so it never reaches the UI or the database.
+                        if contains_dsml(delta):
+                            logger.warning(
+                                "Stripped leaked tool-call markup from agent text "
+                                "(session %s)", session_id,
+                            )
+                            delta = strip_dsml_markers(delta)
+                    if delta:
+                        round_text_chars += len(delta)
+                        if first_token_at_s is None:
+                            first_token_at_s = time.monotonic()
+                        yield _sse_event("token", {
+                            "delta": delta,
+                        }, session_id=session_id, message_id=message_id)
+                elif content_type == "text_reasoning":
+                    delta = getattr(content, "text", "")
+                    if delta:
+                        # Issue #579 — same sanitising for the reasoning stream.
+                        # Issue #640 — only when markup is actually present: a
+                        # per-delta sanitise pass used to strip the leading/
+                        # trailing whitespace of every streamed reasoning token,
+                        # fusing the persisted reasoning into one run-on string.
+                        if contains_dsml(delta):
+                            logger.warning(
+                                "Stripped leaked tool-call markup from agent "
+                                "reasoning (session %s)", session_id,
+                            )
+                            delta = strip_dsml_markers(delta)
+                    if delta:
+                        round_reasoning_chars += len(delta)
+                        yield _sse_event("reasoning_token", {
+                            "delta": delta,
+                        }, session_id=session_id, message_id=message_id)
+                elif content_type in ("function_call", "tool_call"):
+                    round_tool_activity += 1
+                    call_id = getattr(content, "call_id", None)
+                    if call_id:
+                        tool_started_at_s[call_id] = time.monotonic()
+                    _handle_streaming_function_call(content, pending_calls)
+                elif content_type in ("function_result", "tool_result"):
+                    round_tool_activity += 1
+                    tool_calls += 1
+                    tool_call_id = getattr(content, "call_id", None) or ""
+                    started = tool_started_at_s.pop(tool_call_id, None)
+                    if started is not None:
+                        tool_durations_s.append(time.monotonic() - started)
+                    tool_name = getattr(content, "name", "unknown")
+                    output = getattr(content, "output", None) or getattr(content, "result", None)
+                    success = not _is_tool_error(output)
+                    result_summary = _summarise_tool_result(output)
+
+                    # Resolve the final tool name and arguments from pending calls
+                    resolved_args = None
+                    if tool_call_id and tool_call_id in pending_calls:
+                        pending = pending_calls.pop(tool_call_id)
+                        if pending.get("name"):
+                            tool_name = pending["name"]
+                        resolved_args = _resolve_tool_arguments(
+                            pending.get("args_str", ""), output
                         )
-                        delta = strip_dsml_markers(delta)
-                if delta:
-                    if first_token_at_s is None:
-                        first_token_at_s = time.monotonic()
-                    yield _sse_event("token", {
-                        "delta": delta,
-                    }, session_id=session_id, message_id=message_id)
-            elif content_type == "text_reasoning":
-                delta = getattr(content, "text", "")
-                if delta:
-                    # Issue #579 — same sanitising for the reasoning stream.
-                    delta = strip_dsml_markers(delta)
-                if delta:
-                    yield _sse_event("reasoning_token", {
-                        "delta": delta,
-                    }, session_id=session_id, message_id=message_id)
-            elif content_type in ("function_call", "tool_call"):
-                call_id = getattr(content, "call_id", None)
-                if call_id:
-                    tool_started_at_s[call_id] = time.monotonic()
-                _handle_streaming_function_call(content, pending_calls)
-            elif content_type in ("function_result", "tool_result"):
-                tool_calls += 1
-                tool_call_id = getattr(content, "call_id", None) or ""
-                started = tool_started_at_s.pop(tool_call_id, None)
-                if started is not None:
-                    tool_durations_s.append(time.monotonic() - started)
-                tool_name = getattr(content, "name", "unknown")
-                output = getattr(content, "output", None) or getattr(content, "result", None)
-                success = not _is_tool_error(output)
-                result_summary = _summarise_tool_result(output)
 
-                # Resolve the final tool name and arguments from pending calls
-                resolved_args = None
-                if tool_call_id and tool_call_id in pending_calls:
-                    pending = pending_calls.pop(tool_call_id)
-                    if pending.get("name"):
-                        tool_name = pending["name"]
-                    resolved_args = _resolve_tool_arguments(
-                        pending.get("args_str", ""), output
-                    )
+                    # Issue #579 — record the call for runaway-loop detection and
+                    # for the early-stop wrap-up prompt.
+                    recent_call_keys.append(_tool_call_key(tool_name, resolved_args))
+                    try:
+                        _args_preview = (
+                            json.dumps(resolved_args, default=str)[:200]
+                            if resolved_args is not None
+                            else ""
+                        )
+                    except (TypeError, ValueError):
+                        _args_preview = ""
+                    turn_notes.append(f"{tool_name}({_args_preview})")
 
-                # Issue #579 — record the call for runaway-loop detection and
-                # for the early-stop wrap-up prompt.
-                recent_call_keys.append(_tool_call_key(tool_name, resolved_args))
-                try:
-                    _args_preview = (
-                        json.dumps(resolved_args, default=str)[:200]
-                        if resolved_args is not None
-                        else ""
-                    )
-                except (TypeError, ValueError):
-                    _args_preview = ""
-                turn_notes.append(f"{tool_name}({_args_preview})")
+                    # Build the tool event payloads with batch_id for Issue #447
+                    tool_start_payload: dict = {
+                        "tool_call_id": tool_call_id,
+                        "tool_name": tool_name,
+                        "arguments": resolved_args,
+                    }
+                    tool_result_payload: dict = {
+                        "tool_call_id": tool_call_id,
+                        "tool_name": tool_name,
+                        "success": success,
+                        "result_summary": result_summary,
+                        "output": output,
+                    }
+                    if batch_id:
+                        tool_start_payload["batch_id"] = batch_id
+                        tool_result_payload["batch_id"] = batch_id
 
-                # Build the tool event payloads with batch_id for Issue #447
-                tool_start_payload: dict = {
-                    "tool_call_id": tool_call_id,
-                    "tool_name": tool_name,
-                    "arguments": resolved_args,
-                }
-                tool_result_payload: dict = {
-                    "tool_call_id": tool_call_id,
-                    "tool_name": tool_name,
-                    "success": success,
-                    "result_summary": result_summary,
-                    "output": output,
+                    # Yield a single consolidated tool_start event
+                    yield _sse_event("tool_start", tool_start_payload,
+                                     session_id=session_id, message_id=message_id)
+
+                    # Yield the tool_result event
+                    yield _sse_event("tool_result", tool_result_payload,
+                                     session_id=session_id, message_id=message_id)
+
+                    # ── Memory updated event (Issue #451) ──────────────────────
+                    # When memory tools complete, emit a dedicated event so the
+                    # frontend can show "Memory updated" notifications.
+                    if tool_name in ("save_memory", "delete_memory"):
+                        # Derive the action from the tool's own returned value
+                        raw_action = None
+                        memory_key = None
+                        if isinstance(output, dict):
+                            raw_action = output.get("action")
+                            memory_key = output.get("key")
+                        elif isinstance(output, str):
+                            # Fallback: parse JSON string
+                            import json as _json
+                            try:
+                                parsed = _json.loads(output)
+                                if isinstance(parsed, dict):
+                                    raw_action = parsed.get("action")
+                                    memory_key = parsed.get("key")
+                            except (_json.JSONDecodeError, TypeError):
+                                pass
+                        # Map raw tool action → SSE action
+                        if raw_action in ("created", "updated"):
+                            memory_action = "saved"
+                        elif raw_action == "deleted":
+                            memory_action = "deleted"
+                        else:
+                            # Pass through needs_confirmation, error, not_found, or None
+                            memory_action = raw_action
+                        yield _sse_event("memory_updated", {
+                            "tool_name": tool_name,
+                            "action": memory_action,
+                            "key": memory_key,
+                            "success": success,
+                        }, session_id=session_id, message_id=message_id)
+
+            # Issue #639 — a chunk carrying finish_reason closes a model round.
+            # Snapshot its counters so the round that ends the stream can be
+            # classified (text vs reasoning-only vs tool-calls) afterwards.
+            if isinstance(update_finish_reason, str) and update_finish_reason:
+                _close_round(update_finish_reason)
+
+            # ── Step completion (Issue #447 — parallel batches count as 1) ──
+            # Issue #579 — this block MUST sit outside the per-content loop so it
+            # runs once per update (not once per content item) and so the ``break``
+            # below actually terminates the stream loop.  Previously it was nested
+            # inside ``for content in update.contents`` and the guard silently did
+            # nothing: steps were double-counted and the run continued to MAF's own
+            # 40-iteration limit.
+            if func_results_in_update:
+                step_index += 1
+                step_payload: dict = {
+                    "step_index": step_index,
+                    "total_steps_so_far": step_index,
                 }
                 if batch_id:
-                    tool_start_payload["batch_id"] = batch_id
-                    tool_result_payload["batch_id"] = batch_id
-
-                # Yield a single consolidated tool_start event
-                yield _sse_event("tool_start", tool_start_payload,
+                    step_payload["batch_id"] = batch_id
+                    step_payload["batch_size"] = len(func_results_in_update)
+                yield _sse_event("step_complete", step_payload,
                                  session_id=session_id, message_id=message_id)
 
-                # Yield the tool_result event
-                yield _sse_event("tool_result", tool_result_payload,
-                                 session_id=session_id, message_id=message_id)
-
-                # ── Memory updated event (Issue #451) ──────────────────────
-                # When memory tools complete, emit a dedicated event so the
-                # frontend can show "Memory updated" notifications.
-                if tool_name in ("save_memory", "delete_memory"):
-                    # Derive the action from the tool's own returned value
-                    raw_action = None
-                    memory_key = None
-                    if isinstance(output, dict):
-                        raw_action = output.get("action")
-                        memory_key = output.get("key")
-                    elif isinstance(output, str):
-                        # Fallback: parse JSON string
-                        import json as _json
-                        try:
-                            parsed = _json.loads(output)
-                            if isinstance(parsed, dict):
-                                raw_action = parsed.get("action")
-                                memory_key = parsed.get("key")
-                        except (_json.JSONDecodeError, TypeError):
-                            pass
-                    # Map raw tool action → SSE action
-                    if raw_action in ("created", "updated"):
-                        memory_action = "saved"
-                    elif raw_action == "deleted":
-                        memory_action = "deleted"
-                    else:
-                        # Pass through needs_confirmation, error, not_found, or None
-                        memory_action = raw_action
-                    yield _sse_event("memory_updated", {
-                        "tool_name": tool_name,
-                        "action": memory_action,
-                        "key": memory_key,
-                        "success": success,
-                    }, session_id=session_id, message_id=message_id)
-
-        # ── Step completion (Issue #447 — parallel batches count as 1) ──
-        # Issue #579 — this block MUST sit outside the per-content loop so it
-        # runs once per update (not once per content item) and so the ``break``
-        # below actually terminates the stream loop.  Previously it was nested
-        # inside ``for content in update.contents`` and the guard silently did
-        # nothing: steps were double-counted and the run continued to MAF's own
-        # 40-iteration limit.
-        if func_results_in_update:
-            step_index += 1
-            step_payload: dict = {
-                "step_index": step_index,
-                "total_steps_so_far": step_index,
-            }
-            if batch_id:
-                step_payload["batch_id"] = batch_id
-                step_payload["batch_size"] = len(func_results_in_update)
-            yield _sse_event("step_complete", step_payload,
-                             session_id=session_id, message_id=message_id)
-
-            # ── Step budget: warn at 60 %, stop at 100 % (Issue #595) ──
-            if not warned_steps and step_index >= step_warn_at:
-                warned_steps = True
-                yield _sse_event("budget_warning", _budget_event_payload(
-                    kind="steps",
-                    consumed=step_index,
-                    limit=budget.max_steps,
-                    step_index=step_index,
-                    tool_calls=tool_calls,
-                    input_tokens=stream_usage_in,
-                    output_tokens=stream_usage_out,
-                    cache_hits=stream_cache_hit,
-                    budget=budget,
-                ), session_id=session_id, message_id=message_id)
-            if step_index >= budget.max_steps:
-                logger.warning(
-                    "Agent step budget reached (%d, source=%s) for session %s "
-                    "after %d tool calls and %d input tokens — terminating stream",
-                    budget.max_steps, budget.max_steps_source, session_id,
-                    tool_calls, stream_usage_in,
-                )
-                counters = _budget_usage_counters(
-                    step_index=step_index,
-                    tool_calls=tool_calls,
-                    input_tokens=stream_usage_in,
-                    output_tokens=stream_usage_out,
-                    cache_hits=stream_cache_hit,
-                )
-                # Keep the legacy event name/payload for existing consumers,
-                # then emit the unified budget event (Issue #595).
-                yield _sse_event("step_limit_reached", {
-                    "step_index": step_index,
-                    "max_steps": budget.max_steps,
-                    "budget_source": budget.max_steps_source,
-                    **counters,
-                }, session_id=session_id, message_id=message_id)
-                yield _sse_event("budget_exceeded", _budget_event_payload(
-                    kind="steps",
-                    consumed=step_index,
-                    limit=budget.max_steps,
-                    step_index=step_index,
-                    tool_calls=tool_calls,
-                    input_tokens=stream_usage_in,
-                    output_tokens=stream_usage_out,
-                    cache_hits=stream_cache_hit,
-                    budget=budget,
-                ), session_id=session_id, message_id=message_id)
-                pending_calls.clear()
-                stop_reason = "step_limit"
-                budget_exceeded = True
-                budget_kind = "steps"
-                break
-
-        # ── Input-token budget (Issue #595) ─────────────────────────────
-        # Checked after every update (not only tool-result updates) because a
-        # usage content can arrive with or without a batch.  Best-effort: the
-        # round that crosses the budget has already been paid for, so the stop
-        # happens before the next model call.
-        if budget.max_input_tokens > 0:
-            if usage_seen:
-                if not warned_tokens and stream_usage_in >= token_warn_at:
-                    warned_tokens = True
+                # ── Step budget: warn at 60 %, stop at 100 % (Issue #595) ──
+                if not warned_steps and step_index >= step_warn_at:
+                    warned_steps = True
                     yield _sse_event("budget_warning", _budget_event_payload(
-                        kind="input_tokens",
-                        consumed=stream_usage_in,
-                        limit=budget.max_input_tokens,
+                        kind="steps",
+                        consumed=step_index,
+                        limit=budget.max_steps,
                         step_index=step_index,
                         tool_calls=tool_calls,
                         input_tokens=stream_usage_in,
@@ -4738,19 +4754,32 @@ async def _run_agent_stream(
                         cache_hits=stream_cache_hit,
                         budget=budget,
                     ), session_id=session_id, message_id=message_id)
-                if stream_usage_in >= budget.max_input_tokens:
+                if step_index >= budget.max_steps:
                     logger.warning(
-                        "Agent input-token budget reached (%d, source=%s) for "
-                        "session %s after %d steps / %d tool calls — "
-                        "terminating stream",
-                        budget.max_input_tokens,
-                        budget.max_input_tokens_source, session_id,
-                        step_index, tool_calls,
+                        "Agent step budget reached (%d, source=%s) for session %s "
+                        "after %d tool calls and %d input tokens — terminating stream",
+                        budget.max_steps, budget.max_steps_source, session_id,
+                        tool_calls, stream_usage_in,
                     )
+                    counters = _budget_usage_counters(
+                        step_index=step_index,
+                        tool_calls=tool_calls,
+                        input_tokens=stream_usage_in,
+                        output_tokens=stream_usage_out,
+                        cache_hits=stream_cache_hit,
+                    )
+                    # Keep the legacy event name/payload for existing consumers,
+                    # then emit the unified budget event (Issue #595).
+                    yield _sse_event("step_limit_reached", {
+                        "step_index": step_index,
+                        "max_steps": budget.max_steps,
+                        "budget_source": budget.max_steps_source,
+                        **counters,
+                    }, session_id=session_id, message_id=message_id)
                     yield _sse_event("budget_exceeded", _budget_event_payload(
-                        kind="input_tokens",
-                        consumed=stream_usage_in,
-                        limit=budget.max_input_tokens,
+                        kind="steps",
+                        consumed=step_index,
+                        limit=budget.max_steps,
                         step_index=step_index,
                         tool_calls=tool_calls,
                         input_tokens=stream_usage_in,
@@ -4759,47 +4788,169 @@ async def _run_agent_stream(
                         budget=budget,
                     ), session_id=session_id, message_id=message_id)
                     pending_calls.clear()
-                    stop_reason = "input_budget"
+                    stop_reason = "step_limit"
                     budget_exceeded = True
-                    budget_kind = "input_tokens"
+                    budget_kind = "steps"
                     break
-            elif (
-                not usage_missing_logged
-                and step_index >= 3
-                and step_index > 0
-            ):
-                # The provider never reported usage mid-stream, so the token
-                # budget cannot bind.  Say so once instead of pretending.
-                usage_missing_logged = True
-                logger.warning(
-                    "Provider reported no streamed usage for session %s after "
-                    "%d steps; max_input_tokens=%d cannot be enforced mid-run "
-                    "(per-turn totals may still be available at the end)",
-                    session_id, step_index, budget.max_input_tokens,
-                )
 
-        # ── Runaway tool-loop detection (Issue #579) ────────────────────
-        # The same tool call repeated N times in a row means the model is
-        # stuck; stop early instead of grinding to the step cap (and burning
-        # tokens) like the PowerShell loop in the original report.
+            # ── Input-token budget (Issue #595) ─────────────────────────────
+            # Checked after every update (not only tool-result updates) because a
+            # usage content can arrive with or without a batch.  Best-effort: the
+            # round that crosses the budget has already been paid for, so the stop
+            # happens before the next model call.
+            if budget.max_input_tokens > 0:
+                if usage_seen:
+                    if not warned_tokens and stream_usage_in >= token_warn_at:
+                        warned_tokens = True
+                        yield _sse_event("budget_warning", _budget_event_payload(
+                            kind="input_tokens",
+                            consumed=stream_usage_in,
+                            limit=budget.max_input_tokens,
+                            step_index=step_index,
+                            tool_calls=tool_calls,
+                            input_tokens=stream_usage_in,
+                            output_tokens=stream_usage_out,
+                            cache_hits=stream_cache_hit,
+                            budget=budget,
+                        ), session_id=session_id, message_id=message_id)
+                    if stream_usage_in >= budget.max_input_tokens:
+                        logger.warning(
+                            "Agent input-token budget reached (%d, source=%s) for "
+                            "session %s after %d steps / %d tool calls — "
+                            "terminating stream",
+                            budget.max_input_tokens,
+                            budget.max_input_tokens_source, session_id,
+                            step_index, tool_calls,
+                        )
+                        yield _sse_event("budget_exceeded", _budget_event_payload(
+                            kind="input_tokens",
+                            consumed=stream_usage_in,
+                            limit=budget.max_input_tokens,
+                            step_index=step_index,
+                            tool_calls=tool_calls,
+                            input_tokens=stream_usage_in,
+                            output_tokens=stream_usage_out,
+                            cache_hits=stream_cache_hit,
+                            budget=budget,
+                        ), session_id=session_id, message_id=message_id)
+                        pending_calls.clear()
+                        stop_reason = "input_budget"
+                        budget_exceeded = True
+                        budget_kind = "input_tokens"
+                        break
+                elif (
+                    not usage_missing_logged
+                    and step_index >= 3
+                    and step_index > 0
+                ):
+                    # The provider never reported usage mid-stream, so the token
+                    # budget cannot bind.  Say so once instead of pretending.
+                    usage_missing_logged = True
+                    logger.warning(
+                        "Provider reported no streamed usage for session %s after "
+                        "%d steps; max_input_tokens=%d cannot be enforced mid-run "
+                        "(per-turn totals may still be available at the end)",
+                        session_id, step_index, budget.max_input_tokens,
+                    )
+
+            # ── Runaway tool-loop detection (Issue #579) ────────────────────
+            # The same tool call repeated N times in a row means the model is
+            # stuck; stop early instead of grinding to the step cap (and burning
+            # tokens) like the PowerShell loop in the original report.
+            if (
+                settings.AGENT_LOOP_DETECTION_ENABLED
+                and len(recent_call_keys) >= settings.AGENT_LOOP_REPEAT_THRESHOLD
+            ):
+                tail = recent_call_keys[-settings.AGENT_LOOP_REPEAT_THRESHOLD:]
+                if len(set(tail)) == 1:
+                    logger.warning(
+                        "Agent loop detected for session %s: identical tool call "
+                        "repeated %d times — terminating stream",
+                        session_id, settings.AGENT_LOOP_REPEAT_THRESHOLD,
+                    )
+                    yield _sse_event("loop_detected", {
+                        "repeat_count": settings.AGENT_LOOP_REPEAT_THRESHOLD,
+                        "step_index": step_index,
+                    }, session_id=session_id, message_id=message_id)
+                    pending_calls.clear()
+                    stop_reason = "loop"
+                    break
+
+        # ---- Issue #639 — was the round that ended the stream an answer? --
+        # The trailing counters describe the last round when the provider did
+        # not send a finish_reason chunk for it.  Snapshot even a
+        # zero-token stream so the diagnostic below still fires.
         if (
-            settings.AGENT_LOOP_DETECTION_ENABLED
-            and len(recent_call_keys) >= settings.AGENT_LOOP_REPEAT_THRESHOLD
+            round_text_chars
+            or round_reasoning_chars
+            or round_tool_activity
+            or last_round is None
         ):
-            tail = recent_call_keys[-settings.AGENT_LOOP_REPEAT_THRESHOLD:]
-            if len(set(tail)) == 1:
-                logger.warning(
-                    "Agent loop detected for session %s: identical tool call "
-                    "repeated %d times — terminating stream",
-                    session_id, settings.AGENT_LOOP_REPEAT_THRESHOLD,
-                )
-                yield _sse_event("loop_detected", {
-                    "repeat_count": settings.AGENT_LOOP_REPEAT_THRESHOLD,
-                    "step_index": step_index,
-                }, session_id=session_id, message_id=message_id)
-                pending_calls.clear()
-                stop_reason = "loop"
-                break
+            _close_round(None)
+
+        # Issue #639 — a round with no text and no tool call is a diagnostic
+        # event in its own right: record which model did it, why the provider
+        # says it ended, and the output budget it ran under.
+        if last_round["text_chars"] == 0 and last_round["tool_activity"] == 0:
+            logger.warning(
+                "Model %s produced a round with no text and no tool call for "
+                "session %s (attempt %d): finish_reason=%s, %d reasoning chars, "
+                "effective max_tokens=%s",
+                getattr(model, "model_id", None) or getattr(model, "name", None),
+                session_id,
+                attempt,
+                last_round["finish_reason"] or finish_reason,
+                last_round["reasoning_chars"],
+                default_options.get("max_tokens"),
+            )
+
+        if stop_reason is not None or not stream_exhausted_cleanly:
+            # A budget/loop stop or a provider error: never retry.
+            break
+
+        # Only a round that actually produced tokens is retried.  A genuinely
+        # empty response (zero tokens, Issue #317) is left to the terminal
+        # ``empty_output`` path: there is nothing to nudge.
+        degenerate_round = bool(
+            last_round["reasoning_chars"] > 0
+            and last_round["text_chars"] == 0
+            and last_round["tool_activity"] == 0
+        )
+        if not degenerate_round:
+            break
+
+        if attempt >= 2:
+            # The retry was also reasoning-only: do not end on an empty
+            # answer — fall back to the #579 wrap-up below.
+            logger.warning(
+                "The reasoning-only retry for session %s produced no answer "
+                "either; falling back to the wrap-up", session_id,
+            )
+            stop_reason = "empty_round"
+            break
+
+        logger.info(
+            "Reasoning-only round for session %s (finish_reason=%s, %d "
+            "reasoning chars, effective max_tokens=%s) — retrying once with "
+            "a directive nudge",
+            session_id,
+            last_round["finish_reason"] or finish_reason,
+            last_round["reasoning_chars"],
+            default_options.get("max_tokens"),
+        )
+
+        retry_messages = await _reasoning_only_retry_messages(response_stream)
+        if retry_messages is None:
+            logger.warning(
+                "No conversation to nudge for session %s after a "
+                "reasoning-only round; falling back to the wrap-up",
+                session_id,
+            )
+            stop_reason = "empty_round"
+            break
+
+        reasoning_only_retried = True
+        run_inputs = retry_messages
 
     # ---- Graceful early-termination wrap-up (Issue #579) ------------------
     # When we stop early, ask the model for a short, tool-less conclusion so a
@@ -4881,7 +5032,7 @@ async def _run_agent_stream(
                 "Token extraction for session %s: final type=%s, usage=%s",
                 session_id, type(final).__name__, usage,
             )
-            if usage and isinstance(usage, dict):
+            if usage and isinstance(usage, dict) and attempt == 1:
                 in_tokens, out_tokens, cache_hit = _usage_token_fields(usage)
                 token_counts["in"] = in_tokens
                 token_counts["out"] = out_tokens
@@ -4905,6 +5056,19 @@ async def _run_agent_stream(
                 budget_exceeded=budget_exceeded,
                 budget_kind=budget_kind,
                 budget_enforced=token_counts.get("budget_enforced", True),
+                # Issue #639 — why the turn-ending model round stopped, the
+                # provider usage behind these totals, and whether a
+                # reasoning-only round forced the retry.
+                finish_reason=(
+                    finish_reason
+                    or getattr(final, "finish_reason", None)
+                ),
+                provider_usage={
+                    "input_token_count": token_counts.get("in", 0) or 0,
+                    "output_token_count": token_counts.get("out", 0) or 0,
+                    "cache_read_input_token_count": token_counts.get("cache_hit", 0) or 0,
+                },
+                reasoning_only_retried=reasoning_only_retried,
             )
 
 
@@ -5469,6 +5633,49 @@ def _tool_call_key(name: str, args: Any) -> str:
     return f"{name}\x00{args_norm}"
 
 
+# Issue #639 — directive nudge used for the single retry of a round that
+# produced reasoning but neither text nor a tool call.
+REASONING_ONLY_RETRY_NUDGE = (
+    "Your previous response contained only reasoning — no text and no tool "
+    "call — so the turn could not continue. Do not explain or repeat your "
+    "reasoning. Make the next tool call now; if the task is already complete, "
+    "write the final answer."
+)
+
+
+async def _reasoning_only_retry_messages(
+    response_stream: Any,
+) -> list | None:
+    """Build the continuation messages for the Issue #639 retry.
+
+    The final ``AgentResponse`` of a streamed MAF run carries the whole
+    conversation of the run (assistant rounds, tool results and the
+    reasoning-only reply).  Passing those messages back to ``agent.run`` with
+    one user nudge appended resumes the turn where the model stopped, instead
+    of restarting the task from the original prompt.  Returns ``None`` when no
+    conversation can be recovered, in which case the caller falls back to the
+    #579 wrap-up.
+    """
+    from agent_framework import Message as _MafMessage
+
+    final = getattr(response_stream, "_final_result", None)
+    if final is None:
+        try:
+            final = await response_stream.get_final_response()
+        except Exception:
+            logger.debug(
+                "Reasoning-only retry could not read the run's final response",
+                exc_info=True,
+            )
+            return None
+
+    messages = list(getattr(final, "messages", None) or [])
+    if not messages:
+        return None
+    messages.append(_MafMessage("user", [REASONING_ONLY_RETRY_NUDGE]))
+    return messages
+
+
 def _termination_message(
     stop_reason: str,
     steps: int,
@@ -5493,6 +5700,15 @@ def _termination_message(
             f"this turn (used {_format_int(input_tokens)} input tokens across "
             f"{steps} tool steps and {tool_calls} tool calls). "
             "Send another message if you'd like me to continue."
+        )
+    if stop_reason == "empty_round":
+        # Issue #639 — the model kept answering with reasoning only, so the
+        # turn could not continue on its own.  Say that instead of claiming a
+        # budget stop that never happened.
+        return (
+            "\n\nI stopped because my last response contained only reasoning, "
+            "with no answer and no tool call. Send another message and I'll "
+            "continue from there."
         )
     return (
         f"\n\nI stopped after {steps} tool steps to avoid running away. "
@@ -5528,6 +5744,18 @@ async def _generate_stop_wrapup(
     if stop_reason == "loop":
         reason = "because it was repeating the same tool call without progress"
         nudge = "Point out that progress stalled and suggest how to proceed differently."
+    elif stop_reason == "empty_round":
+        # Issue #639 — the model produced reasoning but neither an answer nor a
+        # tool call, twice.  Ask for the best answer available from the work
+        # already done instead of a budget-style wrap-up.
+        reason = (
+            "because its last two responses contained only reasoning, with no "
+            "answer and no tool call"
+        )
+        nudge = (
+            "Give the best answer you can from the work already done and state "
+            "the single next step the user should take."
+        )
     elif stop_reason == "input_budget" and budget is not None:
         reason = (
             "because it reached this turn's "
@@ -5620,6 +5848,9 @@ def _compute_turn_metrics(
     budget_exceeded: bool = False,
     budget_kind: str | None = None,
     budget_enforced: bool = True,
+    finish_reason: str | None = None,
+    provider_usage: dict | None = None,
+    reasoning_only_retried: bool = False,
 ) -> dict:
     """Compute per-turn timing and context-breakdown metrics.
 
@@ -5628,7 +5859,10 @@ def _compute_turn_metrics(
         ``cache_hit_tokens``, ``system_prompt_tokens``,
         ``tool_definition_tokens``, ``messages_tokens``, plus the Issue #595
         telemetry keys ``tool_calls``, ``budget``, ``budget_exceeded``,
-        ``budget_kind`` and ``budget_enforced``.
+        ``budget_kind``, ``budget_enforced`` and, from Issue #639,
+        ``finish_reason`` (why the final model round ended), ``provider_usage``
+        (the provider-reported totals summed over the turn's rounds) and
+        ``reasoning_only_retried``.
 
     ``ttft_ms`` measures from the start of the turn to the first streamed
     **text** delta, not to the first model token.  It therefore includes any
@@ -5655,6 +5889,11 @@ def _compute_turn_metrics(
         "budget_exceeded": budget_exceeded,
         "budget_kind": budget_kind,
         "budget_enforced": budget_enforced,
+        # Issue #639 — the shape of the round that ended the turn is the
+        # evidence needed to triage an empty or truncated answer later.
+        "finish_reason": finish_reason,
+        "provider_usage": provider_usage,
+        "reasoning_only_retried": reasoning_only_retried,
     }
 
     if tokens_in == 0:

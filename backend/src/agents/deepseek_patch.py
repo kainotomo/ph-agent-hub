@@ -156,6 +156,8 @@ def strip_dsml_markers(text: str) -> str:
     if not text:
         return text
 
+    original = text
+
     # 1. Drop an unclosed container (truncated stream) from its open tag onward.
     open_match = _RE_CONTAINER_OPEN.search(text)
     if open_match is not None and not _RE_CONTAINER_CLOSE.search(text, open_match.end()):
@@ -168,4 +170,10 @@ def strip_dsml_markers(text: str) -> str:
     # 3. Remove the bare sentinel.
     text = _RE_DSML_SENTINEL.sub("", text)
 
+    # Issue #640 — never touch whitespace unless something was actually
+    # removed.  Streamed reasoning arrives one token per delta (often a lone
+    # space or newline); an unconditional ``.strip()`` deleted those and fused
+    # every word of the persisted reasoning into a single run-on string.
+    if text == original:
+        return text
     return text.strip()

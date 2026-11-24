@@ -70,6 +70,19 @@ class TestStripDsmlMarkers:
     def test_empty_unchanged(self):
         assert strip_dsml_markers("") == ""
 
+    # Issue #640 — streamed reasoning arrives one token per delta, so leading
+    # and trailing whitespace on a delta is content, not padding.
+    def test_preserves_surrounding_whitespace_without_markup(self):
+        for text in (" Let me ", "\n", " ", "\n\n  word  "):
+            assert strip_dsml_markers(text) == text
+
+    def test_trims_only_when_a_marker_was_removed(self):
+        assert strip_dsml_markers("  A<tool_calls>x</tool_calls>B  ") == "AB"
+
+    def test_removing_a_marker_does_not_fuse_adjacent_words(self):
+        out = strip_dsml_markers("Let me <｜tool_calls｜>x</｜tool_calls｜> continue")
+        assert out == "Let me  continue"
+
 
 # ===========================================================================
 # Stream guard / loop-detection tests (mocked MAF Agent)

@@ -10,6 +10,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **A reasoning-only round no longer ends the turn as `empty_output`
+  (Issue #639)** — a thinking model could finish a turn having streamed only
+  `reasoning_content`: the final round carried no text and no tool call, so
+  the loop closed the turn and the terminal path reported *"The run ended
+  without producing or persisting an answer"* with nothing retried and no
+  reason recorded. The streaming loop now accounts for every model round
+  (closed by the provider's `finish_reason` chunk), recognises a round that
+  produced reasoning but neither text nor a tool call, and retries it once
+  with a directive nudge that resumes the run — the retry is fed the run's
+  own conversation (assistant rounds, tool results and the reasoning-only
+  reply) plus the nudge, so it continues instead of restarting. A second
+  degenerate round falls back to the #579 tool-less wrap-up, so the turn never
+  ends on an empty bubble. The per-message `metrics` part now persists
+  `finish_reason` (so `length` vs `stop` is answerable after the fact), the
+  provider usage totals behind the turn, and `reasoning_only_retried`; a
+  warning records the model id, `finish_reason`, reasoning size and effective
+  `max_tokens` whenever a round ends with no content and no tool call.
+  ([#639])
+- **Reasoning keeps the whitespace the model produced (Issue #640)** — every
+  streamed reasoning delta was passed through the DSML sanitiser, which
+  unconditionally trimmed it. Reasoning arrives one token per delta, so every
+  space and newline was deleted: the Thinking fold showed one run-on word
+  salad per segment and each later round re-sent that fused text to the
+  provider as `reasoning_content` (roughly 100k characters of it by the third
+  turn of the reported session). The sanitiser now trims only when it actually
+  removed markup, markup detection is checked before sanitising at all, and
+  reasoning deltas are persisted and re-sent verbatim; the final answer is
+  still trimmed when it is stored.
+  ([#640])
 - **The live response timer now reads as a clock (Issue #637)** — while a
   turn streamed, the header showed elapsed time as a minutes:centiseconds
   counter with an `s` suffix (65 s rendered as `65:00s`), which was hard to
@@ -600,3 +629,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#634]: https://github.com/kainotomo/ph-agent-hub/issues/634
 [#635]: https://github.com/kainotomo/ph-agent-hub/issues/635
 [#637]: https://github.com/kainotomo/ph-agent-hub/issues/637
+[#639]: https://github.com/kainotomo/ph-agent-hub/issues/639
+[#640]: https://github.com/kainotomo/ph-agent-hub/issues/640

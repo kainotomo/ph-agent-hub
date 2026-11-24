@@ -1716,3 +1716,141 @@ describe("ChatWindow — Embedded guest query guards (Issue #622)", () => {
     expect(screen.getByTestId("session-usage-toolbar")).toBeInTheDocument();
   });
 });
+
+// =============================================================================
+// Issue #634 — a produced answer is never erased by a failure
+// =============================================================================
+// The backend reports a produced-but-unsaved answer as `persist_failed`
+// (never `empty_output`), and the client must keep the already-streamed text
+// on screen — in send mode and after a reconnect close — because it is the
+// only copy the user has.
+
+describe("ChatWindow — a produced answer survives a failed run (Issue #634)", () => {
+  beforeEach(() => {
+    mockApi.mockReset();
+    mockApi.mockImplementation((url: string) => {
+      if (url === "/models") return Promise.resolve(FAKE_MODELS);
+      return Promise.resolve([]);
+    });
+    mockGetStreamStatus.mockReset();
+    mockGetStreamStatus.mockResolvedValue({ active: false });
+    mockListMessages.mockReset();
+    mockListMessages.mockResolvedValue({ items: [], has_more: false });
+    mockGetRunState.mockReset();
+    mockGetRunState.mockResolvedValue({ run_id: null, state: "idle" });
+    mockStartReconnect.mockReset();
+    lastStreamHandlers.current = null;
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  function tree(client: QueryClient) {
+    return (
+      <QueryClientProvider client={client}>
+        <ChatWindow
+          sessionId="test-session-1"
+          isPending={false}
+          temperature={0.1}
+        />
+      </QueryClientProvider>
+    );
+  }
+
+  async function sendMessage() {
+    const user = userEvent.setup();
+    const textarea = screen.getByPlaceholderText(/Type a message/);
+    await user.clear(textarea);
+    await user.type(textarea, "test message");
+    const sendButton = screen
+      .getAllByRole("button")
+      .find(
+        (btn) =>
+          btn.textContent?.includes("Send") &&
+          !(btn as HTMLButtonElement).disabled,
+      );
+    expect(sendButton).toBeTruthy();
+    await user.click(sendButton!);
+    await settle();
+    return lastStreamHandlers.current;
+  }
+
+  it("keeps the streamed text and shows persist_failed with Retry", async () => {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(tree(client));
+    await settle();
+
+    const handlers = await sendMessage();
+    expect(handlers).not.toBeNull();
+
+    await act(async () => {
+      handlers.onToken("produced answer", "stream-1");
+    });
+    await settle();
+    expect(screen.getByTestId("msg-stream-1")).toHaveTextContent(
+      "produced answer",
+    );
+
+    await act(async () => {
+      handlers.onRunTerminal({
+        session_id: "test-session-1",
+        outcome: "failed",
+        error_code: "persist_failed",
+        message: "The answer was produced but could not be saved.",
+        persisted: false,
+      });
+      handlers.onClose();
+    });
+
+    expect(screen.getByTestId("msg-stream-1")).toHaveTextContent(
+      "produced answer",
+    );
+    expect(screen.getByText(/The response failed/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
+  });
+
+  it("does not let a reconnect close erase the produced answer", async () => {
+    mockGetStreamStatus.mockResolvedValue({ active: true });
+    let captured: any = null;
+    mockStartReconnect.mockImplementation((_sid: string, handlers: any) => {
+      captured = handlers;
+      return new Promise<void>(() => {});
+    });
+
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(tree(client));
+    await settle();
+    expect(captured).not.toBeNull();
+
+    await act(async () => {
+      captured.onToken("produced answer", "stream-1");
+    });
+    await settle();
+    expect(screen.getByTestId("msg-stream-1")).toHaveTextContent(
+      "produced answer",
+    );
+
+    // Reconnect mode used to clear the bubble unconditionally on close.
+    await act(async () => {
+      captured.onRunTerminal({
+        session_id: "test-session-1",
+        outcome: "failed",
+        error_code: "persist_failed",
+        message: "The answer was produced but could not be saved.",
+        persisted: false,
+      });
+      captured.onClose();
+    });
+
+    expect(screen.getByTestId("msg-stream-1")).toHaveTextContent(
+      "produced answer",
+    );
+    expect(screen.getByText(/The response failed/i)).toBeInTheDocument();
+  });
+});

@@ -1130,6 +1130,22 @@ the polled run registry remains the authority for the sidebar. Autopilot and
 workflow streams do not emit `run_terminal` and keep their close-based
 settling.
 
+The terminal path is built to survive a broken DB session (Issue #634).
+Everything it reports about the model and the user is captured into
+plain-value snapshots before the agent runs, because a tool that swallows a
+write error can leave the shared session in `PendingRollback` and expire the
+ORM instances — reading `cfg.model.id` there used to raise *before*
+persistence and lose a fully streamed answer. A failed turn is retried once
+against a fresh session, and the outcome distinguishes the two failure modes:
+`empty_output` means the model produced nothing, while `persist_failed` means
+the answer was produced but could not be stored (the client keeps the
+streamed text on screen and offers a retry). Tool DB access for a turn is
+serialized and a failed session is rolled back mid-run, so one bad tool write
+cannot poison the rest of the turn.
+
+`persisted=true` on `run_terminal` is the only evidence that an assistant row
+exists; `outcome=completed` is never emitted without it.
+
 ### 11.3 SSE Event Types
 
 | Event | Payload | When |
@@ -1149,7 +1165,7 @@ settling.
 | `stream_resync` | `{ reason: "buffer_gap" \| "slow_consumer", from_seq, oldest_seq, last_seq, run_id }` | The client's resume cursor predates the replay buffer (or the reader fell behind). Reload the persisted message instead of trusting the partial text. |
 | `run_terminal` | `{ outcome: "completed" \| "failed" \| "cancelled" \| "lost", error_code, message, message_id, persisted, tokens_in, tokens_out, cache_hit_tokens }` | Always the last event of a chat, regenerate and edit run (Issue #608). Clients settle the turn from this frame; a closing socket is not evidence of success. |
 
-**Error codes:** `model_timeout`, `model_error`, `tool_error`, `max_steps_exceeded`, `invalid_output`, `auth_error`, `internal_error`
+**Error codes:** `model_timeout`, `model_error`, `tool_error`, `max_steps_exceeded`, `invalid_output`, `auth_error`, `internal_error`, `empty_output` (the run produced no answer), `persist_failed` (an answer was produced but could not be saved), `not_persisted` (a `completed` outcome arrived without a stored answer), `connection_lost`, `orphaned`
 
 ### 11.4 Backend Implementation (FastAPI)
 

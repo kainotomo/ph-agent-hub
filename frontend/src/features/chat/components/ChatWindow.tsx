@@ -251,6 +251,12 @@ export const ChatWindow = React.memo(function ChatWindow({
    */
   const [handoffPending, setHandoffPending] = useState(false);
   const [streamError, setStreamError] = useState<string | null>(null);
+  /**
+   * Issue #634 — set when the current turn produced text but ended without
+   * persisting it (or errored).  The streamed bubble is then the only copy of
+   * the answer, so neither `onClose` nor a late reconnect may clear it.
+   */
+  const preserveAnswerRef = useRef(false);
   // Issue #609 — the last submitted turn, so a failed/lost run can be
   // retried into the same session without retyping it.
   const lastTurnRef = useRef<{
@@ -866,6 +872,7 @@ export const ChatWindow = React.memo(function ChatWindow({
     setStreamingMessageId(null);
     setStreamError(null);
     setHandoffPending(false);
+    preserveAnswerRef.current = false;
     setFollowUpQuestions([]);
     setStreamingTokens(null);
     setPendingUserMessage(null);
@@ -1383,6 +1390,11 @@ export const ChatWindow = React.memo(function ChatWindow({
         onRunTerminal: (data: RunTerminalEvent["data"]) => {
           // Issue #616 — adopt the producer's terminal outcome immediately.
           // The socket closing (or never closing) is not the authority.
+          // Issue #634 — a failed/lost run may still have printed the answer
+          // (`persist_failed`: produced but not saved).  Keep that bubble.
+          if (data.outcome === "failed" || data.outcome === "lost") {
+            preserveAnswerRef.current = true;
+          }
           dispatchRunState({
             type: "run_terminal",
             outcome: data.outcome,
@@ -1401,6 +1413,9 @@ export const ChatWindow = React.memo(function ChatWindow({
           void reconcileRunState();
         },
         onError: (err: string) => {
+          // Issue #634 — the error does not mean nothing was produced; keep
+          // whatever streamed before it so the user still has the text.
+          preserveAnswerRef.current = true;
           dispatchRunState({ type: "error", message: err });
           if (isRegenerate) setRegeneratingMsgId(null);
           if (isEdit) setEditingMsgId(null);
@@ -1493,11 +1508,16 @@ export const ChatWindow = React.memo(function ChatWindow({
             // one commit), so Virtuoso keeps following until the persisted row
             // lands.
             setHandoffPending(false);
-            setStreamingContent("");
-            setStreamingSegments([]);
-            setStreamingMessageId(null);
-            setStreamingTokens(null);
-            setWorkflowStep({});
+            // Issue #634 — when the turn failed after printing the answer, the
+            // streamed bubble is the only copy: never clear it here (a late
+            // reconnect close would otherwise erase a produced answer).
+            if (!preserveAnswerRef.current) {
+              setStreamingContent("");
+              setStreamingSegments([]);
+              setStreamingMessageId(null);
+              setStreamingTokens(null);
+              setWorkflowStep({});
+            }
           }
           // Stop the live duration timer when the stream ends.
           setStreamingStart(null);
@@ -1550,6 +1570,8 @@ export const ChatWindow = React.memo(function ChatWindow({
     // optimistic bubble is never suppressed for this new stream.
     setStreamingMessageId(null);
     setHandoffPending(false);
+    // Issue #634 — a new turn starts with a clean preserve flag.
+    preserveAnswerRef.current = false;
     const content = inputValue.trim();
     // Keep the attachments so a 409 (session busy) can restore the send.
     const filesToRestore = pendingFiles;
@@ -1785,6 +1807,8 @@ export const ChatWindow = React.memo(function ChatWindow({
     setStreamingSegments([]);
     setStreamingTokens(null);
     setHandoffPending(false);
+    // Issue #634 — retrying starts a new turn: stop preserving the old bubble.
+    preserveAnswerRef.current = false;
     beginRun();
     dispatchRunState({ type: "stream_open" });
     if (sessionId) addStreamingSession(sessionId);
@@ -1897,6 +1921,8 @@ export const ChatWindow = React.memo(function ChatWindow({
     setStreamingContent("");
     setStreamingSegments([]);
     setStreamError(null);
+    // Issue #634 — a regenerate starts a new turn with a clean preserve flag.
+    preserveAnswerRef.current = false;
     setFollowUpQuestions([]);
     setStreamingTokens(null);
     beginRun();
@@ -1916,6 +1942,8 @@ export const ChatWindow = React.memo(function ChatWindow({
       onMemoryUpdated?: (data: { action: string; key: string | null; success: boolean; tool_name: string }) => void;
       onStepComplete?: (data: { step_name: string; batch_id?: string; batch_size?: number }) => void;
       onMessageComplete?: (data: { message_id: string; tokens_in?: number; tokens_out?: number }) => void;
+      /** Issue #608/#616 — the run's mandatory terminal frame. */
+      onRunTerminal?: (data: RunTerminalEvent["data"]) => void;
       onFollowUpQuestions?: (questions: string[]) => void;
       onTagsUpdated?: () => void;
       onStreamStart?: () => void;
@@ -2066,7 +2094,24 @@ export const ChatWindow = React.memo(function ChatWindow({
         queryClient.invalidateQueries({ queryKey: ["sessionContext", sessionId] });
         queryClient.invalidateQueries({ queryKey: ["sessionUsage", sessionId] });
       },
+      onRunTerminal: (data: RunTerminalEvent["data"]) => {
+        // Issue #634 — adopt the producer's terminal outcome in regenerate
+        // mode too, and keep a produced-but-unsaved answer on screen.
+        if (data.outcome === "failed" || data.outcome === "lost") {
+          preserveAnswerRef.current = true;
+        }
+        dispatchRunState({
+          type: "run_terminal",
+          outcome: data.outcome,
+          errorCode: data.error_code,
+          message: data.message,
+          messageId: data.message_id,
+          persisted: data.persisted,
+        });
+      },
       onError: (err: string) => {
+        // Issue #634 — a regenerate failure may still have printed text.
+        preserveAnswerRef.current = true;
         dispatchRunState({ type: "error", message: err });
         if (regeneratingMsgId === messageId) setRegeneratingMsgId(null);
         setStreamError(err);
@@ -2076,9 +2121,13 @@ export const ChatWindow = React.memo(function ChatWindow({
         dispatchRunState({ type: "stream_closed" });
         if (regeneratingMsgId === messageId) setRegeneratingMsgId(null);
         setPendingUserMessage(null);
-        setStreamingContent("");
-        setStreamingSegments([]);
-        setStreamingMessageId(null);
+        // Issue #634 — keep the produced answer when the run failed after it
+        // was printed; the streamed bubble is the only copy.
+        if (!preserveAnswerRef.current) {
+          setStreamingContent("");
+          setStreamingSegments([]);
+          setStreamingMessageId(null);
+        }
         setStreamingTokens(null);
         setStreamingStart(null);
         setStreamingDuration(null);

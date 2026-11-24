@@ -97,7 +97,7 @@ export function isTerminalPhase(phase: RunPhase): boolean {
 function failed(
   prev: RunSnapshot,
   errorCode: string,
-  reason: string,
+  reason: string | null,
 ): RunSnapshot {
   return {
     ...prev,
@@ -136,8 +136,7 @@ function applyOutcome(
         return failed(
           prev,
           input.errorCode || "not_persisted",
-          input.message ||
-            "The run ended without saving an answer. Please try again.",
+          input.message ?? null,
         );
       }
       return {
@@ -170,7 +169,7 @@ function applyOutcome(
       return failed(
         prev,
         input.errorCode || "agent_error",
-        input.message || "The agent failed before producing an answer.",
+        input.message ?? null,
       );
   }
 }
@@ -221,8 +220,7 @@ function applyServerState(
         return failed(
           base,
           input.errorCode || "not_persisted",
-          input.message ||
-            "The server recorded the run as completed without saving an answer.",
+          input.message ?? null,
         );
       }
       return {
@@ -239,7 +237,7 @@ function applyServerState(
       return failed(
         base,
         input.errorCode || "agent_error",
-        input.message || "The run failed on the server.",
+        input.message ?? null,
       );
     case "cancelled":
       return {
@@ -309,7 +307,7 @@ export function reduceRunState(
       return failed(
         prev,
         input.code || "agent_error",
-        input.message || "The request failed. Please try again.",
+        input.message ?? null,
       );
     }
     case "cancel_requested":
@@ -368,6 +366,8 @@ const ERROR_TEXT: Record<string, string> = {
   model_timeout: "The model took too long to respond. Please try again.",
   empty_output: "The run ended without producing an answer. Please try again.",
   not_persisted: "The run ended without saving an answer. Please try again.",
+  persist_failed:
+    "The answer was produced but could not be saved. Copy it, then retry the turn.",
   missing_terminal:
     "The run stopped before reporting a result. Please try again.",
   agent_error: "The agent failed before producing an answer. Please try again.",

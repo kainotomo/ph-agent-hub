@@ -965,8 +965,16 @@ async def run_agent(
     session_id = session_data["id"]
     is_temporary = session_data.get("is_temporary", False)
 
+    # Issue #634 — same protections as the streaming path: one serialized
+    # session for the whole turn, and plain-value snapshots for everything the
+    # terminal path reads after the tools have run.
+    from ..db.serialized import SerializedSession as _SerializedSession
+
+    db = _SerializedSession(db)
+
     # ---- 1-6. Resolve session config ------------------------------------
     cfg = await _resolve_session_config(db, session_data, tenant_id, current_user, file_ids=file_ids, user_message=user_message)
+    model_info = _snapshot_model_info(cfg)
 
     # ---- Build contextualized message (history + auto-summarization) ----
     contextualized_message, _ = await _maybe_summarize_and_build_context(
@@ -1068,9 +1076,9 @@ async def run_agent(
             is_temporary=is_temporary,
             user_message=user_message,
             assistant_response=raw_response,
-            model_id=cfg.model.id,
-            model_name=cfg.model.name,
-            model_provider=cfg.model.provider,
+            model_id=model_info["id"],
+            model_name=model_info["name"],
+            model_provider=model_info["provider"],
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             metrics=_nonstream_metrics or None,
@@ -1079,10 +1087,7 @@ async def run_agent(
         # ---- Background: embed user message for cross-session retrieval -----
         if not is_temporary:
             try:
-                from ..services.embedding_service import embed_message as _embed_msg
-
-                asyncio.ensure_future(_embed_msg(
-                    db=await _fresh_db_session(),
+                asyncio.ensure_future(_schedule_message_embedding(
                     message_id=_user_msg_id,
                     user_id=current_user.id,
                     tenant_id=current_user.tenant_id,
@@ -1113,15 +1118,15 @@ async def run_agent(
                     user_id=current_user.id,
                     user_email=current_user.email,
                     user_full_name=current_user.display_name,
-                    model_id=cfg.model.id,
-                    model_name=cfg.model.name,
-                    provider=cfg.model.provider,
+                    model_id=model_info["id"],
+                    model_name=model_info["name"],
+                    provider=model_info["provider"],
                     tokens_in=tokens_in,
                     tokens_out=tokens_out,
                     cache_hit_tokens=cache_hit_tokens,
-                    input_price=getattr(cfg.model, "input_price_per_1m", None),
-                    output_price=getattr(cfg.model, "output_price_per_1m", None),
-                    cache_hit_price=getattr(cfg.model, "cache_hit_price_per_1m", None),
+                    input_price=model_info["input_price_per_1m"],
+                    output_price=model_info["output_price_per_1m"],
+                    cache_hit_price=model_info["cache_hit_price_per_1m"],
                 )
             except Exception:
                 logger.exception("Failed to write usage log (non-streaming)")
@@ -1131,8 +1136,8 @@ async def run_agent(
                 logger.warning(
                     "Model '%s' (provider=%s) has no pricing configured — "
                     "usage not deducted from tenant %s",
-                    cfg.model.name,
-                    cfg.model.provider,
+                    model_info["name"],
+                    model_info["provider"],
                     current_user.tenant_id,
                 )
 
@@ -1150,15 +1155,8 @@ async def run_agent(
                     logger.exception("Failed to deduct usage from tenant balance")
 
         # ---- 11. Post-response tasks (follow-up questions, auto-tagging) -----
-        _model_snapshot = {
-            "model_id": cfg.model.model_id,
-            "provider": cfg.model.provider,
-            "base_url": cfg.model.base_url,
-            "api_key": cfg.model.api_key,
-            "follow_up_questions_enabled": cfg.model.follow_up_questions_enabled,
-        }
         _schedule_post_response_tasks(
-            model_snapshot=_model_snapshot,
+            model_snapshot=model_info,
             system_prompt=cfg.system_prompt,
             user_message=user_message,
             assistant_response=raw_response,
@@ -3281,6 +3279,29 @@ async def _fresh_db_session() -> AsyncSession:
     return AsyncSessionLocal()
 
 
+async def _schedule_message_embedding(**kwargs: Any) -> None:
+    """Embed one message in the background, owning (and closing) its session.
+
+    Issue #634 — the session used to be created by the caller and handed to a
+    fire-and-forget task that never closed it; on any error the connection
+    stayed checked out and the pool leaked.
+    """
+    db = await _fresh_db_session()
+    try:
+        from ..services.embedding_service import embed_message as _embed_msg
+
+        await _embed_msg(db=db, **kwargs)
+    except Exception:
+        logger.warning(
+            "Failed to embed message %s", kwargs.get("message_id"), exc_info=True
+        )
+    finally:
+        try:
+            await db.close()
+        except Exception:
+            logger.debug("Failed to close embedding DB session", exc_info=True)
+
+
 # ---------------------------------------------------------------------------
 # Message persistence
 # ---------------------------------------------------------------------------
@@ -3483,6 +3504,69 @@ async def _persist_messages(
 # =============================================================================
 
 
+def _snapshot_model_info(cfg: Any) -> dict:
+    """Plain-value model metadata captured before tools can poison ``db``.
+
+    Issue #634 — the terminal path used to read ``cfg.model.id`` (etc.) after
+    the agent had run.  A tool that swallowed a DB error leaves the shared
+    session in ``PendingRollback`` and expires the ORM model instance, so that
+    read raised and the produced answer was never persisted.  Everything the
+    terminal path needs is captured here, while the session is still healthy.
+    """
+    if cfg is None:
+        return {
+            "id": "unknown",
+            "name": None,
+            "model_id": None,
+            "provider": None,
+            "base_url": None,
+            "api_key": None,
+            "follow_up_questions_enabled": False,
+            "input_price_per_1m": None,
+            "output_price_per_1m": None,
+            "cache_hit_price_per_1m": None,
+        }
+    model = getattr(cfg, "model", None)
+    return {
+        "id": str(getattr(model, "id", "") or "unknown"),
+        "name": getattr(model, "name", None),
+        "model_id": getattr(model, "model_id", None),
+        "provider": getattr(model, "provider", None),
+        "base_url": getattr(model, "base_url", None),
+        "api_key": getattr(model, "api_key", None),
+        "follow_up_questions_enabled": bool(
+            getattr(model, "follow_up_questions_enabled", False) or False
+        ),
+        "input_price_per_1m": getattr(model, "input_price_per_1m", None),
+        "output_price_per_1m": getattr(model, "output_price_per_1m", None),
+        "cache_hit_price_per_1m": getattr(model, "cache_hit_price_per_1m", None),
+    }
+
+
+async def _heal_shared_db_session(db: Any) -> None:
+    """Roll back a shared session left in a failed transaction (Issue #634).
+
+    Tools catch their own DB errors and return an error payload, but a failed
+    flush leaves the shared ``AsyncSession`` in ``PendingRollback`` for the
+    rest of the turn.  Healing it here means one bad tool write cannot poison
+    the remaining tool calls.  Never raises.
+    """
+    try:
+        healer = getattr(db, "rollback_if_failed", None)
+        if healer is not None:
+            if await healer():
+                logger.warning(
+                    "Rolled back a failed shared agent DB session; the turn continues"
+                )
+        elif not getattr(db, "is_active", True):
+            await db.rollback()
+            logger.warning(
+                "Rolled back a failed shared agent DB session; the turn continues"
+            )
+    except Exception:
+        logger.debug("Could not heal the shared agent DB session", exc_info=True)
+
+
 async def run_agent_stream(
     session_data: dict,
     user_message: str,
@@ -3525,6 +3609,13 @@ async def run_agent_stream(
         Dicts with ``event`` and ``data`` keys suitable for
         ``EventSourceResponse``.
     """
+    # Issue #634 — serialize this turn's DB access.  MAF runs a tool batch
+    # with ``asyncio.gather`` against this single session; concurrent use
+    # leaves it in ``PendingRollback`` and used to take the answer with it.
+    from ..db.serialized import SerializedSession as _SerializedSession
+
+    db = _SerializedSession(db)
+
     # Use session_data for tenant_id — current_user may be a detached ORM
     # object in the background task context (MissingGreenlet fix).
     tenant_id = session_data.get("tenant_id", "") or (
@@ -3532,6 +3623,16 @@ async def run_agent_stream(
     )
     session_id = session_data["id"]
     is_temporary = session_data.get("is_temporary", False)
+
+    # Issue #634 — snapshot the authenticated user's fields too.  The terminal
+    # path used to read them off the ORM instance, which raises once a failed
+    # tool flush has expired it (see ``_snapshot_model_info``).
+    user_info = {
+        "tenant_id": getattr(current_user, "tenant_id", "") or "",
+        "id": getattr(current_user, "id", "") or "",
+        "email": getattr(current_user, "email", "") or "",
+        "full_name": getattr(current_user, "display_name", "") or "",
+    }
 
     accumulated_text: str = ""
     accumulated_reasoning: str = ""
@@ -3551,6 +3652,12 @@ async def run_agent_stream(
     cancelled_by_flag = False
     assistant_persisted = False
     persisted_message_id: str | None = None
+    # Issue #634 — plain-value model metadata captured before tools run, so the
+    # terminal path never reads an ORM attribute that a poisoned session has
+    # expired.  ``persistence_error`` is the reason a produced answer could not
+    # be saved (None when it was saved or nothing was produced).
+    model_info: dict = _snapshot_model_info(None)
+    persistence_error: str | None = None
 
     # Persist the user message immediately so it's always visible,
     # even if the agent run fails.
@@ -3580,10 +3687,7 @@ async def run_agent_stream(
     # ---- Background: embed user message for cross-session retrieval -----
     if not is_temporary and current_user is not None:
         try:
-            from ..services.embedding_service import embed_message as _embed_msg
-
-            asyncio.ensure_future(_embed_msg(
-                db=await _fresh_db_session(),
+            asyncio.ensure_future(_schedule_message_embedding(
                 message_id=user_msg_id,
                 user_id=current_user.id,
                 tenant_id=current_user.tenant_id,
@@ -3603,6 +3707,9 @@ async def run_agent_stream(
     try:
         # ---- 1-6. Resolve session config --------------------------------
         cfg = await _resolve_session_config(db, session_data, tenant_id, current_user, file_ids=file_ids, user_message=user_message)
+        # Issue #634 — read every model attribute the terminal path needs now,
+        # while the session is healthy (see ``_snapshot_model_info``).
+        model_info = _snapshot_model_info(cfg)
 
         # ---- Build contextualized message (history + auto-summarization) --
         contextualized_message, summary_info = await _maybe_summarize_and_build_context(
@@ -3730,6 +3837,12 @@ async def run_agent_stream(
                 event_dict, accumulated_segments, accumulated_reasoning, accumulated_text,
             )
 
+            # Issue #634 — a tool that swallowed a DB error leaves the shared
+            # session in a failed transaction; heal it before the next step so
+            # one bad write cannot poison the rest of the turn.
+            if not getattr(db, "is_active", True):
+                await _heal_shared_db_session(db)
+
             # A delegate result must not be attached before the child's own
             # events have been folded in, so drain the bus here first.
             if event_dict.get("event") == "tool_result":
@@ -3776,9 +3889,20 @@ async def run_agent_stream(
         #      We must NOT yield during GeneratorExit — it raises
         #      RuntimeError and causes "ASGI callable returned without
         #      completing response".  Persistence-only here. (Issue #206) --
-        # IMPORTANT: We use a fresh session here because the ``db`` session
-        # passed from ``_handle_streaming_message`` may be rolled back or
-        # closed by the outer generator's cleanup before this runs.
+        # IMPORTANT: every step below gets its own try and its own fresh
+        # session, because the ``db`` session passed from
+        # ``_handle_streaming_message`` may be rolled back or closed by the
+        # outer generator's cleanup, and a tool may have left it in a failed
+        # transaction (Issue #634).
+        segments_to_persist = _flush_reasoning_segment(
+            accumulated_segments, accumulated_reasoning
+        )
+        tokens_in = _stream_token_info.get("in", 0) or 0
+        tokens_out = _stream_token_info.get("out", 0) or 0
+        cache_hit_tokens_stream = _stream_token_info.get("cache_hit", 0) or 0
+        metrics_payload: dict | None = _stream_token_info.get("metrics")
+
+        # ---- 1/4. Sub-agent drain (best effort — never blocks persistence) --
         try:
             # Issue #574 — fold in any child events that arrived after the
             # last parent event so their payloads are still persisted, then
@@ -3792,84 +3916,102 @@ async def run_agent_stream(
                 # the multiplexer returned, so adding here keeps them together.
                 _fold_subagent_usage(_stream_token_info, subagent_bus)
                 remove_bus(session_id)
+        except Exception:
+            logger.exception(
+                "Failed to drain sub-agent events on stream close session_id=%s",
+                session_id,
+            )
 
-            from ..db.base import AsyncSessionLocal as _AsyncSessionLocal
+        # ---- 2/4. Heal a poisoned shared session (Issue #634) ---------------
+        await _heal_shared_db_session(db)
 
-            async with _AsyncSessionLocal() as _persist_db:
-                tokens_in = _stream_token_info.get("in", 0) or 0
-                tokens_out = _stream_token_info.get("out", 0) or 0
-                cache_hit_tokens_stream = _stream_token_info.get("cache_hit", 0) or 0
+        # ---- 3/4. Persist the answer (critical) -----------------------------
+        # Every ORM value comes from the plain-value snapshots: reading
+        # ``cfg.model.*`` / ``current_user.*`` after the agent ran could raise
+        # (expired instance on a poisoned session) and lose a produced answer.
+        from ..db.base import AsyncSessionLocal as _AsyncSessionLocal
 
-                metrics_payload: dict | None = _stream_token_info.get("metrics")
-
-                segments_to_persist = _flush_reasoning_segment(accumulated_segments, accumulated_reasoning)
-
-                if accumulated_text or segments_to_persist:
-                    persisted_message_id = await _persist_assistant_message(
-                        db=_persist_db,
-                        session_id=session_id,
-                        is_temporary=is_temporary,
-                        assistant_response=accumulated_text,
-                        model_id=cfg.model.id if cfg else "unknown",
-                        model_name=cfg.model.name if cfg else None,
-                        model_provider=cfg.model.provider if cfg else None,
-                        content_segments=segments_to_persist,
-                        tokens_in=tokens_in,
-                        tokens_out=tokens_out,
-                        message_id=message_id,
-                        metrics=metrics_payload,
-                    )
-                    assistant_persisted = True
-
-                if cfg is not None and current_user is not None:
-                    usage_log = None
-                    try:
-                        usage_log = await write_usage_log(
+        if accumulated_text or segments_to_persist:
+            for _attempt in (1, 2):
+                try:
+                    async with _AsyncSessionLocal() as _persist_db:
+                        persisted_message_id = await _persist_assistant_message(
                             db=_persist_db,
-                            tenant_id=current_user.tenant_id,
-                            tenant_name=getattr(cfg, "tenant_name", "") or "",
-                            user_id=current_user.id,
-                            user_email=current_user.email,
-                            user_full_name=current_user.display_name,
-                            model_id=cfg.model.id,
-                            model_name=cfg.model.name,
-                            provider=cfg.model.provider,
+                            session_id=session_id,
+                            is_temporary=is_temporary,
+                            assistant_response=accumulated_text,
+                            model_id=model_info["id"],
+                            model_name=model_info["name"],
+                            model_provider=model_info["provider"],
+                            content_segments=segments_to_persist,
                             tokens_in=tokens_in,
                             tokens_out=tokens_out,
-                            cache_hit_tokens=cache_hit_tokens_stream,
-                            input_price=getattr(cfg.model, "input_price_per_1m", None),
-                            output_price=getattr(cfg.model, "output_price_per_1m", None),
-                            cache_hit_price=getattr(cfg.model, "cache_hit_price_per_1m", None),
+                            message_id=message_id,
+                            metrics=metrics_payload,
                         )
-                    except Exception:
-                        logger.exception("Failed to write usage log (streaming)")
-                else:
-                    usage_log = None
-
-                # ---- Warn about missing pricing ----------------------------------
-                if usage_log is not None and usage_log.cost is None:
-                    logger.warning(
-                        "Model '%s' (provider=%s) has no pricing configured — "
-                        "usage not deducted from tenant %s",
-                        cfg.model.name,
-                        cfg.model.provider,
-                        current_user.tenant_id,
+                    assistant_persisted = True
+                    persistence_error = None
+                    break
+                except Exception as exc:
+                    persistence_error = f"{type(exc).__name__}: {exc}"[:500]
+                    logger.exception(
+                        "Failed to persist assistant message (attempt %d/2) "
+                        "session_id=%s message_id=%s chars=%d",
+                        _attempt, session_id, message_id,
+                        len(accumulated_text),
                     )
+            if assistant_persisted:
+                logger.info(
+                    "Persisted assistant message %s for session %s (%d chars)",
+                    persisted_message_id, session_id, len(accumulated_text),
+                )
 
-                # ---- Deduct usage cost from tenant balance -------------------------
-                if usage_log is not None and usage_log.cost is not None:
-                    try:
-                        await deduct_usage(
-                            _persist_db,
-                            tenant_id=current_user.tenant_id,
-                            cost_eur=usage_log.cost,
-                            reference_type="usage_log",
-                            reference_id=usage_log.id,
+        # ---- 4/4. Usage log + tenant balance (best effort, own session) -----
+        if cfg is not None and current_user is not None:
+            try:
+                async with _AsyncSessionLocal() as _usage_db:
+                    usage_log = await write_usage_log(
+                        db=_usage_db,
+                        tenant_id=user_info["tenant_id"],
+                        tenant_name=getattr(cfg, "tenant_name", "") or "",
+                        user_id=user_info["id"],
+                        user_email=user_info["email"],
+                        user_full_name=user_info["full_name"],
+                        model_id=model_info["id"],
+                        model_name=model_info["name"],
+                        provider=model_info["provider"],
+                        tokens_in=tokens_in,
+                        tokens_out=tokens_out,
+                        cache_hit_tokens=cache_hit_tokens_stream,
+                        input_price=model_info["input_price_per_1m"],
+                        output_price=model_info["output_price_per_1m"],
+                        cache_hit_price=model_info["cache_hit_price_per_1m"],
+                    )
+                    # ---- Warn about missing pricing -------------------------
+                    if usage_log is not None and usage_log.cost is None:
+                        logger.warning(
+                            "Model '%s' (provider=%s) has no pricing configured — "
+                            "usage not deducted from tenant %s",
+                            model_info["name"],
+                            model_info["provider"],
+                            user_info["tenant_id"],
                         )
-                    except Exception:
-                        logger.exception("Failed to deduct usage from tenant balance (streaming)")
-        except Exception:
-            logger.exception("Failed to persist partial message on stream close")
+                    # ---- Deduct usage cost from tenant balance ---------------
+                    if usage_log is not None and usage_log.cost is not None:
+                        try:
+                            await deduct_usage(
+                                _usage_db,
+                                tenant_id=user_info["tenant_id"],
+                                cost_eur=usage_log.cost,
+                                reference_type="usage_log",
+                                reference_id=usage_log.id,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Failed to deduct usage from tenant balance (streaming)"
+                            )
+            except Exception:
+                logger.exception("Failed to write usage log (streaming)")
 
         # ---- Close ERPNext httpx clients & MCPTool connections -----------
         if cfg is not None and cfg.cleanup_clients:
@@ -3891,6 +4033,22 @@ async def run_agent_stream(
             terminal_outcome = "cancelled"
         elif assistant_persisted:
             terminal_outcome = "completed"
+        elif accumulated_text or segments_to_persist:
+            # Issue #634 — the answer was produced and streamed to the user,
+            # but the row could not be written.  That is a different failure
+            # from "the model said nothing": the client keeps the produced
+            # text visible and offers a retry.
+            terminal_outcome = "failed"
+            terminal_error_code = "persist_failed"
+            terminal_error_message = (
+                "The answer was produced but could not be saved. "
+                "Copy it before leaving; retry the turn to regenerate it."
+            )
+            logger.error(
+                "Run for session %s message_id=%s produced %d chars but could "
+                "not persist them (last error: %s)",
+                session_id, message_id, len(accumulated_text), persistence_error,
+            )
         else:
             terminal_outcome = "failed"
             terminal_error_code = "empty_output"
@@ -3915,6 +4073,7 @@ async def run_agent_stream(
                 message_id=message_id,
                 token_info=_stream_token_info,
                 cfg=cfg,
+                model_info=model_info,
             )),
         }
 
@@ -3936,20 +4095,11 @@ async def run_agent_stream(
     }
 
     if cfg is not None and terminal_outcome != "failed":
-        # Snapshot model attributes before passing to background task,
-        # since the ORM Model instance may become detached from its
-        # session by the time the background task runs.
-        _model_snapshot = {
-            "id": cfg.model.id,
-            "name": cfg.model.name,
-            "model_id": cfg.model.model_id,
-            "provider": cfg.model.provider,
-            "base_url": cfg.model.base_url,
-            "api_key": cfg.model.api_key,
-            "follow_up_questions_enabled": cfg.model.follow_up_questions_enabled,
-        }
+        # Issue #634 — reuse the pre-run snapshot: the ORM Model instance may
+        # be expired (or detached) by the time the background task runs, so
+        # it must never be read here.
         _schedule_post_response_tasks(
-            model_snapshot=_model_snapshot,
+            model_snapshot=model_info,
             system_prompt=cfg.system_prompt,
             user_message=user_message,
             assistant_response=accumulated_text,
@@ -4967,10 +5117,15 @@ def _build_message_complete_payload(
     message_id: str,
     token_info: dict,
     cfg: Any,
+    model_info: dict | None = None,
 ) -> dict:
     """Build the ``message_complete`` payload including Issue #595 telemetry.
 
     Pure helper so the payload shape is unit-testable without a DB/session.
+
+    *model_info* (Issue #634) is the plain-value snapshot taken before the
+    agent ran; when supplied it is authoritative and ``cfg.model`` is never
+    touched (the ORM instance may be expired by a failed tool flush).
     """
     tokens_in = token_info.get("in", 0) or 0
     tokens_out = token_info.get("out", 0) or 0
@@ -4980,6 +5135,14 @@ def _build_message_complete_payload(
         if getattr(cfg, "run_budget", None) is not None
         else None
     )
+    if model_info is not None:
+        model_id: str | None = model_info.get("id") or "unknown"
+        model_name = model_info.get("name")
+        model_provider = model_info.get("provider")
+    else:
+        model_id = cfg.model.id if cfg else "unknown"
+        model_name = cfg.model.name if cfg else None
+        model_provider = cfg.model.provider if cfg else None
     return {
         "session_id": session_id,
         "message_id": message_id,
@@ -5000,9 +5163,9 @@ def _build_message_complete_payload(
             or metrics.get("budget_exceeded")
         ),
         "budget": budget,
-        "model_id": cfg.model.id if cfg else "unknown",
-        "model_name": cfg.model.name if cfg else None,
-        "model_provider": cfg.model.provider if cfg else None,
+        "model_id": model_id,
+        "model_name": model_name,
+        "model_provider": model_provider,
     }
 
 

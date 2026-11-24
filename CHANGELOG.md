@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- **A streamed answer is no longer lost when the turn's DB session fails
+  (Issue #634)** — after a long chat the response could stream to the end and
+  then be replaced by *"The response failed / The run ended without producing
+  or persisting an answer"* because the terminal path raised while reading an
+  expired `cfg.model` attribute **before** persisting. The value was a
+  tool-write failure (e.g. a parallel `save_memory` batch) that left the
+  shared `AsyncSession` in `PendingRollback`; every later ORM read on it
+  failed. The terminal path now uses plain-value snapshots taken before the
+  agent runs, persists against a fresh session with one retry, converts a
+  produced-but-unsaved answer into a distinct `persist_failed` outcome (never
+  `empty_output`), and heals a poisoned session mid-run. Tool DB access for a
+  turn is serialized so a batch cannot corrupt the session in the first
+  place, background embeddings close their session, and the web client keeps
+  the already-printed answer on screen for failed/lost runs instead of
+  clearing it on close. ([#634])
+
+---
+
 ## [3.12.0] — 2026-11-24
 
 ### Added
@@ -549,3 +570,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#627]: https://github.com/kainotomo/ph-agent-hub/issues/627
 [#628]: https://github.com/kainotomo/ph-agent-hub/issues/628
 [#632]: https://github.com/kainotomo/ph-agent-hub/issues/632
+[#634]: https://github.com/kainotomo/ph-agent-hub/issues/634

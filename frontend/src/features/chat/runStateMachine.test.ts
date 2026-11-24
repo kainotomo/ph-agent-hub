@@ -270,6 +270,29 @@ describe("runStateMachine", () => {
     ).toBeNull();
   });
 
+  // ---- Issue #634: produced-but-unsaved is its own failure ----
+  it("explains a produced answer that could not be saved", () => {
+    const state = reduce(
+      INITIAL_RUN_STATE,
+      { type: "submit" },
+      { type: "stream_open" },
+      {
+        type: "run_terminal",
+        outcome: "failed",
+        errorCode: "persist_failed",
+        persisted: false,
+      },
+    );
+
+    expect(state.phase).toBe("failed");
+    expect(state.errorCode).toBe("persist_failed");
+    const copy = terminalCopy(state);
+    expect(copy).not.toBeNull();
+    expect(copy!.title).toMatch(/response failed/i);
+    expect(copy!.description).toMatch(/could not be saved/i);
+    expect(copy!.retryable).toBe(true);
+  });
+
   // ---- Invariant: no path leaves the UI running after the stream closes ----
   it("never remains running after stream_closed (exhaustive input combos)", () => {
     const preludes: RunInput[][] = [

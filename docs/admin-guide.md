@@ -360,6 +360,7 @@ Tools extend agent capabilities — they can call external APIs, query ERPNext i
 | **sql_query** | Enterprise | Read-only SQL against tenant-configured DB (PostgreSQL, MySQL, MariaDB) | `connection_string`, `row_limit` |
 | **stock_data** | Financial | Stock quotes, historical prices, financials, analyst ratings (yfinance) | None |
 | **stock_screener** | Financial | Stock screening by custom criteria — region, sector, P/E, dividend yield, etc. (yfinance EquityQuery) | None |
+| **subagent** | Agents | Delegated sub-agent persona — the parent agent hands a focused task to a child that runs in its own context. One level of nesting only. | `instructions` (required), `model_role` (required: `@reasoning`, `@general` or `@fast`), `tool_deny`, `temperature`, `timeout_s` |
 | **tasks** | Productivity | Create, update, and list tasks via Google Tasks or Microsoft To Do. Requires per-user OAuth. Users connect via Account Settings. | None |
 | **weather** | Utility | Weather via wttr.in | None |
 | **web_search** | Web | SearXNG-backed web search | `searxng_url` |
@@ -412,8 +413,20 @@ Tools extend agent capabilities — they can call external APIs, query ERPNext i
 {"provider": "smtp", "smtp_host": "smtp.gmail.com", "smtp_port": 587, "smtp_username": "...", "smtp_password": "...", "from_email": "noreply@example.com"}
 ```
 
+**Subagent example:**
+```json
+{
+  "instructions": "You research a topic and return a concise, source-cited summary.",
+  "model_role": "@general",
+  "tool_deny": ["send_email"],
+  "temperature": 0.2,
+  "timeout_s": 300
+}
+```
+`instructions` and `model_role` are required. The top-level **Approval required** flag gates the delegation itself: when ON, every `delegate_to_*` call needs operator approval before the child runs.
+
 5. Set **Enabled** to ON
-6. Configure **Public** access — when ON, all tenant users can use the tool regardless of group membership
+6. Configure **Public** access — when ON, all tenant users can use the tool regardless of group membership. New subagent tools default to Public; see §7.4.
 
 > **Note:** API keys and secrets in the config JSON are **not** automatically encrypted. Use the `EncryptedString` format in the database, or encrypt values manually with the Fernet key before storing them in config JSON. Tools that expect encrypted values (`github.token`, `image_generation.api_key`, `slack.bot_token`, `email.smtp_password`, `email.api_key`, `calendar.credentials`, `sql_query.connection_string`) will attempt decryption at runtime and fall back to plaintext if decryption fails. Per-user credentials stored in `user_tool_credentials` are encrypted at the ORM level automatically.
 
@@ -441,6 +454,32 @@ local TF-IDF-like hashing (256‑dim).
 **Email**: When using per-user accounts (IMAP, Gmail, Outlook), users connect their own credentials in Account Settings. The admin only needs to create one Email tool (type=`email`, config=`{}`).
 
 **Tasks**: Requires per-user OAuth (Google Tasks or Microsoft To Do). Users connect their accounts in Account Settings. Admins create one Tasks tool (type=`tasks`, config=`{}`).
+
+### 7.4 Subagents (delegated agents)
+
+A `subagent` tool is a persona, not a capability of its own: the parent session's agent calls `delegate_to_<slug>` and the child runs with a copy of the parent session's already-resolved tool set. Delegated tools are removed from that copy (nesting is exactly one level), `tool_deny` subtracts further, and approval-gated tools are withheld and reported to the child. A persona can therefore never grant a capability the parent session did not already have.
+
+**Configuration**
+
+| Key | Required | Meaning |
+|---|---|---|
+| `instructions` | yes | The child agent's system prompt. |
+| `model_role` | yes | `@reasoning`, `@general` or `@fast`; bound per tenant in **Models → Model roles**. |
+| `tool_deny` | no | List of tool names the child must not receive. |
+| `temperature` | no | 0–2; defaults to the parent turn's temperature. |
+| `timeout_s` | no | Child run timeout in seconds; falls back to `SUBAGENT_TIMEOUT`. |
+| **Approval required** (top-level) | no | When ON, the `delegate_to_*` call itself requires approval. |
+
+**Activation chain — from Create to a delegated read**
+
+1. **Admin Area → Tools → Create**, type **Subagent**, paste the config example above, save.
+2. Leave **Enabled** ON.
+3. Leave **Public** ON (the default for new subagents) or assign the tool to a group (**Admin Area → Groups → Tools**). An enabled but private, ungrouped subagent is invisible to `/chat/session/tools/available` and is not auto-selected.
+4. With **Auto Tool Selection** on, the persona is kept in the model's pool outside the Top-K cut automatically; no per-session activation is needed.
+5. With **Auto Tool Selection** off, activate the subagent in the chat tool drawer, or mark it **Always-on** so new sessions activate it for you.
+6. The model sees `delegate_to_<slug>` (the slug comes from the tool name) and can hand it a `task`.
+
+**Diagnostics.** If a delegate cannot be built for an enabled persona (for example a malformed config on an old row), the run continues and emits a `warning` SSE event with `code = "subagent_delegate_build_failed"` plus the tool id/name; the backend also logs `subagent_delegate_build_failed` at ERROR. Auto-select logs the personas it retained and any excluded by Public/group at INFO.
 
 ---
 
@@ -894,6 +933,8 @@ A user can belong to multiple groups. When group-based access is active, users s
 1. Open a group
 2. Go to the **Models** or **Tools** tab
 3. Add the resources you want this group to access
+
+> **Subagents and access (Issue #635).** Subagent tools follow the same rule: only Public or group-assigned personas appear in a user's tool drawer and in the Auto Tool Selection candidate pool. Newly created subagents are Public by default; turn **Public** off and assign the tool to a group to restrict it. Auto-select logs the personas it retained and any excluded by access at INFO.
 
 ---
 

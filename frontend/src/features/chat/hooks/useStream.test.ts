@@ -301,6 +301,42 @@ describe("useStream", () => {
     expect(onError).toHaveBeenCalledWith("Something went wrong", "msg-1");
   });
 
+  // ── Non-fatal setup warnings (Issue #635) ─────────────────────────────
+
+  it("dispatches warning events to onWarning", async () => {
+    const { result } = renderHook(() => useStream());
+    const onWarning = vi.fn();
+
+    act(() => {
+      result.current.startStream(
+        "session-1",
+        "Hello",
+        [],
+        undefined,
+        {},
+        { onWarning },
+      );
+    });
+
+    await waitFor(() => expect(mockFetchEventSource).toHaveBeenCalled());
+
+    act(() => {
+      sseEvent("warning", {
+        session_id: "session-1",
+        message_id: "msg-1",
+        code: "subagent_delegate_build_failed",
+        message: "bad persona config",
+      });
+    });
+
+    expect(onWarning).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: "subagent_delegate_build_failed",
+        message: "bad persona config",
+      }),
+    );
+  });
+
   // ── startRegenerateStream ─────────────────────────────────────────────
 
   it("startRegenerateStream POSTs to the regenerate endpoint", async () => {

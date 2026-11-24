@@ -503,3 +503,34 @@ class TestSubagentConfigValidation:
             config={"instructions": "", "model_role": "gpt-4o"},
         )
         assert updated.type == "calculator"
+
+    async def test_subagent_defaults_public(self, db_session: AsyncSession, test_tenant):
+        """Issue #635 — a new subagent persona is Public unless told otherwise."""
+        tool = await create_tool(
+            db_session,
+            tenant_id=test_tenant.id,
+            name="Default Public Persona",
+            type="subagent",
+            config={
+                "instructions": "You research.",
+                "model_role": "@general",
+            },
+        )
+        assert tool.is_public is True
+
+    async def test_subagent_explicit_private_is_respected(
+        self, db_session: AsyncSession, test_tenant
+    ):
+        """An explicit False always wins over the subagent default."""
+        tool = await create_tool(
+            db_session,
+            tenant_id=test_tenant.id,
+            name="Private Persona",
+            type="subagent",
+            config={
+                "instructions": "You research.",
+                "model_role": "@general",
+            },
+            is_public=False,
+        )
+        assert tool.is_public is False

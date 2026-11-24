@@ -410,7 +410,15 @@ export function ToolForm({ open, tool, duplicateFrom, onClose }: ToolFormProps) 
               { label: "Wikipedia", value: "wikipedia" },
               { label: "A2A (Remote Agent)", value: "a2a" },
             ]}
-            onChange={(value) => setToolType(value)}
+            onChange={(value) => {
+              setToolType(value);
+              // Issue #635 — subagent personas are usable out of the box:
+              // default a new persona to Public.  Editing/duplicating keeps
+              // the stored value; the switch can always be turned off.
+              if (!isEdit && !duplicateFrom && value === "subagent") {
+                form.setFieldValue("is_public", true);
+              }
+            }}
           />
         </Form.Item>
 
@@ -587,6 +595,11 @@ export function ToolForm({ open, tool, duplicateFrom, onClose }: ToolFormProps) 
           label="Public"
           valuePropName="checked"
           tooltip="When enabled, all tenant users can use this tool regardless of group membership"
+          extra={
+            toolType === "subagent"
+              ? "Subagents default to Public so users can activate them. Turn this off and assign the tool to a group to restrict access."
+              : undefined
+          }
         >
           <Switch />
         </Form.Item>

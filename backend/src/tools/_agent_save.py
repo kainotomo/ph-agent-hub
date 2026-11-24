@@ -25,12 +25,14 @@ from urllib.parse import unquote, urlparse
 
 logger = logging.getLogger(__name__)
 
-# Saving touches the runner's single ``AsyncSession``.  MAF runs a parallel
-# tool batch concurrently (a prompt may ask for three pages at once), so two
-# ``save_to`` calls in one batch would collide with "Session is already
-# flushing".  Same guard as ``tools/memory.py`` (Issue #583), but shared by
-# both tools so a mixed batch is covered too.  An ``asyncio.Lock`` must not be
-# shared across loops, hence one lock per running loop.
+# Saving must not write through the runner's shared ``AsyncSession``.  MAF
+# runs a parallel tool batch concurrently (a prompt may ask for three pages at
+# once), and the runner's session can hold stale ORM state whose flush raises
+# ``StaleDataError`` ("Record has changed since last read in table
+# 'file_uploads'").  Each save therefore uses a short-lived session of its
+# own (Issue #635); the lock below only serialises the quota-check + insert
+# against other saves in this process.  An ``asyncio.Lock`` must not be shared
+# across loops, hence one lock per running loop.
 _save_locks: dict[int, asyncio.Lock] = {}
 
 
@@ -42,6 +44,26 @@ def _save_lock() -> asyncio.Lock:
         lock = asyncio.Lock()
         _save_locks[id(loop)] = lock
     return lock
+
+
+async def _open_save_session() -> Any:
+    """Open an isolated session for one save (Issue #635).
+
+    The runner's session is shared with MAF's parallel tool batch and may
+    hold stale ORM state; a save must never flush it.
+    """
+    from ..db.base import AsyncSessionLocal
+
+    return AsyncSessionLocal()
+
+
+async def _close_save_session(session: Any) -> None:
+    """Close a save session, never masking the save result."""
+    try:
+        await session.close()
+    except Exception:
+        logger.debug("save_to: failed to close isolated session", exc_info=True)
+
 
 # Acceptance (#626): the preview must be at most 500 characters.
 PREVIEW_CHARS: int = 500
@@ -123,7 +145,10 @@ async def save_extracted_text(
     """Persist *text* and return a manifest — never the text itself.
 
     Args:
-        db: The runner's ``AsyncSession``.  ``None`` disables saving.
+        db: The caller's ``AsyncSession``.  It is only used to decide whether
+            saving is available; the row is written on an isolated session so
+            a parallel tool batch cannot collide with the runner's state
+            (Issue #635).  ``None`` disables saving.
         text: The extracted document text to store.
         url: The source URL, echoed into the manifest.
         filename: Display name for the stored document.
@@ -162,18 +187,23 @@ async def save_extracted_text(
     from ..core.exceptions import ValidationError
     from ..services.upload_service import create_text_upload
 
+    save_db: Any = None
     try:
-        # Serialise the write: a parallel tool batch shares one AsyncSession.
-        async with _save_lock():
-            upload = await create_text_upload(
-                db,
-                session_id=session_id,
-                tenant_id=tenant_id,
-                user_id=user_id,
-                filename=filename,
-                text=text,
-                is_temporary=is_temporary,
-            )
+        save_db = await _open_save_session()
+        try:
+            # Serialise the quota check + insert against other saves.
+            async with _save_lock():
+                upload = await create_text_upload(
+                    save_db,
+                    session_id=session_id,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    filename=filename,
+                    text=text,
+                    is_temporary=is_temporary,
+                )
+        finally:
+            await _close_save_session(save_db)
     except ValidationError as exc:
         logger.info("save_to rejected for %s: %s", url, exc.message)
         return {

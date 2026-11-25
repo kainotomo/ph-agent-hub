@@ -42,6 +42,13 @@ def _make_func_result_content(call_id="call_1", name="test_tool", output="ok"):
     return content
 
 
+def _make_text_content(text):
+    content = MagicMock()
+    content.type = "text"
+    content.text = text
+    return content
+
+
 def _make_usage_content(input_tokens, output_tokens=10, cache_hits=0):
     content = MagicMock()
     content.type = "usage"
@@ -266,16 +273,19 @@ class TestStreamingTokenBudget:
     async def test_normal_short_run_unchanged(self):
         budget = RunBudget(max_steps=50)
         token_counts: dict = {}
+        answer = _make_stream_update([_make_text_content("Done.")])
+        answer.finish_reason = "stop"
         events = await _collect_events(
-            _step_updates(3),
+            _step_updates(3) + [answer],
             budget=budget,
             token_counts=token_counts,
         )
         assert not _events_of(events, "budget_warning")
         assert not _events_of(events, "budget_exceeded")
         assert not _events_of(events, "step_limit_reached")
-        # No synthetic wrap-up token on a clean finish.
-        assert _joined_token_text(events) == ""
+        # The only token is the model's own answer: a clean finish adds no
+        # synthetic wrap-up (#642/#645).
+        assert _joined_token_text(events) == "Done."
         assert token_counts["metrics"]["steps"] == 3
         assert token_counts["metrics"]["budget_exceeded"] is False
         assert token_counts["budget"] == budget.to_dict()

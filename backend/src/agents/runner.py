@@ -363,12 +363,92 @@ SUMMARY_CAP_RATIO = 0.005
 # to 90s for large documents with section extraction.
 TOOL_EXECUTION_TIMEOUT = 90
 
-# Maximum seconds the MAF streaming loop will wait for the next update
-# from the model before giving up.  Prevents the agent from hanging
-# indefinitely when DeepSeek stops sending data mid-stream (e.g., while
-# generating a partial function call).  After this idle period the stream
-# is terminated and partial results are persisted.
+# Maximum seconds the MAF streaming loop will wait for the next update from
+# the model before giving up.  Prevents the agent from hanging indefinitely
+# when DeepSeek stops sending data mid-stream (e.g., while generating a
+# partial function call).  The effective value is
+# ``AGENT_STREAM_IDLE_TIMEOUT_SECONDS`` (Issue #645); this constant is the
+# historical default kept for callers that cannot read settings.
 MAF_STREAM_IDLE_TIMEOUT = 120
+
+
+def _model_phase_idle_timeout() -> float:
+    """Seconds to wait for the next event while the model is generating.
+
+    Issue #645 — split from the tool-phase budget: a silent provider is a
+    dead stream, while a silent tool is often just a slow tool.
+    """
+    configured = float(
+        getattr(settings, "AGENT_STREAM_IDLE_TIMEOUT_SECONDS", 0) or 0
+    )
+    return max(1.0, configured or float(MAF_STREAM_IDLE_TIMEOUT))
+
+
+def _tool_phase_idle_timeout() -> float:
+    """Seconds to wait for the next event while tool calls are executing.
+
+    MAF executes a parallel batch with ``asyncio.gather`` and only yields the
+    results once the whole batch finishes, so one slow tool can legitimately
+    hold the stream silent for minutes.  The budget is therefore always at
+    least the largest configured per-tool timeout plus a margin; otherwise the
+    model-phase watchdog would kill a healthy turn mid-tool (Issue #645).
+    """
+    return max(
+        1.0,
+        float(getattr(settings, "AGENT_TOOL_PHASE_TIMEOUT_SECONDS", 0) or 0),
+        float(TOOL_EXECUTION_TIMEOUT) + 30.0,
+        float(getattr(settings, "MCP_TOOL_TIMEOUT_SECONDS", 0) or 0) + 30.0,
+        float(getattr(settings, "SUBAGENT_TIMEOUT", 0) or 0) + 30.0,
+    )
+
+
+# Finish reasons that mean "the model completed its answer".
+# Anything else (tool_calls, length, None, ...) means the round did not
+# finish an answer, so an interrupted stream must still be concluded.
+_ANSWER_FINISH_REASONS = frozenset({"stop", "end_turn", "stop_sequence"})
+
+
+def _round_produced_answer(round_info: dict | None) -> bool:
+    """True when *round_info* closed with answer text and a terminal reason.
+
+    Issue #645 — an interrupted stream is concluded through the wrap-up unless
+    the round that was cut short had already rendered text *and* the provider
+    reported a normal stop for it.
+    """
+    if not round_info:
+        return False
+    text_chars = int(round_info.get("text_chars") or 0)
+    finish = str(round_info.get("finish_reason") or "")
+    return text_chars > 0 and finish in _ANSWER_FINISH_REASONS
+
+
+async def _close_abandoned_stream(stream: Any, session_id: str) -> None:
+    """Best-effort close of a MAF stream that is no longer being consumed.
+
+    Issue #645 — when the loop stops on a watchdog or a budget it stops
+    pulling the stream, but MAF keeps the underlying run (and any in-flight
+    tool) alive.  Closing the inner async iterator raises ``GeneratorExit``
+    inside it, which cancels that work instead of letting it finish an orphan
+    side effect after the turn has already been reported.
+    """
+    closer = getattr(stream, "aclose", None)
+    if closer is None:
+        # MAF 1.26's ``ResponseStream`` has no public close; the inner
+        # iterator is an async generator in practice.
+        iterator = getattr(stream, "_iterator", None)
+        closer = getattr(iterator, "aclose", None)
+    if closer is None:
+        return
+    try:
+        await closer()
+        logger.info("Closed abandoned model stream for session %s", session_id)
+    except Exception:
+        logger.debug(
+            "Failed to close abandoned model stream for session %s",
+            session_id,
+            exc_info=True,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Model-aware cap computation (Issue #207)
@@ -4422,11 +4502,21 @@ async def _run_agent_stream(
     step_index = 0
     # Timing: measure per-turn wall-clock and tool durations.
     turn_start_s = time.monotonic()
+    # Issue #645 — phase-specific stream budgets plus an absolute turn cap.
+    # A silent model is a dead stream; a silent tool is usually a slow tool.
+    model_idle_timeout = _model_phase_idle_timeout()
+    tool_phase_timeout = _tool_phase_idle_timeout()
+    max_turn_seconds = int(getattr(settings, "AGENT_MAX_TURN_SECONDS", 0) or 0)
+    turn_deadline_s = (
+        turn_start_s + float(max_turn_seconds) if max_turn_seconds > 0 else None
+    )
     first_token_at_s: float | None = None
     tool_started_at_s: dict[str, float] = {}
     tool_durations_s: list[float] = []
     # Aggregate streaming tool calls: call_id -> {name, args_str}
     pending_calls: dict[str, dict] = {}
+    # Issue #645 — True between a round's tool calls and their results.
+    awaiting_tool_results = False
     # Issue #579 — keys of recent tool calls, for runaway-loop detection.
     recent_call_keys: list[str] = []
     # Issue #579 — human-readable notes of the tool calls taken this turn,
@@ -4474,7 +4564,7 @@ async def _run_agent_stream(
     # as a completed answer.
     turn_text_chars = 0
     # Issue #642 — how the model stream ended: ``clean``, ``abort``,
-    # ``idle_timeout``, ``loop`` or ``budget``.
+    # ``idle_timeout``, ``loop``, ``budget`` or ``turn_deadline`` (Issue #645).
     stream_end = "clean"
     # Issue #642 — model rounds seen in this turn (one per finish_reason
     # chunk, plus the trailing partial round).
@@ -4530,21 +4620,56 @@ async def _run_agent_stream(
         last_update = None
         response_iter = response_stream.__aiter__()
         while True:
+            # Issue #645 — the idle budget depends on the phase: tool execution
+            # is expected to be silent for much longer than a model round, and
+            # the absolute turn deadline bounds both.
+            phase_timeout = (
+                tool_phase_timeout if awaiting_tool_results else model_idle_timeout
+            )
+            remaining_s: float | None = None
+            timeout_s = phase_timeout
+            if turn_deadline_s is not None:
+                remaining_s = turn_deadline_s - time.monotonic()
+                if remaining_s <= 0:
+                    stream_end = "turn_deadline"
+                    stop_reason = "turn_deadline"
+                    logger.warning(
+                        "Turn for session %s reached its %ss deadline after "
+                        "%d step(s) — concluding",
+                        session_id, max_turn_seconds, step_index,
+                    )
+                    break
+                timeout_s = min(phase_timeout, remaining_s)
             try:
                 update = await asyncio.wait_for(
                     response_iter.__anext__(),
-                    timeout=MAF_STREAM_IDLE_TIMEOUT,
+                    timeout=timeout_s,
                 )
             except StopAsyncIteration:
                 stream_exhausted_cleanly = True
                 stream_end = "clean"
                 break
             except asyncio.TimeoutError:
-                stream_end = "idle_timeout"
-                logger.warning(
-                    "Agent stream idle timeout (%ss) for session %s after %d events",
-                    MAF_STREAM_IDLE_TIMEOUT, session_id, inner_event_count,
-                )
+                if remaining_s is not None and remaining_s <= phase_timeout:
+                    # The wait was capped by the turn deadline, not by the
+                    # phase watchdog.
+                    stream_end = "turn_deadline"
+                    stop_reason = "turn_deadline"
+                    logger.warning(
+                        "Turn for session %s reached its %ss deadline after "
+                        "%d step(s) — concluding",
+                        session_id, max_turn_seconds, step_index,
+                    )
+                else:
+                    stream_end = "idle_timeout"
+                    logger.warning(
+                        "Agent stream idle timeout (%ss, %s phase) for session "
+                        "%s after %d events",
+                        round(timeout_s, 1),
+                        "tool" if awaiting_tool_results else "model",
+                        session_id,
+                        inner_event_count,
+                    )
                 break
             except Exception:
                 # Stream exhausted or error — log it (Issue #579: this used to be
@@ -4633,6 +4758,9 @@ async def _run_agent_stream(
                     if delta:
                         round_text_chars += len(delta)
                         turn_text_chars += len(delta)
+                        # Issue #645 — text means the model is generating again,
+                        # not waiting on tool results.
+                        awaiting_tool_results = False
                         if first_token_at_s is None:
                             first_token_at_s = time.monotonic()
                         yield _sse_event("token", {
@@ -4659,6 +4787,10 @@ async def _run_agent_stream(
                         }, session_id=session_id, message_id=message_id)
                 elif content_type in ("function_call", "tool_call"):
                     round_tool_activity += 1
+                    # Issue #645 — from here until the results arrive the
+                    # stream is expected to be silent while MAF executes the
+                    # batch, so the longer tool-phase budget applies.
+                    awaiting_tool_results = True
                     call_id = getattr(content, "call_id", None)
                     if call_id:
                         tool_started_at_s[call_id] = time.monotonic()
@@ -4666,6 +4798,9 @@ async def _run_agent_stream(
                 elif content_type in ("function_result", "tool_result"):
                     round_tool_activity += 1
                     round_tool_results += 1
+                    # Issue #645 — results are in; the next round is the model
+                    # generating again.
+                    awaiting_tool_results = False
                     tool_calls += 1
                     tool_call_id = getattr(content, "call_id", None) or ""
                     started = tool_started_at_s.pop(tool_call_id, None)
@@ -4763,6 +4898,11 @@ async def _run_agent_stream(
             # Snapshot its counters so the round that ends the stream can be
             # classified (text vs reasoning-only vs tool-calls) afterwards.
             if isinstance(update_finish_reason, str) and update_finish_reason:
+                # Issue #645 — a round that ends on tool calls hands over to
+                # tool execution; the stream will be silent until the batch
+                # results arrive.
+                if update_finish_reason == "tool_calls":
+                    awaiting_tool_results = True
                 _close_round(update_finish_reason)
 
             # ── Step completion (Issue #447 — parallel batches count as 1) ──
@@ -4923,6 +5063,13 @@ async def _run_agent_stream(
                     stream_end = "loop"
                     break
 
+        # ---- Issue #645 — never leave an abandoned run executing ----------
+        # The loop stopped pulling but MAF may still be running the model call
+        # or an in-flight tool.  Close what we own so no side effect lands
+        # after the turn is reported.
+        if not stream_exhausted_cleanly:
+            await _close_abandoned_stream(response_stream, session_id)
+
         # ---- Issue #639 — was the round that ended the stream an answer? --
         # The trailing counters describe the last round when the provider did
         # not send a finish_reason chunk for it.  Snapshot even a
@@ -4990,7 +5137,13 @@ async def _run_agent_stream(
                 session_id, stream_end, step_index, turn_text_chars, rounds,
                 tool_calls,
             )
-            if turn_text_chars == 0:
+            # Issue #645 — the #642 guard only fired when the turn had rendered
+            # *zero* text.  A one-line preamble ("I'll start by reading…")
+            # defeated it: the user then got that line and nothing else while
+            # the run was reported as completed.  What matters is whether the
+            # round that was cut short had rendered its answer, not whether the
+            # turn ever produced any text.
+            if not _round_produced_answer(last_round):
                 stop_reason = "stream_interrupted"
             break
 
@@ -5837,6 +5990,12 @@ def _termination_message(
             "\n\nMy response was interrupted before it finished. Send "
             "another message and I'll continue from there."
         )
+    if stop_reason == "turn_deadline":
+        # Issue #645 — the absolute per-turn wall-clock cap was reached.
+        return (
+            "\n\nI stopped because this turn reached its time limit. Send "
+            "another message and I'll continue from where I stopped."
+        )
     if stop_reason == "empty_round":
         # Issue #639 — the model kept answering with reasoning only, so the
         # turn could not continue on its own.  Say that instead of claiming a
@@ -5924,6 +6083,21 @@ async def _generate_stop_wrapup(
             "Summarise what was accomplished, state the budget that was "
             "reached, and state the single next step to continue."
         )
+    elif stop_reason == "turn_deadline":
+        # Issue #645 — the absolute per-turn wall-clock cap was reached.
+        max_turn_seconds = int(
+            getattr(settings, "AGENT_MAX_TURN_SECONDS", 0) or 0
+        )
+        reason = (
+            f"because this turn reached its {_format_int(max_turn_seconds)}-"
+            "second time limit"
+            if max_turn_seconds > 0
+            else "because this turn reached its time limit"
+        )
+        nudge = (
+            "Summarise what was accomplished so far, state that the time "
+            "limit was reached, and state the single next step to continue."
+        )
     else:
         reason = (
             f"after reaching the {steps}-step tool budget for this turn "
@@ -5942,15 +6116,23 @@ async def _generate_stop_wrapup(
     )
 
     try:
-        response = await model_client.get_response(
-            messages=[
-                _MafMessage(
-                    "system",
-                    [system_prompt or "You are a helpful assistant."],
-                ),
-                _MafMessage("user", [instruction]),
-            ],
-            options={"temperature": 0.3, "max_tokens": 512},
+        # Issue #645 — the wrap-up is a model call too; bound it so a dead
+        # provider cannot extend the turn a second time after the watchdog.
+        wrapup_timeout = float(
+            getattr(settings, "AGENT_WRAPUP_TIMEOUT_SECONDS", 0) or 60.0
+        )
+        response = await asyncio.wait_for(
+            model_client.get_response(
+                messages=[
+                    _MafMessage(
+                        "system",
+                        [system_prompt or "You are a helpful assistant."],
+                    ),
+                    _MafMessage("user", [instruction]),
+                ],
+                options={"temperature": 0.3, "max_tokens": 512},
+            ),
+            timeout=max(1.0, wrapup_timeout),
         )
         text = (response.messages[-1].text or "").strip()
         if text:
@@ -6026,7 +6208,8 @@ def _compute_turn_metrics(
         ``finish_reason`` (why the final model round ended), ``provider_usage``
         (the provider-reported totals summed over the turn's rounds),
         ``reasoning_only_retried`` and, from Issue #642, ``stream_end``
-        (``clean`` / ``abort`` / ``idle_timeout`` / ``loop`` / ``budget``),
+        (``clean`` / ``abort`` / ``idle_timeout`` / ``loop`` / ``budget`` /
+        ``turn_deadline``),
         ``rounds``, ``attempts``, ``pending_tool_calls_at_end``,
         ``final_round_finish_reason`` and ``stop_reason``.
 

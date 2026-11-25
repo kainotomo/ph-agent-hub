@@ -148,6 +148,44 @@ class Settings(BaseSettings):
     AGENT_LOOP_REPEAT_THRESHOLD: int = 4
     """Number of consecutive identical tool calls that triggers loop detection."""
 
+    # --- Stream liveness and turn-duration guards (Issue #645) ---
+    AGENT_STREAM_IDLE_TIMEOUT_SECONDS: float = 120.0
+    """How long the agent loop waits for the next event while the model itself
+    is generating (no tool call is in flight).  A provider that stays silent
+    past this point ends the turn with ``stream_end="idle_timeout"`` and the
+    tool-less wrap-up, instead of hanging the stream.  Model-phase only: tool
+    execution is covered by ``AGENT_TOOL_PHASE_TIMEOUT_SECONDS``."""
+
+    AGENT_TOOL_PHASE_TIMEOUT_SECONDS: float = 360.0
+    """How long the agent loop waits for the next event **while tool calls are
+    executing**.  MAF runs a parallel batch through one ``asyncio.gather`` and
+    emits the results only when the whole batch finishes, so a healthy but
+    slow tool legitimately holds the stream silent for a long time.  This
+    phase-specific budget keeps the model-phase watchdog from killing the
+    turn mid-tool (Issue #645).  It is automatically raised above the
+    configured per-tool timeouts and ``SUBAGENT_TIMEOUT``."""
+
+    MCP_TOOL_TIMEOUT_SECONDS: int = 180
+    """Per-request timeout passed to MAF's MCP tools (``request_timeout``).
+    MCP tools are not wrapped by the 90s ``FunctionTool`` execution timeout,
+    so without this a hung MCP server keeps the stream silent until the
+    tool-phase watchdog fires.  When the MCP request times out, MAF turns the
+    exception into a normal function result and the model continues the turn.
+    ``0`` leaves MCP requests unbounded (not recommended)."""
+
+    AGENT_MAX_TURN_SECONDS: int = 1800
+    """Absolute wall-clock cap for one agent turn, independent of the step and
+    token budgets.  Prevents a turn that keeps producing events (slow tools,
+    long tool chain) from running indefinitely.  On expiry the turn stops with
+    ``stop_reason="turn_deadline"`` and the usual tool-less wrap-up.  ``0``
+    disables the cap."""
+
+    AGENT_WRAPUP_TIMEOUT_SECONDS: float = 60.0
+    """Timeout for the tool-less wrap-up model call that concludes a turn
+    stopped early (budget, loop, interrupted stream, deadline).  On timeout
+    the canned termination message is used instead, so a dead provider can
+    never extend the turn a second time."""
+
     # --- Tool output caps (Issue #584) ---
     STORAGE_TOOL_OUTPUT_MAX_CHARS: int = 64_000
     """Character budget for the tool-result text *stored* inside a persisted

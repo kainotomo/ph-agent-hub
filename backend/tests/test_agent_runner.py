@@ -1428,6 +1428,11 @@ class TestRunAgentStream:
 
     @patch("agent_framework.Agent")
     async def test_stream_exhaustion_ends_normally(self, mock_agent_class):
+        """An empty stream is concluded, never persisted as silence.
+
+        Issue #642 — a turn that produced no answer text at all is concluded
+        through the tool-less wrap-up instead of an empty assistant message.
+        """
         mock_instance = MagicMock()
         mock_instance.run.return_value = self._stream_from_updates([])
         mock_agent_class.return_value = mock_instance
@@ -1438,7 +1443,10 @@ class TestRunAgentStream:
                                    "assistant", "sess1", "msg1"):
             events.append(event)
 
-        assert len(events) == 0  # No events, no crash
+        assert [e["event"] for e in events] == ["token"]
+        assert "could not finish a written answer" in json.loads(
+            events[0]["data"]
+        )["delta"]
 
 
 # =============================================================================

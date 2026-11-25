@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..core.config import settings
 from ..core.encryption import encrypt, decrypt
 from ..core.exceptions import NotFoundError, ValidationError
 from ..db.orm.mcp_servers import McpServer
@@ -391,6 +392,12 @@ def _build_mcp_tool_instance(server: McpServer):
         "allowed_tools": server.allowed_tools,
         "approval_mode": "never_require",
     }
+    # Issue #645 — bound a single MCP call so a hung server cannot hold the
+    # agent stream silent until the tool-phase watchdog kills the turn.  The
+    # timeout surfaces as a tool exception, which MAF converts into a normal
+    # function result the model can react to.
+    if settings.MCP_TOOL_TIMEOUT_SECONDS > 0:
+        common_kwargs["request_timeout"] = int(settings.MCP_TOOL_TIMEOUT_SECONDS)
 
     if server.transport == "streamable_http":
         from httpx import AsyncClient, Timeout

@@ -114,6 +114,26 @@ attempt, so it could describe an earlier round), and the per-message `metrics`
 part also carries `final_round_finish_reason`, `stream_end`, `rounds`,
 `attempts`, `pending_tool_calls_at_end` and `stop_reason`.
 
+**Slow tools must not kill a turn, and an interrupted turn must still answer
+(Issue #645):** the #642 guard keyed on `turn_text_chars == 0`, so a one-line
+preamble ("I'll start by reading the prompt…") streamed before the tool calls
+defeated it, and a turn that died mid-tool was still persisted as `completed`.
+The single 120s watchdog covered both model silence and tool execution, and
+MCP tools carried no per-request timeout, so a hung MCP server held the stream
+silent until the watchdog fired. The stream budget is now phase-aware:
+`AGENT_STREAM_IDLE_TIMEOUT_SECONDS` (default 120s) applies while the model
+generates, `AGENT_TOOL_PHASE_TIMEOUT_SECONDS` (default 360s, floored above the
+configured per-tool timeouts and `SUBAGENT_TIMEOUT`) applies while a tool batch
+runs, and `AGENT_MAX_TURN_SECONDS` (default 1800s) caps the whole turn with
+`stop_reason="turn_deadline"`. MCP tools receive `MCP_TOOL_TIMEOUT_SECONDS`
+(default 180s) as MAF's `request_timeout`, so a hung server becomes a normal
+tool error the model can react to instead of a silent stream. On an unclean
+end the turn sets `stop_reason="stream_interrupted"` unless the round that was
+cut short already rendered its answer and stopped normally; the wrap-up call
+is bounded by `AGENT_WRAPUP_TIMEOUT_SECONDS` (default 60s), and the abandoned
+MAF stream is closed so an in-flight tool cannot finish an orphan side effect
+after the turn is reported.
+
 **Auto Tool Selection (Issues #287, #439):** Instead of requiring users to
 manually activate tools per session, the agent can automatically select
 relevant tools from the available pool. The LLM receives tool definitions

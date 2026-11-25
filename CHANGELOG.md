@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [3.14.2] — 2026-11-25
 
 ### Changed
 - **Backend dependencies upgraded to the 2026-11 releases** — `sqlalchemy` 2.1,
@@ -34,6 +34,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removed.
 
 ### Fixed
+- **Long turns survive slow tools and never end silently (Issue #645)** — a
+  turn that stalled while MAF executed a tool batch was killed by the single
+  120s stream watchdog, and because the model had already streamed a one-line
+  preamble (`turn_text_chars > 0`) the #642 "no answer text" guard never fired:
+  the run was persisted as `completed` with the preamble and no answer, and the
+  client offered neither an error nor a retry. The interruption had two
+  causes. MCP tools never received a per-request timeout — they are not
+  wrapped by the 90s `FunctionTool` execution timeout — so a hung MCP server
+  kept the stream silent until the watchdog fired; they now get
+  `MCP_TOOL_TIMEOUT_SECONDS` (default 180s) as MAF's `request_timeout`, which
+  turns the hang into a normal tool error the model can react to. And the
+  watchdog itself is now phase-aware: `AGENT_STREAM_IDLE_TIMEOUT_SECONDS`
+  (120s) covers model silence, `AGENT_TOOL_PHASE_TIMEOUT_SECONDS` (360s,
+  automatically floored above the configured tool timeouts) covers tool
+  execution, `AGENT_MAX_TURN_SECONDS` (default 30 min, `stop_reason`
+  `turn_deadline`) caps the whole turn, and the wrap-up model call is bounded
+  by `AGENT_WRAPUP_TIMEOUT_SECONDS` (60s). On an unclean end the turn is now
+  concluded through the wrap-up unless the round that was cut short had
+  already rendered its answer and stopped normally, and the abandoned MAF
+  stream is closed so an in-flight tool cannot finish an orphan side effect
+  after the turn was reported.
 - **A turn can no longer end with no answer text at all (Issue #642)** — the
   #639 retry only covered a round with reasoning, no text and *no* tool
   activity on a cleanly exhausted stream, so two shapes of empty turn still

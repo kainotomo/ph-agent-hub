@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Backend dependencies upgraded to the 2026-11 releases** — `sqlalchemy` 2.1,
+  `alembic` 1.20, `cryptography` 50, `redis` 8, `a2a-sdk` 1.3, `pytest` 9 /
+  `pytest-asyncio` 1.5, `playwright` 1.65, `weasyprint` 70, `edgartools` 6,
+  `croniter` 7, `pandas` 3.1 and the remaining direct requirements. The
+  `bcrypt<4.1` pin is gone: `passlib>=1.9.5` supports bcrypt 5.x and existing
+  password hashes verify unchanged. The stale `openai<3` cap moves to `<4`
+  (the dev environment already ran openai 3.x). `pytz` and `json-repair`, both
+  imported by the code but only ever present transitively (or not at all), are
+  now declared; the duplicated `httpx` / `pytest` entries and the
+  contradictory `pytest-asyncio<1.0` cap are removed. Full analysis:
+  [`docs/dependency-review-2026-11-25.md`](docs/dependency-review-2026-11-25.md).
+- **pytest-asyncio 1.x loop scopes** — `backend/pytest.ini` now sets
+  `asyncio_default_test_loop_scope` / `asyncio_default_fixture_loop_scope` to
+  `session` (the engine is created at import time and must stay on one loop),
+  and the deprecated session `event_loop` fixture in `tests/conftest.py` is
+  removed.
+
 ### Fixed
 - **A turn can no longer end with no answer text at all (Issue #642)** — the
   #639 retry only covered a round with reasoning, no text and *no* tool

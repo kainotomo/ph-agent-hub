@@ -4139,8 +4139,25 @@ async def run_agent_stream(
     if terminal_outcome is None:
         if cancelled_by_flag:
             terminal_outcome = "cancelled"
-        elif assistant_persisted:
+        elif assistant_persisted and accumulated_text.strip():
             terminal_outcome = "completed"
+        elif assistant_persisted:
+            # Issue #642 — a row exists, but it carries no answer text (only
+            # reasoning or tool segments were persisted).  Reporting this as
+            # ``completed`` left the user with an empty bubble and no retry.
+            terminal_outcome = "failed"
+            terminal_error_code = "empty_output"
+            terminal_error_message = (
+                "The run ended without producing an answer. Please try again."
+            )
+            logger.error(
+                "Run for session %s message_id=%s persisted a message with no "
+                "answer text (%d reasoning/segment chars, stop_reason=%s, "
+                "stream_end=%s)",
+                session_id, message_id, len(accumulated_reasoning or ""),
+                (_stream_token_info.get("metrics") or {}).get("stop_reason"),
+                (_stream_token_info.get("metrics") or {}).get("stream_end"),
+            )
         elif accumulated_text or segments_to_persist:
             # Issue #634 — the answer was produced and streamed to the user,
             # but the row could not be written.  That is a different failure
@@ -4447,30 +4464,50 @@ async def _run_agent_stream(
     attempt = 0
     run_inputs: Any = user_message
     # Provider-reported reason the last model round ended (Issue #639).
+    # Issue #642 — reset per round (in ``_close_round``) so a value from an
+    # earlier round can never be attributed to the round that ended the turn.
     finish_reason: str | None = None
     reasoning_only_retried = False
     stream_exhausted_cleanly = False
+    # Issue #642 — answer text produced anywhere in the turn, across rounds and
+    # retry attempts.  A turn that ends with none of it must never be reported
+    # as a completed answer.
+    turn_text_chars = 0
+    # Issue #642 — how the model stream ended: ``clean``, ``abort``,
+    # ``idle_timeout``, ``loop`` or ``budget``.
+    stream_end = "clean"
+    # Issue #642 — model rounds seen in this turn (one per finish_reason
+    # chunk, plus the trailing partial round).
+    rounds = 0
     # Per-round accounting: counters for the round currently streaming.
     # A round ends on the chunk carrying the provider's finish_reason; the
     # counters are then snapshotted into ``last_round`` and reset.
     round_text_chars = 0
     round_reasoning_chars = 0
     round_tool_activity = 0
+    round_tool_results = 0
     last_round: dict | None = None
 
     def _close_round(round_finish_reason: str | None) -> None:
         """Snapshot the round that just ended and start a fresh one."""
         nonlocal last_round, round_text_chars
         nonlocal round_reasoning_chars, round_tool_activity
+        nonlocal round_tool_results, rounds, finish_reason
         last_round = {
             "text_chars": round_text_chars,
             "reasoning_chars": round_reasoning_chars,
             "tool_activity": round_tool_activity,
+            "tool_results": round_tool_results,
             "finish_reason": round_finish_reason,
         }
+        rounds += 1
+        # Issue #642 — the finish reason belongs to the round that just
+        # closed, not to the attempt.
+        finish_reason = round_finish_reason
         round_text_chars = 0
         round_reasoning_chars = 0
         round_tool_activity = 0
+        round_tool_results = 0
 
     while True:
         attempt += 1
@@ -4500,8 +4537,10 @@ async def _run_agent_stream(
                 )
             except StopAsyncIteration:
                 stream_exhausted_cleanly = True
+                stream_end = "clean"
                 break
             except asyncio.TimeoutError:
+                stream_end = "idle_timeout"
                 logger.warning(
                     "Agent stream idle timeout (%ss) for session %s after %d events",
                     MAF_STREAM_IDLE_TIMEOUT, session_id, inner_event_count,
@@ -4510,6 +4549,9 @@ async def _run_agent_stream(
             except Exception:
                 # Stream exhausted or error — log it (Issue #579: this used to be
                 # swallowed silently) then break so post-loop code can run.
+                # Issue #642 — record the unclean end so the turn cannot be
+                # reported as a completed answer.
+                stream_end = "abort"
                 logger.exception(
                     "Agent stream raised for session %s after %d events",
                     session_id, inner_event_count,
@@ -4590,6 +4632,7 @@ async def _run_agent_stream(
                             delta = strip_dsml_markers(delta)
                     if delta:
                         round_text_chars += len(delta)
+                        turn_text_chars += len(delta)
                         if first_token_at_s is None:
                             first_token_at_s = time.monotonic()
                         yield _sse_event("token", {
@@ -4622,6 +4665,7 @@ async def _run_agent_stream(
                     _handle_streaming_function_call(content, pending_calls)
                 elif content_type in ("function_result", "tool_result"):
                     round_tool_activity += 1
+                    round_tool_results += 1
                     tool_calls += 1
                     tool_call_id = getattr(content, "call_id", None) or ""
                     started = tool_started_at_s.pop(tool_call_id, None)
@@ -4789,6 +4833,7 @@ async def _run_agent_stream(
                     ), session_id=session_id, message_id=message_id)
                     pending_calls.clear()
                     stop_reason = "step_limit"
+                    stream_end = "budget"
                     budget_exceeded = True
                     budget_kind = "steps"
                     break
@@ -4835,6 +4880,7 @@ async def _run_agent_stream(
                         ), session_id=session_id, message_id=message_id)
                         pending_calls.clear()
                         stop_reason = "input_budget"
+                        stream_end = "budget"
                         budget_exceeded = True
                         budget_kind = "input_tokens"
                         break
@@ -4874,6 +4920,7 @@ async def _run_agent_stream(
                     }, session_id=session_id, message_id=message_id)
                     pending_calls.clear()
                     stop_reason = "loop"
+                    stream_end = "loop"
                     break
 
         # ---- Issue #639 — was the round that ended the stream an answer? --
@@ -4904,17 +4951,62 @@ async def _run_agent_stream(
                 default_options.get("max_tokens"),
             )
 
-        if stop_reason is not None or not stream_exhausted_cleanly:
-            # A budget/loop stop or a provider error: never retry.
+        # Issue #642 — a round that asked for a tool and never received a
+        # result is as dead as a reasoning-only round: there is nothing to
+        # follow, so the turn cannot continue on its own.  Log it separately
+        # so a stalled tool execution is visible in the server log.
+        if (
+            last_round["text_chars"] == 0
+            and last_round["tool_activity"] > 0
+            and last_round["tool_results"] == 0
+        ):
+            logger.warning(
+                "Model %s asked for %d tool call(s) in a round that never "
+                "produced a tool result for session %s (attempt %d): "
+                "finish_reason=%s, %d reasoning chars",
+                getattr(model, "model_id", None) or getattr(model, "name", None),
+                last_round["tool_activity"],
+                session_id,
+                attempt,
+                last_round["finish_reason"] or finish_reason,
+                last_round["reasoning_chars"],
+            )
+
+        if stop_reason is not None:
+            # A budget/loop stop: never retry.
+            break
+
+        if not stream_exhausted_cleanly:
+            # Issue #642 — the stream ended without the provider finishing the
+            # round (provider error, idle timeout, client disconnect).  Do not
+            # re-drive the model here: the aborted round may have been
+            # mid-write, so a nudge retry could repeat a side effect.  Never
+            # leave the turn empty either — fall through to the tool-less
+            # #579 wrap-up, which only writes text.
+            logger.warning(
+                "Stream for session %s ended %s after %d step(s) without "
+                "finishing the turn (%d answer chars, %d round(s), %d tool "
+                "call(s)) — concluding instead of retrying",
+                session_id, stream_end, step_index, turn_text_chars, rounds,
+                tool_calls,
+            )
+            if turn_text_chars == 0:
+                stop_reason = "stream_interrupted"
             break
 
         # Only a round that actually produced tokens is retried.  A genuinely
         # empty response (zero tokens, Issue #317) is left to the terminal
         # ``empty_output`` path: there is nothing to nudge.
+        # Issue #642 — a dead tool call counts as degenerate too: the round
+        # ended with `finish_reason=tool_calls` but no tool result ever
+        # followed, so the loop has nothing left to continue from.
         degenerate_round = bool(
-            last_round["reasoning_chars"] > 0
-            and last_round["text_chars"] == 0
-            and last_round["tool_activity"] == 0
+            last_round["text_chars"] == 0
+            and last_round["tool_results"] == 0
+            and (
+                last_round["reasoning_chars"] > 0
+                or last_round["tool_activity"] > 0
+            )
         )
         if not degenerate_round:
             break
@@ -4930,27 +5022,51 @@ async def _run_agent_stream(
             break
 
         logger.info(
-            "Reasoning-only round for session %s (finish_reason=%s, %d "
-            "reasoning chars, effective max_tokens=%s) — retrying once with "
-            "a directive nudge",
+            "Degenerate round for session %s (finish_reason=%s, %d reasoning "
+            "chars, %d tool call(s) with no result, effective max_tokens=%s) "
+            "— retrying once with a directive nudge",
             session_id,
             last_round["finish_reason"] or finish_reason,
             last_round["reasoning_chars"],
+            last_round["tool_activity"],
             default_options.get("max_tokens"),
         )
 
         retry_messages = await _reasoning_only_retry_messages(response_stream)
         if retry_messages is None:
+            # Issue #642 — the nudge cannot be built.  For a reasoning-only
+            # round the #639 wording still applies; for a dead tool call the
+            # turn simply never produced an answer, so say that instead.
             logger.warning(
-                "No conversation to nudge for session %s after a "
-                "reasoning-only round; falling back to the wrap-up",
+                "No conversation to nudge for session %s after a degenerate "
+                "round (finish_reason=%s, %d tool call(s) with no result); "
+                "falling back to the wrap-up",
                 session_id,
+                last_round["finish_reason"] or finish_reason,
+                last_round["tool_activity"],
             )
-            stop_reason = "empty_round"
+            stop_reason = (
+                "empty_round" if last_round["reasoning_chars"] > 0
+                else "no_answer"
+            )
             break
 
         reasoning_only_retried = True
         run_inputs = retry_messages
+
+    # ---- Issue #642 — a turn may never end with zero answer text ----------
+    # Any path that reaches here with nothing rendered (a degenerate round, a
+    # round that only executed tools, a stream that never produced text) is
+    # concluded through the tool-less wrap-up instead of being persisted as an
+    # empty assistant message.
+    if stop_reason is None and turn_text_chars == 0:
+        logger.warning(
+            "Turn for session %s ended with no answer text (%d round(s), "
+            "%d tool call(s), stream_end=%s) — generating the fallback "
+            "conclusion",
+            session_id, rounds, tool_calls, stream_end,
+        )
+        stop_reason = "no_answer"
 
     # ---- Graceful early-termination wrap-up (Issue #579) ------------------
     # When we stop early, ask the model for a short, tool-less conclusion so a
@@ -5058,11 +5174,19 @@ async def _run_agent_stream(
                 budget_enforced=token_counts.get("budget_enforced", True),
                 # Issue #639 — why the turn-ending model round stopped, the
                 # provider usage behind these totals, and whether a
-                # reasoning-only round forced the retry.
+                # reasoning-only round forced the retry.  Issue #642 — the
+                # round-level answer shape and how the stream ended.
                 finish_reason=(
-                    finish_reason
+                    (last_round or {}).get("finish_reason")
+                    or finish_reason
                     or getattr(final, "finish_reason", None)
                 ),
+                final_round_finish_reason=(last_round or {}).get("finish_reason"),
+                stream_end=stream_end,
+                rounds=rounds,
+                attempts=attempt,
+                pending_tool_calls_at_end=len(pending_calls),
+                stop_reason=stop_reason,
                 provider_usage={
                     "input_token_count": token_counts.get("in", 0) or 0,
                     "output_token_count": token_counts.get("out", 0) or 0,
@@ -5701,6 +5825,18 @@ def _termination_message(
             f"{steps} tool steps and {tool_calls} tool calls). "
             "Send another message if you'd like me to continue."
         )
+    if stop_reason == "no_answer":
+        # Issue #642 — the turn consumed its rounds without rendering text.
+        return (
+            "\n\nI could not finish a written answer in this turn. Send "
+            "another message and I'll continue from where I stopped."
+        )
+    if stop_reason == "stream_interrupted":
+        # Issue #642 — the model stream broke mid-round.
+        return (
+            "\n\nMy response was interrupted before it finished. Send "
+            "another message and I'll continue from there."
+        )
     if stop_reason == "empty_round":
         # Issue #639 — the model kept answering with reasoning only, so the
         # turn could not continue on its own.  Say that instead of claiming a
@@ -5755,6 +5891,27 @@ async def _generate_stop_wrapup(
         nudge = (
             "Give the best answer you can from the work already done and state "
             "the single next step the user should take."
+        )
+    elif stop_reason == "no_answer":
+        # Issue #642 — the loop ran out of rounds without ever rendering an
+        # answer (for example the last round only executed tools).  Ask for
+        # the answer from the work already done, not for a budget summary.
+        reason = (
+            "because its rounds produced no answer text, only reasoning or "
+            "tool calls"
+        )
+        nudge = (
+            "Give the answer to the original request from the work already "
+            "done, as directly as possible, and state the single next step."
+        )
+    elif stop_reason == "stream_interrupted":
+        # Issue #642 — the provider stream ended mid-round (error, idle
+        # timeout, disconnect).  Say so, then answer from what was gathered.
+        reason = "because the model stream was interrupted before it finished"
+        nudge = (
+            "Say in one sentence that the response was interrupted, then give "
+            "the best answer available from the work already done and the "
+            "single next step the user should take."
         )
     elif stop_reason == "input_budget" and budget is not None:
         reason = (
@@ -5851,6 +6008,12 @@ def _compute_turn_metrics(
     finish_reason: str | None = None,
     provider_usage: dict | None = None,
     reasoning_only_retried: bool = False,
+    final_round_finish_reason: str | None = None,
+    stream_end: str = "clean",
+    rounds: int = 0,
+    attempts: int = 0,
+    pending_tool_calls_at_end: int = 0,
+    stop_reason: str | None = None,
 ) -> dict:
     """Compute per-turn timing and context-breakdown metrics.
 
@@ -5861,8 +6024,11 @@ def _compute_turn_metrics(
         telemetry keys ``tool_calls``, ``budget``, ``budget_exceeded``,
         ``budget_kind``, ``budget_enforced`` and, from Issue #639,
         ``finish_reason`` (why the final model round ended), ``provider_usage``
-        (the provider-reported totals summed over the turn's rounds) and
-        ``reasoning_only_retried``.
+        (the provider-reported totals summed over the turn's rounds),
+        ``reasoning_only_retried`` and, from Issue #642, ``stream_end``
+        (``clean`` / ``abort`` / ``idle_timeout`` / ``loop`` / ``budget``),
+        ``rounds``, ``attempts``, ``pending_tool_calls_at_end``,
+        ``final_round_finish_reason`` and ``stop_reason``.
 
     ``ttft_ms`` measures from the start of the turn to the first streamed
     **text** delta, not to the first model token.  It therefore includes any
@@ -5894,6 +6060,15 @@ def _compute_turn_metrics(
         "finish_reason": finish_reason,
         "provider_usage": provider_usage,
         "reasoning_only_retried": reasoning_only_retried,
+        # Issue #642 — how the round that ended the turn actually looked, and
+        # how the stream itself ended.  Together with ``finish_reason`` these
+        # answer "why is this message empty?" from the export alone.
+        "final_round_finish_reason": final_round_finish_reason,
+        "stream_end": stream_end,
+        "rounds": rounds,
+        "attempts": attempts,
+        "pending_tool_calls_at_end": pending_tool_calls_at_end,
+        "stop_reason": stop_reason,
     }
 
     if tokens_in == 0:

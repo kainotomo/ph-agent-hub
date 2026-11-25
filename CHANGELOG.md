@@ -10,6 +10,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **A turn can no longer end with no answer text at all (Issue #642)** — the
+  #639 retry only covered a round with reasoning, no text and *no* tool
+  activity on a cleanly exhausted stream, so two shapes of empty turn still
+  slipped through: a round that ended on `finish_reason=tool_calls` and never
+  received a tool result (the execution raised, the stream aborted, an approval
+  stalled), and a stream that ended uncleanly (provider error, idle timeout,
+  client disconnect) before the round was classified. Both left the turn with
+  zero answer characters, and because the reasoning segment is still persisted
+  the run was reported as `completed`: the client showed an empty bubble and
+  offered no retry. The loop now counts round tool results as well as tool
+  activity, treats a tool call that received no result as degenerate and gives
+  it the same one-shot #639 nudge retry, and never re-drives a model after an
+  unclean end (the aborted round may have been mid-write) — it concludes
+  through the tool-less #579 wrap-up instead. A turn that produced no answer
+  text at all sets `stop_reason="no_answer"` and is concluded the same way, and
+  the terminal state now requires non-empty answer text before it may report
+  `completed`, so a reasoning-only message becomes `failed` / `empty_output`
+  and the client offers a retry. `finish_reason` is closed per model round
+  instead of being carried over from an earlier round, and the per-message
+  `metrics` part also carries `stream_end` (`clean` / `abort` /
+  `idle_timeout` / `loop` / `budget`), `rounds`, `attempts`,
+  `pending_tool_calls_at_end`, `final_round_finish_reason` and `stop_reason`.
+  ([#642])
 - **A reasoning-only round no longer ends the turn as `empty_output`
   (Issue #639)** — a thinking model could finish a turn having streamed only
   `reasoning_content`: the final round carried no text and no tool call, so
@@ -631,3 +654,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#637]: https://github.com/kainotomo/ph-agent-hub/issues/637
 [#639]: https://github.com/kainotomo/ph-agent-hub/issues/639
 [#640]: https://github.com/kainotomo/ph-agent-hub/issues/640
+[#642]: https://github.com/kainotomo/ph-agent-hub/issues/642

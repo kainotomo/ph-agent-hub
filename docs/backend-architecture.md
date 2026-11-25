@@ -87,6 +87,33 @@ The DSML sanitiser trims a delta only when it actually removed leaked markup
 fusing the reasoning into one run-on string). The final answer text is still
 trimmed when it is stored.
 
+**A turn may never end without answer text (Issue #642):** the #639 retry only
+covered a round with reasoning, no text and *no* tool activity on a cleanly
+exhausted stream, so two shapes of empty turn still escaped it. A round can end
+with `finish_reason=tool_calls` and never receive a tool result (the execution
+raised, the stream was aborted, or an approval stalled), and a stream can end
+uncleanly (provider error, `MAF_STREAM_IDLE_TIMEOUT`, client disconnect) and
+break the loop before the round is classified at all. Both left the turn with
+zero answer characters; because the reasoning segment is still persisted, the
+run was then reported as `completed`, so the client showed an empty bubble and
+offered no retry.
+
+`_run_agent_stream` now snapshots `tool_results` per round alongside
+`tool_activity`, treats a round that called a tool and received no result as
+degenerate (same one-shot #639 nudge retry), and records how the stream ended
+(`stream_end`: `clean`, `abort`, `idle_timeout`, `loop`, `budget`). An unclean
+end is never re-driven — the aborted round may have been mid-write, so a nudge
+could repeat a side effect — instead it sets `stop_reason="stream_interrupted"`
+and falls through to the tool-less #579 wrap-up. After the loop, a turn that
+produced no answer text at all sets `stop_reason="no_answer"` and is concluded
+the same way, so an empty bubble is no longer reachable. The terminal state now
+requires non-empty answer text before it may report `completed`; a
+reasoning-only message is reported as `failed` / `empty_output` so the client
+offers a retry. `finish_reason` is closed per model round (it was only reset per
+attempt, so it could describe an earlier round), and the per-message `metrics`
+part also carries `final_round_finish_reason`, `stream_end`, `rounds`,
+`attempts`, `pending_tool_calls_at_end` and `stop_reason`.
+
 **Auto Tool Selection (Issues #287, #439):** Instead of requiring users to
 manually activate tools per session, the agent can automatically select
 relevant tools from the available pool. The LLM receives tool definitions

@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now declared; the duplicated `httpx` / `pytest` entries and the
   contradictory `pytest-asyncio<1.0` cap are removed. Full analysis:
   [`docs/dependency-review-2026-11-25.md`](docs/dependency-review-2026-11-25.md).
+- **`agent-framework` 1.26.0** — the aggregate `agent-framework` package is
+  replaced by `agent-framework-core` plus the provider plugins the app
+  actually imports (`agent-framework-openai`, `agent-framework-anthropic`) and
+  `mcp` / `tenacity` for MCP tools. The unused `[all]` plugin set is no longer
+  installed; among it `agent-framework-ag-ui`, which capped FastAPI below
+  0.142.
 - **pytest-asyncio 1.x loop scopes** — `backend/pytest.ini` now sets
   `asyncio_default_test_loop_scope` / `asyncio_default_fixture_loop_scope` to
   `session` (the engine is created at import time and must stay on one loop),

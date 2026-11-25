@@ -60,10 +60,19 @@ pdfminer-six
 pypdfium2
 
 # AI Agent Framework
-# Pinned exactly: MAF marks [BREAKING] changes inside 1.x minors, so an open range
-# can silently accept breaking changes. Bump deliberately and re-run the suite.
-# agent-framework==X pins agent-framework-core[all]==X.
-agent-framework==1.19.0
+# MAF marks [BREAKING] changes inside 1.x minors, so the version is pinned and
+# bumped deliberately (re-run the unit + integration suites).
+# We depend on agent-framework-core plus ONLY the pieces the app imports:
+#   agent_framework(.openai/.anthropic) clients and the MCP tools.
+# The `agent-framework` meta package would pull core[all] — ~35 unused (mostly
+# beta) plugins, including agent-framework-ag-ui which caps FastAPI below 0.142.
+agent-framework-core==1.26.0
+agent-framework-openai>=1.18.2,<2
+agent-framework-anthropic>=1.0.0b261112,<2
+# MCP tool support (MCPStdioTool / MCPWebsocketTool and the MCP server bridge).
+# Imported lazily by agent-framework-core, previously supplied by core[all].
+mcp>=2.2.0,<3
+tenacity>=9.1.4,<10
 # MAF permits openai<4; the old `<3` cap was stale — the deep type path used by
 # src/models/deepseek.py exists in openai 3.x and the dev venv already ran 3.x.
 openai>=2.25.0,<4

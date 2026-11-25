@@ -4,7 +4,6 @@
 # Async SQLAlchemy session, test client, and test data fixtures for RAG tests.
 # =============================================================================
 
-import asyncio
 import os
 import sys
 import uuid
@@ -55,14 +54,6 @@ def _disable_license_gate(monkeypatch):
         return 1_000_000
 
     monkeypatch.setattr(ls, "get_effective_tenant_limit", _unlimited_limit)
-
-
-@pytest.fixture(scope="session")
-def event_loop():
-    """Create a single event loop for the test session."""
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
 
 
 @pytest_asyncio.fixture

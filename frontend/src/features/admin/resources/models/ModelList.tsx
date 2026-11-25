@@ -117,15 +117,15 @@ export function ModelList() {
         v ? <Text code>{v}</Text> : <Text type="secondary">—</Text>,
     },
     {
-      title: "API Key",
-      key: "api_key",
-      render: () => <Text type="secondary">••••••••</Text>,
-    },
-    {
-      title: "Max Tokens",
-      dataIndex: "max_tokens",
-      key: "max_tokens",
-      sorter: true,
+      title: "Context Window",
+      dataIndex: "context_length",
+      key: "context_length",
+      render: (v: number | null) =>
+        v !== null && v !== undefined ? (
+          <Text>{v.toLocaleString()}</Text>
+        ) : (
+          <Text type="secondary">—</Text>
+        ),
     },
     {
       title: "Enabled",
@@ -156,30 +156,6 @@ export function ModelList() {
           }
         />
       ),
-    },
-    {
-      title: "Input Price",
-      dataIndex: "input_price_per_1m",
-      key: "input_price_per_1m",
-      render: (v: number | null) =>
-        v !== null && v !== undefined ? (
-          <Text style={{ fontSize: 12 }}>${v.toFixed(4)}</Text>
-        ) : (
-          <Text type="secondary" style={{ fontSize: 12 }}>—</Text>
-        ),
-      responsive: ["lg" as const],
-    },
-    {
-      title: "Output Price",
-      dataIndex: "output_price_per_1m",
-      key: "output_price_per_1m",
-      render: (v: number | null) =>
-        v !== null && v !== undefined ? (
-          <Text style={{ fontSize: 12 }}>${v.toFixed(4)}</Text>
-        ) : (
-          <Text type="secondary" style={{ fontSize: 12 }}>—</Text>
-        ),
-      responsive: ["lg" as const],
     },
     {
       title: "Auto-Route",

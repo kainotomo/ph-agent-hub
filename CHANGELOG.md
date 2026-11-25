@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Changed
+- **Models list shows the context window instead of pricing internals (Issue #647)** — the `/admin/models` table no longer shows the API Key, Max Tokens, Input Price and Output Price columns; it now shows each model's Context Window, formatted with thousands separators and `—` when unset. The removed values remain editable in the model form. ([#647])
+
 ## [3.14.3] — 2026-11-25
 
 ### Fixed
@@ -704,3 +709,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#639]: https://github.com/kainotomo/ph-agent-hub/issues/639
 [#640]: https://github.com/kainotomo/ph-agent-hub/issues/640
 [#642]: https://github.com/kainotomo/ph-agent-hub/issues/642
+[#647]: https://github.com/kainotomo/ph-agent-hub/issues/647

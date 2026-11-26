@@ -433,6 +433,11 @@ class TestMetrics642:
         metrics = token_counts["metrics"]
         assert metrics["stream_end"] == "abort"
         assert metrics["finish_reason"] is None
+        # Issue #661 follow-up — the cause is persisted with the turn, because
+        # the wrap-up path means no error frame ever reaches the outer producer.
+        assert metrics["stream_error"]["type"] == "RuntimeError"
+        assert "connection reset by peer" in metrics["stream_error"]["message"]
+        assert metrics["stream_error"]["code"] == "internal_error"
 
 
 # ---------------------------------------------------------------------------

@@ -22,7 +22,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "3.15.3"
+APP_VERSION = "3.15.4"
 """Version of the running application.  Bumped once per release."""
 
 # backend/src/core/build_info.py → the repository's backend directory, which

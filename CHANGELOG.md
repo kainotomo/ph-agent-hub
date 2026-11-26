@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.15.4] — 2026-11-26
+
+### Added
+- **An aborted model stream records its cause in the export (Issue #661
+  follow-up)** — a turn whose model stream dies mid-run is concluded through
+  the tool-less wrap-up, so the outer producer never sees an exception: the run
+  is persisted as interrupted, no error frame reaches the client, and the cause
+  survived only in the server log. The `metrics` part now carries
+  `stream_error` — `{type, message, code}` with the same code the run-terminal
+  frame uses, or `null` on a clean turn — so a session file can explain a
+  failed turn on its own. ([#661])
+
 ## [3.15.3] — 2026-11-26
 
 ### Added

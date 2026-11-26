@@ -828,6 +828,29 @@ class TestFormatToolOutputForStorage:
         assert "key" in result
         assert "value" in result
 
+    def test_non_ascii_output_keeps_characters(self):
+        """Issue #649 — Greek text must not be stored as \\uXXXX escapes."""
+        out = self.fn({"query": "Πως μαγειρεύουμε φασόλια βραστά", "results": []})
+
+        assert "Πως μαγειρεύουμε φασόλια βραστά" in out
+        assert "\\u03a0" not in out
+        assert json.loads(out)["query"] == "Πως μαγειρεύουμε φασόλια βραστά"
+
+    def test_non_ascii_over_cap_notice_uses_unescaped_length(self):
+        """The clip notice must count characters of the UTF-8 payload (#649)."""
+        cap = STORAGE_TOOL_OUTPUT_MAX_CHARS
+        rows = [
+            {"title": "Ελληνικός τίτλος " * 20, "value": "v" * 500}
+            for _ in range(200)
+        ]
+        serialized = json.dumps(rows, ensure_ascii=False)
+        assert len(serialized) > cap
+
+        result = self.fn(rows)
+
+        assert f"{len(serialized):,} chars shown" in result
+        assert "truncated" in result
+
 
 class TestHandleStreamingFunctionCall:
     """Tests for ``_handle_streaming_function_call``."""

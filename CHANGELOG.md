@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [3.14.5] — 2026-11-26
+
+### Fixed
+- **Non-ASCII tool output and conversation export work again (Issue #649)** — tool results were stored as ASCII-escaped JSON, so Greek (and Cyrillic/CJK) text in `web_search` / `wikipedia_search` output rendered as escape sequences in the transcript and in exports. The storage formatter now serialises with `ensure_ascii=False`, and legacy compact-JSON outputs are decoded when rendered or exported, so existing conversations display correctly too. Separately, a non-ASCII session title made the JSON/TXT export raise `UnicodeEncodeError` while building the `Content-Disposition` header; the UI swallowed the 500, so “Download as JSON” did nothing. The export header now uses RFC 5987 (`filename*`) with a control-free ASCII fallback, the exported JSON is UTF-8 text, the client parses `filename*`, and a failed export shows an error toast. ([#649])
+
+## [3.14.4] — 2026-11-25
 
 ### Changed
 - **Models list shows the context window instead of pricing internals (Issue #647)** — the `/admin/models` table no longer shows the API Key, Max Tokens, Input Price and Output Price columns; it now shows each model's Context Window, formatted with thousands separators and `—` when unset. The removed values remain editable in the model form. ([#647])
@@ -710,3 +715,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#640]: https://github.com/kainotomo/ph-agent-hub/issues/640
 [#642]: https://github.com/kainotomo/ph-agent-hub/issues/642
 [#647]: https://github.com/kainotomo/ph-agent-hub/issues/647
+[#649]: https://github.com/kainotomo/ph-agent-hub/issues/649

@@ -1064,7 +1064,7 @@ User-provided filenames are sanitized at two points in the upload lifecycle:
 
 1. **S3/MinIO storage keys** (`upload_service.py:create_upload`): The `_sanitize_storage_filename()` function normalizes the filename to a safe ASCII-only form for use in object keys. This prevents path traversal (`../`), header injection characters (`"`, `;`), null bytes, and Unicode homoglyph attacks.
 
-2. **Download `Content-Disposition` headers** (`chat.py:download_upload`): The `_encode_content_disposition_filename()` function uses **RFC 5987** encoding for filenames containing non-ASCII characters. The header emits both `filename` (ASCII fallback) and `filename*` (percent-encoded UTF-8), ensuring correct browser handling across all modern clients.
+2. **Download `Content-Disposition` headers** (`chat.py:download_upload`): The `_encode_content_disposition_filename()` function uses **RFC 5987** encoding for filenames containing non-ASCII characters. The header emits both `filename` (ASCII fallback) and `filename*` (percent-encoded UTF-8), ensuring correct browser handling across all modern clients. The conversation export (`chat.py:export_session`) reuses the same helper, so a non-ASCII session title cannot break the response header; a title with control characters is scrubbed from the ASCII fallback.
 
 The `original_filename` column in the database is **never modified** — it retains the user's original name for display purposes.
 

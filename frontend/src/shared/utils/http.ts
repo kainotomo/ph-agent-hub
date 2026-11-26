@@ -99,3 +99,34 @@ export async function readJsonResponse<T>(response: Response): Promise<T> {
     );
   }
 }
+
+/**
+ * Extract the download filename from a `Content-Disposition` header.
+ *
+ * Prefers the RFC 5987 `filename*=UTF-8''...` parameter so non-ASCII names
+ * (Greek, Cyrillic, CJK) survive the round trip; falls back to the quoted
+ * `filename=` parameter and returns `null` when neither is present.
+ */
+export function filenameFromContentDisposition(
+  header: string | null,
+): string | null {
+  if (!header) return null;
+
+  const extended = header.match(/filename\*\s*=\s*([^']*)'[^']*'([^;]+)/i);
+  if (extended) {
+    const charset = extended[1].trim().toLowerCase();
+    if (!charset || charset === "utf-8") {
+      try {
+        return decodeURIComponent(extended[2].trim());
+      } catch {
+        // Malformed percent-encoding — fall through to `filename=`.
+      }
+    }
+  }
+
+  const plain = header.match(
+    /(?:^|;)\s*filename\s*=\s*(?:"([^"]*)"|([^;]*))/i,
+  );
+  const value = (plain?.[1] ?? plain?.[2] ?? "").trim();
+  return value || null;
+}

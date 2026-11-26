@@ -11,6 +11,7 @@ import { cleanup, render, screen, act, within, fireEvent } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { SessionSidebar } from "./SessionSidebar";
+import { message } from "antd";
 
 // jsdom does not implement Element.scrollIntoView
 Element.prototype.scrollIntoView = vi.fn();
@@ -35,6 +36,7 @@ const {
   mockDeleteFolder,
   mockSearchSessions,
   mockListSessionsByTag,
+  mockExportSession,
 } = vi.hoisted(() => ({
   mockGetSidebarSummary: vi.fn(),
   mockGetSidebarGroupPage: vi.fn(),
@@ -51,6 +53,7 @@ const {
   mockDeleteFolder: vi.fn(),
   mockSearchSessions: vi.fn(),
   mockListSessionsByTag: vi.fn(),
+  mockExportSession: vi.fn(),
 }));
 
 vi.mock("../services/chat", () => ({
@@ -63,7 +66,7 @@ vi.mock("../services/chat", () => ({
   moveSessions: mockMoveSessions,
   updateSession: mockUpdateSession,
   getSession: mockGetSession,
-  exportSession: vi.fn(),
+  exportSession: mockExportSession,
   importSession: mockImportSession,
   addTagToSession: vi.fn(),
   removeTagFromSession: vi.fn(),
@@ -329,6 +332,7 @@ describe("SessionSidebar", () => {
     mockListFolders.mockResolvedValue([]);
     mockSearchSessions.mockResolvedValue([]);
     mockListSessionsByTag.mockResolvedValue([]);
+    mockExportSession.mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -1519,5 +1523,88 @@ describe("SessionSidebar — progressive session loading", () => {
 
     expect(mockGetSidebarGroupPage).toHaveBeenCalledTimes(2);
     expect(document.querySelectorAll("[data-session-id]")).toHaveLength(8);
+  });
+});
+
+describe("SessionSidebar — export menu (Issue #649)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockStreamingState.streamingSessionIds = new Set();
+    mockStreamingState.completedUnreadIds = new Set();
+    mockGetSidebarSummary.mockResolvedValue(summaryFrom(SESSIONS));
+    mockGetSidebarGroupPage.mockResolvedValue({
+      key: "unfiled",
+      folder_id: null,
+      total: 0,
+      offset: 5,
+      limit: 5,
+      sessions: [],
+    });
+    mockGetSession.mockResolvedValue(null);
+    mockListFolders.mockResolvedValue([]);
+    mockExportSession.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  async function openExportMenu(user: ReturnType<typeof userEvent.setup>) {
+    const row = document.querySelector('[data-session-id="session-1"]');
+    expect(row).toBeTruthy();
+    const trigger = row!.querySelector('[aria-label="Export session"]');
+    expect(trigger).toBeTruthy();
+    await act(async () => {
+      await user.click(trigger as HTMLElement);
+    });
+    return within(await screen.findByRole("menu"));
+  }
+
+  it("downloads a session as JSON from the row export menu", async () => {
+    renderSidebar();
+    await settle();
+
+    const user = userEvent.setup();
+    const menu = await openExportMenu(user);
+    await act(async () => {
+      await user.click(menu.getByText("Download as JSON"));
+    });
+
+    expect(mockExportSession).toHaveBeenCalledWith("session-1", "json");
+  });
+
+  it("downloads a session as text from the row export menu", async () => {
+    renderSidebar();
+    await settle();
+
+    const user = userEvent.setup();
+    const menu = await openExportMenu(user);
+    await act(async () => {
+      await user.click(menu.getByText("Download as Text"));
+    });
+
+    expect(mockExportSession).toHaveBeenCalledWith("session-1", "txt");
+  });
+
+  it("shows an error toast when the export fails", async () => {
+    const errorSpy = vi.spyOn(message, "error");
+    mockExportSession.mockRejectedValue(
+      new Error("HTTP 500: Internal Server Error"),
+    );
+
+    renderSidebar();
+    await settle();
+
+    const user = userEvent.setup();
+    const menu = await openExportMenu(user);
+    await act(async () => {
+      await user.click(menu.getByText("Download as JSON"));
+    });
+    await settle();
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Export failed"),
+    );
   });
 });

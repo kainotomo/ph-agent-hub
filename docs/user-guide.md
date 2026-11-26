@@ -395,7 +395,7 @@ You can export conversations from your session list and import them back later. 
    - **JSON** — Full structured export including model metadata, token counts, and content blocks. Supports future re-import.
    - **Plain Text** — Human-readable transcript with timestamps and model attribution.
 
-The file will download automatically. The filename is derived from the session title.
+The file will download automatically. The filename is derived from the session title; non-ASCII titles (for example Greek) are preserved using RFC 5987 encoding, with an ASCII fallback. If the export fails, an error notification explains why instead of silently doing nothing.
 
 **Exported JSON format** (version 1):
 ```json

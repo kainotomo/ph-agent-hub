@@ -3175,6 +3175,120 @@ class TestExportSession:
         )
         assert resp.status_code == 403
 
+    async def test_export_json_non_ascii_title(
+        self, async_client, auth_headers, test_user, test_session, test_model, db_session
+    ):
+        """A Greek session title exports with an RFC 5987 filename (#649)."""
+        from src.db.orm.messages import Message
+        from datetime import datetime, timezone
+
+        test_session.title = "Πως μαγειρεύουμε φασόλια βραστά"
+        msg = Message(
+            id=str(uuid.uuid4()),
+            session_id=test_session.id,
+            sender="user",
+            content=[{"type": "text", "text": "Ελληνικό κείμενο"}],
+            is_deleted=False,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        db_session.add(msg)
+        await db_session.flush()
+
+        headers = auth_headers(test_user)
+        resp = await async_client.get(
+            f"/api/chat/session/{test_session.id}/export?format=json",
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        disposition = resp.headers["content-disposition"]
+        assert 'filename="file.json"' in disposition
+        assert "filename*=UTF-8''" in disposition
+        assert "%CE%A0" in disposition
+        # The payload carries characters, not ASCII escapes.
+        assert "Πως μαγειρεύουμε φασόλια βραστά" in resp.text
+        assert "Ελληνικό κείμενο" in resp.text
+        assert _ascii_escaped("Πως") not in resp.text
+
+    async def test_export_txt_non_ascii_title(
+        self, async_client, auth_headers, test_user, test_session, test_model, db_session
+    ):
+        """A Greek session title exports as readable UTF-8 text (#649)."""
+        test_session.title = "Συνταγή φασολιών"
+        await db_session.flush()
+
+        headers = auth_headers(test_user)
+        resp = await async_client.get(
+            f"/api/chat/session/{test_session.id}/export?format=txt",
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        assert "filename*=UTF-8''" in resp.headers["content-disposition"]
+        assert "Συνταγή φασολιών" in resp.text
+
+    async def test_export_json_decodes_legacy_escaped_tool_output(
+        self, async_client, auth_headers, test_user, test_session, test_model, db_session
+    ):
+        """Legacy escaped tool output is readable in the export (#649)."""
+        from src.db.orm.messages import Message
+        from datetime import datetime, timezone
+
+        msg = Message(
+            id=str(uuid.uuid4()),
+            session_id=test_session.id,
+            sender="assistant",
+            content=[
+                {
+                    "type": "function_result",
+                    "name": "web_search",
+                    "output": _legacy_tool_output({"query": "Πως μαγειρεύουμε"}),
+                }
+            ],
+            is_deleted=False,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        db_session.add(msg)
+        await db_session.flush()
+
+        headers = auth_headers(test_user)
+        resp = await async_client.get(
+            f"/api/chat/session/{test_session.id}/export?format=json",
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        assert "Πως μαγειρεύουμε" in resp.text
+        assert _ascii_escaped("Πως") not in resp.text
+
+    async def test_export_title_with_newline_does_not_crash(
+        self, async_client, auth_headers, test_user, test_session, test_model, db_session
+    ):
+        """Control characters in the title cannot break the header (#649)."""
+        from src.db.orm.messages import Message
+        from datetime import datetime, timezone
+
+        test_session.title = "line1" + chr(10) + "line2"
+        msg = Message(
+            id=str(uuid.uuid4()),
+            session_id=test_session.id,
+            sender="user",
+            content=[{"type": "text", "text": "hi"}],
+            is_deleted=False,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        db_session.add(msg)
+        await db_session.flush()
+
+        headers = auth_headers(test_user)
+        resp = await async_client.get(
+            f"/api/chat/session/{test_session.id}/export?format=json",
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        assert chr(10) not in resp.headers["content-disposition"]
+        assert chr(13) not in resp.headers["content-disposition"]
+
 
 class TestImportSession:
     """Tests for POST /import."""
@@ -5320,6 +5434,61 @@ class TestSanitizeFilename:
         assert result == "conversation"
 
 
+def _ascii_escaped(text: str) -> str:
+    """Return the ASCII escape form json.dumps uses for *text*."""
+    return json.dumps(text)[1:-1]
+
+
+def _legacy_tool_output(payload) -> str:
+    """Recreate the pre-Issue-#649 storage form (ASCII-escaped compact JSON)."""
+    return json.dumps(payload)
+
+
+class TestRenderToolOutput:
+    """Tests for the _render_tool_output() helper (Issue #649)."""
+
+    def test_decodes_legacy_ascii_escaped_json(self):
+        """Old rows stored dict outputs as ASCII-escaped JSON."""
+        from src.api.chat import _render_tool_output
+
+        legacy = _legacy_tool_output({"query": "Πως μαγειρεύουμε", "results": []})
+        rendered = _render_tool_output(legacy)
+
+        assert _ascii_escaped("Πως") not in rendered
+        assert "Πως μαγειρεύουμε" in rendered
+        assert json.loads(rendered)["query"] == "Πως μαγειρεύουμε"
+
+    def test_non_ascii_dict_is_utf8_json(self):
+        """Non-string outputs are serialized with characters intact."""
+        from src.api.chat import _render_tool_output
+
+        rendered = _render_tool_output({"title": "Φασόλια βραστά"})
+
+        assert "Φασόλια βραστά" in rendered
+        assert _ascii_escaped("Φ") not in rendered
+
+    def test_plain_text_untouched(self):
+        """Plain text (even mentioning escapes) is not rewritten."""
+        from src.api.chat import _render_tool_output
+
+        text = "hello " + _ascii_escaped("Π")
+        assert _render_tool_output(text) == text
+
+    def test_pretty_printed_json_untouched(self):
+        """Line-broken JSON is never re-laid-out by the renderer."""
+        from src.api.chat import _render_tool_output
+
+        pretty = json.dumps({"query": "Πως"}, indent=2, ensure_ascii=True)
+        assert chr(10) in pretty
+        assert _render_tool_output(pretty) == pretty
+
+    def test_none_returns_none(self):
+        """A missing output stays missing."""
+        from src.api.chat import _render_tool_output
+
+        assert _render_tool_output(None) is None
+
+
 # =============================================================================
 # Issue #539 — Lazy-Fetch Reasoning & Tool Details
 # =============================================================================
@@ -5495,6 +5664,41 @@ class TestBuildContentSummary:
         result = _build_content_summary(content)
         assert len(result[0]["summary"]) <= 200
 
+    def test_build_content_summary_legacy_escaped_output(self):
+        """Legacy ASCII-escaped tool output summarises as Greek (#649)."""
+        from src.api.chat import _build_content_summary
+
+        content = [
+            {
+                "type": "function_result",
+                "name": "web_search",
+                "output": _legacy_tool_output(
+                    {"query": "Πως μαγειρεύουμε", "results": []}
+                ),
+            }
+        ]
+        part = _build_content_summary(content)[0]
+
+        assert "Πως μαγειρεύουμε" in part["output_summary"]
+        assert _ascii_escaped("Πως") not in part["output_summary"]
+        assert part["output_chars"] == len(
+            json.dumps(
+                {"query": "Πως μαγειρεύουμε", "results": []},
+                ensure_ascii=False,
+            )
+        )
+
+    def test_build_content_summary_greek_dict_output(self):
+        """A dict output is projected with non-ASCII intact (#649)."""
+        from src.api.chat import _build_content_summary
+
+        part = _build_content_summary(
+            [{"type": "function_result", "output": {"title": "Φασόλια βραστά"}}]
+        )[0]
+
+        assert "Φασόλια βραστά" in part["output_summary"]
+        assert _ascii_escaped("Φ") not in part["output_summary"]
+
 
 class TestGetMessageStep:
     """Tests for GET /chat/session/{session_id}/message/{message_id}/step/{index}."""
@@ -5659,3 +5863,39 @@ class TestGetMessageStep:
         assert resp.status_code == 200, resp.text
         data = resp.json()
         assert data["full_output"] == "[1, 2, 3]"
+
+    async def test_get_message_step_decodes_legacy_escaped_output(
+        self, async_client, auth_headers, test_user, test_session, test_model, db_session
+    ):
+        """Legacy escaped tool output is decoded in the step body (#649)."""
+        from src.db.orm.messages import Message
+        from datetime import datetime, timezone
+
+        msg_id = str(uuid.uuid4())
+        msg = Message(
+            id=msg_id,
+            session_id=test_session.id,
+            sender="assistant",
+            content=[
+                {
+                    "type": "function_result",
+                    "name": "web_search",
+                    "output": _legacy_tool_output({"query": "Πως μαγειρεύουμε"}),
+                },
+            ],
+            is_deleted=False,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        db_session.add(msg)
+        await db_session.flush()
+
+        headers = auth_headers(test_user)
+        resp = await async_client.get(
+            f"/api/chat/session/{test_session.id}/message/{msg_id}/step/0",
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert "Πως μαγειρεύουμε" in data["full_output"]
+        assert _ascii_escaped("Πως") not in data["full_output"]

@@ -4826,7 +4826,7 @@ async def _run_agent_stream(
                     recent_call_keys.append(_tool_call_key(tool_name, resolved_args))
                     try:
                         _args_preview = (
-                            json.dumps(resolved_args, default=str)[:200]
+                            json.dumps(resolved_args, ensure_ascii=False, default=str)[:200]
                             if resolved_args is not None
                             else ""
                         )
@@ -6357,9 +6357,9 @@ def _records_fitting(items: list, budget: int) -> int:
     shown = 0
     for item in items:
         try:
-            size = len(json.dumps(item, default=str))
+            size = len(json.dumps(item, ensure_ascii=False, default=str))
         except (TypeError, ValueError):
-            size = len(json.dumps(str(item)))
+            size = len(json.dumps(str(item), ensure_ascii=False))
         cost = size + (2 if shown else 0)  # ", " between records
         if used + cost > budget:
             break
@@ -6423,7 +6423,7 @@ def _format_tool_output_for_storage(output: Any) -> str | None:
         text = output
     else:
         try:
-            text = json.dumps(output, default=str)
+            text = json.dumps(output, ensure_ascii=False, default=str)
             serialized_ok = True
         except (TypeError, ValueError):
             text = str(output)

@@ -6,6 +6,10 @@
 // =============================================================================
 
 import api, { getToken } from "../../../services/api";
+import {
+  describeHttpError,
+  filenameFromContentDisposition,
+} from "../../../shared/utils/http";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -470,14 +474,13 @@ export async function exportSession(
     },
   );
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || "Export failed");
+    throw new Error(await describeHttpError(res));
   }
   const blob = await res.blob();
   const url = URL.createObjectURL(blob);
-  const contentDisposition = res.headers.get("Content-Disposition") || "";
-  const filenameMatch = contentDisposition.match(/filename="?(.+?)"?$/);
-  const filename = filenameMatch?.[1] || `conversation.${format}`;
+  const filename =
+    filenameFromContentDisposition(res.headers.get("Content-Disposition")) ??
+    `conversation.${format}`;
   const a = document.createElement("a");
   a.href = url;
   a.download = filename;

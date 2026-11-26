@@ -740,6 +740,61 @@ def _first_line(text: str) -> str:
     return text[:200]
 
 
+# ---------------------------------------------------------------------------
+# Tool-output rendering (Issue #649)
+# ---------------------------------------------------------------------------
+
+#: A JSON ``\uXXXX`` escape, as produced by ``json.dumps(..., ensure_ascii=True)``.
+_UNICODE_ESCAPE_RE = re.compile(r"\\u[0-9a-fA-F]{4}")
+
+
+def _render_tool_output(output: Any) -> str | None:
+    """Render one ``function_result.output`` value as display text.
+
+    Dict/list outputs are JSON-serialized with non-ASCII characters intact.
+    A string output is normally already display text and is returned as-is.
+
+    The exception is the compact JSON document the storage formatter used to
+    write for dict/list outputs before Issue #649: it was serialized with
+    ``ensure_ascii=True``, so every non-ASCII character is a ``\\uXXXX``
+    escape.  Such a payload is re-serialized with the characters intact (the
+    default separators make the layout identical).  Line-broken JSON is left
+    alone — it did not come from that formatter and re-dumping it would
+    collapse the layout.
+    """
+    if output is None:
+        return None
+    if not isinstance(output, str):
+        return json.dumps(output, ensure_ascii=False, default=str)
+    if "\n" in output or "\r" in output or not _UNICODE_ESCAPE_RE.search(output):
+        return output
+    try:
+        parsed = json.loads(output)
+    except (TypeError, ValueError):
+        return output
+    if isinstance(parsed, (dict, list)):
+        return json.dumps(parsed, ensure_ascii=False, default=str)
+    return output
+
+
+def _render_tool_output_parts(content: list | None) -> list | None:
+    """Return *content* with every ``function_result`` output rendered.
+
+    Used by the conversation export so both the JSON and the plain-text
+    transcript match what the chat UI shows (Issue #649).
+    """
+    if not isinstance(content, list):
+        return content
+    return [
+        (
+            {**part, "output": _render_tool_output(part.get("output"))}
+            if isinstance(part, dict) and part.get("type") == "function_result"
+            else part
+        )
+        for part in content
+    ]
+
+
 def _build_content_summary(content: list | None) -> list | None:
     """Transform a full content JSON array into a summary array.
 
@@ -780,13 +835,7 @@ def _build_content_summary(content: list | None) -> list | None:
             summary.append(projected)
         elif ptype == "function_result":
             projected = {k: v for k, v in part.items() if k != "output"}
-            output = part.get("output")
-            if output is None:
-                out_str = ""
-            elif isinstance(output, str):
-                out_str = output
-            else:
-                out_str = json.dumps(output)
+            out_str = _render_tool_output(part.get("output")) or ""
             projected["output_chars"] = len(out_str)
             projected["output_summary"] = _first_line(out_str)
             summary.append(projected)
@@ -1695,12 +1744,9 @@ async def get_message_step(
     if ptype in ("reasoning", "text"):
         response["full_text"] = part.get("text")
     elif ptype == "function_result":
-        output = part.get("output")
-        if output is not None:
-            if isinstance(output, str):
-                response["full_output"] = output
-            else:
-                response["full_output"] = json.dumps(output)
+        rendered = _render_tool_output(part.get("output"))
+        if rendered is not None:
+            response["full_output"] = rendered
 
     return StepDetailResponse(**response)
 
@@ -5377,13 +5423,22 @@ async def export_session(
             for m in orm_messages
         ]
 
+    # Issue #649 — render tool outputs exactly as the chat does, so a legacy
+    # ASCII-escaped payload does not read back as ``\uXXXX`` text in the export.
+    msgs = [
+        {**m, "content": _render_tool_output_parts(m.get("content"))}
+        for m in msgs
+    ]
+
     # Build filename from session title
     title = data.get("title", "conversation")
     safe_title = _sanitize_filename(title)
 
     if format == ExportFormat.JSON:
         payload = _build_export_dict(data, msgs)
-        content_bytes = json.dumps(payload, indent=2, default=str).encode("utf-8")
+        content_bytes = json.dumps(
+            payload, indent=2, default=str, ensure_ascii=False
+        ).encode("utf-8")
         media_type = "application/json"
         filename = f"{safe_title}.json"
     else:
@@ -5396,7 +5451,11 @@ async def export_session(
         content=iter([content_bytes]),
         media_type=media_type,
         headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
+            # RFC 5987 — keeps non-ASCII titles (e.g. Greek) out of the raw
+            # header value, which Starlette can only latin-1 encode.
+            "Content-Disposition": (
+                upload_service._encode_content_disposition_filename(filename)
+            ),
             "Content-Length": str(len(content_bytes)),
         },
     )

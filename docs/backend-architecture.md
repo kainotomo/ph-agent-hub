@@ -174,6 +174,13 @@ prompt, so on a long conversation the real request was past the cut; it now
 receives the user's stored message (clipped head+tail by
 `HISTORY_TOOL_RESULT_MAX_CHARS`) and is therefore about the actual request.
 
+When a model stream dies mid-turn, the turn is concluded through the
+tool-less wrap-up, so the outer producer never sees an exception and the cause
+used to survive only in the server log. The metrics part now also carries
+`stream_error` — `{type, message (first 500 chars), code}` or `null` on a clean
+turn — so an export alone says whether a failed turn lost its provider stream,
+and why.
+
 Note that on the streaming path the user message is persisted before the
 context is built, so it is itself part of the replayed block and a first
 streaming turn reports `contextualized: true` with `history_messages >= 1`.

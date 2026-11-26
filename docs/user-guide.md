@@ -435,6 +435,8 @@ replayed) and `contextualized` (whether history was replayed at all). If
 `context_compacted` is `true`, the model's in-run context was reduced during the
 turn, so later rounds may have seen less than the transcript shows. These fields
 are additive: exports from older versions, which lack them, still import.
+If a turn's model stream failed, `stream_error` records its type, message and
+error code, so the export explains the interruption without the server log.
 
 ### 8.2 Import a Conversation
 

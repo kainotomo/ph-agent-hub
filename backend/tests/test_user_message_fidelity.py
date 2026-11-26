@@ -529,6 +529,15 @@ class TestCompactionGuard:
         assert metrics["context_compacted"] is True
         assert _metrics(tokens_in=10, user_message=MESSAGE)["context_compacted"] is False
 
+    def test_clean_turn_has_no_stream_error(self):
+        assert _metrics(tokens_in=10)["stream_error"] is None
+
+    def test_stream_error_is_recorded_verbatim(self):
+        error = {"type": "RuntimeError", "message": "connection reset by peer", "code": "internal_error"}
+        metrics = _metrics(tokens_in=10, stream_error=error)
+
+        assert metrics["stream_error"] == error
+
 
 class TestStopWrapUpRequest:
     """The early-stop conclusion must be about the user's actual request."""

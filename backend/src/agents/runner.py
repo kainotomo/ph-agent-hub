@@ -4837,6 +4837,10 @@ async def _run_agent_stream(
     # Issue #642 — how the model stream ended: ``clean``, ``abort``,
     # ``idle_timeout``, ``loop``, ``budget`` or ``turn_deadline`` (Issue #645).
     stream_end = "clean"
+    # Issue #661 follow-up — the exception behind an ``abort`` (type, message,
+    # SSE code), persisted in the turn's metrics.  The turn is concluded with
+    # the wrap-up, so without this the cause existed only in the server log.
+    stream_error: dict | None = None
     # Issue #642 — model rounds seen in this turn (one per finish_reason
     # chunk, plus the trailing partial round).
     rounds = 0
@@ -4951,12 +4955,18 @@ async def _run_agent_stream(
                         inner_event_count,
                     )
                 break
-            except Exception:
+            except Exception as exc:
                 # Stream exhausted or error — log it (Issue #579: this used to be
                 # swallowed silently) then break so post-loop code can run.
                 # Issue #642 — record the unclean end so the turn cannot be
-                # reported as a completed answer.
+                # reported as a completed answer.  Issue #661 follow-up — keep
+                # the cause, which otherwise only reached the server log.
                 stream_end = "abort"
+                stream_error = {
+                    "type": type(exc).__name__,
+                    "message": str(exc)[:500],
+                    "code": _exc_to_error_code(exc),
+                }
                 logger.exception(
                     "Agent stream raised for session %s after %d events",
                     session_id, inner_event_count,
@@ -5679,6 +5689,7 @@ async def _run_agent_stream(
                 context_compacted=bool(
                     getattr(compaction_strategy, "compacted_rounds", 0)
                 ),
+                stream_error=stream_error,
             )
 
 
@@ -6552,6 +6563,7 @@ def _compute_turn_metrics(
     history_messages: int = 0,
     contextualized: bool = False,
     context_compacted: bool = False,
+    stream_error: dict | None = None,
 ) -> dict:
     """Compute per-turn timing and context-breakdown metrics.
 
@@ -6583,6 +6595,12 @@ def _compute_turn_metrics(
         is true when MAF's in-run compaction changed the conversation during
         the turn — the case in which the model's context and the stored
         transcript can legitimately differ.
+
+    Issue #661 follow-up — ``stream_error`` records the exception that killed
+    the model stream (``{"type", "message", "code"}`` or ``None``).  Such a
+    turn is concluded through the tool-less wrap-up, so the outer producer
+    never sees an exception and the cause used to survive only in the server
+    log; an export now carries it.
 
     ``ttft_ms`` measures from the start of the turn to the first streamed
     **text** delta, not to the first model token.  It therefore includes any
@@ -6666,6 +6684,7 @@ def _compute_turn_metrics(
             **budget_meta,
             **turn_input_meta,
             "context_compacted": bool(context_compacted),
+            "stream_error": stream_error,
         }
 
     last_in = last_input_tokens if (last_input_tokens or 0) > 0 else None
@@ -6684,6 +6703,7 @@ def _compute_turn_metrics(
         **budget_meta,
         **turn_input_meta,
         "context_compacted": bool(context_compacted),
+        "stream_error": stream_error,
     }
 
 

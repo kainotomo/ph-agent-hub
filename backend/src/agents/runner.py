@@ -48,7 +48,7 @@ from .subagent_events import (
     get_payload_for_call,
     new_state as new_subagent_state,
 )
-from .turn_input import user_message_digest
+from .turn_input import TurnInputPreservingCompaction, user_message_digest
 from ..core.redis import (
     append_temp_message,
     check_stream_cancel,
@@ -3376,6 +3376,13 @@ def _build_compaction_strategy(
        If the budget is exceeded after step 1, the built-in fallback
        excludes the oldest message groups.
 
+    Issue #661 — the composed strategy is
+    :class:`~.turn_input.TurnInputPreservingCompaction`, which re-includes
+    the turn's user message after MAF's pass: the fallback keeps only the last
+    non-system group, and the model must never receive a conversation without
+    the request the turn is about.  Its ``compacted_rounds`` counter feeds the
+    ``context_compacted`` metric.
+
     Returns:
         A tuple of ``(compaction_strategy, tokenizer)``, or ``(None, None)``
         when no tools are active.
@@ -3399,7 +3406,7 @@ def _build_compaction_strategy(
             ToolResultCompactionStrategy(keep_last_tool_call_groups=3),
         ]
 
-        compaction = TokenBudgetComposedStrategy(
+        compaction = TurnInputPreservingCompaction(
             token_budget=token_budget,
             tokenizer=tokenizer,
             strategies=strategies,
@@ -3496,6 +3503,8 @@ async def _run_agent(
         function_invocation_kwargs=function_invocation_kwargs,
     )
     _turn_end_s = time.monotonic()
+    # Issue #661 — did in-run compaction rewrite the model's conversation?
+    _context_compacted = bool(getattr(compaction_strategy, "compacted_rounds", 0))
 
     # Extract token counts (best-effort)
     tokens_in, tokens_out, cache_hit = _extract_token_counts(result)
@@ -3536,6 +3545,7 @@ async def _run_agent(
             user_message=user_message,
             history_messages=history_messages,
             contextualized=contextualized,
+            context_compacted=_context_compacted,
         ))
 
     # result could be a string or a structured object
@@ -4222,6 +4232,9 @@ async def run_agent_stream(
                 budget=cfg.run_budget,
                 history_messages=_history_messages,
                 contextualized=_contextualized,
+                # Issue #661 — the wrap-up call needs the user's actual
+                # request, not the history-prefixed agent input.
+                original_user_message=user_message,
             )
         # Issue #574 — side channel for delegated sub-agent progress.  Created
         # before the stream is consumed so delegate tools can find it.
@@ -4681,6 +4694,7 @@ async def _run_agent_stream(
     budget: RunBudget | None = None,
     history_messages: int = 0,
     contextualized: bool = False,
+    original_user_message: str | None = None,
 ) -> AsyncIterator[dict]:
     """Run a MAF Agent in streaming mode, yielding SSE event dicts.
 
@@ -4697,6 +4711,12 @@ async def _run_agent_stream(
     usage is accumulated from the streamed ``usage`` contents, so the token
     budget is enforced during the run and the per-turn totals are available
     even when ``get_final_response()`` is unavailable.
+
+    Issue #661 — *user_message* is the exact string handed to ``agent.run``
+    and is what the metrics digest describes.  *history_messages* and
+    *contextualized* say how it was assembled.  *original_user_message* is the
+    user's own message (before history was prepended); the early-stop wrap-up
+    call uses it so that conclusion is about the real request.
     """
     from agent_framework import Agent
 
@@ -5536,6 +5556,9 @@ async def _run_agent_stream(
             budget=budget if budget_kind is not None else None,
             tool_calls=tool_calls,
             input_tokens=stream_usage_in,
+            # Issue #661 — the wrap-up must describe the user's request, not
+            # the first 2,000 characters of the contextualized prompt.
+            original_request=original_user_message,
         )
         # The budget footer is deterministic so the final message always
         # states the budget and the consumed amount, even when the model
@@ -5651,6 +5674,11 @@ async def _run_agent_stream(
                 user_message=user_message,
                 history_messages=history_messages,
                 contextualized=contextualized,
+                # Issue #661 — true when compaction rewrote the conversation
+                # during this turn (the model then saw less than the transcript).
+                context_compacted=bool(
+                    getattr(compaction_strategy, "compacted_rounds", 0)
+                ),
             )
 
 
@@ -6335,6 +6363,7 @@ async def _generate_stop_wrapup(
     budget: RunBudget | None = None,
     tool_calls: int = 0,
     input_tokens: int = 0,
+    original_request: str | None = None,
 ) -> str:
     """Issue #579 — model-authored conclusion when the loop stops early.
 
@@ -6342,6 +6371,13 @@ async def _generate_stop_wrapup(
     ends with a coherent summary instead of an abrupt cut.  Returns text that
     begins with a blank-line separator, or the canned ``_termination_message``
     fallback when the model call fails or returns nothing.
+
+    Issue #661 — *original_request* is the user's stored message (or the
+    file-injected variant), NOT the contextualized string: the wrap-up is a
+    separate model call, and handing it the first 2,000 characters of a
+    history-prefixed prompt meant that on a long conversation the actual
+    request — the thing the conclusion is supposed to be about — was past the
+    cut.  It is clipped head+tail instead, so both ends survive.
 
     Issue #595 — for a budget stop the reason includes the budget and the
     consumed amount, and the caller appends a deterministic footer so those
@@ -6424,7 +6460,7 @@ async def _generate_stop_wrapup(
     instruction = (
         "You were working on a long, tool-using task that has now been stopped "
         f"{reason}. Do NOT call any tools. In at most 6 sentences, {nudge}\n\n"
-        f"Original request:\n{user_message[:2000]}\n\n"
+        f"Original request:\n{_clip_for_history(original_request or user_message)}\n\n"
         f"Tool calls attempted:\n{notes[:2000]}"
     )
 
@@ -6515,6 +6551,7 @@ def _compute_turn_metrics(
     user_message: str | None = None,
     history_messages: int = 0,
     contextualized: bool = False,
+    context_compacted: bool = False,
 ) -> dict:
     """Compute per-turn timing and context-breakdown metrics.
 
@@ -6542,7 +6579,10 @@ def _compute_turn_metrics(
         *user_message*, which must be the exact string the turn passed to
         ``agent.run(...)`` (post-contextualization), never the stored row.  A
         caller that does not supply it gets the keys with null/zero values, so
-        every stored ``metrics`` part has the same shape.
+        every stored ``metrics`` part has the same shape.  ``context_compacted``
+        is true when MAF's in-run compaction changed the conversation during
+        the turn — the case in which the model's context and the stored
+        transcript can legitimately differ.
 
     ``ttft_ms`` measures from the start of the turn to the first streamed
     **text** delta, not to the first model token.  It therefore includes any
@@ -6625,6 +6665,7 @@ def _compute_turn_metrics(
             "last_input_tokens": None,
             **budget_meta,
             **turn_input_meta,
+            "context_compacted": bool(context_compacted),
         }
 
     last_in = last_input_tokens if (last_input_tokens or 0) > 0 else None
@@ -6642,6 +6683,7 @@ def _compute_turn_metrics(
         "last_input_tokens": last_in,
         **budget_meta,
         **turn_input_meta,
+        "context_compacted": bool(context_compacted),
     }
 
 

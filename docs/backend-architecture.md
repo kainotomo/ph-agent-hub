@@ -134,6 +134,52 @@ is bounded by `AGENT_WRAPUP_TIMEOUT_SECONDS` (default 60s), and the abandoned
 MAF stream is closed so an in-flight tool cannot finish an orphan side effect
 after the turn is reported.
 
+**A turn records what it handed the model (Issue #661):** a session could show
+the stored user message but not the string the model actually received, so a
+model that lost the thread and a message-fidelity failure looked identical in
+an export. Every new agent and workflow turn now persists six fields inside its
+`metrics` part: `user_message_chars`, `user_message_sha256`,
+`user_message_head`, `user_message_tail`, `history_messages` and
+`contextualized`. They are computed from the exact string passed to
+`agent.run(...)` — i.e. after contextualization, never from the stored row — so
+a turn that replayed no history hashes to the stored message and a
+contextualized turn deliberately does not. Head *and* tail are kept (200
+characters each): the observed loss was at the end of the message, and a
+head-only preview would have looked healthy three times. `history_messages`
+counts the stored messages that actually rendered into the replayed
+`[Previous conversation]` block (the count and the renderer share one filter)
+and `contextualized` says whether that block was prepended at all. The values
+are bounded (≤ ~450 characters per turn) so a 176 KB file-injected message
+cannot enlarge the row; they ride inside the existing JSON content, so exports
+round-trip them and an export without them still imports. A workflow turn hashes
+the workflow's input message (`null` on a checkpoint resume). The digest is not
+re-taken for the one-shot reasoning-only retry; `reasoning_only_retried` flags
+that case.
+
+The same issue closed the two ways the hub could hand the model a conversation
+without the user's request while the transcript kept it. First, MAF's in-run
+compaction budget fallback keeps only the last non-system message group, so on
+a tool-heavy turn the request is the first thing excluded; the composed
+strategy is now `TurnInputPreservingCompaction`, which re-includes the request
+group after MAF's pass (it is a few hundred characters and costs almost
+nothing) and counts the rounds in which compaction changed the conversation at
+all. That count is the turn's seventh, additive metric key — `context_compacted`
+— so an export can tell "the model lost the thread" from "the model never had
+the thread". The trigger became *reachable* when Issue #652 clamped the
+mid-run budget to `COMPACTION_TOKEN_CEILING` (150K): a 1M-window model keeps a
+700K budget in 3.14.x, where a 300K-token turn was never compacted, and gets
+150K afterwards. Second, the early-stop wrap-up call built
+`Original request:` from the first 2,000 characters of the *contextualized*
+prompt, so on a long conversation the real request was past the cut; it now
+receives the user's stored message (clipped head+tail by
+`HISTORY_TOOL_RESULT_MAX_CHARS`) and is therefore about the actual request.
+
+Note that on the streaming path the user message is persisted before the
+context is built, so it is itself part of the replayed block and a first
+streaming turn reports `contextualized: true` with `history_messages >= 1`.
+The fields describe what actually reached the model, which is the point;
+changing that replay is a separate issue.
+
 **Auto Tool Selection (Issues #287, #439):** Instead of requiring users to
 manually activate tools per session, the agent can automatically select
 relevant tools from the available pool. The LLM receives tool definitions

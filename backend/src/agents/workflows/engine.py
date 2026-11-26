@@ -25,7 +25,6 @@ from agent_framework import (
     AgentExecutor,
     CharacterEstimatorTokenizer,
     ToolResultCompactionStrategy,
-    TokenBudgetComposedStrategy,
     Workflow,
     WorkflowBuilder,
     WorkflowRunState,
@@ -35,7 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...core.exceptions import NotFoundError, ValidationError
 from ...db.orm.models import Model
 from ...models.cost import compute_run_cost_from_prices, prices_from_model
-from ..turn_input import user_message_digest
+from ..turn_input import TurnInputPreservingCompaction, user_message_digest
 from .conditions import condition_names, resolve_condition
 from .definition import DEFAULT_BRANCH, WorkflowDefinition
 from .executors import StepAgent
@@ -256,7 +255,9 @@ def _build_agent_for_step(
     # Determine max tokens for compaction
     max_tokens = getattr(model, "max_tokens", None)
     if max_tokens and max_tokens > 0:
-        compaction = TokenBudgetComposedStrategy(
+        # Issue #661 — never let the budget fallback drop the step's user
+        # message; the guard also counts the rounds compaction changed.
+        compaction = TurnInputPreservingCompaction(
             strategies=[ToolResultCompactionStrategy()],
             token_budget=max_tokens,
             tokenizer=CharacterEstimatorTokenizer(),

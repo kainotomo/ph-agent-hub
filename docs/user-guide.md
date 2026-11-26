@@ -426,6 +426,16 @@ The file will download automatically. The filename is derived from the session t
 build that produced the export, which is what support needs to triage it;
 older exports without those fields still import normally.
 
+Each assistant message's `content` array ends with a `metrics` part recording
+that turn's telemetry. Since 3.15.3 it also records **what the model was given**
+for the turn: `user_message_chars`, `user_message_sha256`, `user_message_head`
+and `user_message_tail` (the first and last 200 characters of the exact string
+handed to the model), plus `history_messages` (how many earlier messages were
+replayed) and `contextualized` (whether history was replayed at all). If
+`context_compacted` is `true`, the model's in-run context was reduced during the
+turn, so later rounds may have seen less than the transcript shows. These fields
+are additive: exports from older versions, which lack them, still import.
+
 ### 8.2 Import a Conversation
 
 1. In the sidebar header, click the **Import** (↑) button

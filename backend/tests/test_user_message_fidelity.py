@@ -430,3 +430,165 @@ class TestExportRoundTrip:
 
         assert title == "Old"
         assert len(messages) == 1
+
+
+# =============================================================================
+# Issue #661 — the hub must never hand the model a conversation without the
+# user's request.  MAF's budget fallback keeps only the last non-system group,
+# so a tool-heavy turn can lose the request in-run while the transcript keeps
+# it; the wrap-up call had the same problem via a 2,000-character excerpt of
+# the contextualized prompt.
+# =============================================================================
+
+
+def _tool_heavy_conversation(
+    n_rounds: int = 10,
+    result_chars: int = 40_000,
+    system_chars: int = 40_000,
+    reasoning_chars: int = 120_000,
+):
+    """A turn shaped like the one in the issue: many big tool results."""
+    from agent_framework import Content, Message
+
+    messages = [Message("system", ["s" * system_chars]), Message("user", [MESSAGE])]
+    for i in range(n_rounds):
+        messages.append(Message("assistant", [
+            Content(type="text_reasoning", text="r" * reasoning_chars),
+            Content(
+                type="function_call",
+                name="PowerShell",
+                call_id=f"c{i}",
+                arguments={"command": "Get-Content x -Raw"},
+            ),
+        ]))
+        messages.append(Message("tool", [
+            Content(
+                type="function_result",
+                call_id=f"c{i}",
+                name="PowerShell",
+                result="y" * result_chars,
+            )
+        ]))
+    return messages
+
+
+class TestCompactionGuard:
+    @pytest.mark.asyncio
+    async def test_plain_budget_fallback_can_drop_the_user_message(self):
+        """Documents the MAF behaviour the guard defends against."""
+        from agent_framework import (
+            CharacterEstimatorTokenizer,
+            ToolResultCompactionStrategy,
+            TokenBudgetComposedStrategy,
+            apply_compaction,
+        )
+
+        tokenizer = CharacterEstimatorTokenizer()
+        plain = TokenBudgetComposedStrategy(
+            token_budget=89_600,  # 70 % of a 128K window
+            tokenizer=tokenizer,
+            strategies=[ToolResultCompactionStrategy(keep_last_tool_call_groups=3)],
+            early_stop=True,
+        )
+        projected = await apply_compaction(
+            _tool_heavy_conversation(), strategy=plain, tokenizer=tokenizer,
+        )
+
+        assert not any((m.text or "") == MESSAGE for m in projected)
+
+    @pytest.mark.asyncio
+    async def test_hub_strategy_keeps_the_user_message_and_says_it_compacted(self):
+        from agent_framework import apply_compaction, CharacterEstimatorTokenizer
+
+        from src.agents.runner import _build_compaction_strategy
+        from src.agents.turn_input import TurnInputPreservingCompaction
+
+        strategy, tokenizer = _build_compaction_strategy(
+            _mock_model(), MagicMock(), [MagicMock()],
+        )
+        assert isinstance(strategy, TurnInputPreservingCompaction)
+
+        projected = await apply_compaction(
+            _tool_heavy_conversation(), strategy=strategy, tokenizer=tokenizer,
+        )
+
+        # The turn's request survives, and the turn records that it compacted.
+        assert any((m.text or "") == MESSAGE for m in projected)
+        assert "US0605051046" in "".join(m.text or "" for m in projected)
+        assert strategy.compacted_rounds >= 1
+
+    @pytest.mark.asyncio
+    async def test_no_tools_means_no_compaction_strategy(self):
+        from src.agents.runner import _build_compaction_strategy
+
+        assert _build_compaction_strategy(_mock_model(), MagicMock(), []) == (None, None)
+
+    def test_metrics_carry_context_compacted(self):
+        metrics = _metrics(tokens_in=10, user_message=MESSAGE, context_compacted=True)
+
+        assert metrics["context_compacted"] is True
+        assert _metrics(tokens_in=10, user_message=MESSAGE)["context_compacted"] is False
+
+
+class TestStopWrapUpRequest:
+    """The early-stop conclusion must be about the user's actual request."""
+
+    def _client(self, text: str = "conclusion"):
+        client = MagicMock()
+        response = MagicMock()
+        response.messages = [MagicMock(text=text)]
+        client.get_response = AsyncMock(return_value=response)
+        return client
+
+    def _instruction(self, client) -> str:
+        payload = client.get_response.call_args.kwargs
+        return payload["messages"][1].text
+
+    @pytest.mark.asyncio
+    async def test_uses_the_original_request_not_a_contextualized_prefix(self):
+        from src.agents.runner import _generate_stop_wrapup
+
+        client = self._client()
+        contextualized = (
+            "[Previous conversation]\n\n"
+            "User: earlier question\n\n"
+            "Assistant: " + ("prior answer " * 500) + "\n\n---\n\n"
+            f"Current message: {MESSAGE}"
+        )
+        await _generate_stop_wrapup(
+            model_client=client,
+            system_prompt="sys",
+            user_message=contextualized,
+            turn_notes=["Get-Content x -Raw"],
+            stop_reason="no_answer",
+            steps=10,
+            tool_calls=10,
+            original_request=MESSAGE,
+        )
+
+        instruction = self._instruction(client)
+        assert MESSAGE in instruction
+        assert "US0605051046" in instruction
+        assert "[Previous conversation]" not in instruction
+
+    @pytest.mark.asyncio
+    async def test_a_huge_request_keeps_both_ends(self):
+        from src.agents.runner import _generate_stop_wrapup
+
+        client = self._client()
+        huge = "BEGINNING ISO 9001\n" + ("x" * 90_000) + "\nENDING ISIN: US0605051046"
+        await _generate_stop_wrapup(
+            model_client=client,
+            system_prompt="sys",
+            user_message=huge,
+            turn_notes=[],
+            stop_reason="no_answer",
+            steps=1,
+            original_request=huge,
+        )
+
+        instruction = self._instruction(client)
+        # Head and tail both survive; the middle is marked as dropped.
+        assert "BEGINNING ISO 9001" in instruction
+        assert "ENDING ISIN: US0605051046" in instruction
+        assert "truncated" in instruction

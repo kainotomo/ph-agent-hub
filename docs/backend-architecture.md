@@ -87,6 +87,21 @@ The DSML sanitiser trims a delta only when it actually removed leaked markup
 fusing the reasoning into one run-on string). The final answer text is still
 trimmed when it is stored.
 
+**Every tool-call round must echo `reasoning_content` (follow-up to Issue
+#661):** DeepSeek thinking mode requires the field on every assistant message
+that carries `tool_calls`, and rejects the *next* request with
+`400 - The reasoning_content in the thinking mode must be passed back to the
+API` when it is missing. The client reconstructed it from the streamed
+`text_reasoning` contents, but only when there was reasoning to reconstruct — a
+thinking round that emitted a tool call with no reasoning at all went back
+without the key and aborted the turn after the tool had already run (observed
+in production on a seven-round session: the eighth request failed, the turn was
+persisted through the #642 interrupted wrap-up, and `stream_error` in the
+metrics named the 400). The client now sends `reasoning_content: ""` for such a
+tool-call message when thinking is on, and nothing when it is off (DeepSeek
+rejects the field in that mode). Plain assistant messages are untouched: only
+tool-call messages carry the requirement.
+
 **A turn may never end without answer text (Issue #642):** the #639 retry only
 covered a round with reasoning, no text and *no* tool activity on a cleanly
 exhausted stream, so two shapes of empty turn still escaped it. A round can end

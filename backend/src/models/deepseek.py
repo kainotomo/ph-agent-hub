@@ -243,6 +243,25 @@ class DeepSeekThinkingClient(OpenAIChatCompletionClient):
                         msg["reasoning_content"] = value
                 else:
                     msg["reasoning_content"] = value
+
+        # ---- Tool-call rounds with no reasoning must still echo the field ----
+        # Issue #661 follow-up — DeepSeek thinking mode requires
+        # ``reasoning_content`` on every assistant message that carries
+        # ``tool_calls``.  A thinking model does sometimes emit a tool call
+        # with no reasoning at all, and the key was then omitted, so the *next*
+        # request was rejected with HTTP 400 ("The `reasoning_content` in the
+        # thinking mode must be passed back to the API") — aborting the turn
+        # mid-run after the tool had already executed.  An empty string is the
+        # accepted form when there is nothing to echo; it is only added when
+        # thinking is on (DeepSeek rejects the field when it is off).
+        if self._thinking_enabled:
+            for msg in prepared:
+                if (
+                    msg.get("role") == "assistant"
+                    and msg.get("tool_calls")
+                    and "reasoning_content" not in msg
+                ):
+                    msg["reasoning_content"] = ""
         return prepared
 
 

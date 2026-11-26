@@ -204,6 +204,12 @@ class DeepSeekThinkingClient(OpenAIChatCompletionClient):
         3. ``reasoning_details`` set by the base class from Content
            ``protected_data`` (fallback — subject to corruption but kept
            for compatibility).
+
+        Issue #664 — after reconstruction, every prepared assistant message
+        carries ``reasoning_content`` (an empty string when the message never
+        had one, e.g. a compaction summary) while thinking is enabled.  The
+        provider requires the field back on all assistant messages of a
+        tools-carrying request and 400s the next request when it is missing.
         """
         # ---- Reconstruct reasoning text from Content.text ----
         # The .text field survives MAF processing correctly; .protected_data
@@ -244,21 +250,28 @@ class DeepSeekThinkingClient(OpenAIChatCompletionClient):
                 else:
                     msg["reasoning_content"] = value
 
-        # ---- Tool-call rounds with no reasoning must still echo the field ----
-        # Issue #661 follow-up — DeepSeek thinking mode requires
-        # ``reasoning_content`` on every assistant message that carries
-        # ``tool_calls``.  A thinking model does sometimes emit a tool call
-        # with no reasoning at all, and the key was then omitted, so the *next*
-        # request was rejected with HTTP 400 ("The `reasoning_content` in the
-        # thinking mode must be passed back to the API") — aborting the turn
-        # mid-run after the tool had already executed.  An empty string is the
-        # accepted form when there is nothing to echo; it is only added when
-        # thinking is on (DeepSeek rejects the field when it is off).
+        # ---- Every assistant message must echo the field ----
+        # Issue #664 — DeepSeek thinking mode requires ``reasoning_content`` to
+        # be passed back on *every* assistant message of a tools-carrying
+        # request, "even for turns where the model did not perform a tool
+        # call" (thinking-mode guide, Tool Calls).  Two shapes of message reach
+        # this point with no reasoning to reconstruct:
+        #
+        #   * a thinking round that emitted a tool call without reasoning, and
+        #   * a **synthetic** assistant message the in-run compaction inserts
+        #     (MAF replaces older tool-call rounds with ``[Tool results: …]``
+        #     summaries; those never had reasoning).
+        #
+        # Omitting the key made the *next* request fail with HTTP 400 — "The
+        # `reasoning_content` in the thinking mode must be passed back to the
+        # API" — aborting the turn after the tools had already run.  The empty
+        # string is the accepted echo when there is nothing to send.  It is
+        # only added while thinking is on: with thinking disabled DeepSeek
+        # ignores/rejects the field.
         if self._thinking_enabled:
             for msg in prepared:
                 if (
                     msg.get("role") == "assistant"
-                    and msg.get("tool_calls")
                     and "reasoning_content" not in msg
                 ):
                     msg["reasoning_content"] = ""

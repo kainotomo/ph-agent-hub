@@ -30,6 +30,11 @@ FRONTEND_IMAGE="${REGISTRY}/ph-agent-hub-frontend"
 APP_VERSION="$(grep '"version"' "${PROJECT_DIR}/frontend/package.json" | head -1 | sed 's/.*"version": *"\(.*\)".*/\1/')"
 echo "Detected app version: ${APP_VERSION}"
 
+# Issue #659 — stamp the commit into the backend image so exports can name
+# the build.  Empty when building outside a git checkout.
+GIT_COMMIT="$(git -C "${PROJECT_DIR}" rev-parse --short HEAD 2>/dev/null || true)"
+echo "Detected git commit: ${GIT_COMMIT:-unknown}"
+
 # ── Defaults (production-first) ────────────────────────────────────────────
 TAG="${APP_VERSION:-latest}"   # Auto-tag from package.json, fallback: latest
 PUSH=true                       # Push by default; --no-push to skip
@@ -65,6 +70,7 @@ echo "========================================"
 echo " Building backend: ${BACKEND_IMAGE}:${TAG}"
 echo "========================================"
 docker build ${NO_CACHE} \
+  --build-arg "GIT_COMMIT=${GIT_COMMIT}" \
   -t "${BACKEND_IMAGE}:${TAG}" \
   -t "${BACKEND_IMAGE}:latest" \
   -f "${PROJECT_DIR}/backend/Dockerfile" \

@@ -6,6 +6,7 @@
 # =============================================================================
 
 import json
+import re
 import uuid
 from unittest.mock import patch
 
@@ -14,6 +15,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.build_info import get_app_version
 from src.core.jwt import create_access_token
 from src.db.orm.sessions import Session
 from src.main import app
@@ -3088,6 +3090,13 @@ class TestExportSession:
         data = resp.json()
         assert data["version"] == 1
         assert len(data["messages"]) == 1
+        # Issue #659 — the export names the build, not just the schema.
+        assert data["app_version"] == get_app_version()
+        assert re.fullmatch(r"\d+\.\d+\.\d+", data["app_version"])
+        assert "commit" in data
+        assert data["commit"] is None or re.fullmatch(
+            r"[0-9a-f]{7,12}", data["commit"]
+        )
 
     async def test_export_txt(
         self, async_client, auth_headers, test_user, test_session, test_model, db_session

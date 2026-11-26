@@ -12,6 +12,7 @@
 # =============================================================================
 
 import json
+import re
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -23,6 +24,7 @@ from src.agents.runner import (
     _compute_turn_metrics,
     _format_tool_output_for_storage,
     _normalise_tool_result,
+    TRUNCATION_MARKER_MAX_CHARS,
     _truncate_tool_output,
     _unwrap_single_value_result,
     _wrap_mcp_tool_output,
@@ -200,7 +202,7 @@ class TestMCPOutputCap:
         result = await mcp_tool._functions[0].func()
         assert isinstance(result, str)
         assert "characters truncated" in result
-        assert len(result) <= _compute_tool_output_cap(1_000_000) + 200
+        assert len(result) <= _compute_tool_output_cap(1_000_000) + TRUNCATION_MARKER_MAX_CHARS
 
     @pytest.mark.asyncio
     async def test_mcp_content_list_is_truncated(self):
@@ -216,7 +218,7 @@ class TestMCPOutputCap:
         assert isinstance(result, list)
         text = result[0].text
         assert "characters truncated" in text
-        assert len(text) <= _compute_tool_output_cap(1_000_000) + 200
+        assert len(text) <= _compute_tool_output_cap(1_000_000) + TRUNCATION_MARKER_MAX_CHARS
 
     def test_wrapping_is_idempotent(self):
         def remote_tool() -> str:
@@ -424,7 +426,7 @@ class TestTextEnvelope:
         text = result[0].text
         assert '"result"' not in text
         assert "characters truncated" in text
-        assert len(text) <= _compute_tool_output_cap(1_000_000) + 200
+        assert len(text) <= _compute_tool_output_cap(1_000_000) + TRUNCATION_MARKER_MAX_CHARS
 
     def test_legacy_stored_envelope_renders_as_text(self):
         """Old messages (before the boundary unwrap) display cleanly too."""
@@ -434,3 +436,120 @@ class TestTextEnvelope:
         rendered = _render_tool_output(raw)
         assert rendered == "Response: row1\r\nrow2\r\n\nStatus Code: 0"
         assert '"result"' not in rendered
+
+
+# ---------------------------------------------------------------------------
+# Issue #657 — the live-context marker names exactly where the cut is
+# ---------------------------------------------------------------------------
+
+_MARKER_RE = re.compile(r"\n\n\[\.\.\. (?P<body>.*?) \.\.\.\]\n\n", re.S)
+
+
+def _parse_truncation(result: str) -> dict:
+    """Parse the #657 marker back into the offsets it advertises."""
+    match = _MARKER_RE.search(result)
+    assert match is not None, result[:300]
+    body = match.group("body")
+    kept = re.search(r"kept 1\u2013([\d,]+) and ([\d,]+)\u2013([\d,]+)", body)
+    cont = re.search(r"continue at char ([\d,]+)", body)
+    resume = re.search(r"resume at char ([\d,]+)", body)
+    assert kept and cont and resume, body
+    to_int = lambda value: int(value.replace(",", ""))  # noqa: E731
+    return {
+        "marker": match.group(0),
+        "body": body,
+        "head_end": to_int(kept.group(1)),
+        "tail_start": to_int(kept.group(2)) - 1,
+        "total": to_int(kept.group(3)),
+        "continue_at": to_int(cont.group(1)),
+        "resume_at": to_int(resume.group(1)),
+        "kept_tail_chars": to_int(kept.group(3)) - to_int(kept.group(2)) + 1,
+    }
+
+
+def _numbered_text(count: int = 2063, width: int = 80) -> str:
+    return "\n".join(f"{i:04d} " + "x" * width for i in range(1, count + 1))
+
+
+class TestTruncationContinuation:
+    """Issue #657 — exact coordinates in the model-context truncation marker."""
+
+    def test_offsets_reconstruct_the_original(self):
+        text = _numbered_text()
+        cap = 40_000
+        result = _truncate_tool_output(text, max_chars=cap)
+        info = _parse_truncation(result)
+
+        assert info["total"] == len(text)
+        assert info["continue_at"] == info["head_end"] + 1
+        assert info["resume_at"] == info["tail_start"] + 1
+        # Both kept ranges are exactly what the marker advertises.
+        clean = result.replace(info["marker"], "")
+        assert clean == text[: info["head_end"]] + text[info["tail_start"] :]
+        assert clean == text[: info["continue_at"] - 1] + text[info["resume_at"] - 1 :]
+        # Nothing was lost besides the dropped range.
+        assert info["tail_start"] - info["head_end"] > 0
+        assert (
+            len(result)
+            <= cap + TRUNCATION_MARKER_MAX_CHARS
+        )
+
+    def test_line_oriented_cuts_land_on_line_boundaries(self):
+        text = _numbered_text()
+        result = _truncate_tool_output(text, max_chars=40_000)
+        info = _parse_truncation(result)
+
+        assert text[: info["head_end"]].endswith("\n")
+        assert text[: info["tail_start"]].endswith("\n")
+        assert "(line " in info["body"]
+        assert f"{text.count(chr(10)) + 1:,} lines total" in info["body"]
+
+    def test_line_numbers_are_correct_for_crlf(self):
+        lines = [f"row {i}" for i in range(1, 401)]
+        text = "\r\n".join(lines) + "\r\n"
+        info = _parse_truncation(_truncate_tool_output(text, max_chars=1000))
+
+        head_line = text.count("\n", 0, info["head_end"]) + 1
+        tail_line = text.count("\n", 0, info["tail_start"]) + 1
+        found = [int(n.replace(",", "")) for n in re.findall(r"\(line ([\d,]+)\)", info["body"])]
+        assert found == [head_line, tail_line]
+        assert f"{len(lines):,} lines total" in info["body"]
+
+    def test_line_numbers_are_correct_without_trailing_newline(self):
+        lines = [f"line {i}" for i in range(1, 301)]
+        text = "\n".join(lines)  # no trailing newline
+        info = _parse_truncation(_truncate_tool_output(text, max_chars=1000))
+
+        head_line = text.count("\n", 0, info["head_end"]) + 1
+        tail_line = text.count("\n", 0, info["tail_start"]) + 1
+        found = [int(n.replace(",", "")) for n in re.findall(r"\(line ([\d,]+)\)", info["body"])]
+        assert found == [head_line, tail_line]
+        assert f"{len(lines):,} lines total" in info["body"]
+
+    def test_plain_string_marker_is_bounded(self):
+        result = _truncate_tool_output("z" * 126_684, max_chars=40_000)
+        marker = _parse_truncation(result)["marker"]
+        assert len(marker) <= TRUNCATION_MARKER_MAX_CHARS
+        assert "characters truncated" in marker
+
+    def test_dict_value_gets_the_same_marker(self):
+        text = _numbered_text(count=400)
+        result = _truncate_tool_output({"output": text}, max_chars=2000)
+        info = _parse_truncation(result["output"])
+        clean = result["output"].replace(info["marker"], "")
+        assert clean == text[: info["head_end"]] + text[info["tail_start"] :]
+
+    @pytest.mark.asyncio
+    async def test_mcp_content_list_gets_the_same_marker(self):
+        text = _numbered_text(count=800)
+
+        async def remote_tool() -> list:
+            return [Content.from_text(text)]
+
+        mcp_tool = _fake_mcp_tool([_tool("PowerShell", remote_tool)])
+        _wrap_mcp_tool_output(mcp_tool, context_length=1_000_000)
+        result = await mcp_tool._functions[0].func()
+
+        info = _parse_truncation(result[0].text)
+        clean = result[0].text.replace(info["marker"], "")
+        assert clean == text[: info["head_end"]] + text[info["tail_start"] :]

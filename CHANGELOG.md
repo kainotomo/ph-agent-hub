@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.15.6] — 2026-11-26
+
+### Fixed
+- **A compacted request no longer breaks the DeepSeek reasoning round-trip
+  (#664)** — with `tools` present, DeepSeek thinking mode requires
+  `reasoning_content` back on *every* assistant message in all subsequent
+  requests, "even for turns where the model did not perform a tool call". The
+  3.15.5 fix echoed it only on tool-call messages, which was not enough: in-run
+  compaction replaces older tool-call rounds with synthetic `[Tool results: …]`
+  assistant messages that never had reasoning, so any turn that compacted sent
+  one assistant message without the field and the *next* request failed with
+  `400 - The reasoning_content in the thinking mode must be passed back to the
+  API`, aborting the turn after the tools had run (three consecutive
+  productions sessions: `stream_end=abort`, `context_compacted=true`). The
+  client now sends `reasoning_content: ""` on every prepared assistant message
+  that has none while thinking is on — compaction summaries included — and
+  nothing when thinking is off. A test runs real MAF compaction and asserts
+  every assistant message in the projected request carries the field. ([#664])
+
 ## [3.15.5] — 2026-11-26
 
 ### Fixed

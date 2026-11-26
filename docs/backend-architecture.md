@@ -87,20 +87,35 @@ The DSML sanitiser trims a delta only when it actually removed leaked markup
 fusing the reasoning into one run-on string). The final answer text is still
 trimmed when it is stored.
 
-**Every tool-call round must echo `reasoning_content` (follow-up to Issue
-#661):** DeepSeek thinking mode requires the field on every assistant message
-that carries `tool_calls`, and rejects the *next* request with
-`400 - The reasoning_content in the thinking mode must be passed back to the
-API` when it is missing. The client reconstructed it from the streamed
-`text_reasoning` contents, but only when there was reasoning to reconstruct — a
-thinking round that emitted a tool call with no reasoning at all went back
-without the key and aborted the turn after the tool had already run (observed
-in production on a seven-round session: the eighth request failed, the turn was
-persisted through the #642 interrupted wrap-up, and `stream_error` in the
-metrics named the 400). The client now sends `reasoning_content: ""` for such a
-tool-call message when thinking is on, and nothing when it is off (DeepSeek
-rejects the field in that mode). Plain assistant messages are untouched: only
-tool-call messages carry the requirement.
+**Every assistant message must echo `reasoning_content` (Issues #661, #664):**
+with `tools` present, DeepSeek thinking mode requires `reasoning_content` to be
+passed back in *all* subsequent requests, for every assistant message — "even
+for turns where the model did not perform a tool call" (thinking-mode guide,
+Tool Calls). The client reconstructed it from the streamed `text_reasoning`
+contents, but only when there was reasoning to reconstruct, so the *next*
+request was rejected with `400 - The reasoning_content in the thinking mode
+must be passed back to the API` and the turn aborted through the #642
+interrupted wrap-up after the tools had already run. Two shapes of message
+reached the API without the key:
+
+- a thinking round that emitted a tool call with **no reasoning** (the
+  original #664 report — 3.15.3/3.15.4 sessions died on the request after such a
+  round), and
+- a **synthetic assistant message** inserted by in-run compaction: MAF replaces
+  older tool-call rounds with `[Tool results: …]` summaries that never had
+  reasoning. This is why #664's first fix — limited to tool-call messages — did
+  not stop the 400 on 3.15.5: every real round in that session had reasoning,
+  and the only reasoning-free assistant messages were the compaction summaries.
+  It also explains the version boundary: compaction only became reachable for
+  large-window models when Issue #652 clamped the budget to
+  `COMPACTION_TOKEN_CEILING`, so 3.14.x sessions never produced those messages.
+
+The client now sends `reasoning_content: ""` on every prepared assistant
+message that has none while thinking is on (nothing when thinking is off, where
+DeepSeek rejects the field), so a compacted request is accepted and a
+tool-call round with no reasoning no longer poisons the next request. A test
+runs real MAF compaction and asserts every assistant message in the projected
+request carries the field.
 
 **A turn may never end without answer text (Issue #642):** the #639 retry only
 covered a round with reasoning, no text and *no* tool activity on a cleanly

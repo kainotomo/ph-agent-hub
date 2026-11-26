@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.15.1] — 2026-11-26
+
+### Fixed
+- **A clean model stream is no longer reported as interrupted (regression
+  from #645)** — on Python 3.11, wrapping MAF's `__anext__` in
+  `asyncio.wait_for` ran each call in a new Task with a copied context.
+  Agent Framework's observability finalizer stores a ContextVar token across
+  `__anext__` calls and resets it in a later one, so a clean
+  `StopAsyncIteration` turned into `ValueError: ... was created in a
+  different Context`. The hub caught that as `stream_end="abort"`, appended a
+  bogus "response was interrupted" wrap-up (or persisted a turn whose metrics
+  said abort), even when the model had finished with `finish_reason="stop"`.
+  The watchdog now uses `asyncio.timeout()` (3.11+), which enforces the same
+  deadline without leaving the current context. Observed in production on
+  2026-11-25/26 in 7 runs; the fast-fail happened after a normal answer or
+  between tool rounds. ([#645])
+- **MCP results that arrive as a JSON string envelope are unwrapped too
+  (follow-up to #654)** — the first #654 fix unwrapped dicts at the
+  FunctionTool boundary, but an MCP tool returns `list[Content]` whose text is
+  already a string. The production PowerShell server's
+  `{"result": "Response: ...\r\n...Status Code: 0"}` therefore still reached
+  the model and the transcript with the wrapper, the escaped `\r\n`
+  sequences and the status line. Text envelopes with a `result`/`output` key
+  are now unwrapped before the cap is applied, and legacy stored envelopes
+  are rendered without the wrapper in the chat UI and exports. Structured
+  single-key payloads such as `{"ticker": "BAC"}` are left alone. ([#654])
+
 ## [3.15.0] — 2026-11-26
 
 ### Changed

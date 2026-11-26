@@ -361,3 +361,76 @@ class TestContextPressure:
         assert metrics["avg_input_tokens_per_step"] is None
         assert metrics["context_growth"] is None
         assert metrics["context_pressure"] is False
+
+
+# ---------------------------------------------------------------------------
+# Issue #654 follow-up — MCP text envelopes are JSON strings, not dicts
+# ---------------------------------------------------------------------------
+
+
+class TestTextEnvelope:
+    def test_json_result_envelope_is_unwrapped(self):
+        from src.agents.runner import _unwrap_json_text_envelope
+
+        raw = json.dumps({"result": "row1\r\nrow2"})
+        assert _unwrap_json_text_envelope(raw) == "row1\r\nrow2"
+
+    def test_structured_single_key_json_is_preserved(self):
+        from src.agents.runner import _unwrap_json_text_envelope
+
+        raw = json.dumps({"ticker": "BAC"})
+        assert _unwrap_json_text_envelope(raw) is raw
+
+    def test_invalid_json_is_unchanged(self):
+        from src.agents.runner import _unwrap_json_text_envelope
+
+        raw = '{"result": "cut mid'
+        assert _unwrap_json_text_envelope(raw) is raw
+
+    def test_plain_text_is_unchanged(self):
+        from src.agents.runner import _unwrap_json_text_envelope
+
+        assert _unwrap_json_text_envelope("just text") == "just text"
+
+    @pytest.mark.asyncio
+    async def test_mcp_powershell_envelope_reaches_model_as_text(self):
+        """The production PowerShell MCP result shape."""
+        payload = json.dumps({"result": "Response: row1\r\nrow2\r\n\nStatus Code: 0"})
+
+        async def remote_tool() -> list:
+            return [Content.from_text(payload)]
+
+        mcp_tool = _fake_mcp_tool([_tool("PowerShell", remote_tool)])
+        _wrap_mcp_tool_output(mcp_tool, context_length=1_000_000)
+
+        result = await mcp_tool._functions[0].func()
+        text = result[0].text
+        assert text == "Response: row1\r\nrow2\r\n\nStatus Code: 0"
+        assert '"result"' not in text
+        assert "\\r\\n" not in text
+
+    @pytest.mark.asyncio
+    async def test_large_mcp_envelope_is_unwrapped_then_capped(self):
+        big = "x" * 126_684
+        payload = json.dumps({"result": big})
+
+        async def remote_tool() -> list:
+            return [Content.from_text(payload)]
+
+        mcp_tool = _fake_mcp_tool([_tool("PowerShell", remote_tool)])
+        _wrap_mcp_tool_output(mcp_tool, context_length=1_000_000)
+
+        result = await mcp_tool._functions[0].func()
+        text = result[0].text
+        assert '"result"' not in text
+        assert "characters truncated" in text
+        assert len(text) <= _compute_tool_output_cap(1_000_000) + 200
+
+    def test_legacy_stored_envelope_renders_as_text(self):
+        """Old messages (before the boundary unwrap) display cleanly too."""
+        from src.api.chat import _render_tool_output
+
+        raw = json.dumps({"result": "Response: row1\r\nrow2\r\n\nStatus Code: 0"})
+        rendered = _render_tool_output(raw)
+        assert rendered == "Response: row1\r\nrow2\r\n\nStatus Code: 0"
+        assert '"result"' not in rendered

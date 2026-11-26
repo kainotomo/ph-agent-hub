@@ -766,10 +766,27 @@ def _render_tool_output(output: Any) -> str | None:
         return None
     if not isinstance(output, str):
         return json.dumps(output, ensure_ascii=False, default=str)
+
+    # Issue #654 — a custom/MCP tool envelope was stored verbatim before the
+    # boundary unwrap existed: ``{"result": "Response: ...\\r\\n..."}``.  Show
+    # the payload the tool returned, not the wrapper and its escapes.
+    parsed: Any = None
+    stripped = output.lstrip()
+    if stripped.startswith("{"):
+        try:
+            parsed = json.loads(output)
+        except (TypeError, ValueError):
+            parsed = None
+        if isinstance(parsed, dict) and len(parsed) == 1:
+            key, value = next(iter(parsed.items()))
+            if key in ("result", "output") and isinstance(value, str):
+                return value
+
     if "\n" in output or "\r" in output or not _UNICODE_ESCAPE_RE.search(output):
         return output
     try:
-        parsed = json.loads(output)
+        if parsed is None:
+            parsed = json.loads(output)
     except (TypeError, ValueError):
         return output
     if isinstance(parsed, (dict, list)):

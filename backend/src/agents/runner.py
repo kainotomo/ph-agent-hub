@@ -3034,6 +3034,13 @@ async def _build_erpnext_callables(
 # (Issue #654).
 _TOOL_RESULT_ERROR_KEYS = frozenset({"error", "exc", "exc_type", "exception"})
 
+# Envelope keys recognised inside a JSON-encoded string.  MCP tools return
+# ``list[Content]`` whose text is often ``{"result": "..."}``; the observed
+# PowerShell server does exactly that.  Only these keys are unwrapped from
+# text so a tool that legitimately returns ``{"ticker": "BAC"}`` keeps its
+# structure (Issue #654 follow-up).
+_TOOL_RESULT_TEXT_ENVELOPE_KEYS = frozenset({"result", "output"})
+
 
 def _unwrap_single_value_result(result: Any) -> Any:
     """Unwrap a single-string-key tool-result envelope (Issue #654).
@@ -3054,15 +3061,44 @@ def _unwrap_single_value_result(result: Any) -> Any:
     return result
 
 
+def _unwrap_json_text_envelope(text: str) -> str:
+    """Unwrap a JSON-encoded single-key envelope string (Issue #654 follow-up).
+
+    MCP ``Content.text`` is a string, not a dict, so the dict-level unwrap
+    above never saw the PowerShell server's ``{"result": "Response: ..."}``:
+    the model and the transcript kept the wrapper, the escaped ``\\r\\n``
+    sequences and the status line.  Only the known envelope keys are
+    unwrapped, and only when the string is a complete JSON object, so
+    structured payloads (``{"ticker": "BAC"}``) are left alone.
+    """
+    stripped = text.lstrip()
+    if not stripped.startswith("{"):
+        return text
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError):
+        return text
+    if isinstance(parsed, dict) and len(parsed) == 1:
+        key, value = next(iter(parsed.items()))
+        if (
+            isinstance(key, str)
+            and key in _TOOL_RESULT_TEXT_ENVELOPE_KEYS
+            and isinstance(value, str)
+        ):
+            return value
+    return text
+
+
 def _normalise_tool_result(result: Any, max_chars: int) -> Any:
     """Apply the tool-result boundary rules in one place (Issues #651/#654).
 
     Order matters: unwrap the envelope first so the cap applies to the text
     the model will actually read, not to its escaped JSON form.
     """
-    return _truncate_tool_output(
-        _unwrap_single_value_result(result), max_chars=max_chars,
-    )
+    result = _unwrap_single_value_result(result)
+    if isinstance(result, str):
+        result = _unwrap_json_text_envelope(result)
+    return _truncate_tool_output(result, max_chars=max_chars)
 
 
 def _wrap_tool_with_output_cap(
@@ -4764,10 +4800,19 @@ async def _run_agent_stream(
                     break
                 timeout_s = min(phase_timeout, remaining_s)
             try:
-                update = await asyncio.wait_for(
-                    response_iter.__anext__(),
-                    timeout=timeout_s,
-                )
+                # Regression from #645 — do NOT wrap ``__anext__`` in
+                # ``asyncio.wait_for`` on Python 3.11: it runs the awaitable
+                # in a new Task with a *copy* of the current context, while
+                # MAF's observability finalizer stores a ContextVar token
+                # across ``__anext__`` calls and resets it in the next call's
+                # context.  The reset then raises ``ValueError: ... was
+                # created in a different Context``, masking a clean
+                # ``StopAsyncIteration`` as an aborted stream (the run ended
+                # with a bogus "interrupted" wrap-up).  ``asyncio.timeout``
+                # (3.11+) enforces the same deadline without leaving the
+                # current context.
+                async with asyncio.timeout(timeout_s):
+                    update = await response_iter.__anext__()
             except StopAsyncIteration:
                 stream_exhausted_cleanly = True
                 stream_end = "clean"
@@ -6762,18 +6807,22 @@ def _truncate_tool_output(
     if isinstance(output, list):
         # Issue #651 — MCP call_tool returns list[Content]; capping the raw
         # string is what the old FunctionTool-only wrapper could never see.
+        # Issue #654 — the text may itself be a JSON ``{"result": ...}``
+        # envelope, so unwrap it before measuring or truncating.
         for item in output:
             text = getattr(item, "text", None)
-            if (
-                getattr(item, "type", None) == "text"
-                and isinstance(text, str)
-                and len(text) > max_chars
-            ):
-                try:
-                    item.text = _truncate_tool_output(text, max_chars=max_chars)
-                except (AttributeError, TypeError):
-                    # Immutable content item: leave it for the next layer.
-                    logger.debug("Could not truncate immutable Content item")
+            if getattr(item, "type", None) == "text" and isinstance(text, str):
+                normalised = _unwrap_json_text_envelope(text)
+                if len(normalised) > max_chars:
+                    normalised = _truncate_tool_output(
+                        normalised, max_chars=max_chars,
+                    )
+                if normalised != text:
+                    try:
+                        item.text = normalised
+                    except (AttributeError, TypeError):
+                        # Immutable content item: leave it for the next layer.
+                        logger.debug("Could not normalise immutable Content item")
         return output
     if isinstance(output, str) and len(output) > max_chars:
         half = max_chars // 2

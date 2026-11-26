@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.15.0] — 2026-11-26
+
+### Changed
+- **Caps now have absolute ceilings (Issue #652)** — every tool-output defence
+  was proportional to the model's declared window, so a large-window model
+  made them decorative: a 1M-token declaration bought a 200,000-character
+  per-result cap and a 700,000-token compaction budget, and neither fired on
+  a 47-round turn that reached ~300k tokens of context. `TOOL_OUTPUT_CAP_MAX_CHARS`
+  (default 40,000) now caps one tool result independently of the window, and
+  `COMPACTION_TOKEN_CEILING` (default 150,000) caps the compaction budget.
+  Both are environment-configurable; `0` restores the old window-scaled
+  behaviour. Models with no declared `context_length` keep the historical
+  100,000-character fallback. ([#652])
+- **Context pressure is now visible on every turn (Issue #653)** — a single
+  turn spent 9.66M input tokens (98% cache reads) and ended with no signal at
+  all, because `max_input_tokens` defaults to unlimited and `budget_warning`
+  was gated on that dimension. The agent now emits a `context_pressure`
+  stream event (and a warning log) once per turn when cumulative input crosses
+  `AGENT_CONTEXT_PRESSURE_MULTIPLIER` × the model window (default 20), and the
+  persisted `metrics` part records `avg_input_tokens_per_step`,
+  `context_growth` (last prompt minus first prompt, in tokens) and the
+  pressure flag/threshold. The admin guide now documents the recommended
+  `max_input_tokens` for tool-heavy skills. ([#653])
+
+### Fixed
+- **MCP and other non-FunctionTool results are capped again (Issue #651)** —
+  `_wrap_tool_with_output_cap` returned anything without a `.func` unchanged,
+  so MCP-backed and externally registered tools never passed through the
+  model-context cap. A PowerShell MCP tool returned 126,684 characters in one
+  result, untruncated; that result alone was ~16% of the run's input bill and
+  stayed in context for 35 rounds. MCP-discovered `FunctionTool`s are now
+  wrapped after `connect()` (the same objects the Agent invokes), the
+  truncation helper handles `list[Content]` as well as strings and dicts, and
+  the existing truncation marker and `STORAGE_TOOL_OUTPUT_MAX_CHARS` storage
+  clip apply to those results. ([#651])
+- **Single-key tool-result envelopes no longer reach the model verbatim
+  (Issue #654)** — a custom tool returning `{"result": "..."}` was JSON-
+  serialised by MAF, so the model read the wrapper, every `\r\n` escape
+  (10,550 of them, ~3.4% of the stored characters) and a trailing status line
+  on every round, and the wrapper was re-sent with the rest of the history.
+  A dict with exactly one string value is now unwrapped at the tool-result
+  boundary (multi-key and error-shaped dicts are kept), so the model and the
+  persisted transcript see the bare text. ([#654])
+
 ## [3.14.5] — 2026-11-26
 
 ### Fixed
@@ -716,3 +760,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#642]: https://github.com/kainotomo/ph-agent-hub/issues/642
 [#647]: https://github.com/kainotomo/ph-agent-hub/issues/647
 [#649]: https://github.com/kainotomo/ph-agent-hub/issues/649
+[#651]: https://github.com/kainotomo/ph-agent-hub/issues/651
+[#652]: https://github.com/kainotomo/ph-agent-hub/issues/652
+[#653]: https://github.com/kainotomo/ph-agent-hub/issues/653
+[#654]: https://github.com/kainotomo/ph-agent-hub/issues/654

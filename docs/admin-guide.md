@@ -827,6 +827,30 @@ Each skill (Admin → Skills) and template (Admin → Templates) can set per-run
 
 Defaults are `50` steps and unlimited input tokens. Precedence per dimension is skill → template → global setting: `AGENT_MAX_STEPS` is the global fallback for `max_steps`, and `AGENT_MAX_INPUT_TOKENS` for `max_input_tokens`. At 60% of a run budget the agent emits a `budget_warning` stream event; at 100% it stops, tells the user the budget and the amount consumed, makes one tool-less wrap-up call, and appends a deterministic budget footer to the final text.
 
+**Recommended `max_input_tokens` for tool-heavy skills.** A tool-heavy turn
+re-sends the whole conversation, including every tool result, on each model
+round, so its *cumulative* input is many times the window: a 46-round turn can
+spend 10M+ input tokens even though no single prompt exceeded ~300K. Leaving
+`max_input_tokens` at `0` therefore means the run ends
+only when the model stops calling tools. Set it to roughly **20× the model's
+declared context window** for tool-heavy skills — for example `2_000_000` for
+a 128K model and `5_000_000` for a 256K model — and lower it for cost-sensitive
+tenants. The per-turn `metrics` part records `avg_input_tokens_per_step` and
+`context_growth` (last prompt size minus first, in tokens) so the multiplier
+can be tuned from real runs.
+
+Independently of `max_input_tokens`, the agent emits a one-per-turn
+`context_pressure` stream event and a warning log when cumulative input
+crosses `AGENT_CONTEXT_PRESSURE_MULTIPLIER` × the model window (default `20`,
+`0` disables). Use it to find turns that are growing without ever tripping a
+budget. Models with no declared `context_length` never fire it.
+
+Two absolute ceilings keep the defences effective on large-window models:
+`TOOL_OUTPUT_CAP_MAX_CHARS` (default `40_000`) caps a single tool result
+entering the model context, and `COMPACTION_TOKEN_CEILING` (default
+`150_000` tokens) caps the mid-run compaction budget. Both accept `0` to
+restore the purely window-scaled behaviour, which is not recommended.
+
 ### 11.4 MAF Target Keys
 
 The `maf_target_key` is only required for **Workflow Based** skills. It must match a registered workflow module in the backend codebase (`src/agents/workflows/`). If the key doesn't match any registered target, the backend logs a warning on startup but does not crash.

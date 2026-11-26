@@ -167,8 +167,9 @@ class Settings(BaseSettings):
 
     MCP_TOOL_TIMEOUT_SECONDS: int = 180
     """Per-request timeout passed to MAF's MCP tools (``request_timeout``).
-    MCP tools are not wrapped by the 90s ``FunctionTool`` execution timeout,
-    so without this a hung MCP server keeps the stream silent until the
+    MCP tools do not get the 90s ``FunctionTool`` execution timeout — their
+    output-cap wrapper deliberately adds no second, shorter wait (Issue #651)
+    — so without this a hung MCP server keeps the stream silent until the
     tool-phase watchdog fires.  When the MCP request times out, MAF turns the
     exception into a normal function result and the model continues the turn.
     ``0`` leaves MCP requests unbounded (not recommended)."""
@@ -192,10 +193,10 @@ class Settings(BaseSettings):
     assistant message.  This is a storage/transcript budget, not the
     model-context cap (that one is ``_compute_tool_output_cap``).  Outputs over
     the budget are clipped with a marker that states what was dropped and how
-    to fetch the rest.  ``0`` stores the output in full: only suitable when
-    large dumps are expected and accepted, because MCP tools are not wrapped by
-    the live output cap and one unbounded result then lands in the message row,
-    the Redis cache for temporary sessions, exports and the chat API."""
+    to fetch the rest.  ``0`` stores the output in full: the live
+    model-context cap (``TOOL_OUTPUT_CAP_MAX_CHARS``) still applies, but the
+    unbounded result would land in the message row, the Redis cache for
+    temporary sessions, exports and the chat API."""
 
     HISTORY_TOOL_RESULT_MAX_CHARS: int = 16_000
     """Character budget for a tool result replayed into the prompt as
@@ -203,6 +204,32 @@ class Settings(BaseSettings):
     middle is replaced with a marker.  ``0`` replays the whole stored result,
     bounded only by the 60%-of-context history budget in
     ``_build_history_string``."""
+
+    # --- Absolute context ceilings (Issue #652) ---
+    TOOL_OUTPUT_CAP_MAX_CHARS: int = 40_000
+    """Absolute ceiling (characters) for one tool result entering the model
+    context.  The model-aware cap is 5 % of the window, which is meaningless
+    on a 1M-token model; this ceiling keeps it bounded regardless of the
+    declared window.  ``0`` disables the absolute ceiling (not recommended:
+    the cap then scales only with ``context_length``).  The unknown-window
+    fallback (``TOOL_OUTPUT_CAP_FALLBACK``) is intentionally unaffected, so
+    models without a declared ``context_length`` keep the existing 100,000
+    character budget."""
+
+    COMPACTION_TOKEN_CEILING: int = 150_000
+    """Absolute ceiling for the mid-run compaction token budget.  The budget
+    is normally 70 % of the model window, so a 1M-token model would otherwise
+    get a 700 000-token budget that never fires.  ``0`` disables the
+    ceiling and restores the purely window-scaled behaviour."""
+
+    # --- Context-pressure telemetry (Issue #653) ---
+    AGENT_CONTEXT_PRESSURE_MULTIPLIER: float = 20.0
+    """Multiple of the model's context window at which one turn's *cumulative*
+    provider-reported input tokens trigger a ``context_pressure`` stream event
+    (and a warning log).  This is telemetry, not enforcement: it fires even
+    when ``max_input_tokens`` is unlimited (``0``), so a turn that re-sends a
+    ~300k-token context for 40 rounds becomes visible.  ``0`` disables it.
+    Models without a declared ``context_length`` never fire it."""
 
     # --- Sub-agent delegation (Issue #574) ---
     SUBAGENT_TIMEOUT: int = 300

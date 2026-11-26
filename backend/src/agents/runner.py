@@ -16,6 +16,7 @@
 # =============================================================================
 
 import asyncio
+import inspect
 import json
 import logging
 import math
@@ -347,10 +348,20 @@ TOOL_OUTPUT_CAP_FALLBACK = 100_000
 # Converted to chars via CHARS_PER_TOKEN_ESTIMATE.
 TOOL_OUTPUT_CAP_RATIO = 0.05
 
-# Absolute ceiling in chars for any single tool result (≈125K tokens).
-# Prevents even 1M-token models from accepting results that would
-# consume more than 12.5% of the window in one call.
-TOOL_OUTPUT_CAP_CEILING = 500_000
+# Absolute ceiling in chars for any single tool result, independent of the
+# model window (Issue #652).  The ratio above is 5 % of the window, so a
+# 1M-token model would otherwise accept a 200 000-char result per call —
+# larger than the whole 128k turn that produced the report.  40 000 chars
+# (≈10K tokens) is four times the storage cap's p99 use case and still leaves
+# room for a full statement or a long file read.  Configurable via
+# ``TOOL_OUTPUT_CAP_MAX_CHARS``; ``0`` disables the absolute ceiling.
+TOOL_OUTPUT_CAP_CEILING = settings.TOOL_OUTPUT_CAP_MAX_CHARS
+
+# Absolute ceiling for the mid-run compaction token budget (Issue #652).
+# The budget is 70 % of the window, so a large window produced a 700K-token
+# budget that could never fire in a 300K-token turn.  Configurable via
+# ``COMPACTION_TOKEN_CEILING``; ``0`` disables the ceiling.
+COMPACTION_TOKEN_CEILING = settings.COMPACTION_TOKEN_CEILING
 
 # Maximum fraction of context_length for conversation summaries.
 SUMMARY_CAP_RATIO = 0.005
@@ -467,10 +478,14 @@ def _compute_tool_output_cap(context_length: int | None) -> int:
         contribute to the agent context, bounded by the ceiling.
     """
     if not context_length:
+        # Unknown window keeps the historical fallback (Issue #652 acceptance:
+        # the fallback path must not change).
         return TOOL_OUTPUT_CAP_FALLBACK
     cap_tokens = max(int(context_length * TOOL_OUTPUT_CAP_RATIO), 25_000)
     cap_chars = cap_tokens * CHARS_PER_TOKEN_ESTIMATE
-    return min(cap_chars, TOOL_OUTPUT_CAP_CEILING)
+    if TOOL_OUTPUT_CAP_CEILING > 0:
+        cap_chars = min(cap_chars, TOOL_OUTPUT_CAP_CEILING)
+    return cap_chars
 
 
 def _compute_summary_cap(context_length: int | None) -> int:
@@ -2228,6 +2243,9 @@ async def _resolve_tool_callables(
             try:
                 await item.connect()
                 cleanup_clients.append(item)
+                # Issue #651 — MCP exposes no ``.func`` until it is connected,
+                # so its FunctionTools are wrapped here, before the agent run.
+                _wrap_mcp_tool_output(item, context_length=context_length)
                 logger.info("Connected MCP tool '%s'", getattr(item, "name", "unknown"))
             except Exception:
                 logger.warning(
@@ -2711,6 +2729,9 @@ async def _auto_select_tools(
             try:
                 await item.connect()
                 cleanup_clients.append(item)
+                # Issue #651 — wrap the MCP-discovered FunctionTools before
+                # the agent run can invoke them.
+                _wrap_mcp_tool_output(item, context_length=context_length)
                 logger.info("Connected MCP tool '%s'", getattr(item, "name", "unknown"))
             except Exception:
                 logger.warning(
@@ -3007,17 +3028,53 @@ async def _build_erpnext_callables(
 # Mid-run compaction (Issue #199 — prevents context overflow on tool-heavy runs)
 # ---------------------------------------------------------------------------
 
+# Keys whose dict form carries error semantics.  Unwrapping these would turn
+# ``{"error": "Permission denied"}`` into bare text and lose both the marker
+# ``_is_tool_error`` looks for and the key that tells the model what failed
+# (Issue #654).
+_TOOL_RESULT_ERROR_KEYS = frozenset({"error", "exc", "exc_type", "exception"})
+
+
+def _unwrap_single_value_result(result: Any) -> Any:
+    """Unwrap a single-string-key tool-result envelope (Issue #654).
+
+    A custom/bound tool commonly returns ``{"result": "<text>"}``.  MAF
+    serialises the dict, so the model reads the wrapper, every ``\\r\\n``
+    escape and (for PowerShell-style tools) a trailing status line, and the
+    wrapper is re-sent with the rest of the history on every round.  A dict
+    with exactly one string value carries no information a bare string does
+    not, so send the value itself.  Multi-key dicts and error-shaped dicts
+    are returned unchanged.
+    """
+    if isinstance(result, dict) and len(result) == 1:
+        key, value = next(iter(result.items()))
+        if isinstance(key, str) and isinstance(value, str):
+            if key not in _TOOL_RESULT_ERROR_KEYS:
+                return value
+    return result
+
+
+def _normalise_tool_result(result: Any, max_chars: int) -> Any:
+    """Apply the tool-result boundary rules in one place (Issues #651/#654).
+
+    Order matters: unwrap the envelope first so the cap applies to the text
+    the model will actually read, not to its escaped JSON form.
+    """
+    return _truncate_tool_output(
+        _unwrap_single_value_result(result), max_chars=max_chars,
+    )
+
 
 def _wrap_tool_with_output_cap(
     tool_obj: Any,
     context_length: int | None = None,
-    timeout: float = TOOL_EXECUTION_TIMEOUT,
+    timeout: float | None = TOOL_EXECUTION_TIMEOUT,
 ) -> Any:
     """Wrap a MAF FunctionTool to cap its output size before it enters the agent context.
 
-    Patches ``FunctionTool.func`` with an async wrapper that truncates
-    oversized results via ``_truncate_tool_output``.  Preserves original
-    function metadata so MAF tool detection, schema generation, and
+    Patches ``FunctionTool.func`` with an async wrapper that normalises and
+    truncates oversized results via ``_normalise_tool_result``.  Preserves
+    original function metadata so MAF tool detection, schema generation, and
     logging continue to work correctly.
 
     The cap is derived from the model's ``context_length`` when available,
@@ -3027,13 +3084,17 @@ def _wrap_tool_with_output_cap(
         tool_obj: The MAF FunctionTool to wrap.
         context_length: The model's context window in tokens, or None.
         timeout: Seconds before the invocation is abandoned.  Delegate
-            tools pass a larger value (Issue #574).
+            tools pass a larger value (Issue #574); ``None`` waits without
+            adding a second, shorter timeout (MCP tools, Issue #651).
 
     Returns:
-        The same ``FunctionTool`` object (mutated).
+        The same ``FunctionTool`` object (mutated), or *tool_obj* unchanged
+        when it has no callable implementation to wrap.
     """
     if not hasattr(tool_obj, "func") or not callable(tool_obj.func):
         return tool_obj  # Declaration-only or non-FunctionTool, skip
+    if getattr(tool_obj, "_ph_output_cap_wrapped", False):
+        return tool_obj  # already wrapped (e.g. MCP reconnect path)
 
     original_func = tool_obj.func
     max_chars = _compute_tool_output_cap(context_length)
@@ -3041,14 +3102,15 @@ def _wrap_tool_with_output_cap(
     async def capped_func(*args: Any, **kwargs: Any) -> Any:
         tool_name = getattr(original_func, '__name__', 'unknown')
         try:
-            result = await asyncio.wait_for(
-                original_func(*args, **kwargs),
-                timeout=timeout,
-            )
+            result = original_func(*args, **kwargs)
+            if inspect.isawaitable(result):
+                if timeout is not None:
+                    result = await asyncio.wait_for(result, timeout=timeout)
+                else:
+                    result = await result
         except asyncio.TimeoutError:
             return {"error": f"Tool '{tool_name}' timed out after {timeout}s"}
-        truncated = _truncate_tool_output(result, max_chars=max_chars)
-        return truncated
+        return _normalise_tool_result(result, max_chars=max_chars)
 
     # Preserve function identity so MAF introspection (name, schema, docs)
     # still works after we replace ``func``.
@@ -3058,6 +3120,7 @@ def _wrap_tool_with_output_cap(
     capped_func.__qualname__ = getattr(original_func, "__qualname__", capped_func.__name__)
 
     tool_obj.func = capped_func
+    tool_obj._ph_output_cap_wrapped = True
     return tool_obj
 
 
@@ -3082,6 +3145,43 @@ def _wrap_tools_with_output_cap(
             _wrap_tool_with_output_cap(
                 t, context_length=context_length, timeout=timeout,
             )
+        )
+    return wrapped
+
+
+def _wrap_mcp_tool_output(
+    mcp_tool: Any,
+    context_length: int | None = None,
+) -> int:
+    """Cap the results of the tools an MCP server exposes (Issue #651).
+
+    An ``MCPTool`` has no ``.func``, so the FunctionTool wrapper skipped it
+    entirely and the model-context cap never applied to exactly the tools most
+    likely to dump text.  After ``connect()`` the server materialises one
+    ``FunctionTool`` per remote tool in ``_functions``; those are the objects
+    the Agent invokes, so wrapping them is the choke point where the result
+    can still be capped *before* MAF appends it to the conversation.
+
+    The MCP request timeout already bounds a hung server (Issue #645), so the
+    wrapper adds no second, shorter timeout.
+
+    Returns:
+        The number of FunctionTools wrapped (0 when the server exposed none).
+    """
+    wrapped = 0
+    for fn in list(getattr(mcp_tool, "_functions", None) or []):
+        before = getattr(fn, "func", None)
+        _wrap_tool_with_output_cap(
+            fn, context_length=context_length, timeout=None,
+        )
+        if getattr(fn, "func", None) is not before:
+            wrapped += 1
+    if wrapped:
+        logger.info(
+            "Capped MCP tool output: server=%s tools=%d cap_chars=%d",
+            getattr(mcp_tool, "name", "unknown"),
+            wrapped,
+            _compute_tool_output_cap(context_length),
         )
     return wrapped
 
@@ -3165,7 +3265,9 @@ def _build_compaction_strategy(
        overhead is reclaimed.
 
     2. **TokenBudgetComposedStrategy** — enforces a hard token budget at
-       70 % of the model's configured context length, with a 32K floor.
+       70 % of the model's configured context length, with a 32K floor and
+       the absolute ``COMPACTION_TOKEN_CEILING`` applied on top (Issue #652),
+       so a large declared window cannot make the budget unreachable.
        If the budget is exceeded after step 1, the built-in fallback
        excludes the oldest message groups.
 
@@ -3179,9 +3281,13 @@ def _build_compaction_strategy(
     try:
         tokenizer = CharacterEstimatorTokenizer()
 
-        # Budget: 70 % of model context length, floor 32K
+        # Budget: 70 % of model context length, floor 32K, absolute ceiling
+        # (Issue #652).  Without the ceiling a 1M-token window gets a 700K
+        # token budget, so compaction never fires in a 300K-token turn.
         context_length = getattr(model, "context_length", None) or 128_000
         token_budget = max(32_000, int(context_length * 0.7))
+        if COMPACTION_TOKEN_CEILING > 0:
+            token_budget = min(token_budget, COMPACTION_TOKEN_CEILING)
 
         strategies = [
             # Step 1: collapse old tool results into compact summaries
@@ -4542,6 +4648,23 @@ async def _run_agent_stream(
         budget.max_input_tokens, budget.warn_ratio,
     )
     usage_missing_logged = False
+    # Issue #653 — the first and last prompt sizes of the turn show how much
+    # the context grew; without them the final metrics only know the total.
+    stream_first_in = 0
+    context_window = getattr(model, "context_length", None)
+    if isinstance(context_window, bool) or not isinstance(context_window, (int, float)):
+        context_window = None
+    else:
+        context_window = int(context_window) or None
+    context_pressure_multiplier = float(
+        getattr(settings, "AGENT_CONTEXT_PRESSURE_MULTIPLIER", 0) or 0
+    )
+    context_pressure_threshold = (
+        int(context_window * context_pressure_multiplier)
+        if context_window and context_pressure_multiplier > 0
+        else 0
+    )
+    context_pressure_reported = False
 
     # ---- Issue #639 — one retry for a reasoning-only round ---------------
     # A round that produced tokens but no text and no tool call cannot
@@ -4727,6 +4850,43 @@ async def _run_agent_stream(
                     update_usage_seen = True
             if update_usage_seen:
                 usage_seen = True
+                if in_tokens and not stream_first_in:
+                    stream_first_in = in_tokens
+
+            # Issue #653 — cumulative context pressure is independent of the
+            # ``max_input_tokens`` budget dimension: with the default ``0``
+            # (unlimited) a turn could re-send a ~300k-token context for 40
+            # rounds (9.66M input tokens) and end completely silently.  Fires
+            # once per turn, not once per round, and only when the model
+            # declares a window.
+            if (
+                update_usage_seen
+                and not context_pressure_reported
+                and context_pressure_threshold > 0
+                and stream_usage_in >= context_pressure_threshold
+            ):
+                context_pressure_reported = True
+                logger.warning(
+                    "Agent context pressure for session %s: cumulative input "
+                    "%d tokens is %dx the %d-token model window "
+                    "(threshold %d) after %d steps / %d tool calls",
+                    session_id, stream_usage_in,
+                    context_pressure_multiplier, context_window,
+                    context_pressure_threshold, step_index, tool_calls,
+                )
+                yield _sse_event("context_pressure", {
+                    "kind": "context_pressure",
+                    "context_length": context_window,
+                    "multiplier": context_pressure_multiplier,
+                    "threshold": context_pressure_threshold,
+                    **_budget_usage_counters(
+                        step_index=step_index,
+                        tool_calls=tool_calls,
+                        input_tokens=stream_usage_in,
+                        output_tokens=stream_usage_out,
+                        cache_hits=stream_cache_hit,
+                    ),
+                }, session_id=session_id, message_id=message_id)
 
             # Issue #447 — detect parallel tool batches.
             # MAF yields all function_results from an asyncio.gather batch in
@@ -5320,6 +5480,9 @@ async def _run_agent_stream(
                 tool_definition_tokens=_estimate_tool_definitions(tools),
                 tokens_in=token_counts.get("in", 0) or 0,
                 last_input_tokens=stream_last_in or None,
+                first_input_tokens=stream_first_in or None,
+                context_pressure=context_pressure_reported,
+                context_pressure_threshold=context_pressure_threshold or None,
                 tool_calls=tool_calls,
                 budget=token_counts.get("budget"),
                 budget_exceeded=budget_exceeded,
@@ -6182,6 +6345,9 @@ def _compute_turn_metrics(
     tool_definition_tokens: int,
     tokens_in: int,
     last_input_tokens: int | None = None,
+    first_input_tokens: int | None = None,
+    context_pressure: bool = False,
+    context_pressure_threshold: int | None = None,
     tool_calls: int = 0,
     budget: dict | None = None,
     budget_exceeded: bool = False,
@@ -6211,7 +6377,12 @@ def _compute_turn_metrics(
         (``clean`` / ``abort`` / ``idle_timeout`` / ``loop`` / ``budget`` /
         ``turn_deadline``),
         ``rounds``, ``attempts``, ``pending_tool_calls_at_end``,
-        ``final_round_finish_reason`` and ``stop_reason``.
+        ``final_round_finish_reason`` and ``stop_reason``.  Issue #653 adds
+        ``avg_input_tokens_per_step`` (cumulative input ÷ tool steps, or ÷
+        model rounds when the turn made no tool call) and ``context_growth``
+        (last prompt size minus first prompt size, in tokens), plus
+        ``context_pressure`` / ``context_pressure_threshold`` so a turn that
+        crossed the cumulative-input multiple is identifiable after the fact.
 
     ``ttft_ms`` measures from the start of the turn to the first streamed
     **text** delta, not to the first model token.  It therefore includes any
@@ -6230,6 +6401,20 @@ def _compute_turn_metrics(
     llm_ms = max(0, turn_wall_ms - tool_ms)
     # Time to first *text*: tool time before the first visible delta counts.
     ttft_ms = None if first_token_at_s is None else int(round((first_token_at_s - turn_start_s) * 1000))
+    # Issue #653 — per-step cost and prompt growth.  A "step" is a tool batch;
+    # a turn with no tool call still has model rounds, so fall back to those
+    # rather than reporting nothing.
+    denominator = steps or rounds
+    avg_input_tokens_per_step = (
+        int(round(tokens_in / denominator))
+        if denominator > 0 and tokens_in > 0
+        else None
+    )
+    context_growth = (
+        last_input_tokens - first_input_tokens
+        if (last_input_tokens or 0) > 0 and (first_input_tokens or 0) > 0
+        else None
+    )
     budget_meta = {
         # Issue #595 — per-turn tool/token telemetry persisted with the
         # message so it is available without exporting the session.
@@ -6252,6 +6437,11 @@ def _compute_turn_metrics(
         "attempts": attempts,
         "pending_tool_calls_at_end": pending_tool_calls_at_end,
         "stop_reason": stop_reason,
+        # Issue #653 — cumulative-input telemetry for tool-heavy turns.
+        "avg_input_tokens_per_step": avg_input_tokens_per_step,
+        "context_growth": context_growth,
+        "context_pressure": context_pressure,
+        "context_pressure_threshold": context_pressure_threshold,
     }
 
     if tokens_in == 0:
@@ -6324,10 +6514,11 @@ def _maybe_accumulate_tool_events(
 # separate on purpose, and this one is the one that must stay legible.
 #
 # Configurable via ``STORAGE_TOOL_OUTPUT_MAX_CHARS`` (0 = store the output in
-# full).  Note that MCP tools are not wrapped by ``_wrap_tool_with_output_cap``
-# (they expose no ``.func``), so disabling this cap lets one unbounded MCP
-# result — e.g. ``Get-Content -Raw`` on a large log — land in the JSON message
-# row, the Redis cache for temporary sessions, exports and the chat API.
+# full).  MCP results now pass the live cap too (Issue #651 wraps the
+# FunctionTools the server exposes), but that cap bounds the *model context*,
+# not the stored row: disabling this one lets one unbounded MCP result — e.g.
+# ``Get-Content -Raw`` on a large log — land in the JSON message row, the
+# Redis cache for temporary sessions, exports and the chat API.
 #
 # Raised 4,000 -> 16,000 (Issue #584) on production evidence: 31% of tool
 # results were clipped in a 30-day window, hitting the data tools hardest
@@ -6546,6 +6737,8 @@ def _truncate_tool_output(
 
     For dict results (the common case), truncates each string value
     exceeding ``max_chars``.  For plain strings, truncates directly.
+    Lists of MAF ``Content`` items (the shape MCP tools return, Issue #651)
+    have each text item capped in place; non-text items pass through.
     Non-string values pass through unchanged.
 
     Truncation keeps the first half + last half of the text, replacing
@@ -6566,6 +6759,22 @@ def _truncate_tool_output(
             else:
                 result[key] = value
         return result
+    if isinstance(output, list):
+        # Issue #651 — MCP call_tool returns list[Content]; capping the raw
+        # string is what the old FunctionTool-only wrapper could never see.
+        for item in output:
+            text = getattr(item, "text", None)
+            if (
+                getattr(item, "type", None) == "text"
+                and isinstance(text, str)
+                and len(text) > max_chars
+            ):
+                try:
+                    item.text = _truncate_tool_output(text, max_chars=max_chars)
+                except (AttributeError, TypeError):
+                    # Immutable content item: leave it for the next layer.
+                    logger.debug("Could not truncate immutable Content item")
+        return output
     if isinstance(output, str) and len(output) > max_chars:
         half = max_chars // 2
         truncated = (

@@ -385,11 +385,12 @@ class TestComputeToolOutputCap:
         from src.agents.runner import TOOL_OUTPUT_CAP_FALLBACK
         assert self.fn(None) == TOOL_OUTPUT_CAP_FALLBACK
 
-    def test_small_context_uses_floor(self):
+    def test_small_context_uses_absolute_ceiling(self):
         # context_length=5000: cap_tokens = max(5000*0.05=250, 25000)=25000
-        # cap_chars = 25000*4 = 100000
+        # cap_chars = 25000*4 = 100000, clipped by the absolute ceiling.
+        from src.agents.runner import TOOL_OUTPUT_CAP_CEILING
         cap = self.fn(5000)
-        assert cap >= 100000
+        assert cap == min(100000, TOOL_OUTPUT_CAP_CEILING)
 
     def test_large_context_bounded_by_ceiling(self):
         from src.agents.runner import TOOL_OUTPUT_CAP_CEILING
@@ -397,10 +398,28 @@ class TestComputeToolOutputCap:
         cap = self.fn(200_000)
         assert cap <= TOOL_OUTPUT_CAP_CEILING
 
+    def test_huge_context_bounded_by_absolute_ceiling(self):
+        """Issue #652 — a 1M-token window must not buy a 200K-char result."""
+        from src.agents.runner import TOOL_OUTPUT_CAP_CEILING
+        assert TOOL_OUTPUT_CAP_CEILING <= 40_000
+        assert self.fn(1_000_000) == TOOL_OUTPUT_CAP_CEILING
+
+    def test_absolute_ceiling_is_configurable(self, monkeypatch):
+        from src.agents import runner as runner_mod
+        monkeypatch.setattr(runner_mod, "TOOL_OUTPUT_CAP_CEILING", 12_345)
+        assert self.fn(1_000_000) == 12_345
+
+    def test_absolute_ceiling_can_be_disabled(self, monkeypatch):
+        from src.agents import runner as runner_mod
+        monkeypatch.setattr(runner_mod, "TOOL_OUTPUT_CAP_CEILING", 0)
+        # 1M * 5% = 50K tokens -> 200K chars, the pre-#652 behaviour.
+        assert self.fn(1_000_000) == 200_000
+
     def test_typical_128k_context(self):
+        from src.agents.runner import TOOL_OUTPUT_CAP_CEILING
         cap = self.fn(128_000)
-        # max(int(128000*0.05)=6400, 25000)=25000 -> 25000*4=100000
-        assert cap == 100000
+        # max(int(128000*0.05)=6400, 25000)=25000 -> 100000 chars, clipped.
+        assert cap == min(100000, TOOL_OUTPUT_CAP_CEILING)
 
 
 class TestComputeSummaryCap:
@@ -1705,6 +1724,32 @@ class TestBuildCompactionStrategy:
         result = self.fn(model, "client", ["tool1"])
         # Should produce a strategy with minimum budget
         assert result is not None
+
+    def test_token_budget_bounded_by_absolute_ceiling(self):
+        """Issue #652 — a 1M window must not produce a 700K-token budget."""
+        from src.agents.runner import COMPACTION_TOKEN_CEILING
+
+        model = MagicMock()
+        model.context_length = 1_000_000
+        strategy, _ = self.fn(model, "client", ["tool1"])
+
+        assert COMPACTION_TOKEN_CEILING <= 150_000
+        assert strategy.token_budget == COMPACTION_TOKEN_CEILING
+
+    def test_unknown_context_keeps_historical_budget(self):
+        """Issue #652 acceptance — the None fallback is unchanged."""
+        model = MagicMock()
+        model.context_length = None
+        strategy, _ = self.fn(model, "client", ["tool1"])
+
+        assert strategy.token_budget == max(32_000, int(128_000 * 0.7))
+
+    def test_small_context_keeps_floor(self):
+        model = MagicMock()
+        model.context_length = 8192
+        strategy, _ = self.fn(model, "client", ["tool1"])
+
+        assert strategy.token_budget == 32_000
 
 
 # =============================================================================

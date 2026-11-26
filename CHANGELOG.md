@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.15.5] — 2026-11-26
+
+### Fixed
+- **A DeepSeek tool-call round with no reasoning no longer 400s the next
+  request (Issue #664)** — thinking mode requires `reasoning_content` on every
+  assistant message that carries `tool_calls`, and the client only echoed it
+  when there was reasoning to reconstruct. A round that emitted a tool call
+  with no reasoning went back without the key and the following request was
+  rejected with `400 - The reasoning_content in the thinking mode must be
+  passed back to the API`; the tool had already run, so the turn died mid-run
+  and was persisted through the interrupted wrap-up. The client now sends
+  `reasoning_content: ""` for such a message when thinking is on (and nothing
+  when it is off, where DeepSeek rejects the field). Found from the
+  `stream_error` metric added in 3.15.4. ([#664])
+
 ## [3.15.4] — 2026-11-26
 
 ### Added

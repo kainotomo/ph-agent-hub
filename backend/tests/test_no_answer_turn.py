@@ -22,6 +22,7 @@
 # =============================================================================
 
 import json
+import contextvars
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -122,6 +123,36 @@ class _NoFinalStream(_FakeStream):
 
     async def get_final_response(self):
         raise RuntimeError("stream was never finalised")
+
+
+# Mirrors MAF's ``inner_response_telemetry_captured_fields`` ContextVar: the
+# token is set in one ``__anext__`` call and reset in a later one.
+_CLEANUP_CONTEXT_VAR = contextvars.ContextVar("test_cleanup_context_var", default=None)
+
+
+class _ContextVarCleanupStream(_FakeStream):
+    """Stream that resets a ContextVar token while exhausting itself.
+
+    Agent Framework's observability finalizer does exactly this from its
+    cleanup hook.  On Python 3.11 ``asyncio.wait_for`` runs each ``__anext__``
+    in a new Task with a copied context, so the reset raises
+    ``ValueError: ... was created in a different Context`` and a clean end is
+    misreported as an abort (regression from #645).
+    """
+
+    def __init__(self, updates):
+        super().__init__(updates)
+        self._token = None
+
+    async def __anext__(self):
+        if self._updates:
+            if self._token is None:
+                self._token = _CLEANUP_CONTEXT_VAR.set("stream-active")
+            return self._updates.pop(0)
+        if self._token is not None:
+            _CLEANUP_CONTEXT_VAR.reset(self._token)
+            self._token = None
+        raise StopAsyncIteration
 
 
 def _final_with_conversation():
@@ -402,3 +433,39 @@ class TestMetrics642:
         metrics = token_counts["metrics"]
         assert metrics["stream_end"] == "abort"
         assert metrics["finish_reason"] is None
+
+
+# ---------------------------------------------------------------------------
+# Regression from #645 — a clean stream end must stay clean
+# ---------------------------------------------------------------------------
+
+
+class TestContextVarCleanup:
+    @pytest.mark.asyncio
+    async def test_clean_exhaustion_with_contextvar_reset_is_not_an_abort(self):
+        """A ContextVar token reset during MAF's cleanup must not abort a turn.
+
+        The observability finalizer stores a token across ``__anext__`` calls
+        and resets it in a later one.  ``asyncio.wait_for`` (Python 3.11) runs
+        each call in a copied context, so the reset raised
+        ``ValueError: ... was created in a different Context`` and a normal
+        ``StopAsyncIteration`` was misread as ``stream_end="abort"`` — the run
+        then ended with a bogus "interrupted" wrap-up even though the model
+        had finished.  The loop must keep the timeout watchdog without moving
+        the call to another context.
+        """
+        async def _wrapup(**_kwargs):
+            raise AssertionError("a cleanly finished turn needs no wrap-up")
+
+        with patch("src.agents.runner._generate_stop_wrapup", _wrapup):
+            token_counts: dict = {}
+            events, agent = await _run(
+                [_ContextVarCleanupStream([_text("Here is the answer.", finish_reason="stop")])],
+                token_counts=token_counts,
+            )
+
+        assert agent.run.call_count == 1
+        assert _deltas(events, "token") == ["Here is the answer."]
+        metrics = token_counts["metrics"]
+        assert metrics["stream_end"] == "clean"
+        assert metrics["stop_reason"] is None

@@ -48,6 +48,7 @@ from .subagent_events import (
     get_payload_for_call,
     new_state as new_subagent_state,
 )
+from .turn_input import user_message_digest
 from ..core.redis import (
     append_temp_message,
     check_stream_cancel,
@@ -627,6 +628,28 @@ def _msg_get(msg, attr: str, default=None):
     return getattr(msg, attr, default)
 
 
+def _iter_history_entries(messages: list):
+    """Yield ``(sender, text)`` for every message rendered into history.
+
+    These are exactly the messages ``_format_conversation_history`` puts in
+    the replayed block: not summarized, and carrying extractable text.
+    Factored out so the Issue #661 ``history_messages`` count can never drift
+    from what is actually rendered.
+    """
+    for msg in messages:
+        if _msg_get(msg, "summarized", False):
+            continue  # Compressed into the summary system message
+        text = _extract_message_text(_msg_get(msg, "content"))
+        if not text:
+            continue
+        yield _msg_get(msg, "sender", ""), text
+
+
+def _count_history_messages(messages: list) -> int:
+    """Count the stored messages that render into replayed history (Issue #661)."""
+    return sum(1 for _ in _iter_history_entries(messages))
+
+
 def _format_conversation_history(messages: list) -> str:
     """Format a list of message dicts/ORMs into a readable history string.
 
@@ -638,18 +661,7 @@ def _format_conversation_history(messages: list) -> str:
 
     lines: list[str] = ["[Previous conversation]"]
 
-    for msg in messages:
-        sender = _msg_get(msg, "sender", "")
-        content = _msg_get(msg, "content")
-        summarized = _msg_get(msg, "summarized", False)
-
-        if summarized:
-            continue  # Skip messages that have been compressed into a summary
-
-        text = _extract_message_text(content)
-        if not text:
-            continue
-
+    for sender, text in _iter_history_entries(messages):
         if sender == "user":
             lines.append(f"User: {text}")
         elif sender == "assistant":
@@ -850,6 +862,7 @@ async def _maybe_summarize_and_build_context(
     session_data: dict,
     cfg: "SessionConfig",
     user_message: str,
+    context_stats: dict | None = None,
 ) -> tuple[str, dict | None]:
     """Check if summarization is needed and build the contextualized message.
 
@@ -857,7 +870,17 @@ async def _maybe_summarize_and_build_context(
         A tuple of (contextualized_message, summary_info_or_None).
         summary_info is a dict with keys: summary_text, summarized_count,
         tokens_saved — used for the SSE summarized event.
+
+    Issue #661 — *context_stats*, when given, is filled with two keys on
+    every return path: ``history_messages`` (how many stored messages
+    rendered into the replayed ``[Previous conversation]`` block) and
+    ``contextualized`` (whether one was prepended at all).  An out-dict is
+    used so existing callers and mocks that expect a 2-tuple keep working.
     """
+    stats = context_stats if context_stats is not None else {}
+    stats.setdefault("history_messages", 0)
+    stats.setdefault("contextualized", False)
+
     session_id = session_data["id"]
     is_temporary = session_data.get("is_temporary", False)
     context_length = getattr(cfg.model, "context_length", None)
@@ -988,9 +1011,14 @@ async def _maybe_summarize_and_build_context(
     history_str = _build_history_string(current_messages, context_length)
 
     if history_str:
+        # Issue #661 — record what was actually replayed.
+        stats["history_messages"] = _count_history_messages(current_messages)
+        stats["contextualized"] = True
         contextualized = f"{history_str}\n\n---\n\nCurrent message: {user_message}"
         return contextualized, summary_info
 
+    stats["history_messages"] = 0
+    stats["contextualized"] = False
     return user_message, summary_info
 
 
@@ -1083,12 +1111,18 @@ async def run_agent(
     model_info = _snapshot_model_info(cfg)
 
     # ---- Build contextualized message (history + auto-summarization) ----
+    # Issue #661 — the stats say whether the agent input was the stored
+    # message or a history-prefixed string, and how much was replayed.
+    _context_stats: dict = {}
     contextualized_message, _ = await _maybe_summarize_and_build_context(
         db=db,
         session_data=session_data,
         cfg=cfg,
         user_message=user_message,
+        context_stats=_context_stats,
     )
+    _history_messages = int(_context_stats.get("history_messages", 0) or 0)
+    _contextualized = bool(_context_stats.get("contextualized", False))
 
     # ---- Pre-flight balance check -----------------------------------------
     if current_user is not None:
@@ -1168,6 +1202,8 @@ async def run_agent(
                     function_invocation_kwargs=function_invocation_kwargs,
                     metrics_out=_nonstream_metrics,
                     budget=cfg.run_budget,
+                    history_messages=_history_messages,
+                    contextualized=_contextualized,
                 )
         except Exception as exc:
             logger.error("Agent run failed: %s", exc)
@@ -3403,6 +3439,8 @@ async def _run_agent(
     function_invocation_kwargs: dict | None = None,
     metrics_out: dict | None = None,
     budget: RunBudget | None = None,
+    history_messages: int = 0,
+    contextualized: bool = False,
 ) -> tuple[str, int, int, int]:
     """Run a simple MAF Agent.
 
@@ -3416,6 +3454,10 @@ async def _run_agent(
             ``max_iterations`` (bound when the client is built); a token
             overage is reported after the run because a non-streaming call
             cannot be interrupted mid-loop.
+        history_messages: Messages replayed into the contextualized input
+            (Issue #661), recorded in the turn's metrics.
+        contextualized: Whether the input carried a replayed history block
+            (Issue #661).
 
     Returns:
         A tuple of (response_text, tokens_in, tokens_out, cache_hit_tokens).
@@ -3489,6 +3531,11 @@ async def _run_agent(
             budget_exceeded=budget_exceeded,
             budget_kind="input_tokens" if budget_exceeded else None,
             budget_enforced=True,
+            # Issue #661 — the digest is of the exact string handed to
+            # ``agent.run`` above, not of the stored row.
+            user_message=user_message,
+            history_messages=history_messages,
+            contextualized=contextualized,
         ))
 
     # result could be a string or a structured object
@@ -4075,12 +4122,18 @@ async def run_agent_stream(
             yield _warning_event
 
         # ---- Build contextualized message (history + auto-summarization) --
+        # Issue #661 — record whether the agent input is the stored message or
+        # a history-prefixed string, and how much was replayed.
+        _context_stats: dict = {}
         contextualized_message, summary_info = await _maybe_summarize_and_build_context(
             db=db,
             session_data=session_data,
             cfg=cfg,
             user_message=user_message,
+            context_stats=_context_stats,
         )
+        _history_messages = int(_context_stats.get("history_messages", 0) or 0)
+        _contextualized = bool(_context_stats.get("contextualized", False))
 
         # ---- Pre-flight balance check -----------------------------------------
         if current_user is not None:
@@ -4149,6 +4202,8 @@ async def run_agent_stream(
                 function_invocation_kwargs=function_invocation_kwargs,
                 db=db,
                 session_context=_build_session_context_block(session_data),
+                history_messages=_history_messages,
+                contextualized=_contextualized,
             )
         else:
             stream = _run_agent_stream(
@@ -4165,6 +4220,8 @@ async def run_agent_stream(
                 reasoning_effort=cfg.reasoning_effort,
                 function_invocation_kwargs=function_invocation_kwargs,
                 budget=cfg.run_budget,
+                history_messages=_history_messages,
+                contextualized=_contextualized,
             )
         # Issue #574 — side channel for delegated sub-agent progress.  Created
         # before the stream is consumed so delegate tools can find it.
@@ -4622,6 +4679,8 @@ async def _run_agent_stream(
     reasoning_effort: str | None = None,
     function_invocation_kwargs: dict | None = None,
     budget: RunBudget | None = None,
+    history_messages: int = 0,
+    contextualized: bool = False,
 ) -> AsyncIterator[dict]:
     """Run a MAF Agent in streaming mode, yielding SSE event dicts.
 
@@ -5587,6 +5646,11 @@ async def _run_agent_stream(
                     "cache_read_input_token_count": token_counts.get("cache_hit", 0) or 0,
                 },
                 reasoning_only_retried=reasoning_only_retried,
+                # Issue #661 — the digest is of ``user_message``, which is the
+                # string this generator handed to ``agent.run`` (attempt 1).
+                user_message=user_message,
+                history_messages=history_messages,
+                contextualized=contextualized,
             )
 
 
@@ -5606,6 +5670,8 @@ async def _run_workflow_stream(
     function_invocation_kwargs: dict | None = None,
     db: AsyncSession | None = None,
     session_context: str | None = None,
+    history_messages: int = 0,
+    contextualized: bool = False,
 ) -> AsyncIterator[dict]:
     """Run a MAF Workflow in streaming mode, yielding SSE event dicts.
 
@@ -5624,6 +5690,10 @@ async def _run_workflow_stream(
         db: Database session for resolving model records and tools.
         session_context: Optional current-session block (Issue #572) appended to
             every step's instructions.
+        history_messages: Messages replayed into the contextualized workflow
+            input (Issue #661), recorded in the turn's metrics.
+        contextualized: Whether the workflow input carried a replayed history
+            block (Issue #661).
 
     Raises:
         ValidationError: If the skill has no maf_target_key.
@@ -5696,6 +5766,8 @@ async def _run_workflow_stream(
             tools=tools,
             checkpoint_storage=checkpoint_storage,
             budget_state=budget_state,
+            history_messages=history_messages,
+            contextualized=contextualized,
         ):
             yield event_dict
 
@@ -6440,6 +6512,9 @@ def _compute_turn_metrics(
     attempts: int = 0,
     pending_tool_calls_at_end: int = 0,
     stop_reason: str | None = None,
+    user_message: str | None = None,
+    history_messages: int = 0,
+    contextualized: bool = False,
 ) -> dict:
     """Compute per-turn timing and context-breakdown metrics.
 
@@ -6461,6 +6536,13 @@ def _compute_turn_metrics(
         (last prompt size minus first prompt size, in tokens), plus
         ``context_pressure`` / ``context_pressure_threshold`` so a turn that
         crossed the cumulative-input multiple is identifiable after the fact.
+        Issue #661 adds the input digest — ``user_message_chars``,
+        ``user_message_sha256``, ``user_message_head``, ``user_message_tail``,
+        ``history_messages`` and ``contextualized`` — computed from
+        *user_message*, which must be the exact string the turn passed to
+        ``agent.run(...)`` (post-contextualization), never the stored row.  A
+        caller that does not supply it gets the keys with null/zero values, so
+        every stored ``metrics`` part has the same shape.
 
     ``ttft_ms`` measures from the start of the turn to the first streamed
     **text** delta, not to the first model token.  It therefore includes any
@@ -6521,6 +6603,14 @@ def _compute_turn_metrics(
         "context_pressure": context_pressure,
         "context_pressure_threshold": context_pressure_threshold,
     }
+    # Issue #661 — prove what the model was given.  The digest is of the exact
+    # string this turn handed to ``agent.run(...)``; for a turn with no
+    # replayed history that is the stored message itself.
+    turn_input_meta = user_message_digest(
+        user_message,
+        history_messages=history_messages,
+        contextualized=contextualized,
+    )
 
     if tokens_in == 0:
         return {
@@ -6534,6 +6624,7 @@ def _compute_turn_metrics(
             "messages_tokens": None,
             "last_input_tokens": None,
             **budget_meta,
+            **turn_input_meta,
         }
 
     last_in = last_input_tokens if (last_input_tokens or 0) > 0 else None
@@ -6550,6 +6641,7 @@ def _compute_turn_metrics(
         "messages_tokens": messages_tokens,
         "last_input_tokens": last_in,
         **budget_meta,
+        **turn_input_meta,
     }
 
 

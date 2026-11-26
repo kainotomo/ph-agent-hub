@@ -3,7 +3,11 @@
 // =============================================================================
 
 import { describe, expect, it } from "vitest";
-import { describeHttpError, readJsonResponse } from "./http";
+import {
+  describeHttpError,
+  filenameFromContentDisposition,
+  readJsonResponse,
+} from "./http";
 
 describe("describeHttpError", () => {
   it("surfaces a JSON `detail` message", async () => {
@@ -82,5 +86,30 @@ describe("readJsonResponse", () => {
     await expect(readJsonResponse(response)).rejects.toThrow(
       /Invalid JSON response/,
     );
+  });
+});
+
+describe("filenameFromContentDisposition", () => {
+  it("prefers the RFC 5987 filename* parameter", () => {
+    const header = `attachment; filename="file.json"; filename*=UTF-8''%CE%A0%CF%89%CF%82.json`;
+
+    expect(filenameFromContentDisposition(header)).toBe("Πως.json");
+  });
+
+  it("falls back to the plain filename parameter", () => {
+    expect(
+      filenameFromContentDisposition('attachment; filename="chat.txt"'),
+    ).toBe("chat.txt");
+  });
+
+  it("returns null when the header has no filename", () => {
+    expect(filenameFromContentDisposition("attachment")).toBeNull();
+    expect(filenameFromContentDisposition(null)).toBeNull();
+  });
+
+  it("falls back to the plain parameter for malformed percent-encoding", () => {
+    const header = `attachment; filename="chat.json"; filename*=UTF-8''%E0%A4%A`;
+
+    expect(filenameFromContentDisposition(header)).toBe("chat.json");
   });
 });

@@ -81,6 +81,7 @@ import {
   SearchScope,
 } from "../services/chat";
 import { MemoryManager } from "./MemoryManager";
+import type { ExportFormat } from "../services/chat";
 import { useSidebarSessions } from "../hooks/useSidebarSessions";
 import { SessionFolderHeader } from "./SessionFolderHeader";
 import {
@@ -170,6 +171,13 @@ const SessionListItem = React.memo(function SessionListItem({
   onDragEnd,
   showMatchedFields,
 }: SessionListItemProps) {
+  const handleExport = (format: ExportFormat) => {
+    void exportSession(item.id, format).catch((err: unknown) => {
+      message.error(
+        `Export failed: ${err instanceof Error ? err.message : "Unknown error"}`,
+      );
+    });
+  };
   return (
     <div
       data-session-id={item.id}
@@ -385,7 +393,7 @@ const SessionListItem = React.memo(function SessionListItem({
                         label: "Download as JSON",
                         onClick: (e) => {
                           e.domEvent.stopPropagation();
-                          exportSession(item.id, "json");
+                          handleExport("json");
                         },
                       },
                       {
@@ -394,7 +402,7 @@ const SessionListItem = React.memo(function SessionListItem({
                         label: "Download as Text",
                         onClick: (e) => {
                           e.domEvent.stopPropagation();
-                          exportSession(item.id, "txt");
+                          handleExport("txt");
                         },
                       },
                     ],

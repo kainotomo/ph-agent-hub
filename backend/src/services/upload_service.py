@@ -247,12 +247,21 @@ def _encode_content_disposition_filename(original_filename: str) -> str:
         \u2192 ``attachment; filename="resume.pdf"; filename*=UTF-8''r%C3%A9sum%C3%A9.pdf``
     """
     safe_ascii = _sanitize_storage_filename(original_filename)
+    # Header safety: a sanitized name can still carry control characters
+    # (a newline would produce an invalid header value).
+    safe_ascii = re.sub(r"[\x00-\x1f\x7f]", "_", safe_ascii)
 
     # Check if non-ASCII chars exist in original
     has_non_ascii = any(ord(c) > 127 for c in original_filename)
 
     if not has_non_ascii:
         return f'attachment; filename="{safe_ascii}"'
+
+    # A fully non-ASCII name sanitises down to a bare extension (".json");
+    # keep a usable ASCII fallback for clients that ignore filename*.
+    stem, dot, ext = safe_ascii.rpartition(".")
+    if not re.search(r"[A-Za-z0-9]", stem if dot else safe_ascii):
+        safe_ascii = "file" + (dot + ext if dot else "")
 
     # RFC 5987: filename*=UTF-8''url-encoded-value
     encoded = quote(original_filename, safe="")

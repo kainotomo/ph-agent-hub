@@ -159,6 +159,28 @@ class TestEncodeContentDispositionFilename:
         assert result.startswith("attachment; ")
         assert 'filename="file"' in result
 
+    def test_non_ascii_stem_falls_back_to_file(self):
+        """A fully non-ASCII name keeps a usable ASCII fallback (#649)."""
+        result = _encode_content_disposition_filename(
+            "Πως μαγειρεύουμε φασόλια βραστά.json"
+        )
+        assert 'filename="file.json"' in result
+        assert "filename*=UTF-8''" in result
+        assert "%CE%A0" in result  # Greek capital Pi, UTF-8 percent-encoded
+
+    def test_cjk_stem_falls_back_to_file(self):
+        """CJK names also sanitise down to a bare extension."""
+        result = _encode_content_disposition_filename("中文文档.docx")
+        assert 'filename="file.docx"' in result
+        assert "filename*=UTF-8''" in result
+
+    def test_control_chars_are_stripped_from_ascii_fallback(self):
+        """Control characters must never reach the header value."""
+        result = _encode_content_disposition_filename("line\nbreak.txt")
+        assert "\n" not in result
+        assert "\r" not in result
+        assert 'filename="line_break.txt"' in result
+
 
 # =============================================================================
 # _resolve_content_type

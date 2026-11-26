@@ -238,6 +238,26 @@ export interface BudgetExceededEvent {
   data: BudgetWarningEvent["data"];
 }
 
+/**
+ * Issue #653 — emitted once per turn when cumulative provider-reported input
+ * tokens cross a multiple of the model window, independent of the (possibly
+ * unlimited) `max_input_tokens` budget.
+ */
+export interface ContextPressureEvent {
+  event: "context_pressure";
+  data: {
+    kind: "context_pressure";
+    context_length: number;
+    multiplier: number;
+    threshold: number;
+    steps: number;
+    tool_calls: number;
+    input_tokens: number;
+    output_tokens: number;
+    cache_hits: number;
+  };
+}
+
 export interface ReasoningTokenEvent {
   event: "reasoning_token";
   data: {
@@ -400,6 +420,7 @@ export type StreamEvent =
   | RunTerminalEvent
   | BudgetWarningEvent
   | BudgetExceededEvent
+  | ContextPressureEvent
   | ReasoningTokenEvent
   | FollowUpQuestionsEvent
   | SummarizedEvent

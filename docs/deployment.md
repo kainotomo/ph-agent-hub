@@ -198,6 +198,10 @@ Key variables:
 | `AGENT_LOOP_DETECTION_ENABLED` | Terminate a turn early when the same tool call repeats (default: `True`) |
 | `AGENT_LOOP_REPEAT_THRESHOLD` | Consecutive identical tool calls that trigger loop detection (default: `4`) |
 | `AGENT_PARALLEL_TOOLS_ENABLED` | Enable parallel tool execution (default: `True`) |
+| `TOOL_OUTPUT_CAP_MAX_CHARS` | Absolute ceiling (characters) for one tool result entering the model context, independent of the declared window; `0` disables the ceiling (default: `40000`, Issue #652) |
+| `COMPACTION_TOKEN_CEILING` | Absolute ceiling (tokens) for the mid-run compaction budget; `0` disables the ceiling (default: `150000`, Issue #652) |
+| `AGENT_CONTEXT_PRESSURE_MULTIPLIER` | Cumulative-input multiple of the model window that emits a once-per-turn `context_pressure` event and warning; `0` disables (default: `20`, Issue #653) |
+| `STORAGE_TOOL_OUTPUT_MAX_CHARS` | Character budget for a tool result stored in a persisted message; `0` stores it in full (default: `64000`) |
 | `AUTO_SELECT_TOOLS_TOP_K` | Number of tools presented for auto-selection (default: `8`) |
 | `SCHEDULER_POLL_INTERVAL_SECONDS` | How often scheduler polls for due tasks in seconds (default: `30`) |
 | `A2A_TASK_TTL_SECONDS` | Default TTL for completed/canceled A2A task records (default: `86400`) |

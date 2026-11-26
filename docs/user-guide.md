@@ -401,6 +401,8 @@ The file will download automatically. The filename is derived from the session t
 ```json
 {
   "version": 1,
+  "app_version": "3.15.2",
+  "commit": "abc1234",
   "exported_at": "2026-06-12T16:14:13+00:00",
   "application": "ph-agent-hub",
   "session": {
@@ -419,6 +421,10 @@ The file will download automatically. The filename is derived from the session t
   ]
 }
 ```
+
+`version` is the export schema (still 1). `app_version` and `commit` name the
+build that produced the export, which is what support needs to triage it;
+older exports without those fields still import normally.
 
 ### 8.2 Import a Conversation
 

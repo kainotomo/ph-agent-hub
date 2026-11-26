@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.15.2] — 2026-11-26
+
+### Added
+- **A first-class host file reader (`read_file`, Issue #658)** — the hub's only
+  file reader was keyed by `file_id` (uploaded documents), so a file that lives
+  on the host could only be read through a shell/MCP tool: capped at 40,000
+  characters, decoding with the shell's code page (PowerShell 5.1 turned UTF-8
+  into mojibake) and offering no `offset`/`limit`. The new built-in
+  `read_file(path, offset=1, limit=..., encoding="utf-8")` pages a file by line
+  with 1-based numbering, explicit decoding, `total_lines`/`total_bytes` and an
+  exact `continue_at`. One call stays at 600 lines / 30,000 characters, below
+  the model-context cap, so a page is never middle-truncated. It is registered
+  only when `WORKSPACE_ROOTS` names an existing directory; paths outside the
+  roots, `..` traversal, symlinks and non-regular files return a named
+  `error_code` instead of an empty result. ([#658])
+- **The session export names the build that produced it (Issue #659)** — the
+  export root carried only `version` (the schema, 1), so triage could not tell
+  which build wrote an export; the 2026-11-26 export had to be dated by
+  inferring `TOOL_OUTPUT_CAP_MAX_CHARS` behaviour. Exports now also carry
+  `app_version` (semver, from the single `APP_VERSION` constant FastAPI and the
+  export share) and `commit` (short sha from the image build / deployment
+  environment, falling back to git in a checkout, `null` when unknown).
+  `version` stays 1 and the fields are additive, so old exports and the import
+  path are unaffected. `infrastructure/build.sh` stamps `GIT_COMMIT` into the
+  backend image. ([#659])
+
+### Fixed
+- **A truncated tool result now says exactly where to resume (Issue #657)** —
+  `_truncate_tool_output()` kept the head and tail, but the marker only said how
+  many characters were dropped: not the total, not the kept ranges, not the
+  first dropped offset, not even whether the cut fell on a line boundary. A
+  176 KB file read arrived as 40,041 of 176,825 characters with both cuts
+  mid-line, and the model spent 3 of that turn's 7 tool calls probing for the
+  boundary. The marker now reports the total, both kept character ranges and
+  both continuation offsets — plus the line numbers and total line count for
+  line-oriented text — and for line-oriented text both cut points are moved to
+  line boundaries so the line numbers are exact for LF, CRLF and a file with no
+  trailing newline. The cap, which results are truncated and the storage marker
+  are unchanged; a test reconstructs the original from the kept slices plus the
+  advertised offsets. ([#657])
+
 ## [3.15.1] — 2026-11-26
 
 ### Fixed
@@ -791,3 +832,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#652]: https://github.com/kainotomo/ph-agent-hub/issues/652
 [#653]: https://github.com/kainotomo/ph-agent-hub/issues/653
 [#654]: https://github.com/kainotomo/ph-agent-hub/issues/654
+[#657]: https://github.com/kainotomo/ph-agent-hub/issues/657
+[#658]: https://github.com/kainotomo/ph-agent-hub/issues/658
+[#659]: https://github.com/kainotomo/ph-agent-hub/issues/659

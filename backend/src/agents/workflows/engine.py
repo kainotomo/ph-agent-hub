@@ -25,7 +25,6 @@ from agent_framework import (
     AgentExecutor,
     CharacterEstimatorTokenizer,
     ToolResultCompactionStrategy,
-    TokenBudgetComposedStrategy,
     Workflow,
     WorkflowBuilder,
     WorkflowRunState,
@@ -35,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...core.exceptions import NotFoundError, ValidationError
 from ...db.orm.models import Model
 from ...models.cost import compute_run_cost_from_prices, prices_from_model
+from ..turn_input import TurnInputPreservingCompaction, user_message_digest
 from .conditions import condition_names, resolve_condition
 from .definition import DEFAULT_BRANCH, WorkflowDefinition
 from .executors import StepAgent
@@ -255,7 +255,9 @@ def _build_agent_for_step(
     # Determine max tokens for compaction
     max_tokens = getattr(model, "max_tokens", None)
     if max_tokens and max_tokens > 0:
-        compaction = TokenBudgetComposedStrategy(
+        # Issue #661 — never let the budget fallback drop the step's user
+        # message; the guard also counts the rounds compaction changed.
+        compaction = TurnInputPreservingCompaction(
             strategies=[ToolResultCompactionStrategy()],
             token_budget=max_tokens,
             tokenizer=CharacterEstimatorTokenizer(),
@@ -858,6 +860,8 @@ async def iter_workflow_sse(
     checkpoint_id: str | None = None,
     responses: dict | None = None,
     budget_state: dict[str, Any] | None = None,
+    history_messages: int = 0,
+    contextualized: bool = False,
 ) -> AsyncIterator[dict]:
     """Stream a workflow execution, yielding SSE event dicts per step.
 
@@ -887,6 +891,13 @@ async def iter_workflow_sse(
         checkpoint_id:             ID of a checkpoint to resume from.
         responses:                 Optional MAF ``responses`` dict, forwarded as-is
                                    for workflow resume (function-call approvals).
+        history_messages:          Messages replayed into ``message`` before the
+                                   workflow ran (Issue #661); recorded in the
+                                   turn's metrics.
+        contextualized:            Whether ``message`` carried a replayed
+                                   history block (Issue #661).  A resumed run
+                                   passes ``message=None`` and therefore gets
+                                   null digest fields.
 
     Yields:
         SSE event dicts.
@@ -1226,6 +1237,10 @@ async def iter_workflow_sse(
             _emit_workflow_metrics(
                 token_counts, total_steps, turn_start_s, first_token_at_s,
                 final_tokens_in, final_tokens_out, final_cache_hit,
+                # Issue #661 — digest of the workflow's input message.
+                message=message,
+                history_messages=history_messages,
+                contextualized=contextualized,
             )
 
             yield {
@@ -1260,7 +1275,12 @@ async def iter_workflow_sse(
                 }),
             }
             # Still emit basic metrics even on extraction failure
-            _emit_workflow_metrics(token_counts, total_steps, turn_start_s, first_token_at_s, 0, 0, 0)
+            _emit_workflow_metrics(
+                token_counts, total_steps, turn_start_s, first_token_at_s, 0, 0, 0,
+                message=message,
+                history_messages=history_messages,
+                contextualized=contextualized,
+            )
 
 
 # ===========================================================================
@@ -1295,12 +1315,20 @@ def _emit_workflow_metrics(
     tokens_in: int,
     tokens_out: int,
     cache_hit_tokens: int,
+    *,
+    message: str | None = None,
+    history_messages: int = 0,
+    contextualized: bool = False,
 ) -> None:
     """Compute and set the metrics dict for workflow execution.
 
     ``last_input_tokens`` is the largest single-step prompt (``None`` when no
     step usage was streamed); ``messages_tokens`` is derived from it so the
     context breakdown adds up.
+
+    Issue #661 — *message* is the workflow's input message, i.e. the exact
+    string the workflow was run with (``None`` for a checkpoint resume), and
+    the turn records its six-field digest alongside the timing fields.
     """
     if token_counts is None:
         return
@@ -1335,4 +1363,11 @@ def _emit_workflow_metrics(
         "tool_definition_tokens": tool_definition_tokens if tool_definition_tokens > 0 else None,
         "messages_tokens": messages_tokens,
         "last_input_tokens": last_in,
+        # Issue #661 — what the workflow was handed, from the workflow's own
+        # input message (``None`` on a resume yields null digest fields).
+        **user_message_digest(
+            message,
+            history_messages=history_messages,
+            contextualized=contextualized,
+        ),
     }

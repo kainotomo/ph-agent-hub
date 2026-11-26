@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.15.3] — 2026-11-26
+
+### Added
+- **A turn records the exact message it handed the model (Issue #661)** — a
+  session stored one user message, but the string the model received was the
+  contextualized one (and MAF could compact it further in-run), so an export
+  could not tell a model failure from a message-fidelity failure: the three
+  2026-11-26 runs of one session produced three different model-visible
+  messages with nothing in the file to show which was real. Every new agent
+  and workflow turn now persists six additive fields in its `metrics` part,
+  computed from the exact string passed to `agent.run(...)`: `user_message_chars`,
+  `user_message_sha256`, `user_message_head`, `user_message_tail`,
+  `history_messages` and `contextualized`. Head *and* tail are kept (200
+  characters each) because the observed loss was at the end of the message; the
+  hash covers the whole string, never the preview. For a turn with no replayed
+  history the hash is the stored message's; a contextualized turn deliberately
+  hashes the agent input. The values ride inside the existing JSON content, so
+  exports round-trip them and older exports still import. ([#661])
+
+### Fixed
+- **Compaction can no longer drop the user's message from the model's context
+  (Issue #661)** — MAF's in-run token-budget fallback keeps only the last
+  non-system message group, so a tool-heavy turn excluded the user's request
+  first: the model reasoned about tool results and its own earlier rounds with
+  no subject in context while the transcript still showed the request. The
+  budget became reachable when Issue #652 clamped it to
+  `COMPACTION_TOKEN_CEILING` (150K) for every window — a 1M-window model kept a
+  700K budget in 3.14.x, where a 300K-token turn was never compacted. The agent
+  and workflow step compaction now use `TurnInputPreservingCompaction`, which
+  re-includes the request group after MAF's pass, and the turn records the new
+  `context_compacted` metric so an export can distinguish a model that lost the
+  thread from one that never had it. The early-stop wrap-up call had the same
+  class of bug: it built `Original request:` from the first 2,000 characters of
+  the *contextualized* prompt, so on a long conversation the real request was
+  past the cut; it now receives the user's own message, clipped head+tail.
+  ([#661])
+
 ## [3.15.2] — 2026-11-26
 
 ### Added
@@ -835,3 +872,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#657]: https://github.com/kainotomo/ph-agent-hub/issues/657
 [#658]: https://github.com/kainotomo/ph-agent-hub/issues/658
 [#659]: https://github.com/kainotomo/ph-agent-hub/issues/659
+[#661]: https://github.com/kainotomo/ph-agent-hub/issues/661

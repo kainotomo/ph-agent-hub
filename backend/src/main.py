@@ -33,6 +33,7 @@ from .api.skills import router as skills_router
 from .api.templates import router as templates_router
 from .api.users import router as users_router
 from .api.widget import router as widget_router
+from .core.build_info import get_app_version
 from .core.config import settings
 
 # Conditionally import A2A server router (requires a2a-sdk)
@@ -363,7 +364,7 @@ async def lifespan(app: FastAPI):
         logger.warning("Failed to release run leases on shutdown", exc_info=True)
 
 
-app = FastAPI(title="PH Agent Hub", version="3.15.1", lifespan=lifespan)
+app = FastAPI(title="PH Agent Hub", version=get_app_version(), lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------

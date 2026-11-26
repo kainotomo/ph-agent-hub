@@ -2144,6 +2144,43 @@ class TestResolveToolCallables:
         callables, clients = await self.fn(db_session, session_data, test_tenant.id, [], 8192, "user1")
         # Built-in file tools are added; check that at least some callables are returned
         assert len(callables) > 0
+        names = {getattr(c, "name", None) for c in callables}
+        assert "list_uploaded_files" in names
+        # Issue #658 — host file access is off unless WORKSPACE_ROOTS is set.
+        assert "read_file" not in names
+
+    async def test_includes_builtin_read_file_when_configured(
+        self, db_session, test_tenant, test_session, tmp_path, monkeypatch,
+    ):
+        """Issue #658 — the host reader is wired in only when a root exists."""
+        from src.core.config import settings
+
+        monkeypatch.setattr(settings, "WORKSPACE_ROOTS", str(tmp_path))
+        session_data = {"id": test_session.id, "tenant_id": test_tenant.id}
+        callables, clients = await self.fn(
+            db_session, session_data, test_tenant.id, [], 8192, "user1",
+        )
+        names = {getattr(c, "name", None) for c in callables}
+        assert "read_file" in names
+
+    async def test_demo_and_guest_sessions_get_no_host_file_access(
+        self, db_session, test_tenant, test_session, tmp_path, monkeypatch,
+    ):
+        """Issue #658 — anonymous demo/widget owners never read host files."""
+        from src.core.config import settings
+
+        monkeypatch.setattr(settings, "WORKSPACE_ROOTS", str(tmp_path))
+        for owner in ("demo:tenant-1", "guest:embed-1"):
+            session_data = {
+                "id": test_session.id,
+                "tenant_id": test_tenant.id,
+                "user_id": owner,
+            }
+            callables, _ = await self.fn(
+                db_session, session_data, test_tenant.id, [], 8192, None,
+            )
+            names = {getattr(c, "name", None) for c in callables}
+            assert "read_file" not in names
 
     @pytest.mark.regression
     async def test_mcp_resolution_does_not_write_tool_config(
@@ -2842,7 +2879,6 @@ class TestPersistAssistantMessage:
     @patch("src.agents.runner.append_temp_message")
     async def test_temp_path_preserves_order(self, mock_append, db_session, test_session_temp, test_model):
         """Temporary/Redis path: ordered segments are appended as-is."""
-        mock_append.return_value = "redis-msg-id"
         segments = [
             {"type": "reasoning", "text": "r1"},
             {"type": "function_call", "name": "x", "arguments": {}, "id": "c1"},
@@ -2853,10 +2889,13 @@ class TestPersistAssistantMessage:
             "answer", test_model.id, "gpt-4", "openai",
             segments, 10, 10,
         )
-        assert msg_id == "redis-msg-id"
         mock_append.assert_called_once()
         call_args = mock_append.call_args
-        content = call_args[0][1]["content"]
+        stored = call_args[0][1]
+        # ``append_temp_message`` returns None; the persisted id is the one
+        # generated for the stored dict, not the append call's return value.
+        assert msg_id == stored["id"]
+        content = stored["content"]
         types = [p["type"] for p in content]
         assert types == ["reasoning", "function_call", "function_result", "text"]
 

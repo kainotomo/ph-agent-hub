@@ -39,6 +39,7 @@ from ..agents.stream_bridge import (
     register_bridge,
     remove_bridge,
 )
+from ..core.build_info import get_app_version, get_commit
 from ..core.config import settings
 from ..core.dependencies import get_current_user, get_db, oauth2_scheme
 from ..core.exceptions import (
@@ -5232,6 +5233,11 @@ def _build_export_dict(
 
     return {
         "version": 1,
+        # Issue #659 — ``version`` above is the export *schema*; these name
+        # the build that produced the export (additive, so older exports and
+        # import consumers are unaffected).
+        "app_version": get_app_version(),
+        "commit": get_commit(),
         "exported_at": now,
         "application": "ph-agent-hub",
         "session": {

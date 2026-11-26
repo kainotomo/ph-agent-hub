@@ -1363,6 +1363,16 @@ async def _resolve_model(
 # exists to publish.
 _NON_RESOLVABLE_OWNER_PREFIXES = ("guest:", "demo:")
 
+
+def _is_anonymous_owner(owner_id: str | None) -> bool:
+    """True when *owner_id* is a demo/widget guest with no user account.
+
+    Used to keep tool surfaces that touch host resources away from
+    unauthenticated demo and embed-widget sessions (Issue #658).
+    """
+    return str(owner_id or "").startswith(_NON_RESOLVABLE_OWNER_PREFIXES)
+
+
 #: Marker substituted for ``{{SESSION_URL}}`` when the session has no link.
 _NO_SESSION_URL_MARKER = "(this session has no resolvable link)"
 
@@ -2201,6 +2211,20 @@ async def _resolve_tool_callables(
             "Failed to build file_list tool for session %s", session_id, exc_info=True
         )
 
+    # ---- Built-in tool: read_file (host files, Issue #658) ---------------
+    # Registered only when WORKSPACE_ROOTS names an existing directory;
+    # build_read_file_tool() returns [] otherwise.  Anonymous demo/widget
+    # guests never get host filesystem access.
+    if not _is_anonymous_owner(session_user_id):
+        try:
+            from ..tools.read_file import build_read_file_tool
+            callables.extend(build_read_file_tool())
+        except Exception:
+            logger.warning(
+                "Failed to build read_file tool for session %s", session_id,
+                exc_info=True,
+            )
+
     # ---- Built-in tool: memory (always available, except temp) ----------
     # Gives the agent persistent memory: save, delete, and list entries.
     # Skipped for temporary sessions — they should leave no DB trace.
@@ -2710,6 +2734,15 @@ async def _auto_select_tools(
         callables.extend(file_list_tools)
     except Exception:
         logger.warning("Failed to build file_list tool for session %s", session_id, exc_info=True)
+
+    # Issue #658 — host file reader, only when WORKSPACE_ROOTS is configured
+    # and the session belongs to a real user (never a demo/widget guest).
+    if not _is_anonymous_owner(session_user_id):
+        try:
+            from ..tools.read_file import build_read_file_tool
+            callables.extend(build_read_file_tool())
+        except Exception:
+            logger.warning("Failed to build read_file tool", exc_info=True)
 
     user_id = session_data.get("user_id", "")
     if user_id and not is_temporary:
@@ -6774,6 +6807,75 @@ def _summarise_tool_result(output: Any) -> str:
     return text
 
 
+# Issue #657 — the live-context marker must say *where* the cut is, not just
+# how much was dropped, so the model can continue a large read with arithmetic
+# instead of probing and grepping for the boundary.  The marker is a handful of
+# numbers, so its own length is bounded by this constant (tests assert it).
+TRUNCATION_MARKER_MAX_CHARS = 240
+
+
+def _truncation_split(text: str, max_chars: int) -> tuple[int, int]:
+    """Return the 0-based ``(head_end, tail_start)`` cut points for a truncation.
+
+    The head is kept from offset 0, the tail from ``tail_start`` to the end,
+    and everything in between is replaced by a marker.  For line-oriented
+    text both cut points are moved to line boundaries, so the kept slices
+    contain whole lines and the line numbers in the marker are exact.  The
+    character ranges the marker reports are derived from the returned
+    indices, not from ``max_chars``, which is what makes reconstructing the
+    original from them possible.
+    """
+    total = len(text)
+    half = max(1, max_chars // 2)
+    head_end = half
+    tail_start = total - half
+
+    if "\n" in text:
+        newline = text.rfind("\n", 0, half)
+        if newline != -1:
+            head_end = newline + 1
+        # Advance the tail cut to the start of a line (just after a newline).
+        while tail_start < total and text[tail_start - 1] != "\n":
+            tail_start += 1
+
+    # A one-line file, an all-newline tail, or a tiny cap can leave no tail
+    # at all: fall back to the plain character split, which always leaves
+    # half the text on each side for ``total > max_chars``.
+    if tail_start >= total or tail_start <= head_end:
+        head_end = half
+        tail_start = total - half
+    return head_end, tail_start
+
+
+def _truncation_marker(text: str, head_end: int, tail_start: int) -> str:
+    """Build the live-context marker naming both kept ranges and both cuts.
+
+    Issue #657 — the previous marker (``[... N characters truncated ...]``)
+    only said how much was lost.  A file read then had to be paged by probing
+    for the boundary.  The replacement reports the total, both kept ranges,
+    the first dropped character and (for line-oriented text) both lines, so
+    the next call is arithmetic.  `head_end` and `tail_start` are 0-based;
+    the numbers in the marker are 1-based character/line positions, matching
+    how ``read_file_content`` numbers its lines.
+    """
+    total = len(text)
+    dropped = tail_start - head_end
+    parts = [
+        f"{dropped:,} of {total:,} characters truncated",
+        f"kept 1\u2013{head_end:,} and {tail_start + 1:,}\u2013{total:,}",
+        f"continue at char {head_end + 1:,}",
+        f"resume at char {tail_start + 1:,}",
+    ]
+    if "\n" in text:
+        head_line = text.count("\n", 0, head_end) + 1
+        tail_line = text.count("\n", 0, tail_start) + 1
+        total_lines = text.count("\n") + (0 if text.endswith("\n") else 1)
+        parts[2] += f" (line {head_line:,})"
+        parts[3] += f" (line {tail_line:,})"
+        parts.append(f"{total_lines:,} lines total")
+    return "\n\n[... " + "; ".join(parts) + " ...]\n\n"
+
+
 def _truncate_tool_output(
     output: Any,
     max_chars: int = TOOL_OUTPUT_CAP_FALLBACK,
@@ -6786,20 +6888,22 @@ def _truncate_tool_output(
     have each text item capped in place; non-text items pass through.
     Non-string values pass through unchanged.
 
-    Truncation keeps the first half + last half of the text, replacing
-    the middle with a notice showing how many characters were dropped.
-    This preserves important context from both the beginning (titles,
-    headers, summaries) and end (financial figures, conclusions).
+    Truncation keeps the first half + last half of the text, replacing the
+    middle with a marker naming the total length, both kept ranges and the
+    exact continuation offsets (Issue #657).  This preserves important
+    context from both the beginning (titles, headers, summaries) and end
+    (financial figures, conclusions), and turns an oversized read into a
+    paging prompt instead of a dead end.
     """
     if isinstance(output, dict):
         result = {}
         for key, value in output.items():
             if isinstance(value, str) and len(value) > max_chars:
-                half = max_chars // 2
+                head_end, tail_start = _truncation_split(value, max_chars)
                 result[key] = (
-                    value[:half]
-                    + f"\n\n[... {len(value) - max_chars} characters truncated ...]\n\n"
-                    + value[-half:]
+                    value[:head_end]
+                    + _truncation_marker(value, head_end, tail_start)
+                    + value[tail_start:]
                 )
             else:
                 result[key] = value
@@ -6825,13 +6929,12 @@ def _truncate_tool_output(
                         logger.debug("Could not normalise immutable Content item")
         return output
     if isinstance(output, str) and len(output) > max_chars:
-        half = max_chars // 2
-        truncated = (
-            output[:half]
-            + f"\n\n[... {len(output) - max_chars} characters truncated ...]\n\n"
-            + output[-half:]
+        head_end, tail_start = _truncation_split(output, max_chars)
+        return (
+            output[:head_end]
+            + _truncation_marker(output, head_end, tail_start)
+            + output[tail_start:]
         )
-        return truncated
     return output
 
 

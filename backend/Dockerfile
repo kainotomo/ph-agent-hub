@@ -57,6 +57,12 @@ RUN playwright install chromium && \
 # Copy application code
 COPY . .
 
+# Build identity (Issue #659) — the commit is stamped into the image by
+# infrastructure/build.sh (the .git directory is not copied into the build
+# context), so a session export can name the build that produced it.
+ARG GIT_COMMIT=""
+ENV GIT_COMMIT=${GIT_COMMIT}
+
 EXPOSE 8000
 
 # CMD is overridden in docker-compose.yml:

@@ -851,6 +851,20 @@ entering the model context, and `COMPACTION_TOKEN_CEILING` (default
 `150_000` tokens) caps the mid-run compaction budget. Both accept `0` to
 restore the purely window-scaled behaviour, which is not recommended.
 
+**Host file access (`read_file`, Issue #658).** The agent reads files that live
+on the hub host — a repository prompt, a CSV under `data/`, a generated report
+— with the built-in `read_file` tool instead of a shell/MCP command. It is
+disabled until `WORKSPACE_ROOTS` names at least one existing directory
+(comma-separated allowlist; paths outside the roots, `..` traversal, symlinks
+and non-regular files are refused with a named `error_code`). One call returns
+at most 600 lines and 30,000 characters — below the model-context cap — with
+1-based line numbers, an explicit `encoding` (UTF-8 by default; pass `cp1252`
+for a legacy code page) and a `continue_at` line for the next page, so a large
+file is paged with arithmetic instead of guesswork. In Docker, mount the
+directory into the backend container and point the setting at its in-container
+path (e.g. volume `./workspace:/data/workspace` and
+`WORKSPACE_ROOTS=/data/workspace`).
+
 ### 11.4 MAF Target Keys
 
 The `maf_target_key` is only required for **Workflow Based** skills. It must match a registered workflow module in the backend codebase (`src/agents/workflows/`). If the key doesn't match any registered target, the backend logs a warning on startup but does not crash.

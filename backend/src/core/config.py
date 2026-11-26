@@ -222,6 +222,17 @@ class Settings(BaseSettings):
     get a 700 000-token budget that never fires.  ``0`` disables the
     ceiling and restores the purely window-scaled behaviour."""
 
+    # --- Host file reader (Issue #658) ---
+    WORKSPACE_ROOTS: str = ""
+    """Comma-separated allowlist of host directories the built-in ``read_file``
+    tool may read.  The tool is only registered when at least one existing
+    directory is configured; an empty value (the default) leaves the hub
+    without host-file access.  Paths outside these roots, ``..`` traversal,
+    symlinks and non-regular files are refused with a named error.  Read the
+    file through the tool instead of a shell/MCP call: it decodes explicitly
+    (UTF-8 by default), pages by line with an exact ``continue_at`` and keeps
+    every call under the model-context tool-output cap."""
+
     # --- Context-pressure telemetry (Issue #653) ---
     AGENT_CONTEXT_PRESSURE_MULTIPLIER: float = 20.0
     """Multiple of the model's context window at which one turn's *cumulative*

@@ -2,7 +2,7 @@
 // PH Agent Hub — NotificationBell Component
 // =============================================================================
 // Bell icon with unread count badge; dropdown shows recent notifications
-// with "Mark all read" action (Issue #449).
+// with "Mark all read" (Issue #449) and "Clear read" (Issue #669) actions.
 // =============================================================================
 
 import React, { useState } from "react";
@@ -11,6 +11,7 @@ import {
   Badge,
   Button,
   List,
+  Popconfirm,
   Popover,
   Typography,
   Empty,
@@ -18,6 +19,7 @@ import {
   Space,
   Tag,
   Tooltip,
+  message,
 } from "antd";
 import {
   BellOutlined,
@@ -31,6 +33,7 @@ import {
   listNotifications,
   markAllNotificationsRead,
   markNotificationRead,
+  deleteReadNotifications,
   NotificationData,
   NotificationListResponse,
   UnreadCountResponse,
@@ -76,6 +79,7 @@ function timeAgo(dateStr: string): string {
 
 export function NotificationBell() {
   const [open, setOpen] = useState(false);
+  const [clearing, setClearing] = useState(false);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
@@ -97,11 +101,32 @@ export function NotificationBell() {
   });
 
   const unreadCount = unreadData?.count ?? 0;
+  const readCount = Math.max(0, (notifData?.total ?? 0) - unreadCount);
 
   const handleMarkAllRead = async () => {
     await markAllNotificationsRead();
     queryClient.invalidateQueries({ queryKey: ["notification-unread-count"] });
     queryClient.invalidateQueries({ queryKey: ["notifications"] });
+  };
+
+  const handleClearRead = async () => {
+    setClearing(true);
+    try {
+      const result = await deleteReadNotifications();
+      queryClient.invalidateQueries({ queryKey: ["notification-unread-count"] });
+      queryClient.invalidateQueries({ queryKey: ["notifications"] });
+      message.success(
+        result.deleted === 0
+          ? "No read notifications to delete"
+          : `Deleted ${result.deleted} read notification${
+              result.deleted === 1 ? "" : "s"
+            }`,
+      );
+    } catch {
+      message.error("Failed to delete read notifications");
+    } finally {
+      setClearing(false);
+    }
   };
 
   const handleNotificationClick = async (notif: NotificationData) => {
@@ -134,16 +159,32 @@ export function NotificationBell() {
         }}
       >
         <Text strong>Notifications</Text>
-        {unreadCount > 0 && (
-          <Button
-            type="link"
-            size="small"
-            icon={<CheckOutlined />}
-            onClick={handleMarkAllRead}
-          >
-            Mark all read
-          </Button>
-        )}
+        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          {unreadCount > 0 && (
+            <Button
+              type="link"
+              size="small"
+              icon={<CheckOutlined />}
+              onClick={handleMarkAllRead}
+            >
+              Mark all read
+            </Button>
+          )}
+          {readCount > 0 && (
+            <Popconfirm
+              title="Delete all read notifications?"
+              description="This cannot be undone. Unread notifications are kept."
+              okText="Delete"
+              okButtonProps={{ danger: true }}
+              cancelText="Cancel"
+              onConfirm={handleClearRead}
+            >
+              <Button type="link" size="small" danger loading={clearing}>
+                Clear read
+              </Button>
+            </Popconfirm>
+          )}
+        </div>
       </div>
 
       {/* List */}
@@ -272,6 +313,7 @@ export function NotificationBell() {
               <BellOutlined style={{ fontSize: 16 }} />
             </Badge>
           }
+          aria-label="Notifications"
           style={{ display: "flex", alignItems: "center", justifyContent: "center" }}
         />
       </Tooltip>

@@ -669,6 +669,7 @@ Scheduled tasks support time-based autonomous agent execution. States: `ACTIVE`,
 GET    /notifications              # List notifications (paginated, unread_only filter)
 POST   /notifications/read/:id     # Mark a notification as read
 POST   /notifications/read-all     # Mark all notifications as read
+DELETE /notifications/read         # Delete all read notifications
 GET    /notifications/unread-count # Get unread notification count
 ```
 
@@ -772,7 +773,7 @@ Admin API endpoints (see `api/admin.py`):
       demo.py              — public demo endpoint
       memory.py            — user memory CRUD
       models.py            — user-facing model listing
-      notifications.py     — list notifications, mark read, unread count
+      notifications.py     — list notifications, mark read, delete read, unread count
       prompts.py           — user prompt CRUD
       scheduled_tasks.py   — CRUD + pause/resume for scheduled agent tasks
       skills.py            — user skill CRUD

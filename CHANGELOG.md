@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.16.0] — 2026-11-27
+
+### Added
+- **Clear read notifications (#669)** — the notification bell now has a
+  **Clear read** action next to **Mark all read**. It deletes every notification
+  the user has already read — across all pages, not just the 20 shown in the
+  panel — after a confirmation prompt, reports how many were removed, and
+  leaves unread notifications (and the badge) untouched. The backend exposes
+  `DELETE /api/notifications/read`, scoped to the signed-in user and tenant and
+  returning the deleted count. ([#669])
+
 ## [3.15.6] — 2026-11-26
 
 ### Fixed
@@ -932,3 +943,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#658]: https://github.com/kainotomo/ph-agent-hub/issues/658
 [#659]: https://github.com/kainotomo/ph-agent-hub/issues/659
 [#661]: https://github.com/kainotomo/ph-agent-hub/issues/661
+[#669]: https://github.com/kainotomo/ph-agent-hub/issues/669

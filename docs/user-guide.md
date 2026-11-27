@@ -401,7 +401,7 @@ The file will download automatically. The filename is derived from the session t
 ```json
 {
   "version": 1,
-  "app_version": "3.15.6",
+  "app_version": "3.16.0",
   "commit": "abc1234",
   "exported_at": "2026-06-12T16:14:13+00:00",
   "application": "ph-agent-hub",
@@ -728,6 +728,7 @@ Notifications alert you to important events like background task completion and 
 
 - Click a notification to mark it as read
 - Click **Mark all as read** to clear the badge
+- Click **Clear read** to permanently delete notifications you have already read (a confirmation is required); unread notifications are kept
 
 ### 16.3 Notification Types
 

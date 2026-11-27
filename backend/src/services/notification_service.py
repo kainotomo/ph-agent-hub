@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.orm.notifications import Notification
@@ -149,6 +149,23 @@ async def mark_all_read(
             Notification.is_read == False,  # noqa: E712
         )
         .values(is_read=True)
+    )
+    await db.commit()
+    return result.rowcount
+
+
+async def delete_read_notifications(
+    db: AsyncSession,
+    user_id: str,
+    tenant_id: str,
+) -> int:
+    """Delete all read notifications for a user. Returns count deleted."""
+    result = await db.execute(
+        delete(Notification).where(
+            Notification.user_id == user_id,
+            Notification.tenant_id == tenant_id,
+            Notification.is_read == True,  # noqa: E712
+        )
     )
     await db.commit()
     return result.rowcount

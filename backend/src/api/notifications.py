@@ -17,11 +17,13 @@ from ..core.dependencies import get_current_user, get_db
 from ..core.exceptions import NotFoundError
 from ..db.orm.users import User as UserORM
 from ..models.notification import (
+    DeleteReadNotificationsResponse,
     NotificationListResponse,
     NotificationResponse,
     UnreadCountResponse,
 )
 from ..services.notification_service import (
+    delete_read_notifications as delete_read_notifications_service,
     get_unread_count,
     list_notifications,
     mark_all_read,
@@ -88,3 +90,15 @@ async def mark_all_notifications_read(
     """Mark all unread notifications as read."""
     count = await mark_all_read(db, current_user.id, current_user.tenant_id)
     return {"status": "ok", "updated": count}
+
+
+@router.delete("/read", response_model=DeleteReadNotificationsResponse)
+async def clear_read_notifications(
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(get_current_user),
+) -> DeleteReadNotificationsResponse:
+    """Delete every read notification for the current user."""
+    deleted = await delete_read_notifications_service(
+        db, current_user.id, current_user.tenant_id
+    )
+    return DeleteReadNotificationsResponse(deleted=deleted)

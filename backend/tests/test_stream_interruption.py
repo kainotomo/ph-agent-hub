@@ -25,6 +25,7 @@ import pytest
 
 import src.agents.runner as runner_module
 from src.agents.runner import (
+    CONTINUE_FOOTER,
     TOOL_EXECUTION_TIMEOUT,
     _generate_stop_wrapup,
     _round_produced_answer,
@@ -305,6 +306,64 @@ class TestWrapUpTimeout:
 
 
 # ---------------------------------------------------------------------------
+# Follow-up to #579 — the interrupted conclusion must not send the user back
+# to the start, and must always end with the same actionable next step
+# ---------------------------------------------------------------------------
+
+
+class TestInterruptedWrapupContract:
+    @pytest.mark.asyncio
+    async def test_wrapup_appends_the_continue_footer(self):
+        captured: dict = {}
+        response = MagicMock()
+        response.messages = [
+            MagicMock(text="The response was interrupted. The work so far is saved."),
+        ]
+        client = MagicMock()
+
+        async def _get_response(**kwargs):
+            captured["messages"] = kwargs["messages"]
+            return response
+
+        client.get_response = _get_response
+
+        out = await _generate_stop_wrapup(
+            model_client=client,
+            system_prompt="s",
+            user_message="u",
+            turn_notes=[],
+            stop_reason="stream_interrupted",
+            steps=1,
+        )
+
+        assert out.endswith(CONTINUE_FOOTER)
+        instruction = captured["messages"][-1].text
+        assert "never tell them to re-run the prompt or start over" in instruction
+        assert "Do not claim that no work was done" in instruction
+
+    @pytest.mark.asyncio
+    async def test_canned_fallback_also_offers_continuation(self):
+        client = MagicMock()
+
+        async def _get_response(**_kwargs):
+            raise RuntimeError("provider down")
+
+        client.get_response = _get_response
+
+        out = await _generate_stop_wrapup(
+            model_client=client,
+            system_prompt="s",
+            user_message="u",
+            turn_notes=[],
+            stop_reason="stream_interrupted",
+            steps=1,
+        )
+
+        assert "Send another message" in out
+        assert "continue" in out.lower()
+
+
+# ---------------------------------------------------------------------------
 # Issue #645 — MCP calls are bounded, so a hung server becomes a tool error
 # ---------------------------------------------------------------------------
 
@@ -364,3 +423,13 @@ class TestRoundProducedAnswer:
         assert _round_produced_answer(
             {"text_chars": 68, "finish_reason": "stop"}
         ) is True
+
+    def test_whitespace_only_text_is_not_an_answer(self):
+        """Follow-up to #579 — stripped DSML can leave only whitespace."""
+        assert _round_produced_answer(
+            {
+                "text_chars": 21,
+                "visible_text_chars": 0,
+                "finish_reason": "stop",
+            }
+        ) is False

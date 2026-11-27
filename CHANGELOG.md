@@ -25,6 +25,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that has none while thinking is on — compaction summaries included — and
   nothing when thinking is off. A test runs real MAF compaction and asserts
   every assistant message in the projected request carries the field. ([#664])
+- **A leaked DSML container no longer becomes the turn's answer, and an
+  interrupted turn always says how to resume (follow-up to #579)** — two
+  2026-11-27 sessions ended without a usable answer. A DeepSeek stream can leak
+  a native DSML container whose sentinel (`｜｜DSML｜｜`) wraps a bare
+  `< calls>` shell; stripping only the sentinel persisted `< calls>` as the
+  answer, and because it counted as text the no-answer guard never fired. The
+  sanitizer now removes the shell and repeats until stable, and the turn counts
+  *visible* text, so a markup/whitespace-only round is concluded through the
+  wrap-up instead of being reported as completed. Separately, the
+  interrupted-turn wrap-up told the user to re-run the prompt from the top even
+  though the saved state resumes on the next message; the conclusion now never
+  advises a restart and always ends with "Send another message and I'll
+  continue from where I stopped." ([#579])
 
 ## [3.15.5] — 2026-11-26
 

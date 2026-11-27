@@ -1,7 +1,8 @@
 // =============================================================================
 // PH Agent Hub — Notifications API Service
 // =============================================================================
-// Endpoints for the notification center (bell icon + dropdown, Issue #449).
+// Endpoints for the notification center (bell icon + dropdown, Issues #449
+// and #669).
 // =============================================================================
 
 import api from "../../../services/api";
@@ -72,4 +73,13 @@ export function markAllNotificationsRead(): Promise<{
     "/notifications/read-all",
     { method: "POST" },
   );
+}
+
+export function deleteReadNotifications(): Promise<{
+  status: string;
+  deleted: number;
+}> {
+  return api<{ status: string; deleted: number }>("/notifications/read", {
+    method: "DELETE",
+  });
 }

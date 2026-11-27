@@ -9,6 +9,7 @@
 #   - GET /api/notifications/unread-count
 #   - POST /api/notifications/{id}/read
 #   - POST /api/notifications/read-all
+#   - DELETE /api/notifications/read
 # =============================================================================
 
 import uuid
@@ -513,3 +514,128 @@ class TestMarkAllRead:
             headers=headers,
         )
         assert count_resp.json()["count"] == 0
+
+
+class TestDeleteRead:
+    async def test_delete_read_removes_only_read(
+        self,
+        override_get_db,
+        async_client: httpx.AsyncClient,
+        auth_headers,
+        test_user,
+        test_notification,
+        read_notification,
+    ) -> None:
+        """DELETE /api/notifications/read removes read rows and keeps unread."""
+        headers = auth_headers(test_user)
+        response = await async_client.delete(
+            "/api/notifications/read",
+            headers=headers,
+        )
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok", "deleted": 1}
+
+        list_resp = await async_client.get("/api/notifications", headers=headers)
+        data = list_resp.json()
+        assert data["total"] == 1
+        assert data["items"][0]["id"] == test_notification.id
+        assert data["items"][0]["is_read"] is False
+
+        count_resp = await async_client.get(
+            "/api/notifications/unread-count",
+            headers=headers,
+        )
+        assert count_resp.json()["count"] == 1
+
+    async def test_delete_read_removes_all_when_all_read(
+        self,
+        override_get_db,
+        async_client: httpx.AsyncClient,
+        auth_headers,
+        test_user,
+        read_notification,
+    ) -> None:
+        """DELETE /api/notifications/read empties the list when all rows are read."""
+        headers = auth_headers(test_user)
+        response = await async_client.delete(
+            "/api/notifications/read",
+            headers=headers,
+        )
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok", "deleted": 1}
+
+        list_resp = await async_client.get("/api/notifications", headers=headers)
+        assert list_resp.json()["total"] == 0
+
+    async def test_delete_read_nothing_to_delete(
+        self,
+        override_get_db,
+        async_client: httpx.AsyncClient,
+        auth_headers,
+        test_user,
+        test_notification,
+    ) -> None:
+        """DELETE /api/notifications/read reports zero when only unread rows exist."""
+        headers = auth_headers(test_user)
+        response = await async_client.delete(
+            "/api/notifications/read",
+            headers=headers,
+        )
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok", "deleted": 0}
+
+        list_resp = await async_client.get("/api/notifications", headers=headers)
+        assert list_resp.json()["total"] == 1
+
+    async def test_delete_read_other_user_not_affected(
+        self,
+        override_get_db,
+        async_client: httpx.AsyncClient,
+        auth_headers,
+        test_user,
+        db_session: AsyncSession,
+        test_tenant,
+    ) -> None:
+        """A user's delete-read must not touch another user's notifications."""
+        from src.db.orm.users import User as UserORM
+
+        other_user = UserORM(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            email=f"other-delete-{uuid.uuid4().hex[:8]}@example.com",
+            password_hash="fakehash",
+            display_name="Other Delete User",
+            role="user",
+            is_active=True,
+        )
+        db_session.add(other_user)
+        await db_session.flush()
+
+        other_notification = Notification(
+            id=str(uuid.uuid4()),
+            user_id=other_user.id,
+            tenant_id=test_tenant.id,
+            type=Notification.TYPE_TASK_COMPLETED,
+            title="Other user read notification",
+            body=None,
+            reference_id=None,
+            reference_type=None,
+            is_read=True,
+        )
+        db_session.add(other_notification)
+        await db_session.flush()
+
+        headers = auth_headers(test_user)
+        response = await async_client.delete(
+            "/api/notifications/read",
+            headers=headers,
+        )
+        assert response.status_code == 200
+        assert response.json()["deleted"] == 0
+
+        other_headers = auth_headers(other_user)
+        list_resp = await async_client.get(
+            "/api/notifications",
+            headers=other_headers,
+        )
+        assert list_resp.json()["total"] == 1

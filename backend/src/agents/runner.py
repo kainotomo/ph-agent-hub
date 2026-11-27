@@ -38,6 +38,7 @@ from agent_framework import (
     ToolResultCompactionStrategy,
 )
 
+from ..core.build_info import get_app_version
 from ..core.config import settings
 from ..core.exceptions import ValidationError, NotFoundError
 from .budget import RunBudget, budget_from_settings, resolve_run_budget
@@ -4822,6 +4823,11 @@ async def _run_agent_stream(
         else 0
     )
     context_pressure_reported = False
+    # Issue #672 — the cumulative input that tripped the pressure threshold.
+    # Persisted with the turn so an export can prove the event instead of
+    # inferring it from ``tokens_in``, which #595 may overwrite with the final
+    # round's usage.
+    context_pressure_at_input_tokens: int | None = None
 
     # ---- Issue #639 — one retry for a reasoning-only round ---------------
     # A round that produced tokens but no text and no tool call cannot
@@ -5051,6 +5057,7 @@ async def _run_agent_stream(
                 and stream_usage_in >= context_pressure_threshold
             ):
                 context_pressure_reported = True
+                context_pressure_at_input_tokens = stream_usage_in
                 logger.warning(
                     "Agent context pressure for session %s: cumulative input "
                     "%d tokens is %dx the %d-token model window "
@@ -5678,6 +5685,11 @@ async def _run_agent_stream(
                 first_input_tokens=stream_first_in or None,
                 context_pressure=context_pressure_reported,
                 context_pressure_threshold=context_pressure_threshold or None,
+                # Issue #672 — the counter the threshold is compared against
+                # and the value it had when it fired, so an export proves the
+                # event instead of leaving it to inference.
+                cumulative_input_tokens=stream_usage_in,
+                context_pressure_at_input_tokens=context_pressure_at_input_tokens,
                 tool_calls=tool_calls,
                 budget=token_counts.get("budget"),
                 budget_exceeded=budget_exceeded,
@@ -6591,6 +6603,8 @@ def _compute_turn_metrics(
     first_input_tokens: int | None = None,
     context_pressure: bool = False,
     context_pressure_threshold: int | None = None,
+    cumulative_input_tokens: int | None = None,
+    context_pressure_at_input_tokens: int | None = None,
     tool_calls: int = 0,
     budget: dict | None = None,
     budget_exceeded: bool = False,
@@ -6642,6 +6656,19 @@ def _compute_turn_metrics(
         the turn — the case in which the model's context and the stored
         transcript can legitimately differ.
 
+    Issue #672 adds the provenance a triager cannot otherwise recover:
+    ``app_version`` (the build that *recorded* this turn, as opposed to the
+    export's top-level ``app_version``, which names the build that exported
+    it, Issue #659), ``cumulative_input_tokens`` (the counter the pressure
+    threshold and the input-token budget are enforced against) and
+    ``context_pressure_at_input_tokens`` (its value when the pressure event
+    fired).  The last two make ``context_pressure`` verifiable: a turn can no
+    longer report the flag beside a ``tokens_in`` that never reached the
+    threshold, which is what made the Issue #672 export unreadable.
+    ``cumulative_input_tokens`` falls back to ``tokens_in`` when a caller
+    cannot supply the streamed counter (the non-streaming path has a single
+    round, so its reported usage is the turn's).
+
     Issue #661 follow-up — ``stream_error`` records the exception that killed
     the model stream (``{"type", "message", "code"}`` or ``None``).  Such a
     turn is concluded through the tool-less wrap-up, so the outer producer
@@ -6669,9 +6696,19 @@ def _compute_turn_metrics(
     # a turn with no tool call still has model rounds, so fall back to those
     # rather than reporting nothing.
     denominator = steps or rounds
+    # Issue #672 — prefer the cumulative counter the budget enforces against
+    # (``stream_usage_in``) over ``tokens_in``, which #595 may have replaced
+    # with the final round's usage.  Without this, a turn that hit the
+    # override reports a per-step cost of a few thousand tokens instead of
+    # the ~111K the provider actually charged.
+    cumulative_in = (
+        cumulative_input_tokens
+        if cumulative_input_tokens is not None
+        else tokens_in
+    )
     avg_input_tokens_per_step = (
-        int(round(tokens_in / denominator))
-        if denominator > 0 and tokens_in > 0
+        int(round(cumulative_in / denominator))
+        if denominator > 0 and cumulative_in > 0
         else None
     )
     context_growth = (
@@ -6706,6 +6743,14 @@ def _compute_turn_metrics(
         "context_growth": context_growth,
         "context_pressure": context_pressure,
         "context_pressure_threshold": context_pressure_threshold,
+        # Issue #672 — the evidence for the two flags above, and the build
+        # that wrote this turn.  ``context_pressure`` true without a value
+        # here is a contradiction a reader can now detect; ``app_version``
+        # names the recording build, while the export's top-level
+        # ``app_version`` names the exporting build (Issue #659).
+        "context_pressure_at_input_tokens": context_pressure_at_input_tokens,
+        "cumulative_input_tokens": cumulative_in,
+        "app_version": get_app_version(),
     }
     # Issue #661 — prove what the model was given.  The digest is of the exact
     # string this turn handed to ``agent.run(...)``; for a turn with no
@@ -7013,6 +7058,17 @@ def _summarise_tool_result(output: Any) -> str:
 # numbers, so its own length is bounded by this constant (tests assert it).
 TRUNCATION_MARKER_MAX_CHARS = 240
 
+# Issue #672 — a line-oriented result is paged forward, not read once: the
+# model continues at the offset the marker names.  Under a half/half split the
+# tail kept at the end of every window is text the model already has, so a
+# 176,825-char read delivered ~20,000 chars of duplicate tail per page (1.77x
+# the source for that document).  A small tail keeps what Issue #657 added it
+# for — the end of a report is visible on the first read — while leaving the
+# first ~95 % of the budget contiguous, so a forward page advances instead of
+# repeating.  Caps at or below the floor keep the historical half split.
+TRUNCATION_TAIL_MIN_CHARS = 2_000
+TRUNCATION_TAIL_RATIO = 0.05
+
 
 def _truncation_split(text: str, max_chars: int) -> tuple[int, int]:
     """Return the 0-based ``(head_end, tail_start)`` cut points for a truncation.
@@ -7024,14 +7080,32 @@ def _truncation_split(text: str, max_chars: int) -> tuple[int, int]:
     character ranges the marker reports are derived from the returned
     indices, not from ``max_chars``, which is what makes reconstructing the
     original from them possible.
+
+    Issue #672 — the tail gets a small, fixed share of the budget instead of
+    half of it when the text is line-oriented (see
+    ``TRUNCATION_TAIL_MIN_CHARS``): a forward page then carries new text
+    rather than the tail the previous page already delivered.  Single-line
+    payloads keep the half/half split, where the end of the blob is as
+    informative as the start and paging by offset is not how they are read.
     """
     total = len(text)
     half = max(1, max_chars // 2)
-    head_end = half
-    tail_start = total - half
+    line_oriented = "\n" in text
+    tail_chars = half
+    if line_oriented:
+        tail_chars = min(
+            max(
+                TRUNCATION_TAIL_MIN_CHARS,
+                int(max_chars * TRUNCATION_TAIL_RATIO),
+            ),
+            half,
+        )
+    head_budget = max(1, max_chars - tail_chars)
+    head_end = head_budget
+    tail_start = total - tail_chars
 
-    if "\n" in text:
-        newline = text.rfind("\n", 0, half)
+    if line_oriented:
+        newline = text.rfind("\n", 0, head_budget)
         if newline != -1:
             head_end = newline + 1
         # Advance the tail cut to the start of a line (just after a newline).
@@ -7088,12 +7162,15 @@ def _truncate_tool_output(
     have each text item capped in place; non-text items pass through.
     Non-string values pass through unchanged.
 
-    Truncation keeps the first half + last half of the text, replacing the
-    middle with a marker naming the total length, both kept ranges and the
-    exact continuation offsets (Issue #657).  This preserves important
-    context from both the beginning (titles, headers, summaries) and end
-    (financial figures, conclusions), and turns an oversized read into a
-    paging prompt instead of a dead end.
+    Truncation keeps the head and a tail of the text, replacing the middle
+    with a marker naming the total length, both kept ranges and the exact
+    continuation offsets (Issue #657).  This preserves important context from
+    both the beginning (titles, headers, summaries) and end (financial
+    figures, conclusions), and turns an oversized read into a paging prompt
+    instead of a dead end.  Issue #672 — line-oriented text keeps a small
+    tail and a contiguous head, so the next page advances through the
+    document instead of re-delivering the tail the previous page already
+    carried.
     """
     if isinstance(output, dict):
         result = {}

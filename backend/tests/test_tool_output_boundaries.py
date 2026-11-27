@@ -553,3 +553,67 @@ class TestTruncationContinuation:
         info = _parse_truncation(result[0].text)
         clean = result[0].text.replace(info["marker"], "")
         assert clean == text[: info["head_end"]] + text[info["tail_start"] :]
+
+
+class TestContiguousPaging:
+    """Issue #672 — a forward page must advance, not repeat the tail.
+
+    Under the #657 half/half split every page re-delivered the last ~20,000
+    chars of the document, so the 176,825-char read in the issue cost 1.77x
+    its source.  Line-oriented results now keep a small tail and a contiguous
+    head; single-line payloads keep both ends.
+    """
+
+    def test_line_oriented_head_keeps_most_of_the_cap(self):
+        text = _numbered_text()
+        cap = 40_000
+        result = _truncate_tool_output(text, max_chars=cap)
+        info = _parse_truncation(result)
+
+        assert info["total"] == len(text)
+        assert info["head_end"] >= 37_000
+        assert info["kept_tail_chars"] <= 2_100
+        clean = result.replace(info["marker"], "")
+        assert clean == text[: info["head_end"]] + text[info["tail_start"] :]
+        assert len(result) <= cap + TRUNCATION_MARKER_MAX_CHARS
+
+    def test_small_caps_keep_the_half_split(self):
+        """The #657 tests run with tiny caps; that behaviour must not move."""
+        text = _numbered_text(count=400)
+        info = _parse_truncation(_truncate_tool_output(text, max_chars=1_000))
+
+        assert 300 <= info["head_end"] <= 510
+        # Line snapping may move the cut by at most one 86-char line.
+        assert 400 <= info["kept_tail_chars"] <= 510
+
+    def test_single_line_payload_keeps_both_ends(self):
+        text = "z" * 126_684
+        info = _parse_truncation(_truncate_tool_output(text, max_chars=40_000))
+
+        assert info["head_end"] == 20_000
+        assert info["kept_tail_chars"] == 20_000
+
+    def test_forward_paging_delivers_at_most_110_percent(self):
+        """The issue's 176 KB document fits in ~5 pages, not 23 calls."""
+        text = _numbered_text()
+        cap = _compute_tool_output_cap(1_000_000)
+        assert cap >= 40_000
+
+        delivered = 0
+        pages = 0
+        start = 0
+        while start < len(text):
+            remaining = text[start:]
+            if len(remaining) <= cap:
+                delivered += len(remaining)
+                pages += 1
+                break
+            result = _truncate_tool_output(remaining, max_chars=cap)
+            info = _parse_truncation(result)
+            delivered += len(result) - len(info["marker"])
+            pages += 1
+            start += info["continue_at"] - 1
+            assert pages < 50, "paging did not advance"
+
+        assert pages >= 4
+        assert delivered <= int(1.10 * len(text))

@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.16.2] — 2026-11-27
+
+### Fixed
+- **An export can now prove which build recorded a turn, and why context
+  pressure fired (#672)** — the 3.16.0 export that opened the issue reported
+  `context_pressure: true` beside `context_pressure_threshold: 20,000,000` and
+  10,474,495 input tokens, and its metrics part had no `context_compacted` key
+  although the recording build writes one. Both oddities are provenance
+  failures rather than missing code: the export's `app_version` names the build
+  that *exported* the session (Issue #659), so an old session exported by a new
+  build reads as a new build that omitted keys. Every turn's metrics part now
+  carries its own `app_version`, plus `cumulative_input_tokens` and
+  `context_pressure_at_input_tokens` — the counter the pressure threshold is
+  compared against and its value when the event fired, `null` when it did not
+  — so the flag can never again be read as true without evidence.
+  `tokens_in` keeps its #595 behaviour (it may hold the final round's usage),
+  so `avg_input_tokens_per_step` now divides the cumulative counter instead:
+  the issue's turn is 111,431 tokens per step, not 3,297. ([#672])
+
+### Changed
+- **A truncated line-oriented read keeps a contiguous head instead of the text
+  at each end (#672)** — the 40,000-character cap splits a 177 KB document into
+  windows and the #657 marker tells the model to continue at a character
+  offset, but every window also re-delivered the last ~20,000 characters as a
+  tail: the same 176,825-character document cost 312,408 characters (1.77x)
+  across its reads. Line-oriented results now keep ~95 % of the cap at the head
+  and a 2,000-character tail (never more than half), so a forward page advances
+  through the document; the same read is 5 pages and 1.04x in a test that
+  walks it by the marker's own `continue_at`. Single-line payloads (JSON
+  dumps) keep the half/half split, and caps at or below 4,000 characters are
+  unchanged, so every #652/#657 behaviour a test pins stays where it was.
+  ([#672])
+
 ## [3.16.1] — 2026-11-27
 
 ### Fixed
@@ -959,3 +992,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#659]: https://github.com/kainotomo/ph-agent-hub/issues/659
 [#661]: https://github.com/kainotomo/ph-agent-hub/issues/661
 [#669]: https://github.com/kainotomo/ph-agent-hub/issues/669
+[#672]: https://github.com/kainotomo/ph-agent-hub/issues/672

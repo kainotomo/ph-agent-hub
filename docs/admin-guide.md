@@ -843,13 +843,23 @@ Independently of `max_input_tokens`, the agent emits a one-per-turn
 `context_pressure` stream event and a warning log when cumulative input
 crosses `AGENT_CONTEXT_PRESSURE_MULTIPLIER` × the model window (default `20`,
 `0` disables). Use it to find turns that are growing without ever tripping a
-budget. Models with no declared `context_length` never fire it.
+budget. Models with no declared `context_length` never fire it. The per-turn
+`metrics` part records the evidence for that event — `cumulative_input_tokens`
+(the counter the threshold is compared against) and
+`context_pressure_at_input_tokens` (its value when it fired, `null` if it never
+did) — plus `app_version`, the build that recorded the turn; the export's own
+top-level `app_version` names the build that produced the export, so the two
+can differ for an old session (Issue #672).
 
 Two absolute ceilings keep the defences effective on large-window models:
 `TOOL_OUTPUT_CAP_MAX_CHARS` (default `40_000`) caps a single tool result
 entering the model context, and `COMPACTION_TOKEN_CEILING` (default
 `150_000` tokens) caps the mid-run compaction budget. Both accept `0` to
-restore the purely window-scaled behaviour, which is not recommended.
+restore the purely window-scaled behaviour, which is not recommended. A
+truncated line-oriented result keeps a contiguous head (~95 % of the cap) and
+a small tail, so paging forward through a large document does not re-deliver
+text the previous page already carried; single-line payloads keep both ends
+(Issue #672).
 
 **Host file access (`read_file`, Issue #658).** The agent reads files that live
 on the hub host — a repository prompt, a CSV under `data/`, a generated report

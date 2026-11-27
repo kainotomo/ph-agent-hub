@@ -3316,3 +3316,88 @@ class TestComputeTurnMetrics:
         assert metrics["last_input_tokens"] is None
         assert metrics["messages_tokens"] == 1_000
 
+
+class TestTurnProvenanceMetrics:
+    """Issue #672 — a turn must prove its build and its pressure event.
+
+    The 3.16.0 export that produced the issue reported
+    ``context_pressure: true`` beside ``context_pressure_threshold:
+    20,000,000`` and a total of 10,474,495 input tokens: a combination the
+    code cannot produce, and one no reader could resolve because the counters
+    behind it were not persisted.  These keys close that gap.
+    """
+
+    def _metrics(self, **overrides):
+        from src.agents.runner import _compute_turn_metrics
+
+        kwargs = dict(
+            turn_start_s=0.0,
+            turn_end_s=10.0,
+            first_token_at_s=None,
+            tool_durations_s=[],
+            steps=1,
+            cache_hit_tokens=0,
+            system_prompt_tokens=0,
+            tool_definition_tokens=0,
+            tokens_in=1_000,
+        )
+        kwargs.update(overrides)
+        return _compute_turn_metrics(**kwargs)
+
+    def test_metrics_name_the_recording_build(self):
+        from src.core.build_info import get_app_version
+
+        # Both return branches must carry the key: a turn with no reported
+        # usage is exactly the one a triager cannot otherwise place.
+        assert self._metrics()["app_version"] == get_app_version()
+        assert (
+            self._metrics(tokens_in=0)["app_version"] == get_app_version()
+        )
+
+    def test_pressure_evidence_is_persisted(self):
+        metrics = self._metrics(
+            tokens_in=310_000,
+            cumulative_input_tokens=10_474_495,
+            context_pressure=True,
+            context_pressure_threshold=20_000_000,
+            context_pressure_at_input_tokens=20_500_000,
+        )
+
+        assert metrics["cumulative_input_tokens"] == 10_474_495
+        assert metrics["context_pressure_at_input_tokens"] == 20_500_000
+        assert metrics["context_pressure"] is True
+
+    def test_pressure_evidence_is_absent_when_not_fired(self):
+        metrics = self._metrics()
+
+        assert metrics["context_pressure"] is False
+        assert metrics["context_pressure_at_input_tokens"] is None
+
+    def test_pressure_flag_implies_the_threshold_was_reached(self):
+        """The #672 contradiction must be impossible for a new turn."""
+        metrics = self._metrics(
+            cumulative_input_tokens=10_474_495,
+            context_pressure=True,
+            context_pressure_threshold=20_000_000,
+            context_pressure_at_input_tokens=20_500_000,
+        )
+
+        threshold = metrics["context_pressure_threshold"]
+        at_input = metrics["context_pressure_at_input_tokens"]
+        assert threshold and at_input is not None and at_input >= threshold
+
+    def test_avg_input_uses_the_cumulative_counter(self):
+        """#595 may overwrite ``tokens_in`` with the final round's usage."""
+        metrics = self._metrics(
+            steps=94,
+            tokens_in=310_000,
+            cumulative_input_tokens=10_474_495,
+        )
+
+        assert metrics["avg_input_tokens_per_step"] == 111_431
+
+    def test_avg_falls_back_to_tokens_in(self):
+        metrics = self._metrics(steps=10, tokens_in=5_000)
+
+        assert metrics["cumulative_input_tokens"] == 5_000
+        assert metrics["avg_input_tokens_per_step"] == 500

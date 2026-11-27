@@ -10,9 +10,11 @@
 #   - POST /api/notifications/{id}/read
 #   - POST /api/notifications/read-all
 #   - DELETE /api/notifications/read
+#   - POST /api/notifications/run-finished
 # =============================================================================
 
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -639,3 +641,196 @@ class TestDeleteRead:
             headers=other_headers,
         )
         assert list_resp.json()["total"] == 1
+
+
+class TestRecordRunNotification:
+    """POST /api/notifications/run-finished — browser-notified runs (#669)."""
+
+    @staticmethod
+    def _run_started_a_minute_ago() -> str:
+        return (
+            datetime.now(timezone.utc) - timedelta(minutes=1)
+        ).isoformat()
+
+    @staticmethod
+    async def _enable_notifications(db_session: AsyncSession, test_user) -> None:
+        test_user.notification_prefs = {
+            "enabled": True,
+            "on_completion": True,
+            "on_failure": True,
+            "sound": False,
+        }
+        await db_session.flush()
+
+    async def test_records_a_notified_completion(
+        self,
+        override_get_db,
+        async_client: httpx.AsyncClient,
+        auth_headers,
+        test_user,
+        test_session,
+        db_session: AsyncSession,
+    ) -> None:
+        """A browser-notified completion becomes an unread bell record."""
+        await self._enable_notifications(db_session, test_user)
+        headers = auth_headers(test_user)
+        response = await async_client.post(
+            "/api/notifications/run-finished",
+            headers=headers,
+            json={
+                "session_id": test_session.id,
+                "outcome": "completed",
+                "started_at": self._run_started_a_minute_ago(),
+            },
+        )
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok", "created": True}
+
+        list_resp = await async_client.get("/api/notifications", headers=headers)
+        data = list_resp.json()
+        assert data["total"] == 1
+        item = data["items"][0]
+        assert item["type"] == Notification.TYPE_CHAT_RUN_COMPLETED
+        assert item["title"] == "Response ready"
+        assert item["is_read"] is False
+        assert item["reference_id"] == test_session.id
+        assert item["reference_type"] == "session"
+
+        count_resp = await async_client.get(
+            "/api/notifications/unread-count",
+            headers=headers,
+        )
+        assert count_resp.json()["count"] == 1
+
+    async def test_is_idempotent_for_the_same_run(
+        self,
+        override_get_db,
+        async_client: httpx.AsyncClient,
+        auth_headers,
+        test_user,
+        test_session,
+        db_session: AsyncSession,
+    ) -> None:
+        """Calling twice for one run writes a single record."""
+        await self._enable_notifications(db_session, test_user)
+        headers = auth_headers(test_user)
+        payload = {
+            "session_id": test_session.id,
+            "outcome": "completed",
+            "started_at": self._run_started_a_minute_ago(),
+        }
+
+        first = await async_client.post(
+            "/api/notifications/run-finished", headers=headers, json=payload
+        )
+        second = await async_client.post(
+            "/api/notifications/run-finished", headers=headers, json=payload
+        )
+        assert first.json()["created"] is True
+        assert second.json()["created"] is False
+
+        list_resp = await async_client.get("/api/notifications", headers=headers)
+        assert list_resp.json()["total"] == 1
+
+    async def test_respects_notification_preferences(
+        self,
+        override_get_db,
+        async_client: httpx.AsyncClient,
+        auth_headers,
+        test_user,
+        test_session,
+    ) -> None:
+        """Nothing is stored when browser notifications are disabled."""
+        headers = auth_headers(test_user)
+        response = await async_client.post(
+            "/api/notifications/run-finished",
+            headers=headers,
+            json={
+                "session_id": test_session.id,
+                "outcome": "completed",
+                "started_at": self._run_started_a_minute_ago(),
+            },
+        )
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok", "created": False}
+
+        list_resp = await async_client.get("/api/notifications", headers=headers)
+        assert list_resp.json()["total"] == 0
+
+    async def test_records_a_notified_failure(
+        self,
+        override_get_db,
+        async_client: httpx.AsyncClient,
+        auth_headers,
+        test_user,
+        test_session,
+        db_session: AsyncSession,
+    ) -> None:
+        """A failed run is recorded with the failure copy and type."""
+        await self._enable_notifications(db_session, test_user)
+        headers = auth_headers(test_user)
+        response = await async_client.post(
+            "/api/notifications/run-finished",
+            headers=headers,
+            json={
+                "session_id": test_session.id,
+                "outcome": "failed",
+                "started_at": self._run_started_a_minute_ago(),
+            },
+        )
+        assert response.json()["created"] is True
+
+        list_resp = await async_client.get("/api/notifications", headers=headers)
+        item = list_resp.json()["items"][0]
+        assert item["type"] == Notification.TYPE_CHAT_RUN_FAILED
+        assert item["title"] == "Run failed"
+
+    async def test_rejects_another_users_session(
+        self,
+        override_get_db,
+        async_client: httpx.AsyncClient,
+        auth_headers,
+        test_user,
+        db_session: AsyncSession,
+        test_tenant,
+    ) -> None:
+        """A user cannot record a notification for someone else's session."""
+        from src.db.orm.users import User as UserORM
+
+        await self._enable_notifications(db_session, test_user)
+        other_user = UserORM(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            email=f"other-run-{uuid.uuid4().hex[:8]}@example.com",
+            password_hash="fakehash",
+            display_name="Other Run User",
+            role="user",
+            is_active=True,
+        )
+        db_session.add(other_user)
+        await db_session.flush()
+        other_session = Session(
+            id=str(uuid.uuid4()),
+            tenant_id=test_tenant.id,
+            user_id=other_user.id,
+            title="Other user's session",
+            auto_route_enabled=False,
+            auto_select_tools=True,
+        )
+        db_session.add(other_session)
+        await db_session.flush()
+
+        headers = auth_headers(test_user)
+        response = await async_client.post(
+            "/api/notifications/run-finished",
+            headers=headers,
+            json={
+                "session_id": other_session.id,
+                "outcome": "completed",
+                "started_at": self._run_started_a_minute_ago(),
+            },
+        )
+        assert response.status_code == 404
+
+        list_resp = await async_client.get("/api/notifications", headers=headers)
+        assert list_resp.json()["total"] == 0

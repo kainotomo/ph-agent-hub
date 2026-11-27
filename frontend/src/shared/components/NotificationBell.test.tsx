@@ -48,9 +48,11 @@ const unreadNotification = {
   created_at: new Date().toISOString(),
 };
 
-function renderBell() {
+function renderBell(options?: { staleTime?: number }) {
   const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
+    defaultOptions: {
+      queries: { retry: false, staleTime: options?.staleTime ?? 0 },
+    },
   });
   return render(
     <QueryClientProvider client={queryClient}>
@@ -107,6 +109,24 @@ describe("NotificationBell — clear read", () => {
     );
     expect(screen.queryByText("Old notification")).not.toBeInTheDocument();
     expect(screen.getByText("New notification")).toBeInTheDocument();
+  });
+
+  it("refetches on reopen even inside the app-wide stale window", async () => {
+    mocks.getUnreadCount.mockResolvedValue({ count: 0 });
+    mocks.listNotifications
+      .mockResolvedValueOnce({ items: [], total: 0 })
+      .mockResolvedValueOnce({ items: [unreadNotification], total: 1 });
+
+    const user = userEvent.setup();
+    renderBell({ staleTime: 60_000 });
+    await openBell(user);
+    expect(await screen.findByText("No notifications")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Notifications" }));
+    await openBell(user);
+
+    expect(await screen.findByText("New notification")).toBeInTheDocument();
+    expect(mocks.listNotifications).toHaveBeenCalledTimes(2);
   });
 
   it("hides Clear read when every notification is unread", async () => {

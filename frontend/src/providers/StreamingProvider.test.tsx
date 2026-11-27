@@ -4,6 +4,7 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { act, renderHook } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import React from "react";
 import { StreamingProvider, useStreamingContext } from "./StreamingProvider";
 
@@ -18,9 +19,14 @@ vi.mock("../features/chat/hooks/useSessionStatusStream", () => ({
 }));
 
 function renderStore() {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
   return renderHook(() => useStreamingContext(), {
     wrapper: ({ children }: { children: React.ReactNode }) => (
-      <StreamingProvider>{children}</StreamingProvider>
+      <QueryClientProvider client={queryClient}>
+        <StreamingProvider>{children}</StreamingProvider>
+      </QueryClientProvider>
     ),
   });
 }

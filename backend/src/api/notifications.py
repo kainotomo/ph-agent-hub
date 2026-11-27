@@ -2,8 +2,8 @@
 # PH Agent Hub — Notifications API Router
 # =============================================================================
 # Endpoints for the notification center (bell icon + dropdown in the
-# frontend).  Notifications are created by the system when background
-# tasks complete, fail, or are cancelled.
+# frontend).  Notifications are created for background task outcomes and
+# for chat runs the browser has just notified the user about.
 # =============================================================================
 
 from __future__ import annotations
@@ -15,11 +15,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.dependencies import get_current_user, get_db
 from ..core.exceptions import NotFoundError
+from ..db.orm.sessions import Session as SessionORM
 from ..db.orm.users import User as UserORM
 from ..models.notification import (
     DeleteReadNotificationsResponse,
     NotificationListResponse,
     NotificationResponse,
+    RecordRunNotificationRequest,
+    RecordRunNotificationResponse,
     UnreadCountResponse,
 )
 from ..services.notification_service import (
@@ -29,6 +32,7 @@ from ..services.notification_service import (
     mark_all_read,
     mark_read,
 )
+from ..services.run_notifications import record_notified_outcome
 
 logger = logging.getLogger(__name__)
 
@@ -102,3 +106,31 @@ async def clear_read_notifications(
         db, current_user.id, current_user.tenant_id
     )
     return DeleteReadNotificationsResponse(deleted=deleted)
+
+
+@router.post("/run-finished", response_model=RecordRunNotificationResponse)
+async def record_finished_run_notification(
+    payload: RecordRunNotificationRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserORM = Depends(get_current_user),
+) -> RecordRunNotificationResponse:
+    """Record a bell notification for a run the browser just notified about.
+
+    The client calls this only after it decided to show an OS/browser
+    notification, so the user can review (and clear) that event later.
+    Duplicate detection keeps a run the server already recorded as a single
+    entry.
+    """
+    session = await db.get(SessionORM, payload.session_id)
+    if session is None or session.user_id != current_user.id:
+        raise NotFoundError("Session not found")
+
+    notification = await record_notified_outcome(
+        db,
+        session_id=payload.session_id,
+        user_id=current_user.id,
+        tenant_id=session.tenant_id,
+        outcome=payload.outcome,
+        started_at=payload.started_at,
+    )
+    return RecordRunNotificationResponse(created=notification is not None)

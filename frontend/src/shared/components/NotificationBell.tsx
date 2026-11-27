@@ -90,7 +90,11 @@ export function NotificationBell() {
     refetchInterval: 30_000,
   });
 
-  // Recent notifications — fetch when popover opens
+  // Recent notifications — fetch when popover opens.  The list must never
+  // be served from a stale cache: new records arrive while the panel is
+  // closed (and are persisted by the notifying tab), so reopening it has to
+  // show them immediately instead of waiting out the app-wide 60 s
+  // staleTime.
   const {
     data: notifData,
     isLoading,
@@ -98,6 +102,8 @@ export function NotificationBell() {
     queryKey: ["notifications", "recent"],
     queryFn: () => listNotifications(1, 20),
     enabled: open,
+    staleTime: 0,
+    refetchInterval: open ? 20_000 : false,
   });
 
   const unreadCount = unreadData?.count ?? 0;

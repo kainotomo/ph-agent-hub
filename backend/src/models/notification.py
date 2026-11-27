@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -34,3 +35,16 @@ class UnreadCountResponse(BaseModel):
 class DeleteReadNotificationsResponse(BaseModel):
     status: str = "ok"
     deleted: int
+
+
+class RecordRunNotificationRequest(BaseModel):
+    """A finished run the browser already notified the user about."""
+
+    session_id: str
+    outcome: Literal["completed", "failed"]
+    started_at: datetime | None = None
+
+
+class RecordRunNotificationResponse(BaseModel):
+    status: str = "ok"
+    created: bool

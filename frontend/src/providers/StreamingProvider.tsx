@@ -24,6 +24,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "./AuthProvider";
 import { useSessionStatusStream } from "../features/chat/hooks/useSessionStatusStream";
 import { DEFAULT_NOTIFICATION_PREFS } from "../services/auth";
@@ -31,6 +32,7 @@ import {
   getNotificationPermission,
   showBrowserNotification,
 } from "../services/browserNotifications";
+import { recordRunFinishedNotification } from "../features/chat/services/notifications";
 import { shouldNotifyFinishedRun } from "../features/chat/notificationPolicy";
 import { useUnreadTitle } from "../shared/hooks/useUnreadTitle";
 import { playCompletionSound } from "../shared/utils/sound";
@@ -122,6 +124,7 @@ export function StreamingProvider({
   children: React.ReactNode;
 }) {
   const { user } = useAuth();
+  const queryClient = useQueryClient();
   const [runs, setRuns] = useState<SessionRunMap>({});
   const [completedUnreadIds, setCompletedUnreadIds] = useState<Set<string>>(
     () => loadUnreadIds(),
@@ -303,8 +306,15 @@ export function StreamingProvider({
     if (notifiedRunsRef.current.has(key)) return;
     notifiedRunsRef.current.set(key, now);
 
+    // Both notification channels must agree: every run the browser
+    // notifies about also gets a durable bell record, so the user can
+    // review or clear it later.  The backend deduplicates against its own
+    // unattended catch-up record for the same run.
+    const outcome = event.outcome;
+    if (outcome !== "completed" && outcome !== "failed") return;
+
     const title = sessionTitlesRef.current[event.session_id];
-    const failed = event.outcome === "failed";
+    const failed = outcome === "failed";
     const body = failed
       ? title
         ? `“${title}” ended with an error.`
@@ -318,9 +328,29 @@ export function StreamingProvider({
       tag: `ph-session-${event.session_id}`,
       url: `/chat/${event.session_id}`,
       silent: !prefs.sound,
-    });
+    })
+      .then((shown) => {
+        if (!shown) return;
+        return recordRunFinishedNotification({
+          session_id: event.session_id,
+          outcome,
+          started_at:
+            event.started_at ??
+            runsRef.current[event.session_id]?.startedAt ??
+            null,
+        }).then(() => {
+          queryClient.invalidateQueries({
+            queryKey: ["notification-unread-count"],
+          });
+          queryClient.invalidateQueries({ queryKey: ["notifications"] });
+        });
+      })
+      .catch(() => {
+        // The bell is a durable convenience: a failed write must never
+        // affect the run or the browser notification.
+      });
     if (prefs.sound) playCompletionSound();
-  }, []);
+  }, [queryClient]);
 
   const handleStatusSnapshot = useCallback(
     (snapshot: RunSnapshotEntry[]) => {

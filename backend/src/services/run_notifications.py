@@ -172,6 +172,44 @@ async def record_run_outcome(
     )
 
 
+async def record_notified_outcome(
+    db: AsyncSession,
+    *,
+    session_id: str,
+    user_id: str,
+    tenant_id: str,
+    outcome: str,
+    started_at: datetime | None = None,
+) -> Notification | None:
+    """Persist a record for a run the client already notified the user about.
+
+    The browser applied its own visibility policy before showing the
+    notification, so the ``attached``/duration gates of
+    ``record_run_outcome`` do not apply here.  Preferences and duplicate
+    detection still do: when the server already stored the same run (the
+    unattended catch-up path), this is a no-op.
+    """
+    if outcome == "completed":
+        type_ = Notification.TYPE_CHAT_RUN_COMPLETED
+    elif outcome == "failed":
+        type_ = Notification.TYPE_CHAT_RUN_FAILED
+    else:
+        return None
+
+    prefs = await get_notification_prefs(db, user_id)
+    if not prefs["enabled"] or not prefs[_PREF_BY_TYPE[type_]]:
+        return None
+
+    return await _record(
+        db,
+        type_=type_,
+        session_id=session_id,
+        user_id=user_id,
+        tenant_id=tenant_id,
+        started_at=started_at,
+    )
+
+
 async def record_run_outcome_safe(**kwargs) -> None:
     """``record_run_outcome`` with its own DB session; never raises."""
     from ..db.base import AsyncSessionLocal

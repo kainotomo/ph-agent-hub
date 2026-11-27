@@ -83,3 +83,18 @@ export function deleteReadNotifications(): Promise<{
     method: "DELETE",
   });
 }
+
+export interface RecordRunNotificationPayload {
+  session_id: string;
+  outcome: "completed" | "failed";
+  started_at?: string | null;
+}
+
+export function recordRunFinishedNotification(
+  payload: RecordRunNotificationPayload,
+): Promise<{ status: string; created: boolean }> {
+  return api<{ status: string; created: boolean }>("/notifications/run-finished", {
+    method: "POST",
+    body: payload,
+  });
+}

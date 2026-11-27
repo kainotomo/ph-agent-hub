@@ -211,6 +211,22 @@ used to survive only in the server log. The metrics part now also carries
 turn — so an export alone says whether a failed turn lost its provider stream,
 and why.
 
+Issue #672 added the provenance an export needs to be readable as evidence.
+The metrics part names `app_version` — the build that *recorded* the turn, as
+opposed to the export's top-level `app_version`, which names the build that
+produced the export (Issue #659): a session recorded on an older build and
+exported on a newer one otherwise looks like a current build that omitted
+keys. It also persists `cumulative_input_tokens` and
+`context_pressure_at_input_tokens` (the value that counter had when the
+`context_pressure` event fired, `null` when it never did). The export that
+opened the issue reported `context_pressure: true` beside
+`context_pressure_threshold: 20,000,000` and a 10.5M-token turn — a
+combination the code cannot produce and no reader could resolve; a new turn
+carries the evidence for the flag instead. `avg_input_tokens_per_step` now
+divides the cumulative counter, because Issue #595 may replace `tokens_in`
+with the final round's usage and turn a ~111K per-step cost into a few
+thousand.
+
 Note that on the streaming path the user message is persisted before the
 context is built, so it is itself part of the replayed block and a first
 streaming turn reports `contextualized: true` with `history_messages >= 1`.

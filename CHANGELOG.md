@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.16.1] — 2026-11-27
+
+### Fixed
+- **A run that triggers a browser notification now also lands in the bell
+  (#669)** — the bell only stored runs the server considered unwatched (no
+  live stream and at least 60 seconds old) or failed, so a short run that
+  notified a hidden tab, or a run in another session, produced an OS
+  notification with nothing to review or clear afterwards. When the browser
+  actually shows a notification, the client now records the same outcome via
+  `POST /api/notifications/run-finished` (user/tenant scoped,
+  preference-gated, and deduplicated against the server's catch-up record for
+  the same run) and invalidates the notification queries. The bell list also
+  ignores the app-wide 60-second cache while open, so new rows appear without
+  closing and reopening the panel. ([#669])
+
 ## [3.16.0] — 2026-11-27
 
 ### Added

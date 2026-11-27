@@ -401,7 +401,7 @@ The file will download automatically. The filename is derived from the session t
 ```json
 {
   "version": 1,
-  "app_version": "3.16.0",
+  "app_version": "3.16.1",
   "commit": "abc1234",
   "exported_at": "2026-06-12T16:14:13+00:00",
   "application": "ph-agent-hub",
@@ -758,7 +758,7 @@ Settings are saved to your account, so they follow you to other devices — but 
 What does **not** notify:
 
 - A run in the session you are currently reading, with the app visible and focused (the answer is already on screen)
-- Nothing when the browser tab is fully closed — this is not a push service. Runs that failed (or took more than a minute) while nobody was watching appear in the bell when you open the app again
+- Nothing when the browser tab is fully closed — this is not a push service. Failures and long unattended runs still appear in the bell when you open the app again; and whenever a browser notification is shown, the same event is also stored in the bell so you can review or clear it later
 - The embedded widget and the demo page
 
 When notifications are denied or unsupported, the tab title still shows an unread count (for example `(2) PH Agent Hub`), and the sidebar dot still marks finished sessions.

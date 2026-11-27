@@ -2,7 +2,8 @@
 // StreamingProvider — browser notification wiring tests (Issue #619)
 // =============================================================================
 
-import { act, renderHook } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -11,12 +12,21 @@ import { StreamingProvider, useStreamingContext } from "./StreamingProvider";
 const mocks = vi.hoisted(() => ({
   stream: vi.fn(),
   show: vi.fn(async () => true),
+  record: vi.fn(async () => ({ status: "ok", created: true })),
 }));
 
 vi.mock("../services/browserNotifications", () => ({
   getNotificationPermission: () => "granted",
   showBrowserNotification: mocks.show,
 }));
+
+vi.mock("../features/chat/services/notifications", async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import("../features/chat/services/notifications")
+    >();
+  return { ...actual, recordRunFinishedNotification: mocks.record };
+});
 
 vi.mock("./AuthProvider", () => ({
   useAuth: () => ({
@@ -55,9 +65,14 @@ function setDocumentState({
 }
 
 function renderStore() {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
   return renderHook(() => useStreamingContext(), {
     wrapper: ({ children }: { children: React.ReactNode }) => (
-      <StreamingProvider>{children}</StreamingProvider>
+      <QueryClientProvider client={queryClient}>
+        <StreamingProvider>{children}</StreamingProvider>
+      </QueryClientProvider>
     ),
   });
 }
@@ -81,6 +96,9 @@ describe("StreamingProvider browser notifications", () => {
   beforeEach(() => {
     localStorage.clear();
     mocks.show.mockClear();
+    mocks.show.mockResolvedValue(true);
+    mocks.record.mockClear();
+    mocks.record.mockResolvedValue({ status: "ok", created: true });
     mocks.stream.mockClear();
   });
 
@@ -123,6 +141,44 @@ describe("StreamingProvider browser notifications", () => {
     );
   });
 
+  it("persists a durable bell record for the notified run", async () => {
+    setDocumentState({ visible: false, focused: false });
+    const { result } = renderStore();
+    act(() => {
+      result.current.seedFromSessions([{ id: "s1", title: "Quarterly report" }]);
+    });
+    act(() => {
+      latestEvent().onEvent({
+        ...finished,
+        started_at: "2026-11-27T09:00:00+00:00",
+      });
+      latestEvent().onEvent({
+        ...finished,
+        started_at: "2026-11-27T09:00:00+00:00",
+      });
+    });
+
+    await waitFor(() => expect(mocks.record).toHaveBeenCalledTimes(1));
+    expect(mocks.record).toHaveBeenCalledWith({
+      session_id: "s1",
+      outcome: "completed",
+      started_at: "2026-11-27T09:00:00+00:00",
+    });
+  });
+
+  it("does not persist when the browser notification is suppressed", async () => {
+    mocks.show.mockResolvedValue(false);
+    setDocumentState({ visible: false, focused: false });
+    const { result } = renderStore();
+    act(() => {
+      result.current.seedFromSessions([{ id: "s1", title: "Quarterly report" }]);
+      latestEvent().onEvent(finished);
+    });
+
+    await waitFor(() => expect(mocks.show).toHaveBeenCalledTimes(1));
+    expect(mocks.record).not.toHaveBeenCalled();
+  });
+
   it("stays quiet for the session on screen", () => {
     setDocumentState({ visible: true, focused: true });
     const { result } = renderStore();
@@ -147,7 +203,7 @@ describe("StreamingProvider browser notifications", () => {
     );
   });
 
-  it("uses the failure copy for a failed run", () => {
+  it("uses the failure copy for a failed run", async () => {
     setDocumentState({ visible: false, focused: false });
     const { result } = renderStore();
     act(() => {
@@ -156,6 +212,11 @@ describe("StreamingProvider browser notifications", () => {
     });
     expect(mocks.show).toHaveBeenCalledWith(
       expect.objectContaining({ title: "Run failed" }),
+    );
+    await waitFor(() =>
+      expect(mocks.record).toHaveBeenCalledWith(
+        expect.objectContaining({ outcome: "failed" }),
+      ),
     );
   });
 });

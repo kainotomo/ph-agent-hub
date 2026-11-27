@@ -32,6 +32,10 @@ class TestContainsDsml:
     def test_detects_ascii_tag(self):
         assert contains_dsml("<function_calls>") is True
 
+    def test_detects_residual_calls_shell(self):
+        # Follow-up to #579 — the shell left after a sentinel is stripped.
+        assert contains_dsml("< calls>") is True
+
     def test_plain_text_is_false(self):
         assert contains_dsml("just text with no markup") is False
 
@@ -62,6 +66,20 @@ class TestStripDsmlMarkers:
 
     def test_strips_unclosed_block(self):
         assert strip_dsml_markers("Keep<tool_calls>garbage") == "Keep"
+
+    def test_strips_sentinel_wrapped_calls_shell(self):
+        """The 2026-11-27 leak: the sentinel hides a ``< calls>`` shell."""
+        leaked = "<｜｜DSML｜｜ calls>\n\n\n\n</｜｜DSML｜｜ calls>"
+        assert strip_dsml_markers(leaked) == ""
+
+    def test_strips_residual_calls_shell_without_sentinel(self):
+        # A streamed delta can deliver the shell after the sentinel was
+        # already removed from an earlier delta.
+        assert strip_dsml_markers("A < calls> x </ calls> B") == "A  x  B"
+
+    def test_sentinel_wrapped_shell_keeps_surrounding_text(self):
+        leaked = "Before <｜｜DSML｜｜ calls> x </｜｜DSML｜｜ calls> after"
+        assert strip_dsml_markers(leaked) == "Before  x  after"
 
     def test_plain_text_unchanged(self):
         text = "Just a normal answer."

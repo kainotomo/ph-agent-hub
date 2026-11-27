@@ -421,15 +421,24 @@ _ANSWER_FINISH_REASONS = frozenset({"stop", "end_turn", "stop_sequence"})
 
 
 def _round_produced_answer(round_info: dict | None) -> bool:
-    """True when *round_info* closed with answer text and a terminal reason.
+    """True when *round_info* closed with visible answer text and a terminal reason.
 
     Issue #645 — an interrupted stream is concluded through the wrap-up unless
     the round that was cut short had already rendered text *and* the provider
     reported a normal stop for it.
+
+    Follow-up to #579 — ``text_chars`` counts every character a delta
+    contributed, including newlines and markup the sanitizer then removed.  A
+    leaked DSML block can leave only whitespace behind, which must not be read
+    as an answer.  ``visible_text_chars`` is the non-whitespace count; callers
+    that predate it keep the old counter as a fallback.
     """
     if not round_info:
         return False
-    text_chars = int(round_info.get("text_chars") or 0)
+    visible = round_info.get("visible_text_chars")
+    text_chars = int(
+        visible if visible is not None else (round_info.get("text_chars") or 0)
+    )
     finish = str(round_info.get("finish_reason") or "")
     return text_chars > 0 and finish in _ANSWER_FINISH_REASONS
 
@@ -4834,6 +4843,10 @@ async def _run_agent_stream(
     # retry attempts.  A turn that ends with none of it must never be reported
     # as a completed answer.
     turn_text_chars = 0
+    # Follow-up to #579 — the same count restricted to non-whitespace text.
+    # A leaked DSML delta can leave only newlines behind; those are not an
+    # answer even though they contributed characters.
+    turn_visible_text_chars = 0
     # Issue #642 — how the model stream ended: ``clean``, ``abort``,
     # ``idle_timeout``, ``loop``, ``budget`` or ``turn_deadline`` (Issue #645).
     stream_end = "clean"
@@ -4848,6 +4861,9 @@ async def _run_agent_stream(
     # A round ends on the chunk carrying the provider's finish_reason; the
     # counters are then snapshotted into ``last_round`` and reset.
     round_text_chars = 0
+    # Follow-up to #579 — see ``_round_produced_answer``.  Whitespace-only
+    # deltas (the tail of a stripped DSML block) must not look like an answer.
+    round_visible_text_chars = 0
     round_reasoning_chars = 0
     round_tool_activity = 0
     round_tool_results = 0
@@ -4855,11 +4871,12 @@ async def _run_agent_stream(
 
     def _close_round(round_finish_reason: str | None) -> None:
         """Snapshot the round that just ended and start a fresh one."""
-        nonlocal last_round, round_text_chars
+        nonlocal last_round, round_text_chars, round_visible_text_chars
         nonlocal round_reasoning_chars, round_tool_activity
         nonlocal round_tool_results, rounds, finish_reason
         last_round = {
             "text_chars": round_text_chars,
+            "visible_text_chars": round_visible_text_chars,
             "reasoning_chars": round_reasoning_chars,
             "tool_activity": round_tool_activity,
             "tool_results": round_tool_results,
@@ -4870,6 +4887,7 @@ async def _run_agent_stream(
         # closed, not to the attempt.
         finish_reason = round_finish_reason
         round_text_chars = 0
+        round_visible_text_chars = 0
         round_reasoning_chars = 0
         round_tool_activity = 0
         round_tool_results = 0
@@ -5083,8 +5101,13 @@ async def _run_agent_stream(
                             )
                             delta = strip_dsml_markers(delta)
                     if delta:
+                        # Follow-up to #579 — whitespace left behind by a
+                        # stripped marker is not answer text.
+                        visible_chars = len(delta.strip())
                         round_text_chars += len(delta)
                         turn_text_chars += len(delta)
+                        round_visible_text_chars += visible_chars
+                        turn_visible_text_chars += visible_chars
                         # Issue #645 — text means the model is generating again,
                         # not waiting on tool results.
                         awaiting_tool_results = False
@@ -5539,9 +5562,11 @@ async def _run_agent_stream(
     # round that only executed tools, a stream that never produced text) is
     # concluded through the tool-less wrap-up instead of being persisted as an
     # empty assistant message.
-    if stop_reason is None and turn_text_chars == 0:
+    # Follow-up to #579 — count visible text, not raw delta length: a leaked
+    # DSML block can strip down to newlines and still leave turn_text_chars > 0.
+    if stop_reason is None and turn_visible_text_chars == 0:
         logger.warning(
-            "Turn for session %s ended with no answer text (%d round(s), "
+            "Turn for session %s ended with no visible answer text (%d round(s), "
             "%d tool call(s), stream_end=%s) — generating the fallback "
             "conclusion",
             session_id, rounds, tool_calls, stream_end,
@@ -6305,6 +6330,15 @@ async def _reasoning_only_retry_messages(
     return messages
 
 
+# Follow-up to #579 — the interrupted-turn wrap-up must always end on this
+# actionable line.  The model-authored part can vary; the next step cannot:
+# the saved state is resumed by sending another message, never by re-running
+# the prompt from the top.
+CONTINUE_FOOTER = (
+    "\n\nSend another message and I'll continue from where I stopped."
+)
+
+
 def _termination_message(
     stop_reason: str,
     steps: int,
@@ -6426,11 +6460,16 @@ async def _generate_stop_wrapup(
     elif stop_reason == "stream_interrupted":
         # Issue #642 — the provider stream ended mid-round (error, idle
         # timeout, disconnect).  Say so, then answer from what was gathered.
+        # Follow-up to #579 — do not let the conclusion deny work that exists
+        # (the model cannot see the tool results) or send the user back to the
+        # start; the next turn resumes from the saved state.
         reason = "because the model stream was interrupted before it finished"
         nudge = (
-            "Say in one sentence that the response was interrupted, then give "
-            "the best answer available from the work already done and the "
-            "single next step the user should take."
+            "Say in one sentence that the response was interrupted. Do not "
+            "claim that no work was done or that nothing was established — you "
+            "cannot see the tool results, so such a claim may be false. Then "
+            "tell the user to send another message to continue from the saved "
+            "state; never tell them to re-run the prompt or start over."
         )
     elif stop_reason == "input_budget" and budget is not None:
         reason = (
@@ -6496,7 +6535,14 @@ async def _generate_stop_wrapup(
         )
         text = (response.messages[-1].text or "").strip()
         if text:
-            return "\n\n" + text
+            conclusion = "\n\n" + text
+            # Follow-up to #579 — deterministic next step, independent of what
+            # the model chose to write.  The canned fallback below already
+            # carries the same instruction, so only the model-authored path
+            # needs it appended.
+            if stop_reason == "stream_interrupted":
+                conclusion += CONTINUE_FOOTER
+            return conclusion
     except Exception:
         logger.warning(
             "Stop wrap-up model call failed; using canned fallback", exc_info=True

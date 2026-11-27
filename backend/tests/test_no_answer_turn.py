@@ -29,6 +29,7 @@ import pytest
 
 from src.agents.runner import (
     REASONING_ONLY_RETRY_NUDGE,
+    _round_produced_answer,
     _run_agent_stream,
 )
 
@@ -304,7 +305,9 @@ class TestStreamInterrupted:
         token_counts: dict = {}
 
         events, agent = await _run(
-            [_RaisingStream([_text("partial answer")])],
+            # Issue #645 — text survives only when the round also closed with
+            # a normal finish reason; a partial round is concluded below.
+            [_RaisingStream([_text("partial answer", finish_reason="stop")])],
             token_counts=token_counts,
         )
 
@@ -312,6 +315,76 @@ class TestStreamInterrupted:
         assert _deltas(events, "token") == ["partial answer"]
         assert token_counts["metrics"]["stream_end"] == "abort"
         assert token_counts["metrics"]["stop_reason"] is None
+
+    @pytest.mark.asyncio
+    async def test_partial_text_without_finish_is_concluded(self, monkeypatch):
+        """Issue #645 — a preamble is not an answer when the round never stopped."""
+        seen: dict = {}
+
+        async def _wrapup(**kwargs):
+            seen.update(kwargs)
+            return "\n\nfallback conclusion"
+
+        monkeypatch.setattr("src.agents.runner._generate_stop_wrapup", _wrapup)
+        token_counts: dict = {}
+
+        events, agent = await _run(
+            [_RaisingStream([_text("partial answer")])],
+            token_counts=token_counts,
+        )
+
+        assert agent.run.call_count == 1
+        assert _deltas(events, "token") == [
+            "partial answer", "\n\nfallback conclusion",
+        ]
+        assert seen["stop_reason"] == "stream_interrupted"
+        assert token_counts["metrics"]["stream_end"] == "abort"
+        assert token_counts["metrics"]["stop_reason"] == "stream_interrupted"
+
+    def test_markup_only_round_is_not_an_answer(self):
+        """Follow-up to #579 — stripped DSML leaves whitespace, not an answer."""
+        assert _round_produced_answer({
+            "text_chars": 21,
+            "visible_text_chars": 0,
+            "finish_reason": "stop",
+        }) is False
+        assert _round_produced_answer({
+            "text_chars": 21,
+            "visible_text_chars": 6,
+            "finish_reason": "stop",
+        }) is True
+        # Callers that predate the visible counter keep the old behaviour.
+        assert _round_produced_answer({
+            "text_chars": 21,
+            "finish_reason": "stop",
+        }) is True
+
+    @pytest.mark.asyncio
+    async def test_leaked_dsml_round_is_concluded_not_persisted_as_answer(
+        self, monkeypatch,
+    ):
+        """The 2026-11-27 shape: the only text is a leaked DSML container."""
+        seen: dict = {}
+
+        async def _wrapup(**kwargs):
+            seen.update(kwargs)
+            return "\n\nfallback conclusion"
+
+        monkeypatch.setattr("src.agents.runner._generate_stop_wrapup", _wrapup)
+        token_counts: dict = {}
+        leaked = "<｜｜DSML｜｜ calls>\n\n\n\n</｜｜DSML｜｜ calls>"
+
+        events, agent = await _run(
+            [_FakeStream([_text(leaked, finish_reason="stop")])],
+            token_counts=token_counts,
+        )
+
+        assert agent.run.call_count == 1
+        # The markup produced no visible delta, so the turn is concluded
+        # instead of persisting the residue as the answer.
+        assert _deltas(events, "token") == ["\n\nfallback conclusion"]
+        assert seen["stop_reason"] == "no_answer"
+        assert token_counts["metrics"]["stop_reason"] == "no_answer"
 
 
 # ---------------------------------------------------------------------------

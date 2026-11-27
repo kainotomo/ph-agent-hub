@@ -133,6 +133,14 @@ _RE_DSML_SENTINEL = re.compile(
     re.IGNORECASE,
 )
 
+# Follow-up to #579 — a native DSML container can arrive as
+# ``<｜｜DSML｜｜ calls>``: removing the sentinel leaves the bare shell
+# ``< calls>``, which the tool-call tag patterns above do not recognise
+# (their name must contain ``tool_calls``/``function_calls``/``invoke``/...).
+# The 2026-11-27 production session persisted exactly that residue as the
+# turn's answer, so the sanitizer must remove the shell on its own as well.
+_RE_RESIDUAL_CALLS_TAG = re.compile(r"<\s*/?\s*calls\s*>", re.IGNORECASE)
+
 
 def contains_dsml(text: str) -> bool:
     """Return True if *text* contains leaked DeepSeek tool-call markup."""
@@ -142,6 +150,7 @@ def contains_dsml(text: str) -> bool:
         _RE_TOOLCALL_BLOCK.search(text)
         or _RE_TOOLCALL_TAG.search(text)
         or _RE_DSML_SENTINEL.search(text)
+        or _RE_RESIDUAL_CALLS_TAG.search(text)
     )
 
 
@@ -149,26 +158,40 @@ def strip_dsml_markers(text: str) -> str:
     """Remove leaked DeepSeek DSML / tool-call markup from *text*.
 
     Handles fullwidth-pipe variants (``|｜DSML｜|``, ``<｜tool_calls｜>``),
-    ASCII tag variants (``<function_calls>``, ``<tool_calls>``, ``<invoke ...>``)
-    and unclosed/truncated blocks.  Surrounding whitespace is trimmed only when
-    a marker was actually removed, so plain text passes through unchanged.
+    ASCII tag variants (``<function_calls>``, ``<tool_calls>``, ``<invoke ...>``),
+    unclosed/truncated blocks and the bare ``< calls>`` shell left behind when
+    a sentinel is removed from ``<｜｜DSML｜｜ calls>``.  Surrounding whitespace is
+    trimmed only when a marker was actually removed, so plain text passes
+    through unchanged.
+
+    The pass repeats until the text is stable: a streamed delta can carry the
+    sentinel and the tag shell in one piece, so removing the sentinel exposes
+    markup the previous pass could not see.
     """
     if not text:
         return text
 
     original = text
 
-    # 1. Drop an unclosed container (truncated stream) from its open tag onward.
-    open_match = _RE_CONTAINER_OPEN.search(text)
-    if open_match is not None and not _RE_CONTAINER_CLOSE.search(text, open_match.end()):
-        text = text[: open_match.start()]
+    for _ in range(4):
+        before = text
 
-    # 2. Remove complete blocks, then any residual individual tags.
-    text = _RE_TOOLCALL_BLOCK.sub("", text)
-    text = _RE_TOOLCALL_TAG.sub("", text)
+        # 1. Drop an unclosed container (truncated stream) from its open tag
+        #    onward.
+        open_match = _RE_CONTAINER_OPEN.search(text)
+        if open_match is not None and not _RE_CONTAINER_CLOSE.search(text, open_match.end()):
+            text = text[: open_match.start()]
 
-    # 3. Remove the bare sentinel.
-    text = _RE_DSML_SENTINEL.sub("", text)
+        # 2. Remove complete blocks, then any residual individual tags.
+        text = _RE_TOOLCALL_BLOCK.sub("", text)
+        text = _RE_TOOLCALL_TAG.sub("", text)
+
+        # 3. Remove the bare sentinel, then any shell it was wrapping.
+        text = _RE_DSML_SENTINEL.sub("", text)
+        text = _RE_RESIDUAL_CALLS_TAG.sub("", text)
+
+        if text == before:
+            break
 
     # Issue #640 — never touch whitespace unless something was actually
     # removed.  Streamed reasoning arrives one token per delta (often a lone

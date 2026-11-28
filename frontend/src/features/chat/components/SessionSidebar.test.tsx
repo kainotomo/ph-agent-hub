@@ -120,8 +120,13 @@ vi.mock("../../../providers/AuthProvider", () => ({
 
 // Mock react-router-dom
 const mockNavigate = vi.fn();
+// The scroll-once guard is keyed by the selected session id, so tests need
+// to switch the route the mocked hook reports (Issue #674).
+const mockRouter = vi.hoisted(() => ({
+  sessionId: "session-1" as string | null,
+}));
 vi.mock("react-router-dom", () => ({
-  useParams: () => ({ sessionId: "session-1" }),
+  useParams: () => ({ sessionId: mockRouter.sessionId }),
   useNavigate: () => mockNavigate,
   useLocation: () => ({ pathname: "/chat/session-1" }),
 }));
@@ -177,21 +182,35 @@ vi.mock("antd", async (importOriginal) => {
   };
 });
 
-// Mock react-virtuoso: render all items (not just visible ones) for tests.
-// Uses a plain function component since forwardRef/useImperativeHandle
-// can't be used inside vi.mock factories without breaking tsc.
-vi.mock("react-virtuoso", () => ({
-  VirtuosoHandle: class {},
-  Virtuoso: ({ data, itemContent, style }: any) => (
-    <div style={style} data-testid="virtuoso-list">
-      {data.map((item: any, index: number) => (
-        <div key={index} data-testid="virtuoso-item">
-          {itemContent(index, item)}
-        </div>
-      ))}
-    </div>
-  ),
+// Mock react-virtuoso: render all items (not just visible ones) for tests and
+// forward the imperative handle so auto-scroll calls can be asserted
+// (Issue #674).
+const { mockScrollToIndex } = vi.hoisted(() => ({
+  mockScrollToIndex: vi.fn(),
 }));
+vi.mock("react-virtuoso", async () => {
+  const React = await import("react");
+  return {
+    VirtuosoHandle: class {},
+    Virtuoso: React.forwardRef<unknown, any>(function VirtuosoMock(
+      { data, itemContent, style }: any,
+      ref,
+    ) {
+      React.useImperativeHandle(ref, () => ({
+        scrollToIndex: mockScrollToIndex,
+      }));
+      return (
+        <div style={style} data-testid="virtuoso-list">
+          {data.map((item: any, index: number) => (
+            <div key={index} data-testid="virtuoso-item">
+              {itemContent(index, item)}
+            </div>
+          ))}
+        </div>
+      );
+    }),
+  };
+});
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -262,16 +281,29 @@ function renderSidebar() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  return render(
+  const utils = render(
     <QueryClientProvider client={queryClient}>
       <SessionSidebar />
     </QueryClientProvider>,
   );
+  return { ...utils, queryClient };
 }
 
 async function settle() {
   await act(async () => {
     await new Promise((r) => setTimeout(r, 200));
+  });
+}
+
+/**
+ * Flush the query-driven render (which act defers until the awaited promise
+ * resolves), then give the sidebar's deferred 100 ms auto-scroll time to fire
+ * on top of it (Issue #674).
+ */
+async function settleScroll() {
+  await settle();
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 400));
   });
 }
 
@@ -338,6 +370,7 @@ describe("SessionSidebar", () => {
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
+    mockRouter.sessionId = "session-1";
   });
 
   // ── Session list rendering (pinned first, sorted by updated_at) ────────
@@ -400,21 +433,59 @@ describe("SessionSidebar", () => {
 
   // ── Scroll to active session via Virtuoso scrollToIndex ──────────────
 
-  it("scrolls to active session without crashing (virtuosoRef may be null in test)", async () => {
-    // The auto-scroll effect calls virtuosoRef.current?.scrollToIndex(...).
-    // In tests the ref is null (vi.mock can't forward refs without tsc
-    // errors), but the optional chaining ensures no crash.  The important
-    // behavior — session highlighting — is verified by the
-    // "highlights the active session" test above.
-    renderSidebar();
-    await settle();
+  it("scrolls to the selected session once, not on background refreshes (Issue #674)", async () => {
+    const { queryClient } = renderSidebar();
+    await settleScroll();
 
-    // Session highlighting still works
-    const activeItem = document.querySelector(
-      '[data-session-id="session-1"]',
+    // Row indices: 0 Unfiled header, 1 pinned-1, 2 pinned-2, 3 session-1,
+    // 4 session-old.  The first selection scrolls once.
+    expect(mockScrollToIndex).toHaveBeenCalledTimes(1);
+    expect(mockScrollToIndex).toHaveBeenLastCalledWith({
+      index: 3,
+      behavior: "smooth",
+      align: "center",
+    });
+
+    // The run-status poll / a mutation invalidation replaces the session
+    // arrays; the user's scroll position must survive.
+    mockGetSidebarSummary.mockResolvedValue(
+      summaryFrom(
+        SESSIONS.map((session) =>
+          session.id === "session-old"
+            ? { ...session, title: "Old Session (refetched)" }
+            : session,
+        ),
+      ),
     );
-    expect(activeItem).toBeInTheDocument();
-    expect(activeItem).toHaveStyle({ background: "#e6f4ff" });
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ["sessions"] });
+    });
+    await settleScroll();
+
+    expect(mockScrollToIndex).toHaveBeenCalledTimes(1);
+
+    // Selecting another chat is a new selection: one scroll to its row.
+    mockRouter.sessionId = "session-old";
+    mockGetSidebarSummary.mockResolvedValue(
+      summaryFrom(
+        SESSIONS.map((session) =>
+          session.id === "session-1"
+            ? { ...session, title: "Active Session (refetched)" }
+            : session,
+        ),
+      ),
+    );
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ["sessions"] });
+    });
+    await settleScroll();
+
+    expect(mockScrollToIndex).toHaveBeenCalledTimes(2);
+    expect(mockScrollToIndex).toHaveBeenLastCalledWith({
+      index: 4,
+      behavior: "smooth",
+      align: "center",
+    });
   });
 
   // ── New Chat (lazy UUID) ──────────────────────────────────────────────
@@ -1064,6 +1135,27 @@ describe("SessionSidebar — folders (Issue #526)", () => {
     await settle();
 
     expect(rowFor("session-1")).toBeInTheDocument();
+  });
+
+  it("keeps the active session's folder collapsed after the first scroll (Issue #674)", async () => {
+    const user = userEvent.setup();
+    renderSidebar();
+    await settle();
+
+    // The active session is in Unfiled, which starts expanded.
+    expect(rowFor("session-1")).toBeInTheDocument();
+
+    await user.click(
+      document.querySelector('[aria-label="Collapse Unfiled"]') as HTMLElement,
+    );
+    await settle();
+
+    // The user collapsed the group on purpose: it must not be re-expanded
+    // by the scroll-to-active-session effect.
+    expect(document.querySelector('[data-session-id="session-1"]')).toBeNull();
+    expect(
+      document.querySelector('[aria-label="Expand Unfiled"]'),
+    ).toBeInTheDocument();
   });
 
   // ── Moving sessions ───────────────────────────────────────────────────

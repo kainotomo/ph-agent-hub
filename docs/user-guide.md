@@ -401,7 +401,7 @@ The file will download automatically. The filename is derived from the session t
 ```json
 {
   "version": 1,
-  "app_version": "3.16.2",
+  "app_version": "3.16.3",
   "commit": "abc1234",
   "exported_at": "2026-06-12T16:14:13+00:00",
   "application": "ph-agent-hub",

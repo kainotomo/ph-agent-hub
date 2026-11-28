@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.16.3] — 2026-11-28
+
+### Fixed
+- **The sessions sidebar scrolls to the selected chat once, not again on
+  every background refresh (#674)** — the auto-scroll effect depended on
+  `sessions` and `rows`, and both get fresh identities on every sidebar
+  render: the paged source rebuilds its array and the 3-second run-status
+  poll re-renders the provider even when nothing changed. A smooth scroll was
+  re-scheduled about 100 ms after each poll, pulling the list back to the
+  active conversation while the user was scrolling it to pick another one.
+  The sidebar now records the chat it last scrolled to and only scrolls when
+  the selected id changes, so background refetches leave the list where the
+  user left it. The first attempt still retries while a deep-linked chat
+  loads or its collapsed folder is expanded, and collapsing the active
+  chat's folder afterwards is left alone. ([#674])
+
 ## [3.16.2] — 2026-11-27
 
 ### Fixed
@@ -993,3 +1009,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#661]: https://github.com/kainotomo/ph-agent-hub/issues/661
 [#669]: https://github.com/kainotomo/ph-agent-hub/issues/669
 [#672]: https://github.com/kainotomo/ph-agent-hub/issues/672
+[#674]: https://github.com/kainotomo/ph-agent-hub/issues/674

@@ -486,6 +486,14 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
   >([]);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
   const virtuosoRef = useRef<VirtuosoHandle>(null);
+  // Issue #674 — the session id whose row was already scrolled to.  The
+  // session arrays get new identities on every render (the paged source
+  // rebuilds them, and the run-status poll re-renders the provider), so the
+  // effect must not re-scroll just because its dependencies changed.
+  const autoScrolledSessionRef = useRef<string | null>(null);
+  // The pending 100 ms scroll timer lives outside the effect so a data update
+  // cannot cancel it; only a new selection or unmount does.
+  const autoScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const {
     streamingSessionIds,
@@ -1248,15 +1256,50 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
     ],
   );
 
-  // Auto-scroll to active session when it changes or data loads.
+  // Auto-scroll to the active session once per selection.
   // Uses Virtuoso's imperative scrollToIndex API instead of DOM querySelector
   // because Virtuoso only renders visible items (virtualization), so the DOM
   // element for off-screen sessions doesn't exist (Issue #501).
   //
   // Issue #526: the index is the session's position in the *flattened* row
   // list, and a session inside a collapsed folder is expanded first.
+  //
+  // Issue #674: scroll only when the selected session changes.  The effect
+  // dependencies (`sessions`, `rows`) are rebuilt on every sidebar render —
+  // the run-status poll re-renders the provider every few seconds — so
+  // scrolling whenever they changed yanked the list back to the active
+  // conversation while the user was browsing.  The ref makes it once per
+  // session id while still retrying until the row exists.
+  const cancelPendingAutoScroll = useCallback(() => {
+    if (autoScrollTimerRef.current !== null) {
+      clearTimeout(autoScrollTimerRef.current);
+      autoScrollTimerRef.current = null;
+    }
+  }, []);
+
+  // Drop a pending scroll on unmount (and let a StrictMode remount schedule
+  // again).
+  useEffect(
+    () => () => {
+      cancelPendingAutoScroll();
+      autoScrolledSessionRef.current = null;
+    },
+    [cancelPendingAutoScroll],
+  );
+
   useEffect(() => {
-    if (!sessionId) return;
+    if (!sessionId) {
+      autoScrolledSessionRef.current = null;
+      cancelPendingAutoScroll();
+      return;
+    }
+    if (autoScrolledSessionRef.current === sessionId) return;
+
+    // New selection (or the first attempt for this one): supersede any scroll
+    // still waiting for the previous selection and clear the marker so a row
+    // that has not loaded yet is retried on the next list update.
+    autoScrolledSessionRef.current = null;
+    cancelPendingAutoScroll();
 
     const target = sessions.find((s) => s.id === sessionId);
     // The active-session fallback keeps deep-linked / search-opened sessions
@@ -1278,15 +1321,22 @@ export const SessionSidebar = React.memo(function SessionSidebar() {
     const idx = findSessionRowIndex(rows, sessionId);
     if (idx === -1) return;
 
-    const timer = setTimeout(() => {
+    autoScrolledSessionRef.current = sessionId;
+    autoScrollTimerRef.current = setTimeout(() => {
+      autoScrollTimerRef.current = null;
       virtuosoRef.current?.scrollToIndex({
         index: idx,
         behavior: "smooth",
         align: "center",
       });
     }, 100);
-    return () => clearTimeout(timer);
-  }, [sessionId, sessions, rows, collapsedFolders]);
+  }, [
+    sessionId,
+    sessions,
+    rows,
+    collapsedFolders,
+    cancelPendingAutoScroll,
+  ]);
 
   const handleNewChat = (temporary = false) => {
     if (temporary) {
